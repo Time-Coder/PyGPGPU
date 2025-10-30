@@ -1,7 +1,7 @@
 import enum
 
 
-class cl_device_type(enum.Enum):
+class cl_device_type(enum.IntFlag):
 
     CL_DEVICE_TYPE_DEFAULT = (1 << 0)
     CL_DEVICE_TYPE_CPU = (1 << 1)
