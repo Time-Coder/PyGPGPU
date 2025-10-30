@@ -3,6 +3,8 @@ import ctypes
 import os
 import platform
 from typing import Dict
+from ctypes import c_int
+import enum
 
 from .CLConstante import CLConstante, define_constantes
 from .CLInfo import CLInfo
@@ -25,7 +27,30 @@ class CL:
                 func.argtypes = list(func_info["args"].values())
                 func.restype = func_info["restype"]
                 func_info["dll_func"] = func
-            return func(*args, **kwargs)
+
+            args = [int(arg) if isinstance(arg, enum.Enum) else arg for arg in args]
+            current_n_args:int = len(args)
+            target_n_args:int = len(func_info["args"])
+            if current_n_args < target_n_args:
+                keys = list(func_info["args"].keys())
+                for i in range(current_n_args, target_n_args):
+                    value = kwargs[keys[i]]
+                    if isinstance(value, enum.Enum):
+                        value = int(value)
+
+                    args.append(value)
+
+            return_value = func(*args)
+            if func_info["restype"] == c_int:
+                try:
+                    return_value = CLConstante.get(return_value)
+                except:
+                    pass
+
+                if isinstance(return_value, CLConstante) and return_value.name in func_info["errors"]:
+                    raise RuntimeError(f"{return_value}: {func_info['errors'][return_value.name]}")
+                
+            return return_value
 
     def __init__(self):
         self.__dll = None

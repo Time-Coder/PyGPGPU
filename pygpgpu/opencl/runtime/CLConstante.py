@@ -27,6 +27,9 @@ class CLConstante:
     def __int__(self):
         return self.__value
     
+    def __str__(self):
+        return f"{self.__name}({self.__value})"
+    
     def __eq__(self, other:int)->bool:
         return (self.__value == other)
     
@@ -96,3 +99,5 @@ def define_constantes(cls):
     cls.CL_INVALID_DEVICE_QUEUE = CLConstante("CL_INVALID_DEVICE_QUEUE", -70)
     cls.CL_INVALID_SPEC_ID = CLConstante("CL_INVALID_SPEC_ID", -71)
     cls.CL_MAX_SIZE_RESTRICTION_EXCEEDED = CLConstante("CL_MAX_SIZE_RESTRICTION_EXCEEDED", -72)
+
+    return cls
