@@ -1,9 +1,33 @@
-from ctypes import c_uint, c_int, c_void_p, c_ulong, POINTER
+from ctypes import c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER
 
 
 class CLInfo:
 
     func_signatures = {
+        # cl_int clGetPlatformInfo(
+        #   cl_platform_id platform,
+        #   cl_platform_info param_name,
+        #   size_t param_value_size,
+        #   void* param_value,
+        #   size_t* param_value_size_ret
+        # );
+        "clGetPlatformInfo": {
+            "args": {
+                "platform": c_void_p,
+                "param_name": c_uint,
+                "param_value_size": c_size_t,
+                "param_value": c_void_p,
+                "param_value_size_ret": POINTER(c_size_t)
+            },
+            "restype": c_int,
+            "errors": {
+                "CL_INVALID_PLATFORM": "platform is not a valid platform.",
+                "CL_INVALID_VALUE": "param_name is not one of the supported values, or if the size in bytes specified by param_value_size is less than size of the return type specified in the Platform Queries table and param_value is not NULL.",
+                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            },
+            "dll_func": None
+        },
+
         # cl_int clGetPlatformIDs(
         #   cl_uint num_entries,
         #   cl_platform_id* platforms,
@@ -97,6 +121,7 @@ class CLInfo:
 * Any of the devices specified in the devices argument cannot support OpenCL objects which share the data store of an OpenGL object.""",
                 "CL_INVALID_PROPERTY": "both CL_CONTEXT_INTEROP_USER_SYNC, and any of the properties defined by the cl_khr_gl_sharing extension are defined in properties.",
                 "CL_INVALID_PROPERTY": "the cl_khr_terminate_context extension is supported and CL_CONTEXT_TERMINATE_KHR is set to CL_TRUE in properties, but not all of the devices associated with the context support the ability to support context termination (i.e. CL_DEVICE_TERMINATE_CAPABILITY_CONTEXT_KHR is set for CL_DEVICE_TERMINATE_CAPABILITY_KHR)."
-            }
+            },
+            "dll_func": None
         }
     }

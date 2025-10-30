@@ -1,8 +1,9 @@
-from ctypes import c_uint, c_int, c_ulong, c_void_p, POINTER
+from ctypes import c_uint, c_int, c_ulong, c_void_p, c_size_t, POINTER
 from .CLConstante import CLConstante
 
 
 class CL:
 
     def clGetPlatformIDs(num_entries:c_uint, platforms:POINTER, num_platforms:POINTER)->CLConstante: ...
+    def clGetPlatformInfo(platform: c_void_p, param_name: c_uint, param_value_size: c_size_t, param_value: c_void_p, param_value_size_ret: POINTER)->CLConstante: ...
     def clGetDeviceIDs(platform:c_void_p, device_type:c_ulong, num_entries:c_uint, devices:POINTER, num_devices:POINTER)->CLConstante: ...
