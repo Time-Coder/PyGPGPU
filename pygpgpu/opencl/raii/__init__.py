@@ -1,2 +1,2 @@
-from .Platforms import Platforms
-from .Platform import Platform
+from .platforms import Platforms
+from .platform import Platform

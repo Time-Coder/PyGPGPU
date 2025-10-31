@@ -1,6 +1,7 @@
 import enum
-from ctypes import c_char, c_void_p, c_int, c_uint, c_ulong, POINTER, LittleEndianStructure
-from .CLConstante import CLConstante
+from ctypes import c_char, c_void_p, c_int, c_uint, c_ulong, c_size_t, POINTER, LittleEndianStructure
+from .clconstantes import CL_NAME_VERSION_MAX_NAME_SIZE, CL_NAME_VERSION_MAX_NAME_SIZE_KHR
+from typing import TypeAlias
 
 cl_int = c_int
 cl_uint = c_uint
@@ -18,6 +19,11 @@ cl_platform_command_buffer_capabilities_khr = cl_bitfield
 cl_external_memory_handle_type_khr = cl_uint
 cl_semaphore_type_khr = cl_uint
 cl_external_semaphore_handle_type_khr = cl_uint
+
+ptr_cl_platform_id:TypeAlias = POINTER(cl_platform_id)
+ptr_cl_uint:TypeAlias = POINTER(cl_uint)
+ptr_size_t:TypeAlias = POINTER(c_size_t)
+ptr_cl_device_id:TypeAlias = POINTER(cl_device_id)
 
 
 class cl_device_type(enum.IntFlag):
@@ -58,21 +64,21 @@ class cl_device_info(enum.IntEnum):
     CL_DEVICE_LUID_KHR = 0x106D
     CL_DEVICE_NODE_MASK_KHR = 0x106E
 
-CL_NAME_VERSION_MAX_NAME_SIZE = CLConstante("CL_NAME_VERSION_MAX_NAME_SIZE", 64)
+
 class cl_name_version(LittleEndianStructure):
     _fields_ = [
         ("version", cl_version),
-        ("name", c_char * CL_NAME_VERSION_MAX_NAME_SIZE.value)
+        ("name", c_char * CL_NAME_VERSION_MAX_NAME_SIZE)
     ]
 
     def __repr__(self)->str:
         return str((self.name.decode("utf-8"), self.version))
 
-CL_NAME_VERSION_MAX_NAME_SIZE_KHR = CLConstante("CL_NAME_VERSION_MAX_NAME_SIZE_KHR", 64)
+
 class cl_name_version_khr(LittleEndianStructure):
     _fields_ = [
         ("version", cl_version_khr),
-        ("name", c_char * CL_NAME_VERSION_MAX_NAME_SIZE_KHR.value)
+        ("name", c_char * CL_NAME_VERSION_MAX_NAME_SIZE_KHR)
     ]
 
     def __repr__(self)->str:

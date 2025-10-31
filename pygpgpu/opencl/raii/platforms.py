@@ -3,7 +3,7 @@ from typing import List
 
 from ..runtime import CL
 from ..runtime.cltypes import cl_platform_id
-from .Platform import Platform
+from .platform import Platform
 
 
 class MetaPlatforms(type):
@@ -21,7 +21,10 @@ class MetaPlatforms(type):
 
         return MetaPlatforms.__n_platforms
     
-    def __getitem__(self, index:int):        
+    def __len__(self)->int:
+        return self.n_platforms
+    
+    def platform(self, index:int):
         if not self.__platforms:
             platform_ids = (cl_platform_id * self.n_platforms)()
             CL.clGetPlatformIDs(self.n_platforms, platform_ids, None)
@@ -29,6 +32,9 @@ class MetaPlatforms(type):
                 self.__platforms.append(Platform(platform_id))
 
         return self.__platforms[index]
+    
+    def __getitem__(self, index:int):
+        return self.platform(index)
         
 
 class Platforms(metaclass=MetaPlatforms):
