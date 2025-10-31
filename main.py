@@ -1,6 +1,7 @@
 from pygpgpu.opencl.raii import Platforms
-from pygpgpu.opencl.runtime.cltypes import cl_name_version
 
 
 for platform in Platforms:
-    print(platform)
+    print(platform, platform.n_devices)
+    for i in range(platform.n_devices):
+        print("   ", platform.device(i).type)

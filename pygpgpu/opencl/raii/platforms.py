@@ -24,7 +24,7 @@ class MetaPlatforms(type):
     def __len__(self)->int:
         return self.n_platforms
     
-    def platform(self, index:int):
+    def platform(self, index:int)->Platform:
         if not self.__platforms:
             platform_ids = (cl_platform_id * self.n_platforms)()
             CL.clGetPlatformIDs(self.n_platforms, platform_ids, None)
@@ -33,7 +33,7 @@ class MetaPlatforms(type):
 
         return self.__platforms[index]
     
-    def __getitem__(self, index:int):
+    def __getitem__(self, index:int)->Platform:
         return self.platform(index)
         
 

@@ -1,7 +1,7 @@
 from ctypes import c_void_p, c_size_t
 
 from .clconstantes import IntConstante
-from .cltypes import cl_uint, cl_platform_id, ptr_cl_platform_id, ptr_cl_uint, ptr_size_t, cl_platform_info, cl_device_type, ptr_cl_device_id
+from .cltypes import cl_uint, cl_platform_id, cl_device_id, cl_device_info, ptr_cl_platform_id, ptr_cl_uint, ptr_size_t, cl_platform_info, cl_device_type, ptr_cl_device_id
 
 
 class CL:
@@ -9,3 +9,4 @@ class CL:
     def clGetPlatformIDs(num_entries: cl_uint, platforms: ptr_cl_platform_id, num_platforms: ptr_cl_uint)->IntConstante: ...
     def clGetPlatformInfo(platform: cl_platform_id, param_name: cl_platform_info, param_value_size: c_size_t, param_value: c_void_p, param_value_size_ret: ptr_size_t)->IntConstante: ...
     def clGetDeviceIDs(platform: cl_platform_id, device_type: cl_device_type, num_entries: cl_uint, devices: ptr_cl_device_id, num_devices: ptr_cl_uint)->IntConstante: ...
+    def clGetDeviceInfo(device:cl_device_id, param_name:cl_device_info, param_value_size:c_size_t, param_value:c_void_p, param_value_size_ret:ptr_size_t)->IntConstante: ...

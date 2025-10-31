@@ -5,7 +5,7 @@ import platform
 from typing import Dict
 from ctypes import c_int
 
-from .clfuncs import signatures
+from .clinfo import CLInfo
 from .clconstantes import IntConstante
 
 
@@ -17,7 +17,7 @@ class MetaCL(type):
             self.name = name
 
         def __call__(self, *args, **kwargs):
-            func_info = signatures[self.name]
+            func_info = CLInfo.func_signatures[self.name]
             func = func_info["dll_func"]
             if func is None:
                 func = getattr(MetaCL.dll(), self.name)
