@@ -1,7 +1,6 @@
 from __future__ import annotations
 from ctypes import c_size_t, byref, c_char, sizeof, _SimpleCData, LittleEndianStructure
 from typing import TYPE_CHECKING, Any, get_args, Dict
-import enum
 
 if TYPE_CHECKING:
     from .platform import Platform

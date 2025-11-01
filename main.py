@@ -7,4 +7,4 @@ from pygpgpu.opencl.runtime import CL
 for platform in Platforms:
     print(platform)
     for device in platform:
-        print("    ", device.vendor)
+        print("    ", device)

@@ -18,7 +18,6 @@ from ..runtime.cltypes import (
     cl_device_local_mem_type,
     cl_device_exec_capabilities,
     cl_command_queue_properties,
-    cl_platform_id,
     cl_device_id,
     cl_device_partition_property,
     cl_device_affinity_domain,
@@ -286,7 +285,7 @@ class Device:
     def built_in_kernels_with_version_khr(self)->List[cl_name_version_khr]: ...
 
     @property
-    def platform(self)->cl_platform_id: ...
+    def platform(self)->Platform: ...
 
     @property
     def name(self)->str: ...
