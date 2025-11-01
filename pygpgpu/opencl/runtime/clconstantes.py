@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Dict, Union, Any
+import enum
 
 
 class Constante:
@@ -25,8 +26,15 @@ class IntConstante(int, Constante):
         instance = int.__new__(cls, value)
         return instance
     
+    @property
+    def value(self)->int:
+        return int(self)
+    
+    def __str__(self)->str:
+        return f"{self.name}({int.__str__(self)})"
+    
     def __repr__(self)->str:
-        return f"{self.name}({int.__repr__(self)})"
+        return str(self)
 
 
 class FloatConstante(float, Constante):
@@ -35,82 +43,37 @@ class FloatConstante(float, Constante):
         instance = float.__new__(cls, value)
         return instance
     
+    @property
+    def value(self)->float:
+        return float(self)
+    
+    def __str__(self)->str:
+        return f"{self.name}({float.__str__(self)})"
+    
     def __repr__(self)->str:
-        return f"{self.name}({float.__repr__(self)})"
+        return str(self)
     
 
-# Error Codes
-CL_SUCCESS = IntConstante("CL_SUCCESS", 0)
-CL_DEVICE_NOT_FOUND = IntConstante("CL_DEVICE_NOT_FOUND", -1)
-CL_DEVICE_NOT_AVAILABLE = IntConstante("CL_DEVICE_NOT_AVAILABLE", -2)
-CL_COMPILER_NOT_AVAILABLE = IntConstante("CL_COMPILER_NOT_AVAILABLE", -3)
-CL_MEM_OBJECT_ALLOCATION_FAILURE = IntConstante("CL_MEM_OBJECT_ALLOCATION_FAILURE", -4)
-CL_OUT_OF_RESOURCES = IntConstante("CL_OUT_OF_RESOURCES", -5)
-CL_OUT_OF_HOST_MEMORY = IntConstante("CL_OUT_OF_HOST_MEMORY", -6)
-CL_PROFILING_INFO_NOT_AVAILABLE = IntConstante("CL_PROFILING_INFO_NOT_AVAILABLE", -7)
-CL_MEM_COPY_OVERLAP = IntConstante("CL_MEM_COPY_OVERLAP", -8)
-CL_IMAGE_FORMAT_MISMATCH = IntConstante("CL_IMAGE_FORMAT_MISMATCH", -9)
-CL_IMAGE_FORMAT_NOT_SUPPORTED = IntConstante("CL_IMAGE_FORMAT_NOT_SUPPORTED", -10)
-CL_BUILD_PROGRAM_FAILURE = IntConstante("CL_BUILD_PROGRAM_FAILURE", -11)
-CL_MAP_FAILURE = IntConstante("CL_MAP_FAILURE", -12)
-CL_MISALIGNED_SUB_BUFFER_OFFSET = IntConstante("CL_MISALIGNED_SUB_BUFFER_OFFSET", -13)
-CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST = IntConstante("CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST", -14)
-CL_COMPILE_PROGRAM_FAILURE = IntConstante("CL_COMPILE_PROGRAM_FAILURE", -15)
-CL_LINKER_NOT_AVAILABLE = IntConstante("CL_LINKER_NOT_AVAILABLE", -16)
-CL_LINK_PROGRAM_FAILURE = IntConstante("CL_LINK_PROGRAM_FAILURE", -17)
-CL_DEVICE_PARTITION_FAILED = IntConstante("CL_DEVICE_PARTITION_FAILED", -18)
-CL_KERNEL_ARG_INFO_NOT_AVAILABLE = IntConstante("CL_KERNEL_ARG_INFO_NOT_AVAILABLE", -19)
-CL_INVALID_VALUE = IntConstante("CL_INVALID_VALUE", -30)
-CL_INVALID_DEVICE_TYPE = IntConstante("CL_INVALID_DEVICE_TYPE", -31)
-CL_INVALID_PLATFORM = IntConstante("CL_INVALID_PLATFORM", -32)
-CL_INVALID_DEVICE = IntConstante("CL_INVALID_DEVICE", -33)
-CL_INVALID_CONTEXT = IntConstante("CL_INVALID_CONTEXT", -34)
-CL_INVALID_QUEUE_PROPERTIES = IntConstante("CL_INVALID_QUEUE_PROPERTIES", -35)
-CL_INVALID_COMMAND_QUEUE = IntConstante("CL_INVALID_COMMAND_QUEUE", -36)
-CL_INVALID_HOST_PTR = IntConstante("CL_INVALID_HOST_PTR", -37)
-CL_INVALID_MEM_OBJECT = IntConstante("CL_INVALID_MEM_OBJECT", -38)
-CL_INVALID_IMAGE_FORMAT_DESCRIPTOR = IntConstante("CL_INVALID_IMAGE_FORMAT_DESCRIPTOR", -39)
-CL_INVALID_IMAGE_SIZE = IntConstante("CL_INVALID_IMAGE_SIZE", -40)
-CL_INVALID_SAMPLER = IntConstante("CL_INVALID_SAMPLER", -41)
-CL_INVALID_BINARY = IntConstante("CL_INVALID_BINARY", -42)
-CL_INVALID_BUILD_OPTIONS = IntConstante("CL_INVALID_BUILD_OPTIONS", -43)
-CL_INVALID_PROGRAM = IntConstante("CL_INVALID_PROGRAM", -44)
-CL_INVALID_PROGRAM_EXECUTABLE = IntConstante("CL_INVALID_PROGRAM_EXECUTABLE", -45)
-CL_INVALID_KERNEL_NAME = IntConstante("CL_INVALID_KERNEL_NAME", -46)
-CL_INVALID_KERNEL_DEFINITION = IntConstante("CL_INVALID_KERNEL_DEFINITION", -47)
-CL_INVALID_KERNEL = IntConstante("CL_INVALID_KERNEL", -48)
-CL_INVALID_ARG_INDEX = IntConstante("CL_INVALID_ARG_INDEX", -49)
-CL_INVALID_ARG_VALUE = IntConstante("CL_INVALID_ARG_VALUE", -50)
-CL_INVALID_ARG_SIZE = IntConstante("CL_INVALID_ARG_SIZE", -51)
-CL_INVALID_KERNEL_ARGS = IntConstante("CL_INVALID_KERNEL_ARGS", -52)
-CL_INVALID_WORK_DIMENSION = IntConstante("CL_INVALID_WORK_DIMENSION", -53)
-CL_INVALID_WORK_GROUP_SIZE = IntConstante("CL_INVALID_WORK_GROUP_SIZE", -54)
-CL_INVALID_WORK_ITEM_SIZE = IntConstante("CL_INVALID_WORK_ITEM_SIZE", -55)
-CL_INVALID_GLOBAL_OFFSET = IntConstante("CL_INVALID_GLOBAL_OFFSET", -56)
-CL_INVALID_EVENT_WAIT_LIST = IntConstante("CL_INVALID_EVENT_WAIT_LIST", -57)
-CL_INVALID_EVENT = IntConstante("CL_INVALID_EVENT", -58)
-CL_INVALID_OPERATION = IntConstante("CL_INVALID_OPERATION", -59)
-CL_INVALID_GL_OBJECT = IntConstante("CL_INVALID_GL_OBJECT", -60)
-CL_INVALID_BUFFER_SIZE = IntConstante("CL_INVALID_BUFFER_SIZE", -61)
-CL_INVALID_MIP_LEVEL = IntConstante("CL_INVALID_MIP_LEVEL", -62)
-CL_INVALID_GLOBAL_WORK_SIZE = IntConstante("CL_INVALID_GLOBAL_WORK_SIZE", -63)
-CL_INVALID_PROPERTY = IntConstante("CL_INVALID_PROPERTY", -64)
-CL_INVALID_IMAGE_DESCRIPTOR = IntConstante("CL_INVALID_IMAGE_DESCRIPTOR", -65)
-CL_INVALID_COMPILER_OPTIONS = IntConstante("CL_INVALID_COMPILER_OPTIONS", -66)
-CL_INVALID_LINKER_OPTIONS = IntConstante("CL_INVALID_LINKER_OPTIONS", -67)
-CL_INVALID_DEVICE_PARTITION_COUNT = IntConstante("CL_INVALID_DEVICE_PARTITION_COUNT", -68)
-CL_INVALID_PIPE_SIZE = IntConstante("CL_INVALID_PIPE_SIZE", -69)
-CL_INVALID_DEVICE_QUEUE = IntConstante("CL_INVALID_DEVICE_QUEUE", -70)
-CL_INVALID_SPEC_ID = IntConstante("CL_INVALID_SPEC_ID", -71)
-CL_MAX_SIZE_RESTRICTION_EXCEEDED = IntConstante("CL_MAX_SIZE_RESTRICTION_EXCEEDED", -72)
+class IntEnum(enum.IntEnum):
+    
+    def __str__(self)->str:
+        return f"{self.name}({self.value})"
+    
+    def __repr__(self)->str:
+        return str(self)
+    
 
-# cl_device_type
-CL_DEVICE_TYPE_DEFAULT = IntConstante("CL_DEVICE_TYPE_DEFAULT", (1 << 0))
-CL_DEVICE_TYPE_CPU = IntConstante("CL_DEVICE_TYPE_CPU", (1 << 1))
-CL_DEVICE_TYPE_GPU = IntConstante("CL_DEVICE_TYPE_GPU", (1 << 2))
-CL_DEVICE_TYPE_ACCELERATOR = IntConstante("CL_DEVICE_TYPE_ACCELERATOR", (1 << 3))
-CL_DEVICE_TYPE_CUSTOM = IntConstante("CL_DEVICE_TYPE_CUSTOM", (1 << 4))
-CL_DEVICE_TYPE_ALL = IntConstante("CL_DEVICE_TYPE_ALL", 0xFFFFFFFF)
+class IntFlag(enum.IntFlag):
+
+    def __str__(self)->str:
+        if len(list(self)) != 1:
+            return self.name
+        else:
+            return f"{self.name}({self.value})"
+    
+    def __repr__(self)->str:
+        return str(self)
+    
 
 CL_NAME_VERSION_MAX_NAME_SIZE = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE", 64)
 CL_NAME_VERSION_MAX_NAME_SIZE_KHR = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE_KHR", 64)

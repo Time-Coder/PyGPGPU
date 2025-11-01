@@ -1,7 +1,10 @@
 from pygpgpu.opencl.raii import Platforms
+from pygpgpu.opencl.runtime import CL
+
+# CL.print_call = True
 
 
 for platform in Platforms:
-    print(platform, platform.n_devices)
-    for i in range(platform.n_devices):
-        print("   ", platform.device(i).type)
+    print(platform)
+    for device in platform:
+        print("    ", device.vendor)

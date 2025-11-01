@@ -10,9 +10,11 @@ from ..runtime.cltypes import (
     cl_device_id,
     cl_uint,
     cl_bitfield,
-    cl_device_info
+    cl_device_info,
+    cl_bool
 )
 from ..runtime import CL, CLInfo
+from ..runtime.clconstantes import IntEnum, IntFlag
 
 
 class Device:
@@ -31,6 +33,9 @@ class Device:
         return self.__id
     
     def __getattr__(self, name:str)->Any:
+        if name in self.__info:
+            return self.__info[name]
+
         key = None
         if hasattr(cl_device_info, f"CL_DEVICE_{name.upper()}"):
             key = getattr(cl_device_info, f"CL_DEVICE_{name.upper()}")
@@ -44,10 +49,9 @@ class Device:
         if key is None:
             raise AttributeError(f"'Device' object has no attribute '{name}'")
 
-        if key not in self.__info:
-            self.__info[key] = self.__fetch_info(key)
+        self.__info[name] = self.__fetch_info(key)
 
-        return self.__info[key]
+        return self.__info[name]
     
     def __repr__(self)->str:
         return f"Device('{self.name}')"
@@ -57,14 +61,16 @@ class Device:
             return cls.from_buffer_copy(buffer).value
         elif issubclass(cls, LittleEndianStructure):
             return cls.from_buffer_copy(buffer)
-        elif issubclass(cls, enum.IntEnum):
+        elif issubclass(cls, IntEnum):
             return cls(cl_uint.from_buffer_copy(buffer).value)
-        elif issubclass(cls, enum.IntFlag):
+        elif issubclass(cls, IntFlag):
             return cls(cl_bitfield.from_buffer_copy(buffer).value)
         elif issubclass(cls, str):
             return buffer.value.decode("utf-8")
         elif issubclass(cls, bytes):
             return buffer.raw
+        elif issubclass(cls, cl_bool):
+            return bool(cl_uint.from_buffer_copy(buffer).value)
         elif cls.__name__.startswith("List"):
             args = get_args(cls)
             ele_cls = args[0]

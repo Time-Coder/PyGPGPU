@@ -59,8 +59,7 @@ class CLInfo:
                 "CL_INVALID_PLATFORM": "platform is not a valid platform.",
                 "CL_INVALID_VALUE": "param_name is not one of the supported values, or if the size in bytes specified by param_value_size is less than size of the return type specified in the Platform Queries table and param_value is not NULL.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
-            },
-            "dll_func": None
+            }
         },
 
         # cl_int clGetPlatformIDs(
@@ -79,8 +78,7 @@ class CLInfo:
                 "CL_PLATFORM_NOT_FOUND_KHR": "cl_khr_icd extension is supported and zero platforms are available.",
                 "CL_INVALID_VALUE": "num_entries is equal to zero and platforms is not NULL or if both num_platforms and platforms are NULL.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
-            },
-            "dll_func": None
+            }
         },
 
         # cl_int clGetDeviceIDs(
@@ -106,8 +104,7 @@ class CLInfo:
                 "CL_DEVICE_NOT_FOUND": "no OpenCL devices that matched device_type were found.",
                 "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
-            },
-            "dll_func": None
+            }
         }, 
 
         # cl_context clCreateContext(
@@ -156,8 +153,7 @@ class CLInfo:
     * Any of the devices specified in the devices argument cannot support OpenCL objects which share the data store of an OpenGL object.""",
                 "CL_INVALID_PROPERTY": "both CL_CONTEXT_INTEROP_USER_SYNC, and any of the properties defined by the cl_khr_gl_sharing extension are defined in properties.",
                 "CL_INVALID_PROPERTY": "the cl_khr_terminate_context extension is supported and CL_CONTEXT_TERMINATE_KHR is set to CL_TRUE in properties, but not all of the devices associated with the context support the ability to support context termination (i.e. CL_DEVICE_TERMINATE_CAPABILITY_CONTEXT_KHR is set for CL_DEVICE_TERMINATE_CAPABILITY_KHR)."
-            },
-            "dll_func": None
+            }
         },
 
         # cl_int clGetDeviceInfo(
@@ -181,8 +177,7 @@ class CLInfo:
                 "CL_INVALID_VALUE": "param_name is not one of the supported values, or if the size in bytes specified by param_value_size is less than size of the return type specified in the Device Queries table and param_value is not NULL.",
                 "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
-            },
-            "dll_func": None
+            }
         }
     }
 

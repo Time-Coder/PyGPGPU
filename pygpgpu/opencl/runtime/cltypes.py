@@ -1,6 +1,5 @@
-import enum
 from ctypes import c_char, c_int64, c_bool, c_void_p, c_int, c_uint, c_ulong, c_size_t, POINTER, LittleEndianStructure
-from .clconstantes import CL_NAME_VERSION_MAX_NAME_SIZE, CL_NAME_VERSION_MAX_NAME_SIZE_KHR
+from .clconstantes import CL_NAME_VERSION_MAX_NAME_SIZE, CL_NAME_VERSION_MAX_NAME_SIZE_KHR, IntEnum, IntFlag
 from typing import TypeAlias
 
 cl_int = c_int
@@ -10,7 +9,7 @@ cl_bool = c_bool
 
 cl_platform_id = c_void_p
 cl_device_id = c_void_p
-cl_context_properties = POINTER(cl_int)
+cl_context_properties = c_int64
 cl_version_khr = cl_uint
 cl_version = cl_uint
 cl_bitfield = cl_ulong
@@ -22,8 +21,84 @@ ptr_cl_uint:TypeAlias = POINTER(cl_uint)
 ptr_size_t:TypeAlias = POINTER(c_size_t)
 ptr_cl_device_id:TypeAlias = POINTER(cl_device_id)
 
+class ErrorCode(IntEnum):
+    CL_SUCCESS = 0
+    CL_DEVICE_NOT_FOUND = -1
+    CL_DEVICE_NOT_AVAILABLE = -2
+    CL_COMPILER_NOT_AVAILABLE = -3
+    CL_MEM_OBJECT_ALLOCATION_FAILURE = -4
+    CL_OUT_OF_RESOURCES = -5
+    CL_OUT_OF_HOST_MEMORY = -6
+    CL_PROFILING_INFO_NOT_AVAILABLE = -7
+    CL_MEM_COPY_OVERLAP = -8
+    CL_IMAGE_FORMAT_MISMATCH = -9
+    CL_IMAGE_FORMAT_NOT_SUPPORTED = -10
+    CL_BUILD_PROGRAM_FAILURE = -11
+    CL_MAP_FAILURE = -12
+    CL_MISALIGNED_SUB_BUFFER_OFFSET = -13
+    CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST = -14
+    CL_COMPILE_PROGRAM_FAILURE = -15
+    CL_LINKER_NOT_AVAILABLE = -16
+    CL_LINK_PROGRAM_FAILURE = -17
+    CL_DEVICE_PARTITION_FAILED = -18
+    CL_KERNEL_ARG_INFO_NOT_AVAILABLE = -19
+    CL_INVALID_VALUE = -30
+    CL_INVALID_DEVICE_TYPE = -31
+    CL_INVALID_PLATFORM = -32
+    CL_INVALID_DEVICE = -33
+    CL_INVALID_CONTEXT = -34
+    CL_INVALID_QUEUE_PROPERTIES = -35
+    CL_INVALID_COMMAND_QUEUE = -36
+    CL_INVALID_HOST_PTR = -37
+    CL_INVALID_MEM_OBJECT = -38
+    CL_INVALID_IMAGE_FORMAT_DESCRIPTOR = -39
+    CL_INVALID_IMAGE_SIZE = -40
+    CL_INVALID_SAMPLER = -41
+    CL_INVALID_BINARY = -42
+    CL_INVALID_BUILD_OPTIONS = -43
+    CL_INVALID_PROGRAM = -44
+    CL_INVALID_PROGRAM_EXECUTABLE = -45
+    CL_INVALID_KERNEL_NAME = -46
+    CL_INVALID_KERNEL_DEFINITION = -47
+    CL_INVALID_KERNEL = -48
+    CL_INVALID_ARG_INDEX = -49
+    CL_INVALID_ARG_VALUE = -50
+    CL_INVALID_ARG_SIZE = -51
+    CL_INVALID_KERNEL_ARGS = -52
+    CL_INVALID_WORK_DIMENSION = -53
+    CL_INVALID_WORK_GROUP_SIZE = -54
+    CL_INVALID_WORK_ITEM_SIZE = -55
+    CL_INVALID_GLOBAL_OFFSET = -56
+    CL_INVALID_EVENT_WAIT_LIST = -57
+    CL_INVALID_EVENT = -58
+    CL_INVALID_OPERATION = -59
+    CL_INVALID_GL_OBJECT = -60
+    CL_INVALID_BUFFER_SIZE = -61
+    CL_INVALID_MIP_LEVEL = -62
+    CL_INVALID_GLOBAL_WORK_SIZE = -63
+    CL_INVALID_PROPERTY = -64
+    CL_INVALID_IMAGE_DESCRIPTOR = -65
+    CL_INVALID_COMPILER_OPTIONS = -66
+    CL_INVALID_LINKER_OPTIONS = -67
+    CL_INVALID_DEVICE_PARTITION_COUNT = -68
+    CL_INVALID_PIPE_SIZE = -69
+    CL_INVALID_DEVICE_QUEUE = -70
+    CL_INVALID_SPEC_ID = -71
+    CL_MAX_SIZE_RESTRICTION_EXCEEDED = -72
+    CL_INVALID_D3D9_DEVICE_NV = -1010
+    CL_INVALID_D3D9_RESOURCE_NV = -1011
+    CL_D3D9_RESOURCE_ALREADY_ACQUIRED_NV = -1012
+    CL_D3D9_RESOURCE_NOT_ACQUIRED_NV = -1013
+    CL_INVALID_D3D10_DEVICE_NV = -1002
+    CL_INVALID_D3D10_RESOURCE_NV = -1003
+    CL_D3D10_RESOURCE_ALREADY_ACQUIRED_NV = -1004
+    CL_D3D10_RESOURCE_NOT_ACQUIRED_NV = -1005
+    CL_INVALID_D3D11_DEVICE_NV = -1006
+    CL_INVALID_D3D11_RESOURCE_NV = -1007
+    CL_D3D11_RESOURCE_ALREADY_ACQUIRED_NV = -1008
+    CL_D3D11_RESOURCE_NOT_ACQUIRED_NV = -1009
 
-class cl_device_type(enum.IntFlag):
+class cl_device_type(IntFlag):
     CL_DEVICE_TYPE_DEFAULT = (1 << 0)
     CL_DEVICE_TYPE_CPU = (1 << 1)
     CL_DEVICE_TYPE_GPU = (1 << 2)
@@ -31,7 +106,7 @@ class cl_device_type(enum.IntFlag):
     CL_DEVICE_TYPE_CUSTOM = (1 << 4)
     CL_DEVICE_TYPE_ALL = 0xFFFFFFFF
 
-class cl_platform_info(enum.IntEnum):
+class cl_platform_info(IntEnum):
     CL_PLATFORM_PROFILE = 0x0900
     CL_PLATFORM_VERSION = 0x0901
     CL_PLATFORM_NUMERIC_VERSION = 0x0906
@@ -49,7 +124,7 @@ class cl_platform_info(enum.IntEnum):
     CL_PLATFORM_SEMAPHORE_EXPORT_HANDLE_TYPES_KHR = 0x2038
     CL_PLATFORM_ICD_SUFFIX_KHR = 0x0920
 
-class cl_device_info(enum.IntEnum):
+class cl_device_info(IntEnum):
     CL_DEVICE_TYPE                                    = 0x1000
     CL_DEVICE_VENDOR_ID                               = 0x1001
     CL_DEVICE_MAX_COMPUTE_UNITS                       = 0x1002
@@ -264,12 +339,12 @@ class cl_device_info(enum.IntEnum):
     CL_DEVICE_DOUBLE_FP_ATOMIC_CAPABILITIES_EXT          = 0x4232
     CL_DEVICE_HALF_FP_ATOMIC_CAPABILITIES_EXT            = 0x4233
 
-class cl_device_mem_cache_type(enum.IntEnum):
+class cl_device_mem_cache_type(IntEnum):
     CL_NONE                                    = 0x0
     CL_READ_ONLY_CACHE                         = 0x1
     CL_READ_WRITE_CACHE                        = 0x2
 
-class cl_device_fp_config(enum.IntFlag):
+class cl_device_fp_config(IntFlag):
     CL_FP_DENORM                               = (1 << 0)
     CL_FP_INF_NAN                              = (1 << 1)
     CL_FP_ROUND_TO_NEAREST                     = (1 << 2)
@@ -279,27 +354,27 @@ class cl_device_fp_config(enum.IntFlag):
     CL_FP_SOFT_FLOAT                           = (1 << 6)
     CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT        = (1 << 7)
 
-class cl_platform_command_buffer_capabilities_khr(enum.IntFlag):
+class cl_platform_command_buffer_capabilities_khr(IntFlag):
     CL_COMMAND_BUFFER_PLATFORM_UNIVERSAL_SYNC_KHR        = (1 << 0)
     CL_COMMAND_BUFFER_PLATFORM_REMAP_QUEUES_KHR          = (1 << 1)
     CL_COMMAND_BUFFER_PLATFORM_AUTOMATIC_REMAP_KHR       = (1 << 2)
 
-class cl_device_local_mem_type(enum.IntEnum):
+class cl_device_local_mem_type(IntEnum):
     CL_LOCAL  = 0x1
     CL_GLOBAL = 0x2
 
-class cl_device_exec_capabilities(enum.IntFlag):
+class cl_device_exec_capabilities(IntFlag):
     CL_EXEC_KERNEL                             = (1 << 0)
     CL_EXEC_NATIVE_KERNEL                      = (1 << 1)
 
-class cl_command_queue_properties(enum.IntFlag):
+class cl_command_queue_properties(IntFlag):
     CL_QUEUE_NO_SYNC_OPERATIONS_INTEL          = (1 << 29)
     CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE     = (1 << 0)
     CL_QUEUE_PROFILING_ENABLE                  = (1 << 1)
     CL_QUEUE_ON_DEVICE                         = (1 << 2)
     CL_QUEUE_ON_DEVICE_DEFAULT                 = (1 << 3)
 
-class cl_device_affinity_domain(enum.IntFlag):
+class cl_device_affinity_domain(IntFlag):
     CL_DEVICE_AFFINITY_DOMAIN_NUMA               = (1 << 0)
     CL_DEVICE_AFFINITY_DOMAIN_L4_CACHE           = (1 << 1)
     CL_DEVICE_AFFINITY_DOMAIN_L3_CACHE           = (1 << 2)
@@ -307,13 +382,13 @@ class cl_device_affinity_domain(enum.IntFlag):
     CL_DEVICE_AFFINITY_DOMAIN_L1_CACHE           = (1 << 4)
     CL_DEVICE_AFFINITY_DOMAIN_NEXT_PARTITIONABLE = (1 << 5)
 
-class cl_device_svm_capabilities(enum.IntFlag):
+class cl_device_svm_capabilities(IntFlag):
     CL_DEVICE_SVM_COARSE_GRAIN_BUFFER           = (1 << 0)
     CL_DEVICE_SVM_FINE_GRAIN_BUFFER             = (1 << 1)
     CL_DEVICE_SVM_FINE_GRAIN_SYSTEM             = (1 << 2)
     CL_DEVICE_SVM_ATOMICS                       = (1 << 3)
 
-class cl_device_atomic_capabilities(enum.IntFlag):
+class cl_device_atomic_capabilities(IntFlag):
     CL_DEVICE_ATOMIC_ORDER_RELAXED          = (1 << 0)
     CL_DEVICE_ATOMIC_ORDER_ACQ_REL          = (1 << 1)
     CL_DEVICE_ATOMIC_ORDER_SEQ_CST          = (1 << 2)
@@ -322,25 +397,25 @@ class cl_device_atomic_capabilities(enum.IntFlag):
     CL_DEVICE_ATOMIC_SCOPE_DEVICE           = (1 << 5)
     CL_DEVICE_ATOMIC_SCOPE_ALL_DEVICES      = (1 << 6)
 
-class cl_device_device_enqueue_capabilities(enum.IntFlag):
+class cl_device_device_enqueue_capabilities(IntFlag):
     CL_DEVICE_QUEUE_SUPPORTED               = (1 << 0)
     CL_DEVICE_QUEUE_REPLACEABLE_DEFAULT     = (1 << 1)
 
-class cl_device_command_buffer_capabilities_khr(enum.IntFlag):
+class cl_device_command_buffer_capabilities_khr(IntFlag):
     CL_COMMAND_BUFFER_CAPABILITY_KERNEL_PRINTF_KHR       = (1 << 0)
     CL_COMMAND_BUFFER_CAPABILITY_DEVICE_SIDE_ENQUEUE_KHR = (1 << 1)
     CL_COMMAND_BUFFER_CAPABILITY_SIMULTANEOUS_USE_KHR    = (1 << 2)
     CL_COMMAND_BUFFER_CAPABILITY_OUT_OF_ORDER_KHR        = (1 << 3)
     CL_COMMAND_BUFFER_CAPABILITY_MULTIPLE_QUEUE_KHR      = (1 << 4)
 
-class cl_mutable_dispatch_fields_khr(enum.IntFlag):
+class cl_mutable_dispatch_fields_khr(IntFlag):
     CL_MUTABLE_DISPATCH_GLOBAL_OFFSET_KHR               = (1 << 0)
     CL_MUTABLE_DISPATCH_GLOBAL_SIZE_KHR                 = (1 << 1)
     CL_MUTABLE_DISPATCH_LOCAL_SIZE_KHR                  = (1 << 2)
     CL_MUTABLE_DISPATCH_ARGUMENTS_KHR                   = (1 << 3)
     CL_MUTABLE_DISPATCH_EXEC_INFO_KHR                   = (1 << 4)
 
-class cl_external_memory_handle_type_khr(enum.IntEnum):
+class cl_external_memory_handle_type_khr(IntEnum):
     CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR               = 0x2067
     CL_EXTERNAL_MEMORY_HANDLE_D3D11_TEXTURE_KHR         = 0x2063
     CL_EXTERNAL_MEMORY_HANDLE_D3D11_TEXTURE_KMT_KHR     = 0x2064
@@ -351,11 +426,11 @@ class cl_external_memory_handle_type_khr(enum.IntEnum):
     CL_EXTERNAL_MEMORY_HANDLE_OPAQUE_WIN32_KMT_KHR      = 0x2062
     CL_EXTERNAL_MEMORY_HANDLE_OPAQUE_WIN32_NAME_KHR     = 0x2069
 
-class cl_device_integer_dot_product_capabilities_khr(enum.IntFlag):
+class cl_device_integer_dot_product_capabilities_khr(IntFlag):
     CL_DEVICE_INTEGER_DOT_PRODUCT_INPUT_4x8BIT_PACKED_KHR = (1 << 0)
     CL_DEVICE_INTEGER_DOT_PRODUCT_INPUT_4x8BIT_KHR        = (1 << 1)
 
-class cl_external_semaphore_handle_type_khr(enum.IntEnum):
+class cl_external_semaphore_handle_type_khr(IntEnum):
     CL_SEMAPHORE_HANDLE_D3D12_FENCE_KHR                = 0x2059
     CL_SEMAPHORE_HANDLE_OPAQUE_FD_KHR                  = 0x2055
     CL_SEMAPHORE_HANDLE_SYNC_FD_KHR                    = 0x2058
@@ -363,10 +438,10 @@ class cl_external_semaphore_handle_type_khr(enum.IntEnum):
     CL_SEMAPHORE_HANDLE_OPAQUE_WIN32_KMT_KHR           = 0x2057
     CL_SEMAPHORE_HANDLE_OPAQUE_WIN32_NAME_KHR          = 0x2068
 
-class cl_device_terminate_capability_khr(enum.IntFlag):
+class cl_device_terminate_capability_khr(IntFlag):
     CL_DEVICE_TERMINATE_CAPABILITY_CONTEXT_KHR         = (1 << 0)
 
-class cl_bool(enum.IntEnum):
+class cl_bool(IntEnum):
     CL_FALSE        = 0
     CL_TRUE         = 1
     CL_BLOCKING     = 1

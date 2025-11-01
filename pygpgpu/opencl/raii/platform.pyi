@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p
-from typing import List, TYPE_CHECKING
+from typing import List, TYPE_CHECKING, Iterator
 
 from ..runtime.cltypes import (
     cl_version,
@@ -31,6 +31,10 @@ class Platform:
     def n_devices(self)->int: ...
 
     def device(self, index:int)->Device: ...
+
+    def __iter__(self)->Iterator[Device]: ...
+
+    def __contains__(self, device:Device)->bool: ...
 
     @property
     def profile(self)->str: ...

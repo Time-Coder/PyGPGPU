@@ -6,7 +6,7 @@ from typing import Dict
 from ctypes import c_int
 
 from .clinfo import CLInfo
-from .clconstantes import IntConstante
+from .cltypes import ErrorCode
 
 
 class MetaCL(type):
@@ -17,13 +17,18 @@ class MetaCL(type):
             self.name = name
 
         def __call__(self, *args, **kwargs):
+            if MetaCL._print_call:
+                call_str = self.name + "(" + ", ".join([self.__str_arg(arg) for arg in args] + [f"{key}={self.__str_arg(value)}" for key, value in kwargs.items()]) + ")"
+                print(call_str, end="", flush=True)
+
             func_info = CLInfo.func_signatures[self.name]
-            func = func_info["dll_func"]
-            if func is None:
+            if "dll_func" not in func_info:
                 func = getattr(MetaCL.dll(), self.name)
                 func.argtypes = list(func_info["args"].values())
                 func.restype = func_info["restype"]
                 func_info["dll_func"] = func
+            else:
+                func = func_info["dll_func"]
             
             current_n_args:int = len(args)
             target_n_args:int = len(func_info["args"])
@@ -35,28 +40,94 @@ class MetaCL(type):
                     args.append(kwargs[args_names[i]])
 
             return_value = func(*args)
-            error_code = IntConstante.get("CL_SUCCESS")
+            error_code = ErrorCode.CL_SUCCESS
             if func_info["restype"] == c_int:
                 try:
-                    return_value = IntConstante.get(return_value)
+                    return_value = ErrorCode(return_value)
                     error_code = return_value
                 except:
                     pass
             
-            if "errcode_ret" in func_info["args"]:
-                if args_names is None:
-                    args_names = list(func_info["args"].keys())
+            if MetaCL._print_call:
+                print(f"->{return_value}", flush=True)
 
-                idx = args_names.index("errcode_ret")
-                error_code = IntConstante.get(args[idx].contents.value)
+            if MetaCL._check_error:
+                if "errcode_ret" in func_info["args"]:
+                    if args_names is None:
+                        args_names = list(func_info["args"].keys())
 
-            if isinstance(error_code, IntConstante) and error_code.name in func_info["errors"]:
-                raise RuntimeError(f"{error_code}: {func_info['errors'][error_code.name]}")
-                
+                    idx = args_names.index("errcode_ret")
+                    error_code = ErrorCode(args[idx].contents.value)
+
+                if error_code != ErrorCode.CL_SUCCESS:
+                    if error_code.name in func_info["errors"]:
+                        raise RuntimeError(f"{error_code}: {func_info['errors'][error_code.name]}")
+                    else:
+                        raise RuntimeError(f"{error_code}: unknown error.")
+            
             return return_value
+
+        @staticmethod
+        def __get_ctypes_type_name(tp) -> str:
+            if isinstance(tp, type):
+                name = tp.__name__
+            else:
+                name = type(tp).__name__
+
+            name_map = {
+                'c_char': 'char',
+                'c_wchar': 'wchar',
+                'c_byte': 'char',
+                'c_ubyte': 'uchar',
+                'c_short': 'short',
+                'c_ushort': 'ushort',
+                'c_int': 'int',
+                'c_uint': 'uint',
+                'c_long': 'long',
+                'c_ulong': 'ulong',
+                'c_longlong': 'int64_t',
+                'c_ulonglong': 'uint64_t',
+                'c_float': 'float',
+                'c_double': 'double',
+                'c_bool': 'bool',
+                'c_void_p': 'void*'
+            }
+            return name_map[name]
+
+        @staticmethod
+        def __str_arg(arg)->str:
+            if type(arg).__name__ == 'CArgObject':
+                obj = arg._obj
+                type_name = MetaCL.Func.__get_ctypes_type_name(obj)
+                addr = ctypes.addressof(obj)
+                return f"({type_name}*)(0x{addr:x})"
+
+            if isinstance(arg, ctypes._Pointer):
+                pointed_type = arg._type_
+                type_name = MetaCL.Func.__get_ctypes_type_name(pointed_type)
+                addr = ctypes.addressof(arg.contents) if arg else 0
+                return f"({type_name}*)(0x{addr:x})"
+
+            if isinstance(arg, ctypes.Array):
+                elem_type = arg._type_
+                elem_type_name = MetaCL.Func.__get_ctypes_type_name(elem_type)
+                length = len(arg)
+                addr = ctypes.addressof(arg)
+                return f"({elem_type_name}[{length}])(0x{addr:x})"
+
+            if hasattr(arg, 'value'):
+                return str(arg.value)
+            
+            if arg is None:
+                return "NULL"
+
+            return str(arg)
 
     __dll = None
     __func_map:Dict[str, Func] = {}
+
+    _check_error:bool = True
+    _print_call:bool = False
 
     @staticmethod
     def opencl_lib_path():
@@ -94,6 +165,22 @@ class MetaCL(type):
             MetaCL.__func_map[name] = MetaCL.Func(name)
 
         return MetaCL.__func_map[name]
+    
+    @property
+    def check_error(self)->bool:
+        return MetaCL._check_error
+    
+    @check_error.setter
+    def check_error(self, flag:bool)->None:
+        MetaCL._check_error = flag
+
+    @property
+    def print_call(self)->bool:
+        return MetaCL._print_call
+    
+    @print_call.setter
+    def print_call(self, flag:bool)->None:
+        MetaCL._print_call = flag
 
 
 class CL(metaclass=MetaCL):
