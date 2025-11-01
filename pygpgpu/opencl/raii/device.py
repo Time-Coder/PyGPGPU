@@ -1,19 +1,17 @@
 from __future__ import annotations
-from ctypes import c_size_t, byref, c_char, sizeof, _SimpleCData, LittleEndianStructure
-from typing import TYPE_CHECKING, Any, get_args, Dict
+from ctypes import c_size_t, byref, c_char
+from typing import TYPE_CHECKING, Any, Dict, List
 
 if TYPE_CHECKING:
     from .platform import Platform
 
 from ..runtime.cltypes import (
     cl_device_id,
-    cl_uint,
-    cl_bitfield,
     cl_device_info,
-    cl_bool
 )
 from ..runtime import CL, CLInfo
-from ..runtime.clconstantes import IntEnum, IntFlag
+
+from .common import parse_result
 
 
 class Device:
@@ -30,6 +28,10 @@ class Device:
     @property
     def id(self)->cl_device_id:
         return self.__id
+    
+    @property
+    def extensions(self)->List[str]:
+        return self.__getattr__("extensions").split(" ")
     
     def __getattr__(self, name:str)->Any:
         if name in self.__info:
@@ -54,34 +56,6 @@ class Device:
     
     def __repr__(self)->str:
         return f"Device('{self.name}')"
-    
-    def __parse_result(self, buffer:bytes, cls:type):
-        if issubclass(cls, _SimpleCData):
-            return cls.from_buffer_copy(buffer).value
-        elif issubclass(cls, LittleEndianStructure):
-            return cls.from_buffer_copy(buffer)
-        elif issubclass(cls, IntEnum):
-            return cls(cl_uint.from_buffer_copy(buffer).value)
-        elif issubclass(cls, IntFlag):
-            return cls(cl_bitfield.from_buffer_copy(buffer).value)
-        elif issubclass(cls, str):
-            return buffer.value.decode("utf-8")
-        elif issubclass(cls, bytes):
-            return buffer.raw
-        elif issubclass(cls, cl_bool):
-            return bool(cl_uint.from_buffer_copy(buffer).value)
-        elif cls.__name__.startswith("List"):
-            args = get_args(cls)
-            ele_cls = args[0]
-            step:int = sizeof(ele_cls)
-            n:int = len(buffer) // step
-            result = []
-            offset:int = 0
-            for i in range(n):
-                value = self.__parse_result(buffer[offset:offset+step], ele_cls)
-                result.append(value)
-                offset += step
-            return result
 
     def __fetch_info(self, key:cl_device_info)->Any:
         result_size = c_size_t()
@@ -91,4 +65,4 @@ class Device:
         CL.clGetDeviceInfo(self.__id, key, result_size, result_bytes, None)
 
         cls = CLInfo.device_info_types[key]
-        return self.__parse_result(result_bytes, cls)
+        return parse_result(result_bytes, cls)

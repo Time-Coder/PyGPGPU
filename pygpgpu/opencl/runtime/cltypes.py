@@ -98,6 +98,10 @@ class ErrorCode(IntEnum):
     CL_D3D11_RESOURCE_ALREADY_ACQUIRED_NV = -1008
     CL_D3D11_RESOURCE_NOT_ACQUIRED_NV = -1009
 
+    @classmethod
+    def dtype(cls):
+        return c_int
+
 class cl_device_type(IntFlag):
     CL_DEVICE_TYPE_DEFAULT = (1 << 0)
     CL_DEVICE_TYPE_CPU = (1 << 1)
@@ -446,6 +450,16 @@ class cl_bool(IntEnum):
     CL_TRUE         = 1
     CL_BLOCKING     = 1
     CL_NON_BLOCKING = 0
+
+class cl_device_partition_property(IntEnum):
+    CL_DEVICE_PARTITION_EQUALLY                = 0x1086
+    CL_DEVICE_PARTITION_BY_COUNTS              = 0x1087
+    CL_DEVICE_PARTITION_BY_COUNTS_LIST_END     = 0x0
+    CL_DEVICE_PARTITION_BY_AFFINITY_DOMAIN     = 0x1088
+
+    @classmethod
+    def dtype(cls):
+        return c_int64
 
 class cl_name_version(LittleEndianStructure):
     _fields_ = [

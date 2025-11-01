@@ -1,6 +1,5 @@
-from ctypes import LittleEndianStructure, c_void_p, c_size_t, byref, c_char, sizeof, _SimpleCData
-from typing import Any, List, get_args, Dict, Iterator
-import enum
+from ctypes import c_void_p, c_size_t, byref, c_char
+from typing import Any, List, Dict, Iterator
 
 from ..runtime import CL, CLInfo
 from ..runtime.cltypes import (
@@ -9,10 +8,8 @@ from ..runtime.cltypes import (
     cl_device_type,
     cl_uint,
     cl_device_id,
-    cl_bitfield,
-    cl_bool
 )
-from ..runtime.clconstantes import IntFlag, IntEnum
+from .common import parse_result
 
 from .device import Device
 
@@ -89,34 +86,6 @@ class Platform:
 
     def __repr__(self)->str:
         return f"Platform('{self.name}')"
-    
-    def __parse_result(self, buffer:bytes, cls:type):
-        if issubclass(cls, _SimpleCData):
-            return cls.from_buffer_copy(buffer).value
-        elif issubclass(cls, LittleEndianStructure):
-            return cls.from_buffer_copy(buffer)
-        elif issubclass(cls, IntEnum):
-            return cls(cl_uint.from_buffer_copy(buffer).value)
-        elif issubclass(cls, IntFlag):
-            return cls(cl_bitfield.from_buffer_copy(buffer).value)
-        elif issubclass(cls, str):
-            return buffer.value.decode("utf-8")
-        elif issubclass(cls, bytes):
-            return buffer.raw
-        elif issubclass(cls, cl_bool):
-            return bool(cl_uint.from_buffer_copy(buffer).value)
-        elif cls.__name__.startswith("List"):
-            args = get_args(cls)
-            ele_cls = args[0]
-            step:int = sizeof(ele_cls)
-            n:int = len(buffer) // step
-            result = []
-            offset:int = 0
-            for i in range(n):
-                value = self.__parse_result(buffer[offset:offset+step], ele_cls)
-                result.append(value)
-                offset += step
-            return result
 
     def __fetch_info(self, key:cl_platform_info)->Any:
         result_size = c_size_t()
@@ -126,4 +95,4 @@ class Platform:
         CL.clGetPlatformInfo(self.__id, key, result_size, result_bytes, None)
 
         cls = CLInfo.platform_info_types[key]
-        return self.__parse_result(result_bytes, cls)
+        return parse_result(result_bytes, cls)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Dict, Union, Any
+from ctypes import c_uint, c_ulong, sizeof
 import enum
 
 
@@ -55,24 +56,40 @@ class FloatConstante(float, Constante):
     
 
 class IntEnum(enum.IntEnum):
-    
+
     def __str__(self)->str:
         return f"{self.name}({self.value})"
     
     def __repr__(self)->str:
         return str(self)
     
+    @classmethod
+    def dtype(cls):
+        return c_uint
+    
+    @classmethod
+    def size(cls):
+        return sizeof(cls.dtype())
+    
 
 class IntFlag(enum.IntFlag):
 
     def __str__(self)->str:
         if len(list(self)) != 1:
-            return self.name
+            return "0"
         else:
             return f"{self.name}({self.value})"
     
     def __repr__(self)->str:
         return str(self)
+    
+    @classmethod
+    def dtype(cls):
+        return c_uint
+    
+    @classmethod
+    def size(cls):
+        return sizeof(cls.dtype())
     
 
 CL_NAME_VERSION_MAX_NAME_SIZE = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE", 64)

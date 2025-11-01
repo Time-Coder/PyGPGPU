@@ -5,6 +5,6 @@ from pygpgpu.opencl.runtime import CL
 
 
 for platform in Platforms:
-    print(platform)
-    for device in platform:
-        print("    ", device)
+    print(platform.icd_suffix)
+    # for device in platform:
+    #     print("    ", device.max_samplers)
