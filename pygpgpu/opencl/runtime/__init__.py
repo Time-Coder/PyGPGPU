@@ -19,6 +19,8 @@ from .cltypes import (
     cl_semaphore_type_khr,
     ptr_cl_platform_id,
     ptr_cl_uint,
+    ptr_cl_int,
+    ptr_int64,
     ptr_size_t,
     ptr_cl_device_id,
     ErrorCode,
@@ -41,11 +43,14 @@ from .cltypes import (
     cl_device_integer_dot_product_capabilities_khr,
     cl_external_semaphore_handle_type_khr,
     cl_device_terminate_capability_khr,
-    cl_context_properties,
     cl_bool,
     cl_device_partition_property,
     cl_name_version,
     cl_name_version_khr,
     cl_device_integer_dot_product_acceleration_properties_khr,
-    cl_device_pci_bus_info_khr
+    cl_device_pci_bus_info_khr,
+    cl_context,
+    cl_context_info,
+    cl_context_properties,
+    CL_CONTEXT_NOTIFY_CALLBACK
 )

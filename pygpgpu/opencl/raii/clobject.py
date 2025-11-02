@@ -1,4 +1,4 @@
-from ctypes import c_void_p, sizeof, _SimpleCData, LittleEndianStructure, c_size_t, byref, c_char
+from ctypes import c_void_p, sizeof, _SimpleCData, LittleEndianStructure, c_size_t, pointer, c_char
 from typing import Dict, Any, get_args
 from abc import ABC, abstractmethod
 
@@ -30,27 +30,36 @@ class CLObject(ABC):
             key = getattr(self._info_enum, f"CL_{name.upper()}_KHR")
 
         if key is None:
-            raise AttributeError(f"'Platform' object has no attribute '{name}'")
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
         self._info[name] = self._fetch_info(key)
 
         return self._info[name]
     
     def __eq__(self, other:CLObject)->bool:
-        return (self.__class__ == other.__class__ and self._id == other._id)
+        return (self.__class__ == other.__class__ and self.id == other.id)
     
     def _fetch_info(self, key)->Any:
         result_size = c_size_t()
-        self._get_info_func(self._id, key, 0, None, byref(result_size))
+        self._get_info_func(self.id, key, 0, None, pointer(result_size))
 
         result_bytes = (c_char * result_size.value)()
-        self._get_info_func(self._id, key, result_size, result_bytes, None)
+        self._get_info_func(self.id, key, result_size, result_bytes, None)
 
         cls = self._info_types_map[key]
         return self._parse_result(result_bytes, cls)
 
     def __repr__(self)->str:
-        return f"{self.__class__.__name__}('{self.name}')"
+        try:
+            result = f"{self.__class__.__name__}('{self.name}')"
+        except:
+            _id = self.id
+            if not isinstance(_id, int):
+                _id = _id.value
+
+            result = f"{self.__class__.__name__}(0x{_id:x})"
+
+        return result
 
     @property
     @abstractmethod

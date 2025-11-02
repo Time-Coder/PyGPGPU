@@ -34,9 +34,12 @@ from ..runtime import (
 
 if TYPE_CHECKING:
     from .platform import Platform
+    from .context import Context
     
 
 class Device:
+
+    def create_context(self)->Context: ...
 
     @property
     def platform(self)->Platform: ...

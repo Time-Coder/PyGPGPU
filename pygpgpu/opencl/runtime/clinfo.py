@@ -1,4 +1,4 @@
-from ctypes import c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER
+from ctypes import c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER, c_int64
 from typing import List
 
 from .cltypes import (
@@ -33,7 +33,18 @@ from .cltypes import (
     cl_device_integer_dot_product_capabilities_khr,
     cl_device_integer_dot_product_acceleration_properties_khr,
     cl_device_pci_bus_info_khr,
-    cl_device_terminate_capability_khr
+    cl_device_terminate_capability_khr,
+    cl_context_info,
+    cl_context_properties,
+    CL_CONTEXT_NOTIFY_CALLBACK,
+    ptr_int64,
+    ptr_cl_device_id,
+    ptr_cl_int,
+    cl_context,
+    cl_int,
+    ptr_size_t,
+    ptr_cl_platform_id,
+    ptr_cl_uint
 )
 
 
@@ -48,13 +59,13 @@ class CLInfo:
         # );
         "clGetPlatformInfo": {
             "args": {
-                "platform": c_void_p,
-                "param_name": c_uint,
+                "platform": cl_platform_id,
+                "param_name": cl_uint,
                 "param_value_size": c_size_t,
                 "param_value": c_void_p,
-                "param_value_size_ret": POINTER(c_size_t)
+                "param_value_size_ret": ptr_size_t
             },
-            "restype": c_int,
+            "restype": cl_int,
             "errors": {
                 "CL_INVALID_PLATFORM": "platform is not a valid platform.",
                 "CL_INVALID_VALUE": "param_name is not one of the supported values, or if the size in bytes specified by param_value_size is less than size of the return type specified in the Platform Queries table and param_value is not NULL.",
@@ -69,11 +80,11 @@ class CLInfo:
         # );
         "clGetPlatformIDs": {
             "args": {
-                "num_entries": c_uint,
-                "platforms": POINTER(c_void_p),
-                "num_platforms": POINTER(c_uint)
+                "num_entries": cl_uint,
+                "platforms": ptr_cl_platform_id,
+                "num_platforms": ptr_cl_uint
             },
-            "restype": c_int,
+            "restype": cl_int,
             "errors": {
                 "CL_PLATFORM_NOT_FOUND_KHR": "cl_khr_icd extension is supported and zero platforms are available.",
                 "CL_INVALID_VALUE": "num_entries is equal to zero and platforms is not NULL or if both num_platforms and platforms are NULL.",
@@ -93,8 +104,8 @@ class CLInfo:
                 "platform": c_void_p,
                 "device_type": c_ulong,
                 "num_entries": c_uint,
-                "devices": POINTER(c_void_p),
-                "num_devices": POINTER(c_uint)
+                "devices": ptr_cl_device_id,
+                "num_devices": ptr_cl_uint
             },
             "restype": c_int,
             "errors": {
@@ -116,11 +127,11 @@ class CLInfo:
         # );
         "clGetDeviceInfo": {
             "args": {
-                "device": c_void_p,
-                "param_name": c_uint,
+                "device": cl_device_id,
+                "param_name": cl_uint,
                 "param_value_size": c_size_t,
                 "param_value": c_void_p,
-                "param_value_size_ret": POINTER(c_size_t)
+                "param_value_size_ret": ptr_size_t
             },
             "restype": c_int,
             "errors": {
@@ -135,27 +146,27 @@ class CLInfo:
         #   const cl_context_properties* properties,
         #   cl_uint num_devices,
         #   const cl_device_id* devices,
-        #   void (CL_CALLBACK* pfn_notify)(const char* errinfo, const void* private_info, size_t cb, void* user_data),
+        #   void (CL_CONTEXT_NOTIFY_CALLBACK* pfn_notify)(const char* errinfo, const void* private_info, size_t cb, void* user_data),
         #   void* user_data,
         #   cl_int* errcode_ret
         # );
         "clCreateContext": {
             "args": {
-                "properties": POINTER(POINTER(c_int)),
-                "num_devices": c_uint,
-                "devices": POINTER(c_void_p),
-                "pfn_notify": c_void_p,
+                "properties": ptr_int64,
+                "num_devices": cl_uint,
+                "devices": ptr_cl_device_id,
+                "pfn_notify": CL_CONTEXT_NOTIFY_CALLBACK,
                 "user_data": c_void_p,
-                "errcode_ret": POINTER(c_int)
+                "errcode_ret": ptr_cl_int
             },
             "restype": c_void_p,
             "errors": {
                 "CL_INVALID_PLATFORM": "no platform is specified in properties and no platform could be selected, or if the platform specified in properties is not a valid platform.",
                 "CL_INVALID_PROPERTY": "a context property name in properties is not a supported property name, if the value specified for a supported property name is not valid, or if the same property name is specified more than once. This error code is missing before version 1.1.",
                 "CL_INVALID_VALUE": """one of following case happends:
-    * devices is NULL.
-    * num_devices is equal to zero.
-    * pfn_notify is NULL but user_data is not NULL.""",
+* devices is NULL.
+* num_devices is equal to zero.
+* pfn_notify is NULL but user_data is not NULL.""",
                 "CL_INVALID_DEVICE": "any device in devices is not a valid device.",
                 "CL_DEVICE_NOT_AVAILABLE": "a device in devices is currently not available even though the device was returned by clGetDeviceIDs.",
                 "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
@@ -166,17 +177,54 @@ class CLInfo:
                 "CL_INVALID_D3D11_DEVICE_KHR": "the value of the property CL_CONTEXT_D3D11_DEVICE_KHR is non-NULL and does not specify a valid Direct3D 11 device with which the cl_device_ids against which this context is to be created may interoperate.",
                 "CL_INVALID_OPERATION": "Direct3D 11 interoperability is specified by setting CL_INVALID_D3D11_DEVICE_KHR to a non-NULL value, and interoperability with another graphics API is also specified.",
                 "CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR": """a context was specified for an OpenGL or OpenGL ES implementation using the EGL, GLX, or WGL binding APIs, as described above; and any of the following conditions hold:
-    * The specified display and context properties do not identify a valid OpenGL or OpenGL ES context.
-    * The specified context does not support buffer and renderbuffer objects.
-    * The specified context is not compatible with the OpenCL context being created (for example, it exists in a physically distinct address space, such as another hardware device; or it does not support sharing data with OpenCL due to implementation restrictions).""",
+* The specified display and context properties do not identify a valid OpenGL or OpenGL ES context.
+* The specified context does not support buffer and renderbuffer objects.
+* The specified context is not compatible with the OpenCL context being created (for example, it exists in a physically distinct address space, such as another hardware device; or it does not support sharing data with OpenCL due to implementation restrictions).""",
                 "CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR": "a share group was specified for a CGL-based OpenGL implementation by setting the property CL_CGL_SHAREGROUP_KHR, and the specified share group does not identify a valid CGL share group object.",
                 "CL_INVALID_OPERATION": """a context was specified as described above and any of the following conditions hold:
-    * A context or share group object was specified for one of CGL, EGL, GLX, or WGL and the OpenGL implementation does not support that window-system binding API.
-    * More than one of the properties CL_CGL_SHAREGROUP_KHR, CL_EGL_DISPLAY_KHR, CL_GLX_DISPLAY_KHR, and CL_WGL_HDC_KHR is set to a non-default value.
-    * Both of the properties CL_CGL_SHAREGROUP_KHR and CL_GL_CONTEXT_KHR are set to non-default values.
-    * Any of the devices specified in the devices argument cannot support OpenCL objects which share the data store of an OpenGL object.""",
+* A context or share group object was specified for one of CGL, EGL, GLX, or WGL and the OpenGL implementation does not support that window-system binding API.
+* More than one of the properties CL_CGL_SHAREGROUP_KHR, CL_EGL_DISPLAY_KHR, CL_GLX_DISPLAY_KHR, and CL_WGL_HDC_KHR is set to a non-default value.
+* Both of the properties CL_CGL_SHAREGROUP_KHR and CL_GL_CONTEXT_KHR are set to non-default values.
+* Any of the devices specified in the devices argument cannot support OpenCL objects which share the data store of an OpenGL object.""",
                 "CL_INVALID_PROPERTY": "both CL_CONTEXT_INTEROP_USER_SYNC, and any of the properties defined by the cl_khr_gl_sharing extension are defined in properties.",
                 "CL_INVALID_PROPERTY": "the cl_khr_terminate_context extension is supported and CL_CONTEXT_TERMINATE_KHR is set to CL_TRUE in properties, but not all of the devices associated with the context support the ability to support context termination (i.e. CL_DEVICE_TERMINATE_CAPABILITY_CONTEXT_KHR is set for CL_DEVICE_TERMINATE_CAPABILITY_KHR)."
+            }
+        },
+
+        # cl_int clReleaseContext(cl_context context);
+        "clReleaseContext": {
+            "args": {
+                "context": cl_context
+            },
+            "restype": cl_int,
+            "errors": {
+                "CL_INVALID_CONTEXT": "context is not a valid OpenCL context.",
+                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                "CL_OUT_OF_HOST_MEMORY": "if there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clGetContextInfo(
+        #   cl_context context,
+        #   cl_context_info param_name,
+        #   size_t param_value_size,
+        #   void* param_value,
+        #   size_t* param_value_size_ret
+        # );
+        "clGetContextInfo": {
+            "args": {
+                "context": cl_context,
+                "param_name": cl_uint,
+                "param_value_size": c_size_t,
+                "param_value": c_void_p,
+                "param_value_size_ret": ptr_size_t
+            },
+            "restype": cl_int,
+            "errors": {
+                "CL_INVALID_CONTEXT": "context is not a valid context.",
+                "CL_INVALID_VALUE": "param_name is not one of the supported values, or if the size in bytes specified by param_value_size is less than size of the return type specified in the Context Queries table and param_value is not NULL.",
+                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         }
     }
@@ -348,4 +396,13 @@ class CLInfo:
         cl_device_info.CL_DEVICE_MAX_NAMED_BARRIER_COUNT_KHR: cl_uint,
         cl_device_info.CL_DEVICE_TERMINATE_CAPABILITY_KHR: cl_device_terminate_capability_khr,
         cl_device_info.CL_DEVICE_CXX_FOR_OPENCL_NUMERIC_VERSION_EXT: cl_version
+    }
+
+    context_info_types = {
+        cl_context_info.CL_CONTEXT_REFERENCE_COUNT: cl_uint,
+        cl_context_info.CL_CONTEXT_NUM_DEVICES: cl_uint,
+        cl_context_info.CL_CONTEXT_DEVICES: List[cl_device_id],
+        cl_context_info.CL_CONTEXT_PROPERTIES: List[cl_context_properties],
+        cl_context_info.CL_CONTEXT_D3D10_PREFER_SHARED_RESOURCES_KHR: cl_bool,
+        cl_context_info.CL_CONTEXT_D3D11_PREFER_SHARED_RESOURCES_KHR: cl_bool
     }

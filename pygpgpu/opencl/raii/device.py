@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, List, Dict
 
 if TYPE_CHECKING:
     from .platform import Platform
+    from .context import Context
 
 from ..runtime import CL, CLInfo, IntEnum, cl_device_id, cl_device_info
 from .clobject import CLObject
@@ -21,6 +22,10 @@ class Device(CLObject):
     @property
     def extensions(self)->List[str]:
         return self.__getattr__("extensions").split(" ")
+    
+    def create_context(self)->Context:
+        from .context import Context
+        return Context(self)
     
     @property
     def _prefix(self)->str:

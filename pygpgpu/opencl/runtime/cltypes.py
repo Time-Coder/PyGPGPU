@@ -1,4 +1,4 @@
-from ctypes import c_char, c_int64, c_void_p, c_int, c_uint, c_ulong, c_size_t, POINTER, LittleEndianStructure
+from ctypes import c_char, c_int64, c_void_p, c_int, c_uint, c_ulong, c_size_t, c_char_p, POINTER, LittleEndianStructure, CFUNCTYPE
 from .clconstantes import IntConstante, IntEnum, IntFlag
 from typing import TypeAlias
 
@@ -8,13 +8,17 @@ cl_ulong = c_ulong
 
 cl_platform_id = c_void_p
 cl_device_id = c_void_p
+cl_context = c_void_p
 cl_bitfield = cl_ulong
 cl_semaphore_type_khr = cl_uint
 
 ptr_cl_platform_id:TypeAlias = POINTER(cl_platform_id)
 ptr_cl_uint:TypeAlias = POINTER(cl_uint)
+ptr_cl_int:TypeAlias = POINTER(cl_int)
 ptr_size_t:TypeAlias = POINTER(c_size_t)
 ptr_cl_device_id:TypeAlias = POINTER(cl_device_id)
+ptr_int64:TypeAlias = POINTER(c_int64)
+CL_CONTEXT_NOTIFY_CALLBACK:TypeAlias = CFUNCTYPE(None, c_char_p, c_void_p, c_size_t, c_void_p)
 
 class ErrorCode(IntEnum):
     CL_SUCCESS = 0
@@ -456,27 +460,45 @@ class cl_device_partition_property(IntEnum):
     def dtype(cls):
         return c_int64
     
+class cl_context_info(IntEnum):
+    CL_CONTEXT_REFERENCE_COUNT                 = 0x1080
+    CL_CONTEXT_DEVICES                         = 0x1081
+    CL_CONTEXT_PROPERTIES                      = 0x1082
+    CL_CONTEXT_NUM_DEVICES                     = 0x1083
+    CL_CONTEXT_D3D9_DEVICE_NV                  = 0x4026
+    CL_CONTEXT_D3D10_DEVICE_NV                 = 0x4014
+    CL_CONTEXT_D3D10_DEVICE_KHR                        = 0x4014
+    CL_CONTEXT_D3D10_PREFER_SHARED_RESOURCES_KHR       = 0x402C
+    CL_CONTEXT_D3D11_DEVICE_NV                         = 0x401D
+    CL_CONTEXT_D3D11_DEVICE_KHR                        = 0x401D
+    CL_CONTEXT_D3D11_PREFER_SHARED_RESOURCES_KHR       = 0x402D
+    CL_CONTEXT_ADAPTER_D3D9_KHR                        = 0x2025
+    CL_CONTEXT_ADAPTER_D3D9EX_KHR                      = 0x2026
+    CL_CONTEXT_ADAPTER_DXVA_KHR                        = 0x2027
+    CL_CONTEXT_D3D9_DEVICE_INTEL                       = 0x4026
+    CL_CONTEXT_D3D9EX_DEVICE_INTEL                     = 0x4072
+    CL_CONTEXT_DXVA_DEVICE_INTEL                       = 0x4073
+
 class cl_context_properties(IntEnum):
-    CL_CONTEXT_PLATFORM                        = 0x1084
-    CL_CONTEXT_INTEROP_USER_SYNC               = 0x1085
-    CL_GL_CONTEXT_KHR                          = 0x2008
-    CL_EGL_DISPLAY_KHR                         = 0x2009
-    CL_GLX_DISPLAY_KHR                         = 0x200A
-    CL_WGL_HDC_KHR                             = 0x200B
-    CL_CGL_SHAREGROUP_KHR                      = 0x200C
-    CL_CONTEXT_TERMINATE_KHR                   = 0x2032
-    CL_PRINTF_CALLBACK_ARM                     = 0x40B0
-    CL_PRINTF_BUFFERSIZE_ARM                   = 0x40B1
-    CL_CONTEXT_SHOW_DIAGNOSTICS_INTEL          = 0x4106
-    CL_CONTEXT_DIAGNOSTICS_LEVEL_ALL_INTEL     = 0xff
-    CL_CONTEXT_DIAGNOSTICS_LEVEL_GOOD_INTEL    = (1 << 0)
-    CL_CONTEXT_DIAGNOSTICS_LEVEL_BAD_INTEL     = (1 << 1)
-    CL_CONTEXT_DIAGNOSTICS_LEVEL_NEUTRAL_INTEL = (1 << 2)
+    CL_CONTEXT_PLATFORM                                = 0x1084
+    CL_CONTEXT_INTEROP_USER_SYNC                       = 0x1085
+    CL_CONTEXT_TERMINATE_KHR                           = 0x2032
+    CL_PRINTF_CALLBACK_ARM                             = 0x40B0
+    CL_PRINTF_BUFFERSIZE_ARM                           = 0x40B1
+    CL_CONTEXT_SHOW_DIAGNOSTICS_INTEL                  = 0x4106
+    CL_CONTEXT_DIAGNOSTICS_LEVEL_ALL_INTEL             = 0xff
+    CL_CONTEXT_DIAGNOSTICS_LEVEL_GOOD_INTEL            = (1 << 0)
+    CL_CONTEXT_DIAGNOSTICS_LEVEL_BAD_INTEL             = (1 << 1)
+    CL_CONTEXT_DIAGNOSTICS_LEVEL_NEUTRAL_INTEL         = (1 << 2)
+    CL_GL_CONTEXT_KHR                                  = 0x2008
+    CL_EGL_DISPLAY_KHR                                 = 0x2009
+    CL_GLX_DISPLAY_KHR                                 = 0x200A
+    CL_WGL_HDC_KHR                                     = 0x200B
+    CL_CGL_SHAREGROUP_KHR                              = 0x200C
 
     @property
     def dtype(self):
         return c_int64
-
 
 CL_VERSION_MAJOR_BITS = IntConstante("CL_VERSION_MAJOR_BITS", 10)
 CL_VERSION_MINOR_BITS = IntConstante("CL_VERSION_MINOR_BITS", 10)

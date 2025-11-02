@@ -1,4 +1,4 @@
-from ctypes import byref
+from ctypes import pointer
 from typing import List, Dict, Iterator
 
 from ..runtime import (
@@ -38,7 +38,7 @@ class Platform(CLObject):
     def n_devices(self)->int:
         if self.__n_devices == 0:
             n_devices = cl_uint()
-            CL.clGetDeviceIDs(self._id, cl_device_type.CL_DEVICE_TYPE_ALL, 0, None, byref(n_devices))
+            CL.clGetDeviceIDs(self._id, cl_device_type.CL_DEVICE_TYPE_ALL, 0, None, pointer(n_devices))
             self.__n_devices = n_devices.value
 
         return self.__n_devices
