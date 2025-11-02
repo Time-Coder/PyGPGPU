@@ -1,70 +1,44 @@
-from ctypes import c_void_p, c_size_t, byref, c_char
-from typing import Any, List, Dict, Iterator
+from ctypes import byref
+from typing import List, Dict, Iterator
 
-from ..runtime import CL, CLInfo
-from ..runtime.cltypes import (
-    cl_platform_info,
+from ..runtime import (
+    CL, CLInfo, IntEnum,
     cl_platform_id,
     cl_device_type,
     cl_uint,
     cl_device_id,
+    cl_platform_info
 )
-from .common import parse_result
 
+from .clobject import CLObject
 from .device import Device
 
 
-class Platform:
+class Platform(CLObject):
 
     def __init__(self, id:cl_platform_id):
-        self.__id:cl_platform_id = id
-        self.__info:Dict[str, Any] = {}
-
+        CLObject.__init__(self, id)
         self.__n_devices:int = 0
         self.__devices_list:List[Device] = []
         self.__devices_map:Dict[cl_device_id, Device] = {}
-
-    @property
-    def id(self)->c_void_p:
-        return self.__id
     
     @property
     def extensions(self)->List[str]:
         return self.__getattr__("extensions").split(" ")
-    
-    def __getattr__(self, name:str)->Any:
-        if name in self.__info:
-            return self.__info[name]
-
-        key = None
-        if hasattr(cl_platform_info, f"CL_PLATFORM_{name.upper()}"):
-            key = getattr(cl_platform_info, f"CL_PLATFORM_{name.upper()}")
-        elif hasattr(cl_platform_info, f"CL_PLATFORM_{name.upper()}_KHR"):
-            key = getattr(cl_platform_info, f"CL_PLATFORM_{name.upper()}_KHR")
-        elif hasattr(cl_platform_info, f"CL_{name.upper()}"):
-            key = getattr(cl_platform_info, f"CL_{name.upper()}")
-        elif hasattr(cl_platform_info, f"CL_{name.upper()}_KHR"):
-            key = getattr(cl_platform_info, f"CL_{name.upper()}_KHR")
-
-        if key is None:
-            raise AttributeError(f"'Platform' object has no attribute '{name}'")
-
-        self.__info[name] = self.__fetch_info(key)
-
-        return self.__info[name]
     
     def __iter__(self)->Iterator[Device]:
         self.__fetch_devices()
         return iter(self.__devices_list)
     
     def __contains__(self, device:Device)->bool:
+        self.__fetch_devices()
         return (device.id.value in self.__devices_map)
     
     @property
     def n_devices(self)->int:
         if self.__n_devices == 0:
             n_devices = cl_uint()
-            CL.clGetDeviceIDs(self.__id, cl_device_type.CL_DEVICE_TYPE_ALL, 0, None, byref(n_devices))
+            CL.clGetDeviceIDs(self._id, cl_device_type.CL_DEVICE_TYPE_ALL, 0, None, byref(n_devices))
             self.__n_devices = n_devices.value
 
         return self.__n_devices
@@ -76,23 +50,26 @@ class Platform:
         device_ids = (cl_device_id * self.n_devices)()
         CL.clGetDeviceIDs(self.id, cl_device_type.CL_DEVICE_TYPE_ALL, self.n_devices, device_ids, None)
         for device_id in device_ids:
-            device = Device(self, cl_device_id(device_id))
+            device = Device(cl_device_id(device_id), self)
             self.__devices_list.append(device)
             self.__devices_map[device_id] = device
 
     def device(self, index:int)->Device:
         self.__fetch_devices()
         return self.__devices_list[index]
+    
+    @property
+    def _prefix(self)->str:
+        return "CL_PLATFORM"
 
-    def __repr__(self)->str:
-        return f"Platform('{self.name}')"
+    @property
+    def _get_info_func(self)->CL.Func:
+        return CL.clGetPlatformInfo
 
-    def __fetch_info(self, key:cl_platform_info)->Any:
-        result_size = c_size_t()
-        CL.clGetPlatformInfo(self.__id, key, 0, None, byref(result_size))
+    @property
+    def _info_types_map(self)->Dict[IntEnum, type]:
+        return CLInfo.platform_info_types
 
-        result_bytes = (c_char * result_size.value)()
-        CL.clGetPlatformInfo(self.__id, key, result_size, result_bytes, None)
-
-        cls = CLInfo.platform_info_types[key]
-        return parse_result(result_bytes, cls)
+    @property
+    def _info_enum(self)->type:
+        return cl_platform_info

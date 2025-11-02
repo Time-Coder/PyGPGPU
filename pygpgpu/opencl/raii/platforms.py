@@ -1,8 +1,7 @@
 from ctypes import c_uint, pointer
 from typing import List, Dict, Iterator
 
-from ..runtime import CL
-from ..runtime.cltypes import cl_platform_id
+from ..runtime import CL, cl_platform_id
 from .platform import Platform
     
 

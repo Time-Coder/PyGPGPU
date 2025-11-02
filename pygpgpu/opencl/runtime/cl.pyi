@@ -1,9 +1,14 @@
 from ctypes import c_void_p, c_size_t
+from typing import Any
 
 from .cltypes import ErrorCode, cl_uint, cl_platform_id, cl_device_id, cl_device_info, ptr_cl_platform_id, ptr_cl_uint, ptr_size_t, cl_platform_info, cl_device_type, ptr_cl_device_id
 
 
 class CL:
+
+    class Func:
+
+        def __call__(self, *args, **kwargs)->Any: ...
 
     @property
     def check_error(self)->bool: ...

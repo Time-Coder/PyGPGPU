@@ -3,7 +3,7 @@ from __future__ import annotations
 from ctypes import c_void_p
 from typing import List, TYPE_CHECKING, Iterator
 
-from ..runtime.cltypes import (
+from ..runtime import (
     cl_version,
     cl_version_khr,
     cl_name_version,

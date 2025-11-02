@@ -1,20 +1,15 @@
-from ctypes import c_char, c_int64, c_bool, c_void_p, c_int, c_uint, c_ulong, c_size_t, POINTER, LittleEndianStructure
-from .clconstantes import CL_NAME_VERSION_MAX_NAME_SIZE, CL_NAME_VERSION_MAX_NAME_SIZE_KHR, IntEnum, IntFlag
+from ctypes import c_char, c_int64, c_void_p, c_int, c_uint, c_ulong, c_size_t, POINTER, LittleEndianStructure
+from .clconstantes import IntConstante, IntEnum, IntFlag
 from typing import TypeAlias
 
 cl_int = c_int
 cl_uint = c_uint
 cl_ulong = c_ulong
-cl_bool = c_bool
 
 cl_platform_id = c_void_p
 cl_device_id = c_void_p
-cl_context_properties = c_int64
-cl_version_khr = cl_uint
-cl_version = cl_uint
 cl_bitfield = cl_ulong
 cl_semaphore_type_khr = cl_uint
-cl_device_partition_property = c_int64
 
 ptr_cl_platform_id:TypeAlias = POINTER(cl_platform_id)
 ptr_cl_uint:TypeAlias = POINTER(cl_uint)
@@ -460,6 +455,62 @@ class cl_device_partition_property(IntEnum):
     @classmethod
     def dtype(cls):
         return c_int64
+    
+class cl_context_properties(IntEnum):
+    CL_CONTEXT_PLATFORM                        = 0x1084
+    CL_CONTEXT_INTEROP_USER_SYNC               = 0x1085
+    CL_GL_CONTEXT_KHR                          = 0x2008
+    CL_EGL_DISPLAY_KHR                         = 0x2009
+    CL_GLX_DISPLAY_KHR                         = 0x200A
+    CL_WGL_HDC_KHR                             = 0x200B
+    CL_CGL_SHAREGROUP_KHR                      = 0x200C
+    CL_CONTEXT_TERMINATE_KHR                   = 0x2032
+    CL_PRINTF_CALLBACK_ARM                     = 0x40B0
+    CL_PRINTF_BUFFERSIZE_ARM                   = 0x40B1
+    CL_CONTEXT_SHOW_DIAGNOSTICS_INTEL          = 0x4106
+    CL_CONTEXT_DIAGNOSTICS_LEVEL_ALL_INTEL     = 0xff
+    CL_CONTEXT_DIAGNOSTICS_LEVEL_GOOD_INTEL    = (1 << 0)
+    CL_CONTEXT_DIAGNOSTICS_LEVEL_BAD_INTEL     = (1 << 1)
+    CL_CONTEXT_DIAGNOSTICS_LEVEL_NEUTRAL_INTEL = (1 << 2)
+
+    @property
+    def dtype(self):
+        return c_int64
+
+
+CL_VERSION_MAJOR_BITS = IntConstante("CL_VERSION_MAJOR_BITS", 10)
+CL_VERSION_MINOR_BITS = IntConstante("CL_VERSION_MINOR_BITS", 10)
+CL_VERSION_PATCH_BITS = IntConstante("CL_VERSION_PATCH_BITS", 12)
+
+CL_VERSION_MAJOR_MASK = IntConstante("CL_VERSION_MAJOR_MASK", (1 << CL_VERSION_MAJOR_BITS) - 1)
+CL_VERSION_MINOR_MASK = IntConstante("CL_VERSION_MINOR_MASK", (1 << CL_VERSION_MINOR_BITS) - 1)
+CL_VERSION_PATCH_MASK = IntConstante("CL_VERSION_PATCH_MASK", (1 << CL_VERSION_PATCH_BITS) - 1)
+
+class cl_version(cl_uint):
+
+    @property
+    def major(self)->int:
+        return (self.value >> (CL_VERSION_MINOR_BITS + CL_VERSION_PATCH_BITS))
+
+    @property
+    def minor(self)->int:
+        return ((self.value >> CL_VERSION_PATCH_BITS) & CL_VERSION_MINOR_MASK)
+
+    @property
+    def patch(self)->int:
+        return (self.value & CL_VERSION_PATCH_MASK)
+    
+    def __str__(self)->str:
+        return f"{self.major}.{self.minor}.{self.patch}"
+    
+    def __repr__(self)->str:
+        return f"{self.major}.{self.minor}.{self.patch}"
+        
+cl_version_khr = cl_version
+
+
+CL_NAME_VERSION_MAX_NAME_SIZE = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE", 64)
+CL_NAME_VERSION_MAX_NAME_SIZE_KHR = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE_KHR", 64)
 
 class cl_name_version(LittleEndianStructure):
     _fields_ = [

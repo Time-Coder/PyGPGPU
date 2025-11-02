@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Dict, Union, Any
-from ctypes import c_uint, c_ulong, sizeof
+from ctypes import c_uint, sizeof
 import enum
 
 
@@ -91,6 +91,3 @@ class IntFlag(enum.IntFlag):
     def size(cls):
         return sizeof(cls.dtype())
     
-
-CL_NAME_VERSION_MAX_NAME_SIZE = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE", 64)
-CL_NAME_VERSION_MAX_NAME_SIZE_KHR = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE_KHR", 64)

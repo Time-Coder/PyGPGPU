@@ -2,7 +2,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
-from typing import Dict
+from typing import Dict, Callable
 from ctypes import c_int
 
 from .clinfo import CLInfo
@@ -11,13 +11,59 @@ from .cltypes import ErrorCode
 
 class MetaCL(type):
 
+    __dll = None
+    __func_map:Dict[str, Callable] = {}
+
+    @staticmethod
+    def opencl_lib_path():
+        system = platform.system()
+        
+        if system == "Windows":
+            return "OpenCL.dll"
+        
+        elif system == "Darwin":
+            return "/System/Library/Frameworks/OpenCL.framework/OpenCL"
+        
+        elif system == "Linux":
+            possible_paths = [
+                "libOpenCL.so",
+                "/usr/lib/x86_64-linux-gnu/libOpenCL.so",
+                "/usr/lib64/libOpenCL.so",
+                "/usr/lib/libOpenCL.so",
+                "/opt/ocl/lib/libOpenCL.so",
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    return path
+                
+            return "libOpenCL.so"
+    
+    @staticmethod
+    def dll():
+        if MetaCL.__dll is None:
+            MetaCL.__dll = ctypes.CDLL(MetaCL.opencl_lib_path())
+
+        return MetaCL.__dll
+
+    def __getattr__(self, name:str)->Callable:
+        if name not in MetaCL.__func_map:
+            MetaCL.__func_map[name] = self.Func(name)
+
+        return MetaCL.__func_map[name]
+
+
+class CL(metaclass=MetaCL):
+
+    print_call:bool = False
+    check_error:bool = True
+
     class Func:
 
         def __init__(self, name:str):
             self.name = name
 
         def __call__(self, *args, **kwargs):
-            if MetaCL._print_call:
+            if CL.print_call:
                 call_str = self.name + "(" + ", ".join([self.__str_arg(arg) for arg in args] + [f"{key}={self.__str_arg(value)}" for key, value in kwargs.items()]) + ")"
                 print(call_str, end="", flush=True)
 
@@ -48,10 +94,10 @@ class MetaCL(type):
                 except:
                     pass
             
-            if MetaCL._print_call:
+            if CL.print_call:
                 print(f"->{return_value}", flush=True)
 
-            if MetaCL._check_error:
+            if CL.check_error:
                 if "errcode_ret" in func_info["args"]:
                     if args_names is None:
                         args_names = list(func_info["args"].keys())
@@ -98,19 +144,19 @@ class MetaCL(type):
         def __str_arg(arg)->str:
             if type(arg).__name__ == 'CArgObject':
                 obj = arg._obj
-                type_name = MetaCL.Func.__get_ctypes_type_name(obj)
+                type_name = CL.Func.__get_ctypes_type_name(obj)
                 addr = ctypes.addressof(obj)
                 return f"({type_name}*)(0x{addr:x})"
 
             if isinstance(arg, ctypes._Pointer):
                 pointed_type = arg._type_
-                type_name = MetaCL.Func.__get_ctypes_type_name(pointed_type)
+                type_name = CL.Func.__get_ctypes_type_name(pointed_type)
                 addr = ctypes.addressof(arg.contents) if arg else 0
                 return f"({type_name}*)(0x{addr:x})"
 
             if isinstance(arg, ctypes.Array):
                 elem_type = arg._type_
-                elem_type_name = MetaCL.Func.__get_ctypes_type_name(elem_type)
+                elem_type_name = CL.Func.__get_ctypes_type_name(elem_type)
                 length = len(arg)
                 addr = ctypes.addressof(arg)
                 return f"({elem_type_name}[{length}])(0x{addr:x})"
@@ -122,66 +168,3 @@ class MetaCL(type):
                 return "NULL"
 
             return str(arg)
-
-    __dll = None
-    __func_map:Dict[str, Func] = {}
-
-    _check_error:bool = True
-    _print_call:bool = False
-
-    @staticmethod
-    def opencl_lib_path():
-        system = platform.system()
-        
-        if system == "Windows":
-            return "OpenCL.dll"
-        
-        elif system == "Darwin":
-            return "/System/Library/Frameworks/OpenCL.framework/OpenCL"
-        
-        elif system == "Linux":
-            possible_paths = [
-                "libOpenCL.so",
-                "/usr/lib/x86_64-linux-gnu/libOpenCL.so",
-                "/usr/lib64/libOpenCL.so",
-                "/usr/lib/libOpenCL.so",
-                "/opt/ocl/lib/libOpenCL.so",
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    return path
-                
-            return "libOpenCL.so"
-    
-    @staticmethod
-    def dll():
-        if MetaCL.__dll is None:
-            MetaCL.__dll = ctypes.CDLL(MetaCL.opencl_lib_path())
-
-        return MetaCL.__dll
-
-    def __getattr__(self, name:str)->Func:
-        if name not in MetaCL.__func_map:
-            MetaCL.__func_map[name] = MetaCL.Func(name)
-
-        return MetaCL.__func_map[name]
-    
-    @property
-    def check_error(self)->bool:
-        return MetaCL._check_error
-    
-    @check_error.setter
-    def check_error(self, flag:bool)->None:
-        MetaCL._check_error = flag
-
-    @property
-    def print_call(self)->bool:
-        return MetaCL._print_call
-    
-    @print_call.setter
-    def print_call(self, flag:bool)->None:
-        MetaCL._print_call = flag
-
-
-class CL(metaclass=MetaCL):
-    pass
