@@ -36,6 +36,9 @@ class CLObject(ABC):
 
         return self._info[name]
     
+    def __eq__(self, other:CLObject)->bool:
+        return (self.__class__ == other.__class__ and self._id == other._id)
+    
     def _fetch_info(self, key)->Any:
         result_size = c_size_t()
         self._get_info_func(self._id, key, 0, None, byref(result_size))
