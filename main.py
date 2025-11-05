@@ -1,4 +1,4 @@
-from pygpgpu.opencl.raii import Platforms, Context
+from pygpgpu.opencl.oop import Platforms, Context
 from pygpgpu.opencl.runtime import CL
 
 CL.print_call = True
