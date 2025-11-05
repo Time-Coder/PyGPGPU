@@ -1,4 +1,4 @@
-from .ShaderSyntaxTokens import Var, Struct, Func
+from .ctokens import Var, Struct, Func
 
 from OpenGL import GL
 

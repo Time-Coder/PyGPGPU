@@ -1,3 +1,4 @@
-from .ShaderParser import ShaderParser
-from .ShaderSyntaxTokens import Var, Attribute, Func, FuncCall, Struct, SimpleVar
-from .kernel_syntax_tree import ShaderSyntaxTree
+from .cparser import CParser
+from .cpreprocessor import CPreprocessor
+from .ctokens import Var, Attribute, Func, FuncCall, Struct, SimpleVar
+from .csyntaxtree import CSyntaxTree

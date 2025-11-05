@@ -4,13 +4,14 @@ from OpenGL import GL
 from typing import List, Dict, Union, Tuple, Set, Optional
 
 from ..GLInfo import GLInfo
-from .ShaderSyntaxTokens import Var, Attribute, Func, FuncCall, Struct
+from .ctokens import Var, Attribute, Func, FuncCall, Struct
 from .ShaderBuiltins import ShaderBuiltins
-from .kernel_syntax_tree import ShaderSyntaxTree
-from .minifyc import minifyc, macros_expand_file
+from .csyntaxtree import KernelSyntaxTree
+from .minifyc import minifyc
+from .cpreprocessor import CPreprocessor
 
 
-class ShaderParser:
+class CParser:
 
     def __init__(self, shader_type):
         self.file_name:str = ""
@@ -30,7 +31,7 @@ class ShaderParser:
         self.functions: Dict[str, Func] = {}
         self.function_groups: Dict[str, List[Func]] = {}
         self.geometry_in: str = ""
-        self.syntax_tree: ShaderSyntaxTree = ShaderSyntaxTree()
+        self.syntax_tree: KernelSyntaxTree = KernelSyntaxTree()
 
         self.accum_location = {"in": 0, "out": 0}
         self.shader_type = shader_type
@@ -61,7 +62,7 @@ class ShaderParser:
         self._is_empty = True
 
     @staticmethod
-    def __parse_field_declaration_list(field_declaration_list: ShaderSyntaxTree.Node) -> Dict[str, Var]:
+    def __parse_field_declaration_list(field_declaration_list: KernelSyntaxTree.Node) -> Dict[str, Var]:
         members: Dict[str, Var] = {}
         for field_declaration in field_declaration_list.children:
             if field_declaration.type != "field_declaration":
@@ -94,7 +95,7 @@ class ShaderParser:
 
         return members
 
-    def __parse_layout(self, layout_qualifiers: ShaderSyntaxTree.Node):
+    def __parse_layout(self, layout_qualifiers: KernelSyntaxTree.Node):
         layout_args: List[str] = []
         layout_kwargs: Dict[str, str] = {}
         for qualifier in layout_qualifiers.children:
@@ -108,7 +109,7 @@ class ShaderParser:
 
         return layout_args, layout_kwargs
 
-    def __parse_single_value_declaration(self, declaration: ShaderSyntaxTree.Node):
+    def __parse_single_value_declaration(self, declaration: KernelSyntaxTree.Node):
         var_names = []
         for var_name in declaration.children:
             if var_name.type in ["identifier", "array_declarator"]:
@@ -210,7 +211,7 @@ class ShaderParser:
                     var.end_index = declaration.end_byte
                     self.global_vars[var.name] = var
 
-    def __parse_block_declaration(self, declaration: ShaderSyntaxTree.Node):
+    def __parse_block_declaration(self, declaration: KernelSyntaxTree.Node):
         block_name = None
         field_declaration_list = None
         var_names = []
@@ -249,7 +250,7 @@ class ShaderParser:
         type_ = block_name.text
         struct = Struct(
             name=type_,
-            members=ShaderParser.__parse_field_declaration_list(
+            members=CParser.__parse_field_declaration_list(
                 field_declaration_list
             )
         )
@@ -329,7 +330,7 @@ class ShaderParser:
 
         return False
 
-    def __parse_struct(self, struct_specifier: ShaderSyntaxTree.Node):
+    def __parse_struct(self, struct_specifier: KernelSyntaxTree.Node):
         type_identifier = struct_specifier.children[1]
         field_declaration_list = struct_specifier.children[2]
         struct_name:str = type_identifier.text
@@ -339,7 +340,7 @@ class ShaderParser:
 
         struct = Struct(
             name=struct_name,
-            members=ShaderParser.__parse_field_declaration_list(
+            members=CParser.__parse_field_declaration_list(
                 field_declaration_list
             ),
             start_index=struct_specifier.start_byte,
@@ -372,7 +373,7 @@ class ShaderParser:
 
         def append_geometry_in(match):
             layout_qualifiers = match.group("layout_qualifiers")
-            args, kwargs = ShaderParser.__get_layout_qualifiers(layout_qualifiers)
+            args, kwargs = CParser.__get_layout_qualifiers(layout_qualifiers)
             for arg in args:
                 if arg in GLInfo.geometry_ins:
                     self.geometry_in = arg
@@ -389,7 +390,7 @@ class ShaderParser:
         
         return re.sub(regx, replacement, self.clean_code, flags=re.M)
 
-    def __find_func_calls_and_local_vars(self, node: ShaderSyntaxTree.Node, func: Func):
+    def __find_func_calls_and_local_vars(self, node: KernelSyntaxTree.Node, func: Func):
         if node.type == "call_expression":
             func_call = FuncCall(call_expression=node)
             func.func_calls[func_call.signature] = func_call
@@ -421,7 +422,7 @@ class ShaderParser:
         for child in node.children:
             self.__find_func_calls_and_local_vars(child, func)
 
-    def __parse_function(self, function_definition: ShaderSyntaxTree.Node):
+    def __parse_function(self, function_definition: KernelSyntaxTree.Node):
         type_identifier = function_definition.children[0]
         function_declarator = function_definition.children[1]
         statement_list = function_definition.children[2]
@@ -472,7 +473,7 @@ class ShaderParser:
             self.clean_code,
             self.line_map,
             self.related_files
-        ) = macros_expand_file(file_name, include_paths, defines)
+        ) = CPreprocessor.macros_expand_file(file_name, include_paths, defines)
         self.compressed_code:str = ""
         self.ins: Dict[str, Var] = {}
         self.outs: Dict[str, Var] = {}
@@ -498,9 +499,9 @@ class ShaderParser:
         for child in root_node.children:
             if child.type == "declaration":
                 declaration = child
-                if ShaderParser.__is_single_value_declaration(declaration):
+                if CParser.__is_single_value_declaration(declaration):
                     self.__parse_single_value_declaration(declaration)
-                elif ShaderParser.__is_block_declaration(declaration):  # block declaration
+                elif CParser.__is_block_declaration(declaration):  # block declaration
                     self.__parse_block_declaration(declaration)
 
             elif child.type == "function_definition":
@@ -584,7 +585,7 @@ class ShaderParser:
                 raise TypeError(f"type '{pure_type}' is not defined in current shader")
             
             suffix = current_var.type[pos_bracket:]
-            elements = ShaderParser.__resolve_array(suffix)
+            elements = CParser.__resolve_array(suffix)
             for element in elements:
                 child_var:Var = Var(
                     name=current_var.name + element[0],
@@ -702,7 +703,7 @@ class ShaderParser:
             if candidate_func.argc != len(arg_types):
                 continue
 
-            current_distance = ShaderParser.__type_list_distance(arg_types, candidate_func.arg_types)
+            current_distance = CParser.__type_list_distance(arg_types, candidate_func.arg_types)
             if isinstance(current_distance, int):
                 if current_distance == 0:
                     min_distance = 0
@@ -770,7 +771,7 @@ class ShaderParser:
 
         return ""
 
-    def __analyse_type(self, expression: ShaderSyntaxTree.Node, func: Func) -> str:
+    def __analyse_type(self, expression: KernelSyntaxTree.Node, func: Func) -> str:
         if expression.type == "number_literal":
             text = expression.text
             if (
@@ -892,13 +893,13 @@ class ShaderParser:
             func_call_key = FuncCall.get_signature(expression)
             func_call = func.func_calls[func_call_key]
             if isinstance(func_call, (Func, list)):
-                return ShaderParser.__get_return_type(func_call)
+                return CParser.__get_return_type(func_call)
 
             if isinstance(func_call, FuncCall):
                 best_match_func = self.__find_best_match_function(func_call, func)
                 if best_match_func:
                     func.func_calls[func_call_key] = best_match_func
-                return ShaderParser.__get_return_type(best_match_func)
+                return CParser.__get_return_type(best_match_func)
 
             return ""
         elif expression.type == "binary_expression":
@@ -910,7 +911,7 @@ class ShaderParser:
             operant2 = expression.children[offset + 2]
             operant2_type = self.__analyse_type(operant2, func)
 
-            return ShaderParser.__greater_type(operant1_type, operant2_type)
+            return CParser.__greater_type(operant1_type, operant2_type)
         elif expression.type in ["parenthesized_expression", "unary_expression"]:
             content = expression.children[1]
             if content.type == "ERROR":
@@ -919,7 +920,7 @@ class ShaderParser:
         elif expression.type == "subscript_expression":
             prefix_expression = expression.children[0]
             prefix_type = self.__analyse_type(prefix_expression, func)
-            result = ShaderParser.__subtype(prefix_type)
+            result = CParser.__subtype(prefix_type)
             return result
         elif expression.type == "conditional_expression":
             operant1 = expression.children[2]
@@ -927,7 +928,7 @@ class ShaderParser:
             operant2 = expression.children[4]
             operant2_type = self.__analyse_type(operant2, func)
 
-            return ShaderParser.__greater_type(operant1_type, operant2_type)
+            return CParser.__greater_type(operant1_type, operant2_type)
         elif expression.type in ["false", "true"]:
             return "bool"
 
@@ -1049,13 +1050,13 @@ class ShaderParser:
     @staticmethod
     def __type_list_distance(type_list1, type_list2):
         for type1, type2 in zip(type_list1, type_list2):
-            current_distance = ShaderParser.__type_distance(type1, type2)
+            current_distance = CParser.__type_distance(type1, type2)
             if current_distance == "inf":
                 return "inf"
 
         full_distance = 0
         for type1, type2 in zip(type_list1, type_list2):
-            current_distance = ShaderParser.__type_distance(type1, type2)
+            current_distance = CParser.__type_distance(type1, type2)
             if current_distance == "unknown":
                 return "unknown"
             full_distance += current_distance
@@ -1098,12 +1099,12 @@ class ShaderParser:
         type1_struct = GLInfo.atom_type_map[type1][2]
         type1_dtype = GLInfo.atom_type_map[type1][1]
         type1_index = GLInfo.basic_types.index(type1_dtype)
-        type1_nitems = ShaderParser.__nitems(type1)
+        type1_nitems = CParser.__nitems(type1)
 
         type2_struct = GLInfo.atom_type_map[type2][2]
         type2_dtype = GLInfo.atom_type_map[type2][1]
         type2_index = GLInfo.basic_types.index(type2_dtype)
-        type2_nitems = ShaderParser.__nitems(type2)
+        type2_nitems = CParser.__nitems(type2)
 
         result_dtype = type1_dtype if type1_index >= type2_index else type2_dtype
         result_struct = type1_struct if type1_nitems >= type2_nitems else type2_struct

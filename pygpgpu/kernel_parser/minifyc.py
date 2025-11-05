@@ -5,7 +5,7 @@ import os
 from typing import Tuple, Dict, Optional, List, Set
 
 
-class CPreprocessor:
+class CMinifier:
 
     def is_space(char):
         return char in [" ", "\t", "\n", "\r", "\v", "\f"]

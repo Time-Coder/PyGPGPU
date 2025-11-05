@@ -1,1 +1,3 @@
 cuda-python
+tree-sitter
+tree-sitter-c

@@ -1,5 +1,5 @@
 from ctypes import pointer, c_void_p
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional, Any, List, Set
 import weakref
 
 from ..runtime import (
@@ -15,6 +15,7 @@ from ..runtime import (
 from .clobject import CLObject
 from .device import Device
 from .platform import Platform
+from ...kernel_parser import CPreprocessor
 
 
 class Context(CLObject):
@@ -38,6 +39,9 @@ class Context(CLObject):
             
         self._platform:Platform = platform
         self._devices:Tuple[Device] = devices
+        self._clean_code:str = ""
+        self._line_map:Dict[str, str] = {}
+        self._related_files:Set[str] = set()
 
     def _init(self):
         if self._id:
@@ -76,6 +80,13 @@ class Context(CLObject):
     @property
     def platform(self)->Platform:
         return self._platform
+    
+    def compile(self, file_name:str, includes:Optional[List[str]] = None, defines:Optional[Dict[str, Any]] = None):
+        (
+            self.__clean_code,
+            self.__line_map,
+            self.__related_files
+        ) = CPreprocessor.macros_expand_file(file_name, includes, defines)
 
     def _pfn_notify(errinfo, private_info, cb, user_data):
         if errinfo:

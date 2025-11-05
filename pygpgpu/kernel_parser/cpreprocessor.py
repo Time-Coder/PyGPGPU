@@ -52,6 +52,7 @@ class CPreprocessor:
         
         return '\n'.join(processed_lines), line_mapping, related_files
 
+    @staticmethod
     def macros_expand(file, include_paths: Optional[List[str] ] = None, defines: Optional[Dict[str, str] ] = None)->Tuple[str, Dict[int, Tuple[str, int] ], Set[str]]:
         output = io.StringIO()
 
@@ -75,12 +76,14 @@ class CPreprocessor:
         pcmd.CmdPreprocessor(cmds, file, output)
         return CPreprocessor.__process_line_directives(output.getvalue())
 
+    @staticmethod
     def macros_expand_code(code: str, include_paths: Optional[List[str] ] = None, defines: Optional[Dict[str, str] ] = None)->Tuple[str, Dict[int, Tuple[str, int] ], Set[str]]:
         input = io.StringIO(code)
         input.name = "<string>"
 
         return CPreprocessor.macros_expand(input, include_paths, defines)
 
+    @staticmethod
     def macros_expand_file(filename: str, include_paths: Optional[List[str] ] = None, defines: Optional[Dict[str, str] ] = None)->Tuple[str, Dict[int, Tuple[str, int] ], Set[str]]:
         input = open(filename, 'r', encoding='utf-8')
 

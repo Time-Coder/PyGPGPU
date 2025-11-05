@@ -5,7 +5,7 @@ import copy
 from ..helper import type_from_str, sizeof
 from ..GLInfo import GLInfo
 from OpenGL import GL
-from .kernel_syntax_tree import ShaderSyntaxTree
+from .csyntaxtree import CSyntaxTree
 
 
 class SimpleVar:
@@ -212,17 +212,17 @@ class FuncCall:
     def __init__(
         self,
         name: str = "",
-        args: Optional[List[ShaderSyntaxTree.Node]] = None,
-        call_expression: Optional[ShaderSyntaxTree.Node] = None,
+        args: Optional[List[CSyntaxTree.Node]] = None,
+        call_expression: Optional[CSyntaxTree.Node] = None,
     ):
         if call_expression is None:
             self.name: str = name
-            self.args: List[ShaderSyntaxTree.Node] = [] if args is None else args
+            self.args: List[CSyntaxTree.Node] = [] if args is None else args
         else:
             identifier = call_expression.children[0]
             argument_list = call_expression.children[1]
             self.name: str = identifier.text
-            self.args: List[ShaderSyntaxTree.Node] = []
+            self.args: List[CSyntaxTree.Node] = []
             for arg in argument_list.children:
                 if arg.type not in [",", "ERROR", "(", ")"]:
                     self.args.append(arg)
@@ -237,7 +237,7 @@ class FuncCall:
         )
 
     @staticmethod
-    def get_signature(call_expression: ShaderSyntaxTree.Node):
+    def get_signature(call_expression: CSyntaxTree.Node):
         identifier = call_expression.children[0]
         argument_list = call_expression.children[1]
 

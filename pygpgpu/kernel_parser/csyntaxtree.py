@@ -6,7 +6,7 @@ import sys
 from typing import List, Optional
 
 
-class KernelSyntaxTree:
+class CSyntaxTree:
 
     __c_raw_parser:Optional[tree_sitter.Parser] = None
 
@@ -19,10 +19,10 @@ class KernelSyntaxTree:
             self.end_byte:int = tree_sitter_node.end_byte
 
             self.index:int = index
-            self.children: List[KernelSyntaxTree.Node] = []
-            self.parent: Optional[KernelSyntaxTree.Node] = None
+            self.children: List[CSyntaxTree.Node] = []
+            self.parent: Optional[CSyntaxTree.Node] = None
             for index, tree_sitter_child in enumerate(tree_sitter_node.children):
-                child = KernelSyntaxTree.Node(tree_sitter_child, index)
+                child = CSyntaxTree.Node(tree_sitter_child, index)
                 child.parent = self
                 self.children.append(child)
 
@@ -34,7 +34,7 @@ class KernelSyntaxTree:
             return self.parent.path + "/" + str(self.index)
         
         @property
-        def next_sibling(self)->Optional[KernelSyntaxTree.Node]:
+        def next_sibling(self)->Optional[CSyntaxTree.Node]:
             if self.parent is None:
                 return None
             
@@ -48,7 +48,7 @@ class KernelSyntaxTree:
         def child_count(self)->int:
             return len(self.children)
         
-        def __getitem__(self, path:str)->KernelSyntaxTree.Node:
+        def __getitem__(self, path:str)->CSyntaxTree.Node:
             indices = path.split("/")
 
             active_node = self
@@ -59,26 +59,26 @@ class KernelSyntaxTree:
             return active_node
 
     def __init__(self, code:str=""):
-        self.root:Optional[KernelSyntaxTree.Node] = None
+        self.root:Optional[CSyntaxTree.Node] = None
         if code:
             self.parse(code)
 
-    def __getitem__(self, path:str)->KernelSyntaxTree.Node:
+    def __getitem__(self, path:str)->CSyntaxTree.Node:
         return self.root[path]
     
     @staticmethod
     def __c_parser():
-        if KernelSyntaxTree.__c_raw_parser is not None:
-            return KernelSyntaxTree.__c_raw_parser
+        if CSyntaxTree.__c_raw_parser is not None:
+            return CSyntaxTree.__c_raw_parser
 
         GLSL_LANGUAGE = tree_sitter.Language(tsc.language())
-        KernelSyntaxTree.__c_raw_parser = tree_sitter.Parser(GLSL_LANGUAGE)
-        return KernelSyntaxTree.__c_raw_parser
+        CSyntaxTree.__c_raw_parser = tree_sitter.Parser(GLSL_LANGUAGE)
+        return CSyntaxTree.__c_raw_parser
 
     def clear(self):
         self.root = None
 
     def parse(self, code:str):
-        raw_tree:tree_sitter.Tree = KernelSyntaxTree.__c_parser().parse(bytes(code, sys.getdefaultencoding()))
-        self.root:Optional[KernelSyntaxTree.Node] = KernelSyntaxTree.Node(raw_tree.root_node)
+        raw_tree:tree_sitter.Tree = CSyntaxTree.__c_parser().parse(bytes(code, sys.getdefaultencoding()))
+        self.root:Optional[CSyntaxTree.Node] = CSyntaxTree.Node(raw_tree.root_node)
         
