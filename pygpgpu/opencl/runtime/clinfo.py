@@ -1,8 +1,9 @@
-from ctypes import c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER, c_int64
+from ctypes import c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER, c_int64, c_char_p
 from typing import List
 
 from .cltypes import (
     cl_platform_info,
+    cl_program,
     cl_version,
     cl_version_khr,
     cl_name_version,
@@ -37,6 +38,7 @@ from .cltypes import (
     cl_context_info,
     cl_context_properties,
     CL_CONTEXT_NOTIFY_CALLBACK,
+    CL_BULD_PROGRAM_CALLBACK,
     ptr_int64,
     ptr_cl_device_id,
     ptr_cl_int,
@@ -44,7 +46,9 @@ from .cltypes import (
     cl_int,
     ptr_size_t,
     ptr_cl_platform_id,
-    ptr_cl_uint
+    ptr_cl_uint,
+    ptr_char,
+    ptr_ptr_char
 )
 
 
@@ -226,6 +230,50 @@ class CLInfo:
                 "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
+        },
+
+        # cl_program clCreateProgramWithSource(
+        #     cl_context context,
+        #     cl_uint count,
+        #     const char** strings,
+        #     const size_t* lengths,
+        #     cl_int* errcode_ret
+        # );
+        "clCreateProgramWithSource": {
+            "args": {
+                "context": cl_context,
+                "count": cl_uint,
+                "strings": ptr_ptr_char,
+                "lengths": ptr_size_t,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_program,
+            "errors": {
+                "CL_INVALID_CONTEXT": "context is not a valid context.",
+                "CL_INVALID_VALUE": "count is zero or if strings or any entry in strings is NULL.",
+                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clBuildProgram(
+        #     cl_program program,
+        #     cl_uint num_devices,
+        #     const cl_device_id* device_list,
+        #     const char* options,
+        #     void (CL_CALLBACK* pfn_notify)(cl_program program, void* user_data),
+        #     void* user_data
+        # );
+        "clBuildProgram": {
+            "args": {
+                "program": cl_program,
+                "num_devices": cl_uint,
+                "device_list": POINTER(cl_device_id),
+                "options": c_char_p,
+                "pfn_notify": CL_BULD_PROGRAM_CALLBACK,
+                "user_data": c_void_p
+            },
+            "restype": cl_int,
         }
     }
 

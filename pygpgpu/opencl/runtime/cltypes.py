@@ -9,6 +9,7 @@ cl_ulong = c_ulong
 cl_platform_id = c_void_p
 cl_device_id = c_void_p
 cl_context = c_void_p
+cl_program = c_void_p
 cl_bitfield = cl_ulong
 cl_semaphore_type_khr = cl_uint
 
@@ -18,7 +19,10 @@ ptr_cl_int:TypeAlias = POINTER(cl_int)
 ptr_size_t:TypeAlias = POINTER(c_size_t)
 ptr_cl_device_id:TypeAlias = POINTER(cl_device_id)
 ptr_int64:TypeAlias = POINTER(c_int64)
+ptr_ptr_char:TypeAlias = POINTER(ptr_char)
 CL_CONTEXT_NOTIFY_CALLBACK:TypeAlias = CFUNCTYPE(None, c_char_p, c_void_p, c_size_t, c_void_p)
+CL_BULD_PROGRAM_CALLBACK:TypeAlias = CFUNCTYPE(None, cl_program, c_void_p)
+
 
 class ErrorCode(IntEnum):
     CL_SUCCESS = 0

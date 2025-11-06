@@ -1,10 +1,11 @@
-from ctypes import pointer, c_void_p
+from ctypes import pointer, c_void_p, c_char_p, c_size_t
 from typing import Tuple, Dict, Optional, Any, List, Set
 import weakref
 
 from ..runtime import (
     cl_device_id,
     cl_int,
+    cl_uint,
     CL,
     CLInfo,
     IntEnum,
@@ -83,12 +84,33 @@ class Context(CLObject):
     
     def compile(self, file_name:str, includes:Optional[List[str]] = None, defines:Optional[Dict[str, Any]] = None):
         (
-            self.__clean_code,
-            self.__line_map,
-            self.__related_files
+            clean_code,
+            line_map,
+            related_files
         ) = CPreprocessor.macros_expand_file(file_name, includes, defines)
+        n_devices:int = len(self.devices)
+        source_len:int = len(clean_code)
+        error_code = cl_int(0)
+        source = (c_char_p * 1)(clean_code.encode("utf-8"))
+        program_id = CL.clCreateProgramWithSource(self.id, cl_uint(1), source, pointer(source_len), pointer(error_code))
+        devices_ids = (cl_device_id * n_devices)()
+        for i in range(n_devices):
+            devices_ids[i] = self.devices[i]
 
-    def _pfn_notify(errinfo, private_info, cb, user_data):
+        try:
+            CL.clBuildProgram(program_id, n_devices, devices_ids, None, None, None)
+        except BaseException as e:
+            for device_id in devices_ids:
+                log_size = c_size_t()
+                CL.clGetProgramBuildInfo(program_id, device_id, CL_PROGRAM_BUILD_LOG, 0, NULL, pointer(log_size))
+                char *log = malloc(log_size + 1);
+                clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+                log[log_size] = '\0';
+                fprintf(stderr, "Build failed:\n%s\n", log);
+                free(log)
+
+
+    def _pfn_notify(errinfo:bytes, private_info, cb, user_data):
         if errinfo:
             message = errinfo.decode('utf-8', errors='replace')
             print(f"[OpenCL Context Notify] {message}")

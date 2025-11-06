@@ -15,6 +15,7 @@ from .cltypes import (
     cl_device_id,
     cl_version_khr,
     cl_version,
+    cl_program,
     cl_bitfield,
     cl_semaphore_type_khr,
     ptr_cl_platform_id,
@@ -23,6 +24,8 @@ from .cltypes import (
     ptr_int64,
     ptr_size_t,
     ptr_cl_device_id,
+    ptr_char,
+    ptr_ptr_char,
     ErrorCode,
     cl_device_type,
     cl_platform_info,
@@ -52,5 +55,6 @@ from .cltypes import (
     cl_context,
     cl_context_info,
     cl_context_properties,
-    CL_CONTEXT_NOTIFY_CALLBACK
+    CL_CONTEXT_NOTIFY_CALLBACK,
+    CL_BULD_PROGRAM_CALLBACK
 )
