@@ -36,8 +36,11 @@ class Context(CLObject):
             
         self._platform:Platform = platform
         self._devices:Tuple[Device] = devices
-        
+        self._programs:Dict[str, Program] = {}
         n_devices = len(self._devices)
+        self._devices_ids = (cl_device_id * n_devices)()
+        for i in range(n_devices):
+            self._devices_ids[i] = self._devices[i].id
         
         pfn_notify = CL_CONTEXT_NOTIFY_CALLBACK(Context._pfn_notify)
 
@@ -64,13 +67,25 @@ class Context(CLObject):
         return self._devices
     
     @property
+    def device_ids(self):
+        return self._devices_ids
+    
+    @property
+    def n_devices(self)->int:
+        return len(self._devices)
+    
+    @property
     def platform(self)->Platform:
         return self._platform
     
-    def compile(self, file_name:str, includes:Optional[List[str]] = None, defines:Optional[Dict[str, Any]] = None)->Program:
-        program = Program(self, file_name, includes, defines)
-        program.build()
-        return program
+    def compile(self, file_name:str, includes:Optional[List[str]] = None, defines:Optional[Dict[str, Any]] = None, options:Optional[List[str]]=None)->Program:
+        key:str = Program._md5(file_name, includes, defines, options)
+        if key not in self._programs:
+            program = Program(self, file_name, includes, defines, options)
+            program.build()
+            self._programs[key] = program
+
+        return self._programs[key]
 
     def _pfn_notify(errinfo:bytes, private_info, cb, user_data):
         if errinfo:

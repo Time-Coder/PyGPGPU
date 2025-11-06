@@ -19,6 +19,12 @@ class CLObject(ABC):
     def id(self)->c_void_p:
         return self._id
     
+    def __hash__(self):
+        if isinstance(self._id, c_void_p):
+            return self._id.value
+        else:
+            return self._id
+
     def __getattr__(self, name:str)->Any:
         if name in self._info:
             return self._info[name]

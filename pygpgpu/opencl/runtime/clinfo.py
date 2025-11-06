@@ -39,6 +39,8 @@ from .cltypes import (
     cl_context_properties,
     cl_program_info,
     cl_program_build_info,
+    cl_build_status,
+    cl_program_binary_type,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK,
     ptr_int64,
@@ -49,7 +51,8 @@ from .cltypes import (
     ptr_size_t,
     ptr_cl_platform_id,
     ptr_cl_uint,
-    ptr_ptr_char
+    ptr_ptr_char,
+    ErrorCode
 )
 
 
@@ -72,9 +75,9 @@ class CLInfo:
             },
             "restype": cl_int,
             "errors": {
-                "CL_INVALID_PLATFORM": "platform is not a valid platform.",
-                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Platform Queries table and param_value is not NULL.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_PLATFORM: "platform is not a valid platform.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Platform Queries table and param_value is not NULL.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -91,9 +94,9 @@ class CLInfo:
             },
             "restype": cl_int,
             "errors": {
-                "CL_PLATFORM_NOT_FOUND_KHR": "cl_khr_icd extension is supported and zero platforms are available.",
-                "CL_INVALID_VALUE": "num_entries is equal to zero and platforms is not NULL or both num_platforms and platforms are NULL.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_PLATFORM_NOT_FOUND_KHR: "cl_khr_icd extension is supported and zero platforms are available.",
+                ErrorCode.CL_INVALID_VALUE: "num_entries is equal to zero and platforms is not NULL or both num_platforms and platforms are NULL.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -114,12 +117,12 @@ class CLInfo:
             },
             "restype": c_int,
             "errors": {
-                "CL_INVALID_PLATFORM": "platform is not a valid platform.",
-                "CL_INVALID_DEVICE_TYPE": "device_type is not a valid value.",
-                "CL_INVALID_VALUE": "num_entries is equal to zero and devices is not NULL or both num_devices and devices are NULL.",
-                "CL_DEVICE_NOT_FOUND": "no OpenCL devices that matched device_type were found.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_PLATFORM: "platform is not a valid platform.",
+                ErrorCode.CL_INVALID_DEVICE_TYPE: "device_type is not a valid value.",
+                ErrorCode.CL_INVALID_VALUE: "num_entries is equal to zero and devices is not NULL or both num_devices and devices are NULL.",
+                ErrorCode.CL_DEVICE_NOT_FOUND: "no OpenCL devices that matched device_type were found.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -140,10 +143,10 @@ class CLInfo:
             },
             "restype": c_int,
             "errors": {
-                "CL_INVALID_DEVICE": "device is not a valid device.",
-                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Device Queries table and param_value is not NULL.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_DEVICE: "device is not a valid device.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Device Queries table and param_value is not NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -166,33 +169,36 @@ class CLInfo:
             },
             "restype": c_void_p,
             "errors": {
-                "CL_INVALID_PLATFORM": "no platform is specified in properties and no platform could be selected, or the platform specified in properties is not a valid platform.",
-                "CL_INVALID_PROPERTY": "a context property name in properties is not a supported property name, if the value specified for a supported property name is not valid, or the same property name is specified more than once. This error code is missing before version 1.1.",
-                "CL_INVALID_VALUE": """one of following case happends:
+                ErrorCode.CL_INVALID_PLATFORM: "no platform is specified in properties and no platform could be selected, or the platform specified in properties is not a valid platform.",
+                ErrorCode.CL_INVALID_PROPERTY: "a context property name in properties is not a supported property name, if the value specified for a supported property name is not valid, or the same property name is specified more than once. This error code is missing before version 1.1.",
+                ErrorCode.CL_INVALID_VALUE: """one of following case happends:
 * devices is NULL.
 * num_devices is equal to zero.
 * pfn_notify is NULL but user_data is not NULL.""",
-                "CL_INVALID_DEVICE": "any device in devices is not a valid device.",
-                "CL_DEVICE_NOT_AVAILABLE": "a device in devices is currently not available even though the device was returned by clGetDeviceIDs.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host.",
-                "CL_INVALID_DX9_MEDIA_ADAPTER_KHR": "any of the values of the properties CL_CONTEXT_ADAPTER_D3D9_KHR, CL_CONTEXT_ADAPTER_D3D9EX_KHR or CL_CONTEXT_ADAPTER_DXVA_KHR is non-NULL and does not specify a valid media adapter with which the cl_device_ids against which this context is to be created may interoperate.",
-                "CL_INVALID_D3D10_DEVICE_KHR": "the value of the property CL_CONTEXT_D3D10_DEVICE_KHR is non-NULL and does not specify a valid Direct3D 10 device with which the cl_device_ids against which this context is to be created may interoperate.",
-                "CL_INVALID_OPERATION": "Direct3D 10 interoperability is specified by setting CL_INVALID_D3D10_DEVICE_KHR to a non-NULL value, and interoperability with another graphics API is also specified.",
-                "CL_INVALID_D3D11_DEVICE_KHR": "the value of the property CL_CONTEXT_D3D11_DEVICE_KHR is non-NULL and does not specify a valid Direct3D 11 device with which the cl_device_ids against which this context is to be created may interoperate.",
-                "CL_INVALID_OPERATION": "Direct3D 11 interoperability is specified by setting CL_INVALID_D3D11_DEVICE_KHR to a non-NULL value, and interoperability with another graphics API is also specified.",
-                "CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR": """a context was specified for an OpenGL or OpenGL ES implementation using the EGL, GLX, or WGL binding APIs, as described above; and any of the following conditions hold:
-* The specified display and context properties do not identify a valid OpenGL or OpenGL ES context.
-* The specified context does not support buffer and renderbuffer objects.
-* The specified context is not compatible with the OpenCL context being created (for example, it exists in a physically distinct address space, such as another hardware device; or it does not support sharing data with OpenCL due to implementation restrictions).""",
-                "CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR": "a share group was specified for a CGL-based OpenGL implementation by setting the property CL_CGL_SHAREGROUP_KHR, and the specified share group does not identify a valid CGL share group object.",
-                "CL_INVALID_OPERATION": """a context was specified as described above and any of the following conditions hold:
-* A context or share group object was specified for one of CGL, EGL, GLX, or WGL and the OpenGL implementation does not support that window-system binding API.
-* More than one of the properties CL_CGL_SHAREGROUP_KHR, CL_EGL_DISPLAY_KHR, CL_GLX_DISPLAY_KHR, and CL_WGL_HDC_KHR is set to a non-default value.
-* Both of the properties CL_CGL_SHAREGROUP_KHR and CL_GL_CONTEXT_KHR are set to non-default values.
-* Any of the devices specified in the devices argument cannot support OpenCL objects which share the data store of an OpenGL object.""",
-                "CL_INVALID_PROPERTY": "both CL_CONTEXT_INTEROP_USER_SYNC, and any of the properties defined by the cl_khr_gl_sharing extension are defined in properties.",
-                "CL_INVALID_PROPERTY": "the cl_khr_terminate_context extension is supported and CL_CONTEXT_TERMINATE_KHR is set to CL_TRUE in properties, but not all of the devices associated with the context support the ability to support context termination (i.e. CL_DEVICE_TERMINATE_CAPABILITY_CONTEXT_KHR is set for CL_DEVICE_TERMINATE_CAPABILITY_KHR)."
+                ErrorCode.CL_INVALID_DEVICE: "any device in devices is not a valid device.",
+                ErrorCode.CL_DEVICE_NOT_AVAILABLE: "a device in devices is currently not available even though the device was returned by clGetDeviceIDs.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+                ErrorCode.CL_INVALID_DX9_MEDIA_ADAPTER_KHR: "any of the values of the properties CL_CONTEXT_ADAPTER_D3D9_KHR, CL_CONTEXT_ADAPTER_D3D9EX_KHR or CL_CONTEXT_ADAPTER_DXVA_KHR is non-NULL and does not specify a valid media adapter with which the cl_device_ids against which this context is to be created may interoperate.",
+                ErrorCode.CL_INVALID_D3D10_DEVICE_KHR: "the value of the property CL_CONTEXT_D3D10_DEVICE_KHR is non-NULL and does not specify a valid Direct3D 10 device with which the cl_device_ids against which this context is to be created may interoperate.",
+                ErrorCode.CL_INVALID_D3D11_DEVICE_KHR: "the value of the property CL_CONTEXT_D3D11_DEVICE_KHR is non-NULL and does not specify a valid Direct3D 11 device with which the cl_device_ids against which this context is to be created may interoperate.",
+                ErrorCode.CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR: """one of following case happend:
+* a share group was specified for a CGL-based OpenGL implementation by setting the property CL_CGL_SHAREGROUP_KHR, and the specified share group does not identify a valid CGL share group object.
+* a context was specified for an OpenGL or OpenGL ES implementation using the EGL, GLX, or WGL binding APIs, as described above; and any of the following conditions hold:
+    * The specified display and context properties do not identify a valid OpenGL or OpenGL ES context.
+    * The specified context does not support buffer and renderbuffer objects.
+    * The specified context is not compatible with the OpenCL context being created (for example, it exists in a physically distinct address space, such as another hardware device; or it does not support sharing data with OpenCL due to implementation restrictions).""",
+                ErrorCode.CL_INVALID_OPERATION: """one of following case happened:
+* Direct3D 11 interoperability is specified by setting CL_INVALID_D3D11_DEVICE_KHR to a non-NULL value, and interoperability with another graphics API is also specified.
+* Direct3D 10 interoperability is specified by setting CL_INVALID_D3D10_DEVICE_KHR to a non-NULL value, and interoperability with another graphics API is also specified.
+* a context was specified as described above and any of the following conditions hold:
+    * A context or share group object was specified for one of CGL, EGL, GLX, or WGL and the OpenGL implementation does not support that window-system binding API.
+    * More than one of the properties CL_CGL_SHAREGROUP_KHR, CL_EGL_DISPLAY_KHR, CL_GLX_DISPLAY_KHR, and CL_WGL_HDC_KHR is set to a non-default value.
+    * Both of the properties CL_CGL_SHAREGROUP_KHR and CL_GL_CONTEXT_KHR are set to non-default values.
+    * Any of the devices specified in the devices argument cannot support OpenCL objects which share the data store of an OpenGL object.""",
+                ErrorCode.CL_INVALID_PROPERTY: """one of following case happend:
+* both CL_CONTEXT_INTEROP_USER_SYNC, and any of the properties defined by the cl_khr_gl_sharing extension are defined in properties.",
+* the cl_khr_terminate_context extension is supported and CL_CONTEXT_TERMINATE_KHR is set to CL_TRUE in properties, but not all of the devices associated with the context support the ability to support context termination (i.e. CL_DEVICE_TERMINATE_CAPABILITY_CONTEXT_KHR is set for CL_DEVICE_TERMINATE_CAPABILITY_KHR)."""
             }
         },
 
@@ -203,9 +209,9 @@ class CLInfo:
             },
             "restype": cl_int,
             "errors": {
-                "CL_INVALID_CONTEXT": "context is not a valid OpenCL context.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "if there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid OpenCL context.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -226,10 +232,10 @@ class CLInfo:
             },
             "restype": cl_int,
             "errors": {
-                "CL_INVALID_CONTEXT": "context is not a valid context.",
-                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Context Queries table and param_value is not NULL.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Context Queries table and param_value is not NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -250,10 +256,10 @@ class CLInfo:
             },
             "restype": cl_program,
             "errors": {
-                "CL_INVALID_CONTEXT": "context is not a valid context.",
-                "CL_INVALID_VALUE": "count is zero or strings or any entry in strings is NULL.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_VALUE: "count is zero or strings or any entry in strings is NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -276,19 +282,21 @@ class CLInfo:
             },
             "restype": cl_int,
             "errors": {
-                "CL_INVALID_PROGRAM": "program is not a valid program object.",
-                "CL_INVALID_VALUE": "device_list is NULL and num_devices is greater than zero, or device_list is not NULL and num_devices is zero.",
-                "CL_INVALID_VALUE": "pfn_notify is NULL but user_data is not NULL.",
-                "CL_INVALID_DEVICE": "any device in device_list is not in the list of devices associated with program.",
-                "CL_INVALID_BINARY": "program is created with clCreateProgramWithBinary and devices listed in device_list do not have a valid program binary loaded.",
-                "CL_INVALID_BUILD_OPTIONS": "the build options specified by options are invalid.",
-                "CL_COMPILER_NOT_AVAILABLE": "program is created with clCreateProgramWithILKHR, clCreateProgramWithSource or clCreateProgramWithIL and a compiler is not available, i.e. CL_DEVICE_COMPILER_AVAILABLE specified in the Device Queries table is set to CL_FALSE.",
-                "CL_BUILD_PROGRAM_FAILURE": "there is a failure to build the program executable. This error will be returned if clBuildProgram does not return until the build has completed.",
-                "CL_INVALID_OPERATION": "the build of a program executable for any of the devices listed in device_list by a previous call to clBuildProgram for program has not completed.",
-                "CL_INVALID_OPERATION": "there are kernel objects attached to program.",
-                "CL_INVALID_OPERATION": "program was not created with clCreateProgramWithSource, clCreateProgramWithIL or clCreateProgramWithBinary.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+                ErrorCode.CL_INVALID_PROGRAM: "program is not a valid program object.",
+                ErrorCode.CL_INVALID_VALUE: """one of following case happend:
+* device_list is NULL and num_devices is greater than zero, or device_list is not NULL and num_devices is zero.
+* pfn_notify is NULL but user_data is not NULL.""",
+                ErrorCode.CL_INVALID_DEVICE: "any device in device_list is not in the list of devices associated with program.",
+                ErrorCode.CL_INVALID_BINARY: "program is created with clCreateProgramWithBinary and devices listed in device_list do not have a valid program binary loaded.",
+                ErrorCode.CL_INVALID_BUILD_OPTIONS: "the build options specified by options are invalid.",
+                ErrorCode.CL_COMPILER_NOT_AVAILABLE: "program is created with clCreateProgramWithILKHR, clCreateProgramWithSource or clCreateProgramWithIL and a compiler is not available, i.e. CL_DEVICE_COMPILER_AVAILABLE specified in the Device Queries table is set to CL_FALSE.",
+                ErrorCode.CL_BUILD_PROGRAM_FAILURE: "there is a failure to build the program executable. This error will be returned if clBuildProgram does not return until the build has completed.",
+                ErrorCode.CL_INVALID_OPERATION: """one of following case happend:
+* the build of a program executable for any of the devices listed in device_list by a previous call to clBuildProgram for program has not completed.
+* there are kernel objects attached to program.
+* program was not created with clCreateProgramWithSource, clCreateProgramWithIL or clCreateProgramWithBinary.""",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host.",
             }
         },
 
@@ -302,18 +310,18 @@ class CLInfo:
         "clGetProgramInfo": {
             "args": {
                 "program": cl_program,
-                "param_name": cl_program_info,
+                "param_name": cl_uint,
                 "param_value_size": c_size_t,
                 "param_value": c_void_p,
                 "param_value_size_ret": ptr_size_t
             },
             "restype": cl_int,
             "errors": {
-                "CL_INVALID_PROGRAM": "program is a not a valid program object.",
-                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Program Object Queries table and param_value is not NULL.",
-                "CL_INVALID_PROGRAM_EXECUTABLE": "param_name is CL_PROGRAM_NUM_KERNELS, CL_PROGRAM_KERNEL_NAMES, CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT, or CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT and a successful program executable has not been built for at least one device in the list of devices associated with program.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_PROGRAM: "program is a not a valid program object.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Program Object Queries table and param_value is not NULL.",
+                ErrorCode.CL_INVALID_PROGRAM_EXECUTABLE: "param_name is CL_PROGRAM_NUM_KERNELS, CL_PROGRAM_KERNEL_NAMES, CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT, or CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT and a successful program executable has not been built for at least one device in the list of devices associated with program.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -336,11 +344,11 @@ class CLInfo:
             },
             "restype": cl_int,
             "errors": {
-                "CL_INVALID_PROGRAM": "program is a not a valid program object.",
-                "CL_INVALID_DEVICE": "device is not in the list of devices associated with program.",
-                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Program Build Queries table and param_value is not NULL.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_PROGRAM: "program is a not a valid program object.",
+                ErrorCode.CL_INVALID_DEVICE: "device is not in the list of devices associated with program.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Program Build Queries table and param_value is not NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
 
@@ -351,9 +359,9 @@ class CLInfo:
             },
             "restype": cl_int,
             "errors": {
-                "CL_INVALID_PROGRAM": "program is not a valid program object.",
-                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_PROGRAM: "program is not a valid program object.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         }
     }
@@ -550,4 +558,12 @@ class CLInfo:
         cl_program_info.CL_PROGRAM_KERNEL_NAMES: str,
         cl_program_info.CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT: cl_bool,
         cl_program_info.CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT: cl_bool
+    }
+
+    program_build_info_types = {
+        cl_program_build_info.CL_PROGRAM_BUILD_STATUS: cl_build_status,
+        cl_program_build_info.CL_PROGRAM_BUILD_OPTIONS: str,
+        cl_program_build_info.CL_PROGRAM_BUILD_LOG: str,
+        cl_program_build_info.CL_PROGRAM_BINARY_TYPE: cl_program_binary_type,
+        cl_program_build_info.CL_PROGRAM_BUILD_GLOBAL_VARIABLE_TOTAL_SIZE: c_size_t
     }

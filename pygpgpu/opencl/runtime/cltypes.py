@@ -100,6 +100,20 @@ class ErrorCode(IntEnum):
     CL_INVALID_D3D11_RESOURCE_NV = -1007
     CL_D3D11_RESOURCE_ALREADY_ACQUIRED_NV = -1008
     CL_D3D11_RESOURCE_NOT_ACQUIRED_NV = -1009
+    CL_PLATFORM_NOT_FOUND_KHR = -1001
+    CL_INVALID_DX9_MEDIA_ADAPTER_KHR          = -1010
+    CL_INVALID_DX9_MEDIA_SURFACE_KHR          = -1011
+    CL_DX9_MEDIA_SURFACE_ALREADY_ACQUIRED_KHR = -1012
+    CL_DX9_MEDIA_SURFACE_NOT_ACQUIRED_KHR     = -1013
+    CL_INVALID_D3D10_DEVICE_KHR               = -1002
+    CL_INVALID_D3D10_RESOURCE_KHR             = -1003
+    CL_D3D10_RESOURCE_ALREADY_ACQUIRED_KHR    = -1004
+    CL_D3D10_RESOURCE_NOT_ACQUIRED_KHR        = -1005
+    CL_INVALID_D3D11_DEVICE_KHR               = -1006
+    CL_INVALID_D3D11_RESOURCE_KHR             = -1007
+    CL_D3D11_RESOURCE_ALREADY_ACQUIRED_KHR    = -1008
+    CL_D3D11_RESOURCE_NOT_ACQUIRED_KHR        = -1009
+    CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR    = -1000
 
     @classmethod
     def dtype(cls):
@@ -525,6 +539,23 @@ class cl_program_build_info(IntEnum):
     CL_PROGRAM_BUILD_LOG                        = 0x1183
     CL_PROGRAM_BINARY_TYPE                      = 0x1184
     CL_PROGRAM_BUILD_GLOBAL_VARIABLE_TOTAL_SIZE = 0x1185
+
+class cl_build_status(IntEnum):
+    CL_BUILD_SUCCESS                            = 0
+    CL_BUILD_NONE                               = -1
+    CL_BUILD_ERROR                              = -2
+    CL_BUILD_IN_PROGRESS                        = -3
+
+    @property
+    def dtype(self):
+        return cl_int
+    
+class cl_program_binary_type(IntEnum):
+    CL_PROGRAM_BINARY_TYPE_NONE                 = 0x0
+    CL_PROGRAM_BINARY_TYPE_COMPILED_OBJECT      = 0x1
+    CL_PROGRAM_BINARY_TYPE_LIBRARY              = 0x2
+    CL_PROGRAM_BINARY_TYPE_EXECUTABLE           = 0x4
+    CL_PROGRAM_BINARY_TYPE_INTERMEDIATE         = 0x40E1
 
 CL_VERSION_MAJOR_BITS = IntConstante("CL_VERSION_MAJOR_BITS", 10)
 CL_VERSION_MINOR_BITS = IntConstante("CL_VERSION_MINOR_BITS", 10)
