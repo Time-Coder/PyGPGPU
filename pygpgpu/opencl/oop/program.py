@@ -45,10 +45,12 @@ class Program(CLObject):
                 CL.clGetProgramBuildInfo(self.id, device_id, cl_program_build_info.CL_PROGRAM_BUILD_LOG, 0, None, pointer(log_size))
                 log = (c_char * log_size.value)()
                 CL.clGetProgramBuildInfo(self.id, device_id, cl_program_build_info.CL_PROGRAM_BUILD_LOG, log_size, log, None)
-                error_message = log.value.decode("utf-8").strip("\n")
+                error_message:str = log.value.decode("utf-8")
+                error_message:str = error_message.strip("\n").replace("<kernel>", self._file_name)
                 error_messages.append(error_message)
 
         if error_messages:
+            print(log.value)
             raise CompileError("\n" + "\n\n".join(error_messages))
 
     @property
