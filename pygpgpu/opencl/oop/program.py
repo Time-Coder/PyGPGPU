@@ -36,17 +36,20 @@ class Program(CLObject):
         for i in range(n_devices):
             devices_ids[i] = self.devices[i].id
 
+        error_messages = []
         try:
             CL.clBuildProgram(self.id, n_devices, devices_ids, None, None, None)
-        except BaseException as e:
+        except RuntimeError as e:
             for device_id in devices_ids:
                 log_size = c_size_t()
                 CL.clGetProgramBuildInfo(self.id, device_id, cl_program_build_info.CL_PROGRAM_BUILD_LOG, 0, None, pointer(log_size))
                 log = (c_char * log_size.value)()
                 CL.clGetProgramBuildInfo(self.id, device_id, cl_program_build_info.CL_PROGRAM_BUILD_LOG, log_size, log, None)
-                error_message = log.value.decode("utf-8")
-                print(log_size.value, log)
-                raise CompileError(error_message)
+                error_message = log.value.decode("utf-8").strip("\n")
+                error_messages.append(error_message)
+
+        if error_messages:
+            raise CompileError("\n" + "\n\n".join(error_messages))
 
     @property
     def context(self)->Context:

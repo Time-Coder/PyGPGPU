@@ -271,7 +271,7 @@ class CLInfo:
                 "num_devices": cl_uint,
                 "device_list": POINTER(cl_device_id),
                 "options": c_char_p,
-                "pfn_notify": CL_BULD_PROGRAM_CALLBACK,
+                "pfn_notify": c_void_p,
                 "user_data": c_void_p
             },
             "restype": cl_int,
