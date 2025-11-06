@@ -42,9 +42,10 @@ class Program(CLObject):
             for device_id in devices_ids:
                 log_size = c_size_t()
                 CL.clGetProgramBuildInfo(self.id, device_id, cl_program_build_info.CL_PROGRAM_BUILD_LOG, 0, None, pointer(log_size))
-                log = (c_char * log_size)()
+                log = (c_char * log_size.value)()
                 CL.clGetProgramBuildInfo(self.id, device_id, cl_program_build_info.CL_PROGRAM_BUILD_LOG, log_size, log, None)
                 error_message = log.value.decode("utf-8")
+                print(log_size.value, log)
                 raise CompileError(error_message)
 
     @property

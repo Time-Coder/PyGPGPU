@@ -329,7 +329,7 @@ class CLInfo:
             "args": {
                 "program": cl_program,
                 "device": cl_device_id,
-                "param_name": cl_program_build_info,
+                "param_name": cl_uint,
                 "param_value_size": c_size_t,
                 "param_value": c_void_p,
                 "param_value_size_ret": ptr_size_t
