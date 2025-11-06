@@ -24,7 +24,6 @@ from .cltypes import (
     ptr_int64,
     ptr_size_t,
     ptr_cl_device_id,
-    ptr_char,
     ptr_ptr_char,
     ErrorCode,
     cl_device_type,
@@ -55,6 +54,8 @@ from .cltypes import (
     cl_context,
     cl_context_info,
     cl_context_properties,
+    cl_program_info,
+    cl_program_build_info,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK
 )

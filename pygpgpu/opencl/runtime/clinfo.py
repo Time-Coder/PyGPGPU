@@ -37,6 +37,8 @@ from .cltypes import (
     cl_device_terminate_capability_khr,
     cl_context_info,
     cl_context_properties,
+    cl_program_info,
+    cl_program_build_info,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK,
     ptr_int64,
@@ -47,7 +49,6 @@ from .cltypes import (
     ptr_size_t,
     ptr_cl_platform_id,
     ptr_cl_uint,
-    ptr_char,
     ptr_ptr_char
 )
 
@@ -72,7 +73,7 @@ class CLInfo:
             "restype": cl_int,
             "errors": {
                 "CL_INVALID_PLATFORM": "platform is not a valid platform.",
-                "CL_INVALID_VALUE": "param_name is not one of the supported values, or if the size in bytes specified by param_value_size is less than size of the return type specified in the Platform Queries table and param_value is not NULL.",
+                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Platform Queries table and param_value is not NULL.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
@@ -91,7 +92,7 @@ class CLInfo:
             "restype": cl_int,
             "errors": {
                 "CL_PLATFORM_NOT_FOUND_KHR": "cl_khr_icd extension is supported and zero platforms are available.",
-                "CL_INVALID_VALUE": "num_entries is equal to zero and platforms is not NULL or if both num_platforms and platforms are NULL.",
+                "CL_INVALID_VALUE": "num_entries is equal to zero and platforms is not NULL or both num_platforms and platforms are NULL.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         },
@@ -140,7 +141,7 @@ class CLInfo:
             "restype": c_int,
             "errors": {
                 "CL_INVALID_DEVICE": "device is not a valid device.",
-                "CL_INVALID_VALUE": "param_name is not one of the supported values, or if the size in bytes specified by param_value_size is less than size of the return type specified in the Device Queries table and param_value is not NULL.",
+                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Device Queries table and param_value is not NULL.",
                 "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
@@ -165,8 +166,8 @@ class CLInfo:
             },
             "restype": c_void_p,
             "errors": {
-                "CL_INVALID_PLATFORM": "no platform is specified in properties and no platform could be selected, or if the platform specified in properties is not a valid platform.",
-                "CL_INVALID_PROPERTY": "a context property name in properties is not a supported property name, if the value specified for a supported property name is not valid, or if the same property name is specified more than once. This error code is missing before version 1.1.",
+                "CL_INVALID_PLATFORM": "no platform is specified in properties and no platform could be selected, or the platform specified in properties is not a valid platform.",
+                "CL_INVALID_PROPERTY": "a context property name in properties is not a supported property name, if the value specified for a supported property name is not valid, or the same property name is specified more than once. This error code is missing before version 1.1.",
                 "CL_INVALID_VALUE": """one of following case happends:
 * devices is NULL.
 * num_devices is equal to zero.
@@ -226,7 +227,7 @@ class CLInfo:
             "restype": cl_int,
             "errors": {
                 "CL_INVALID_CONTEXT": "context is not a valid context.",
-                "CL_INVALID_VALUE": "param_name is not one of the supported values, or if the size in bytes specified by param_value_size is less than size of the return type specified in the Context Queries table and param_value is not NULL.",
+                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Context Queries table and param_value is not NULL.",
                 "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
@@ -250,7 +251,7 @@ class CLInfo:
             "restype": cl_program,
             "errors": {
                 "CL_INVALID_CONTEXT": "context is not a valid context.",
-                "CL_INVALID_VALUE": "count is zero or if strings or any entry in strings is NULL.",
+                "CL_INVALID_VALUE": "count is zero or strings or any entry in strings is NULL.",
                 "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
@@ -274,6 +275,86 @@ class CLInfo:
                 "user_data": c_void_p
             },
             "restype": cl_int,
+            "errors": {
+                "CL_INVALID_PROGRAM": "program is not a valid program object.",
+                "CL_INVALID_VALUE": "device_list is NULL and num_devices is greater than zero, or device_list is not NULL and num_devices is zero.",
+                "CL_INVALID_VALUE": "pfn_notify is NULL but user_data is not NULL.",
+                "CL_INVALID_DEVICE": "any device in device_list is not in the list of devices associated with program.",
+                "CL_INVALID_BINARY": "program is created with clCreateProgramWithBinary and devices listed in device_list do not have a valid program binary loaded.",
+                "CL_INVALID_BUILD_OPTIONS": "the build options specified by options are invalid.",
+                "CL_COMPILER_NOT_AVAILABLE": "program is created with clCreateProgramWithILKHR, clCreateProgramWithSource or clCreateProgramWithIL and a compiler is not available, i.e. CL_DEVICE_COMPILER_AVAILABLE specified in the Device Queries table is set to CL_FALSE.",
+                "CL_BUILD_PROGRAM_FAILURE": "there is a failure to build the program executable. This error will be returned if clBuildProgram does not return until the build has completed.",
+                "CL_INVALID_OPERATION": "the build of a program executable for any of the devices listed in device_list by a previous call to clBuildProgram for program has not completed.",
+                "CL_INVALID_OPERATION": "there are kernel objects attached to program.",
+                "CL_INVALID_OPERATION": "program was not created with clCreateProgramWithSource, clCreateProgramWithIL or clCreateProgramWithBinary.",
+                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+            }
+        },
+
+        # cl_int clGetProgramInfo(
+        #     cl_program program,
+        #     cl_program_info param_name,
+        #     size_t param_value_size,
+        #     void* param_value,
+        #     size_t* param_value_size_ret
+        # );
+        "clGetProgramInfo": {
+            "args": {
+                "program": cl_program,
+                "param_name": cl_program_info,
+                "param_value_size": c_size_t,
+                "param_value": c_void_p,
+                "param_value_size_ret": ptr_size_t
+            },
+            "restype": cl_int,
+            "errors": {
+                "CL_INVALID_PROGRAM": "program is a not a valid program object.",
+                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Program Object Queries table and param_value is not NULL.",
+                "CL_INVALID_PROGRAM_EXECUTABLE": "param_name is CL_PROGRAM_NUM_KERNELS, CL_PROGRAM_KERNEL_NAMES, CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT, or CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT and a successful program executable has not been built for at least one device in the list of devices associated with program.",
+                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clGetProgramBuildInfo(
+        #     cl_program program,
+        #     cl_device_id device,
+        #     cl_program_build_info param_name,
+        #     size_t param_value_size,
+        #     void* param_value,
+        #     size_t* param_value_size_ret
+        # );
+        "clGetProgramBuildInfo": {
+            "args": {
+                "program": cl_program,
+                "device": cl_device_id,
+                "param_name": cl_program_build_info,
+                "param_value_size": c_size_t,
+                "param_value": c_void_p,
+                "param_value_size_ret": ptr_size_t
+            },
+            "restype": cl_int,
+            "errors": {
+                "CL_INVALID_PROGRAM": "program is a not a valid program object.",
+                "CL_INVALID_DEVICE": "device is not in the list of devices associated with program.",
+                "CL_INVALID_VALUE": "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Program Build Queries table and param_value is not NULL.",
+                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clReleaseProgram(cl_program program);
+        "clReleaseProgram": {
+            "args": {
+                "program": cl_program
+            },
+            "restype": cl_int,
+            "errors": {
+                "CL_INVALID_PROGRAM": "program is not a valid program object.",
+                "CL_OUT_OF_RESOURCES": "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                "CL_OUT_OF_HOST_MEMORY": "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
         }
     }
 
@@ -453,4 +534,20 @@ class CLInfo:
         cl_context_info.CL_CONTEXT_PROPERTIES: List[cl_context_properties],
         cl_context_info.CL_CONTEXT_D3D10_PREFER_SHARED_RESOURCES_KHR: cl_bool,
         cl_context_info.CL_CONTEXT_D3D11_PREFER_SHARED_RESOURCES_KHR: cl_bool
+    }
+
+    program_info_types = {
+        cl_program_info.CL_PROGRAM_REFERENCE_COUNT: cl_uint,
+        cl_program_info.CL_PROGRAM_CONTEXT: cl_context,
+        cl_program_info.CL_PROGRAM_NUM_DEVICES: cl_uint,
+        cl_program_info.CL_PROGRAM_DEVICES: List[cl_device_id],
+        cl_program_info.CL_PROGRAM_SOURCE: str,
+        cl_program_info.CL_PROGRAM_IL: str,
+        cl_program_info.CL_PROGRAM_IL_KHR: str,
+        cl_program_info.CL_PROGRAM_BINARY_SIZES: List[c_size_t],
+        cl_program_info.CL_PROGRAM_BINARIES: List[bytes],
+        cl_program_info.CL_PROGRAM_NUM_KERNELS: c_size_t,
+        cl_program_info.CL_PROGRAM_KERNEL_NAMES: str,
+        cl_program_info.CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT: cl_bool,
+        cl_program_info.CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT: cl_bool
     }

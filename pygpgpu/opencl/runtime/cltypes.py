@@ -19,7 +19,7 @@ ptr_cl_int:TypeAlias = POINTER(cl_int)
 ptr_size_t:TypeAlias = POINTER(c_size_t)
 ptr_cl_device_id:TypeAlias = POINTER(cl_device_id)
 ptr_int64:TypeAlias = POINTER(c_int64)
-ptr_ptr_char:TypeAlias = POINTER(ptr_char)
+ptr_ptr_char:TypeAlias = POINTER(c_char_p)
 CL_CONTEXT_NOTIFY_CALLBACK:TypeAlias = CFUNCTYPE(None, c_char_p, c_void_p, c_size_t, c_void_p)
 CL_BULD_PROGRAM_CALLBACK:TypeAlias = CFUNCTYPE(None, cl_program, c_void_p)
 
@@ -503,6 +503,28 @@ class cl_context_properties(IntEnum):
     @property
     def dtype(self):
         return c_int64
+    
+class cl_program_info(IntEnum):
+    CL_PROGRAM_REFERENCE_COUNT                 = 0x1160
+    CL_PROGRAM_CONTEXT                         = 0x1161
+    CL_PROGRAM_NUM_DEVICES                     = 0x1162
+    CL_PROGRAM_DEVICES                         = 0x1163
+    CL_PROGRAM_SOURCE                          = 0x1164
+    CL_PROGRAM_BINARY_SIZES                    = 0x1165
+    CL_PROGRAM_BINARIES                        = 0x1166
+    CL_PROGRAM_NUM_KERNELS                     = 0x1167
+    CL_PROGRAM_KERNEL_NAMES                    = 0x1168
+    CL_PROGRAM_IL                              = 0x1169
+    CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT      = 0x116A
+    CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT      = 0x116B
+    CL_PROGRAM_IL_KHR                          = 0x1169
+
+class cl_program_build_info(IntEnum):
+    CL_PROGRAM_BUILD_STATUS                     = 0x1181
+    CL_PROGRAM_BUILD_OPTIONS                    = 0x1182
+    CL_PROGRAM_BUILD_LOG                        = 0x1183
+    CL_PROGRAM_BINARY_TYPE                      = 0x1184
+    CL_PROGRAM_BUILD_GLOBAL_VARIABLE_TOTAL_SIZE = 0x1185
 
 CL_VERSION_MAJOR_BITS = IntConstante("CL_VERSION_MAJOR_BITS", 10)
 CL_VERSION_MINOR_BITS = IntConstante("CL_VERSION_MINOR_BITS", 10)
