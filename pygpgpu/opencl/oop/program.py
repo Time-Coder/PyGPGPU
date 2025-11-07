@@ -95,9 +95,11 @@ class Program(CLObject):
     def binaries(self)->Dict[Device, bytes]:
         result:Dict[Device, int] = {}
         binary_sizes = self.binary_sizes
-        binaries = (POINTER(c_char) * self.n_devices)()
+        binaries = []
         for i in range(self.n_devices):
-            binaries[i] = (c_char * binary_sizes[self.devices[i]])()
+            binaries.append((c_uchar * binary_sizes[self.devices[i]])())
+
+        
 
         result_size = c_size_t()
         CL.clGetProgramInfo(self.id, cl_program_info.CL_PROGRAM_BINARIES, 0, None, pointer(result_size))
