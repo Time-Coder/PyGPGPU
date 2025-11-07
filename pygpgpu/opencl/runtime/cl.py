@@ -107,7 +107,7 @@ class CL(metaclass=MetaCL):
 
                 if error_code != ErrorCode.CL_SUCCESS:
                     if error_code in func_info["errors"]:
-                        raise RuntimeError(f"{error_code}: {func_info['errors'][error_code.name]}")
+                        raise RuntimeError(f"{error_code}: {func_info['errors'][error_code]}")
                     else:
                         raise RuntimeError(f"{error_code}: unknown error.")
             
