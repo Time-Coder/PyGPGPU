@@ -28,6 +28,10 @@ class Device(CLObject):
         return Context(self)
     
     @property
+    def unique_key(self)->str:
+        return f"{self.name} {self.version} {self.driver_version}"
+    
+    @property
     def _prefix(self)->str:
         return "CL_DEVICE"
 
