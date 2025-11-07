@@ -1,5 +1,5 @@
 from __future__ import annotations
-from ctypes import c_char_p, pointer, c_size_t, c_char, POINTER
+from ctypes import c_char_p, pointer, c_size_t, c_char, POINTER, c_ubyte, string_at
 import re
 import os
 import json
@@ -95,18 +95,17 @@ class Program(CLObject):
     def binaries(self)->Dict[Device, bytes]:
         result:Dict[Device, int] = {}
         binary_sizes = self.binary_sizes
-        binaries = []
+        binaries = (POINTER(c_ubyte) * self.n_devices)()
         for i in range(self.n_devices):
-            binaries.append((c_uchar * binary_sizes[self.devices[i]])())
-
-        
+            binaries[i] = (c_ubyte * binary_sizes[self.devices[i]])()
 
         result_size = c_size_t()
         CL.clGetProgramInfo(self.id, cl_program_info.CL_PROGRAM_BINARIES, 0, None, pointer(result_size))
         CL.clGetProgramInfo(self.id, cl_program_info.CL_PROGRAM_BINARIES, result_size, binaries, None)
 
         for i in range(self.n_devices):
-            result[self.devices[i]] = binaries[i].raw
+            binary = string_at(binaries[0], binary_sizes[self.devices[i]])
+            result[self.devices[i]] = binary
 
         return result
     
