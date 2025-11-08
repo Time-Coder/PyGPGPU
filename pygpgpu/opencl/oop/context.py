@@ -15,6 +15,7 @@ from .clobject import CLObject
 from .device import Device
 from .platform import Platform
 from .program import Program
+from .build_options import BuildOptions
 
 
 class Context(CLObject):
@@ -78,8 +79,56 @@ class Context(CLObject):
     def platform(self)->Platform:
         return self._platform
     
-    def compile(self, file_name:str, includes:Optional[List[str]] = None, defines:Optional[Dict[str, Any]] = None, options:Optional[List[str]]=None)->Program:
-        key:str = Program._md5(file_name, includes, defines, options)
+    def compile(self,
+        file_name:str,
+        includes:Optional[List[str]] = None,
+        defines:Optional[Dict[str, Any]] = None,
+        single_precision_constant:bool=False,
+        denorms_are_zero:bool=False,
+        fp32_correctly_rounded_divide_sqrt:bool=False,
+        opt_disable:bool=False,
+        strict_aliasing:bool=False,
+        uniform_work_group_size:bool=False,
+        no_subgroup_ifp:bool=False,
+        mad_enable:bool=False,
+        no_signed_zeros:bool=False,
+        unsafe_math_optimizations:bool=False,
+        finite_math_only:bool=False,
+        fast_relaxed_math:bool=False,
+        w:bool=False,
+        Werror:bool=False,
+        cl_std:Optional[float]=None,
+        kernel_arg_info:bool=False,
+        g:bool=False,
+        create_library:bool=False,
+        enable_link_options:bool=False,
+        x_spir:bool=False,
+        spir_std:Optional[float]=None
+    )->Program:
+        options:BuildOptions = BuildOptions(
+            single_precision_constant,
+            denorms_are_zero,
+            fp32_correctly_rounded_divide_sqrt,
+            opt_disable,
+            strict_aliasing,
+            uniform_work_group_size,
+            no_subgroup_ifp,
+            mad_enable,
+            no_signed_zeros,
+            unsafe_math_optimizations,
+            finite_math_only,
+            fast_relaxed_math,
+            w,
+            Werror,
+            cl_std,
+            kernel_arg_info,
+            g,
+            create_library,
+            enable_link_options,
+            x_spir,
+            spir_std
+        )
+        key:str = Program._md5_of(file_name, includes, defines, options)
         if key not in self._programs:
             program = Program(self, file_name, includes, defines, options)
             program.build()

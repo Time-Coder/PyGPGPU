@@ -7,6 +7,7 @@ if TYPE_CHECKING:
 
 from ..runtime import CL, CLInfo, IntEnum, cl_device_id, cl_device_info
 from .clobject import CLObject
+from ...utils import sanitize_filename
 
 
 class Device(CLObject):
@@ -29,7 +30,7 @@ class Device(CLObject):
     
     @property
     def unique_key(self)->str:
-        return f"{self.name} {self.version} {self.driver_version}"
+        return sanitize_filename(f"{self.name} {self.version} {self.driver_version}")
     
     @property
     def _prefix(self)->str:

@@ -1,4 +1,4 @@
-from ctypes import c_char, c_int64, c_void_p, c_int, c_uint, c_ulong, c_size_t, c_char_p, POINTER, LittleEndianStructure, CFUNCTYPE
+from ctypes import c_char, c_ubyte, c_int64, c_void_p, c_int, c_uint, c_ulong, c_size_t, c_char_p, POINTER, LittleEndianStructure, CFUNCTYPE
 from .clconstantes import IntConstante, IntEnum, IntFlag
 from typing import TypeAlias
 
@@ -20,6 +20,8 @@ ptr_size_t:TypeAlias = POINTER(c_size_t)
 ptr_cl_device_id:TypeAlias = POINTER(cl_device_id)
 ptr_int64:TypeAlias = POINTER(c_int64)
 ptr_ptr_char:TypeAlias = POINTER(c_char_p)
+ptr_ubyte:TypeAlias = POINTER(c_ubyte)
+ptr_ptr_ubyte:TypeAlias = POINTER(ptr_ubyte)
 CL_CONTEXT_NOTIFY_CALLBACK:TypeAlias = CFUNCTYPE(None, c_char_p, c_void_p, c_size_t, c_void_p)
 CL_BULD_PROGRAM_CALLBACK:TypeAlias = CFUNCTYPE(None, cl_program, c_void_p)
 

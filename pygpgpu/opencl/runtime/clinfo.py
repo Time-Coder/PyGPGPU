@@ -46,6 +46,7 @@ from .cltypes import (
     ptr_int64,
     ptr_cl_device_id,
     ptr_cl_int,
+    ptr_ptr_ubyte,
     cl_context,
     cl_int,
     ptr_size_t,
@@ -258,6 +259,37 @@ class CLInfo:
             "errors": {
                 ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
                 ErrorCode.CL_INVALID_VALUE: "count is zero or strings or any entry in strings is NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_program clCreateProgramWithBinary(
+        #     cl_context context,
+        #     cl_uint num_devices,
+        #     const cl_device_id* device_list,
+        #     const size_t* lengths,
+        #     const unsigned char** binaries,
+        #     cl_int* binary_status,
+        #     cl_int* errcode_ret
+        # );
+        "clCreateProgramWithBinary": {
+            "args": {
+                "context": cl_context,
+                "num_devices": cl_uint,
+                "device_list": ptr_cl_device_id,
+                "lengths": ptr_size_t,
+                "binaries": ptr_ptr_ubyte,
+                "binary_status": ptr_cl_int,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_program,
+            "errors": {
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_VALUE: "device_list is NULL or num_devices is zero.",
+                ErrorCode.CL_INVALID_DEVICE: "any device in device_list is not in the list of devices associated with context.",
+                ErrorCode.CL_INVALID_VALUE: "lengths or binaries is NULL or any entry in lengths[i] is zero or binaries[i] is NULL.",
+                ErrorCode.CL_INVALID_BINARY: "an invalid program binary was encountered for any device. binary_status will return specific status for each device.",
                 ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }

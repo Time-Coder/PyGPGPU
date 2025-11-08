@@ -87,4 +87,6 @@ class CPreprocessor:
     def macros_expand_file(filename: str, include_paths: Optional[List[str] ] = None, defines: Optional[Dict[str, str] ] = None)->Tuple[str, Dict[int, Tuple[str, int] ], Set[str]]:
         input = open(filename, 'r', encoding='utf-8')
 
-        return CPreprocessor.macros_expand(input, include_paths, defines)
+        clean_code, line_map, related_files = CPreprocessor.macros_expand(input, include_paths, defines)
+        related_files.add(os.path.abspath(filename).replace("\\", "/"))
+        return clean_code, line_map, related_files

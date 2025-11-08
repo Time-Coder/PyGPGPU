@@ -42,6 +42,9 @@ class Device:
     def create_context(self)->Context: ...
 
     @property
+    def unique_key(self)->str: ...
+
+    @property
     def platform(self)->Platform: ...
     
     @property

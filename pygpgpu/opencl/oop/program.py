@@ -3,14 +3,16 @@ from ctypes import c_char_p, pointer, c_size_t, c_char, POINTER, c_ubyte, string
 import re
 import os
 import json
-from typing import Dict, List, Any, Optional, TYPE_CHECKING
+import warnings
+from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union
 
 from .clobject import CLObject
 from .device import Device
-from ..runtime import CL, IntEnum, CLInfo, cl_program_info, cl_int, cl_uint, cl_program_build_info
+from .build_options import BuildOptions
+from ..runtime import CL, IntEnum, CLInfo, cl_program_info, cl_int, cl_uint, cl_program_build_info, ErrorCode
 from ...kernel_parser import CPreprocessor
-from ...compile_error import CompileError
-from ...utils import md5
+from ...exceptions import CompileError, CompileWarning
+from ...utils import md5sums, save_var, load_var, save_bin, load_bin, modify_time
 
 if TYPE_CHECKING:
     from .context import Context
@@ -18,35 +20,114 @@ if TYPE_CHECKING:
 
 class Program(CLObject):
 
-    def __init__(self, context:Context, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[List[str]]=None):
+    def __init__(self, context:Context, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None):
         self._context:Context = context
         self._file_name:str = file_name
-        self._includes:Optional[List[str]] = includes if includes is not None else []
-        self._defines:Optional[Dict[str, Any]] = defines if defines is not None else []
-        self._options:Optional[List[str]] = options if options is not None else []
-        self._options_ptr:c_char_p = c_char_p(" ".join(self._options).encode("utf-8"))
-        (
-            self._clean_code,
-            self._line_map,
-            self._related_files
-        ) = CPreprocessor.macros_expand_file(file_name, includes, defines)
-        source_len:int = c_size_t(len(self._clean_code))
-        error_code = cl_int(0)
-        source = (c_char_p * 1)(self._clean_code.encode("utf-8"))
-        program_id = CL.clCreateProgramWithSource(context.id, cl_uint(1), source, pointer(source_len), pointer(error_code))
+        self._base_name:str = os.path.basename(file_name)
+        self._includes:List[str] = includes if includes is not None else []
+        self._defines:Dict[str, Any] = defines if defines is not None else []
+        self._options:List[str] = options if options is not None else BuildOptions()
+        self._options_ptr:c_char_p = c_char_p(str(self._options).encode("utf-8"))
+        self._binaries:Dict[Device, bytes] = {}
+
+        newest_mtime = self._load_meta()
+
+        if not newest_mtime:
+            if CL.print_info:
+                print(f"preprocessing {self._base_name}... ", end="", flush=True)
+
+            (
+                self._clean_code,
+                self._line_map,
+                self._related_files
+            ) = CPreprocessor.macros_expand_file(file_name, includes, defines)
+            self._save_meta()
+
+            if CL.print_info:
+                print(f"done.", flush=True)
+
+        else:
+            if CL.print_info:
+                print(f"load {self._base_name}'s meta info from cache.")
+        
+        if not self._load_bin(newest_mtime):
+            source_len:int = c_size_t(len(self._clean_code))
+            error_code = cl_int(0)
+            source = (c_char_p * 1)(self._clean_code.encode("utf-8"))
+            program_id = CL.clCreateProgramWithSource(context.id, cl_uint(1), source, pointer(source_len), pointer(error_code))
+        else:
+            binary_sizes = (c_size_t * self.n_devices)()
+            binaries = (POINTER(c_ubyte) * self.n_devices)()
+            for i, device in enumerate(self.devices):
+                binary = self._binaries[device]
+                binary_sizes[i] = len(binary)
+                binaries[i] = (c_ubyte * binary_sizes[i]).from_buffer_copy(binary)
+
+            binary_status = (cl_int * self.n_devices)()
+            error_code = cl_int(0)
+
+            try:
+                program_id = CL.clCreateProgramWithBinary(context.id, cl_uint(self.n_devices), self.device_ids, binary_sizes, binaries, binary_status, pointer(error_code))
+            except BaseException as e:
+                pass
+
+            if CL.check_error:
+                error_messages = []
+                for i in range(self.n_devices):
+                    device = self.devices[i]
+                    status = binary_status[i]
+                    if status == ErrorCode.CL_INVALID_VALUE:
+                        error_messages.append(f"binary for {device} error: {ErrorCode.CL_INVALID_VALUE}: lengths[{i}] is zero or if binaries[{i}] is a NULL value")
+                    elif status == ErrorCode.CL_INVALID_BINARY:
+                        error_messages.append(f"binary for {device} error: {ErrorCode.CL_INVALID_VALUE}: program binary is not a valid binary for this device")
+
+                if error_messages:
+                    raise RuntimeError(f"{error_code}:\n{'\n'.join(error_messages)}")
+
+                if error_code.value != ErrorCode.CL_SUCCESS:
+                    raise e
+                
+            if CL.print_info:
+                print(f"load {self._base_name}'s binary from cache.")
+
         CLObject.__init__(self, program_id)
 
     def build(self):
-        error_messages = []
         try:
-            CL.clBuildProgram(self.id, self.n_devices, self.device_ids, self._options_ptr, None, None)
+            if CL.print_info:
+                print(f"building {self._base_name}... ", end="", flush=True)
+
+            error_code = CL.clBuildProgram(self.id, self.n_devices, self.device_ids, self._options_ptr, None, None)
+            success = (error_code == ErrorCode.CL_SUCCESS)
+
+            if CL.print_info:
+                print(f"done.", flush=True)
         except RuntimeError as e:
+            success = False
+
+        if success:
+            self._save_bin()
+
+        if CL.check_error:
+            error_messages = []
             for device, message in self.build_log.items():
+                message = message.strip("\n")
+                if not message:
+                    continue
+
                 error_message = f"{device} reports:\n{self._format_error(message)}"
                 error_messages.append(error_message)
 
-        if error_messages:
-            raise CompileError("\n" + "\n\n".join(error_messages))
+            final_message:str = "\n" + "\n\n".join(error_messages)
+
+            if not success:
+                if error_messages:
+                    raise CompileError(final_message)
+                else:
+                    raise e
+            else:
+                if error_messages:
+                    warnings.warn(final_message, CompileWarning)
 
     def _format_error(self, error_message:str)->str:
         def replace_handler(match:re.Match):
@@ -55,9 +136,75 @@ class Program(CLObject):
             return f"{file_name}:{new_line_number}"
 
         return re.sub(r'<kernel>:(\d+)', replace_handler, error_message.strip("\r\n"))
+    
+    @property
+    def _cache_folder(self)->str:
+        self_folder = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
+        return self_folder + "/__clcache__"
+    
+    @property
+    def _meta_file_name(self)->str:
+        return f"{self._cache_folder}/{self._base_name}_{self._md5}.meta"
+    
+    def _bin_file_name(self, device:Device)->str:
+        return f"{self._cache_folder}/{device.unique_key}/{self._base_name}_{self._md5}.bin"
+
+    def _save_meta(self)->None:
+        meta:Dict[str, Any] = {
+            "clean_code": self._clean_code,
+            "related_files": self._related_files,
+            "line_map": self._line_map
+        }
+        save_var(meta, self._meta_file_name)
+
+    def _save_bin(self)->None:
+        for device in self.devices:
+            save_bin(self.binaries[device], self._bin_file_name(device))
+
+    def _load_meta(self)->Union[bool, float]:
+        meta_mtime = modify_time(self._meta_file_name)
+        if modify_time(self._file_name) > meta_mtime:
+            return False
+        
+        newest_mtime:float = 0
+        meta:Dict[str, Any] = load_var(self._meta_file_name)
+        for related_file in meta["related_files"]:
+            if not os.path.isfile(related_file):
+                return False
+
+            related_file_mtime = modify_time(related_file)
+            if related_file_mtime > newest_mtime:
+                newest_mtime = related_file_mtime
+
+            if related_file_mtime > meta_mtime:
+                return False
+            
+        self._clean_code = meta["clean_code"]
+        self._related_files = meta["related_files"]
+        self._line_map = meta["line_map"]
+        return newest_mtime
+            
+    def _load_bin(self, newest_mtime:Union[float, bool])->bool:
+        if not newest_mtime:
+            return False
+        
+        for device in self.devices:
+            bin_file_name = self._bin_file_name(device)            
+            if newest_mtime > modify_time(bin_file_name):
+                return False
+            
+        for device in self.devices:
+            bin_file_name = self._bin_file_name(device)            
+            self._binaries[device] = load_bin(bin_file_name)
+
+        return True
+
+    @property
+    def _md5(self)->str:
+        return Program._md5_of(self._file_name, self._includes, self._defines, self._options)
 
     @staticmethod
-    def _md5(file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[List[str]]=None)->str:
+    def _md5_of(file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->str:
         if includes is None:
             includes = []
 
@@ -65,22 +212,22 @@ class Program(CLObject):
             defines = {}
 
         if options is None:
-            options = []
+            options = BuildOptions()
         
         file_name = os.path.abspath(file_name).replace("\\", "/")
-        clean_includes:List[str] = list(set(os.path.abspath(include).replace("\\", "/") for include in includes))
-        clean_defines:List[str] = []
-        keys = set(defines.keys())
-        for key in keys:
-            clean_defines.append(f"{key}={defines[key]}")
-        clean_options:List[str] = list(set(options))
+        clean_includes:List[str] = []
+        for include in includes:
+            include = os.path.abspath(include).replace("\\", "/")
+            if include not in clean_includes:
+                clean_includes.append(include)
+                
         content = {
             "file_name": file_name,
             "includes": clean_includes,
-            "defines": clean_defines,
-            "options": clean_options
+            "defines": defines,
+            "options": str(options)
         }
-        return md5(json.dumps(content, separators=(',', ':'), indent=None))
+        return md5sums(json.dumps(content, separators=(',', ':'), indent=None))
 
     @property
     def binary_sizes(self)->Dict[Device, int]:
@@ -93,7 +240,9 @@ class Program(CLObject):
 
     @property
     def binaries(self)->Dict[Device, bytes]:
-        result:Dict[Device, int] = {}
+        if self._binaries:
+            return self._binaries
+        
         binary_sizes = self.binary_sizes
         binaries = (POINTER(c_ubyte) * self.n_devices)()
         for i in range(self.n_devices):
@@ -105,9 +254,9 @@ class Program(CLObject):
 
         for i in range(self.n_devices):
             binary = string_at(binaries[0], binary_sizes[self.devices[i]])
-            result[self.devices[i]] = binary
+            self._binaries[self.devices[i]] = binary
 
-        return result
+        return self._binaries
     
     @property
     def clean_code(self)->str:

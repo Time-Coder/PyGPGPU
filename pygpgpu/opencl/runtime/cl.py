@@ -55,6 +55,7 @@ class MetaCL(type):
 class CL(metaclass=MetaCL):
 
     print_call:bool = False
+    print_info:bool = True
     check_error:bool = True
 
     class Func:

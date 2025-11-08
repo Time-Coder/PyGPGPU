@@ -58,6 +58,7 @@ from .cltypes import (
     cl_program_build_info,
     cl_program_binary_type,
     cl_build_status,
+    ptr_ptr_ubyte,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK
 )
