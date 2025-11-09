@@ -56,7 +56,7 @@ class genVec(genType):
         self._mat_start_index:int = -1
 
         i: int = 0
-        n_data: int = len(self._data)
+        n_elements: int = self.n_elements
         n_args: int = len(args)
 
         if n_args == 0:
@@ -65,7 +65,7 @@ class genVec(genType):
         if n_args == 1:
             arg = args[0]
             if is_number(arg):
-                for i in range(n_data):
+                for i in range(n_elements):
                     self._data[i] = arg
                 return
         
@@ -74,7 +74,7 @@ class genVec(genType):
                 self._data[i] = arg
 
                 i += 1
-                if i == n_data:
+                if i == n_elements:
                     if n_args != 1 and i_arg != n_args - 1:
                         raise ValueError(f"invalid arguments for {self.__class__.__name__}()")
                     
@@ -86,7 +86,7 @@ class genVec(genType):
                     self._data[i] = value
 
                     i += 1
-                    if i == n_data:
+                    if i == n_elements:
                         if n_args != 1 and (i_arg != n_args - 1 or sub_i_arg != sub_n_arg - 1):
                             raise ValueError(f"invalid arguments for {self.__class__.__name__}()")
                         

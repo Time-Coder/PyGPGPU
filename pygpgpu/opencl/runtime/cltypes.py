@@ -1,10 +1,11 @@
-from ctypes import c_char, c_ubyte, c_int64, c_void_p, c_int, c_uint, c_ulong, c_size_t, c_char_p, POINTER, LittleEndianStructure, CFUNCTYPE
+from ctypes import c_char, c_uint64, c_ubyte, c_uint32, c_int32, c_int64, c_void_p, c_size_t, c_char_p, POINTER, LittleEndianStructure, CFUNCTYPE
 from .clconstantes import IntConstant, IntEnum, IntFlag
 from typing import TypeAlias
 
-cl_int = c_int
-cl_uint = c_uint
-cl_ulong = c_ulong
+cl_int = c_int32
+cl_uint = c_uint32
+cl_ulong = c_uint64
+cl_long = c_int64
 
 cl_platform_id = c_void_p
 cl_device_id = c_void_p
@@ -128,7 +129,7 @@ class ErrorCode(IntEnum):
 
     @classmethod
     def dtype(cls):
-        return c_int
+        return cl_int
 
 class cl_device_type(IntFlag):
     CL_DEVICE_TYPE_DEFAULT = (1 << 0)

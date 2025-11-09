@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Union, Any, Optional, Callable
 import ctypes
-from .helper import from_import, is_number
+from .helper import from_import, is_number, align_to_pow2
 import math
 from enum import Enum
 import importlib
@@ -60,7 +60,11 @@ class genType(ABC):
     }
 
     def __init__(self):
-        self._data = (self.dtype * math.prod(self.shape))()
+        n_data = math.prod(self.shape)
+        if self.align_pow2:
+            n_data = align_to_pow2(n_data)
+
+        self._data = (self.dtype * n_data)()
         self._on_changed:Optional[Callable[[], None]] = None
 
     def __copy__(self)->genType:
@@ -98,13 +102,26 @@ class genType(ABC):
     def shape(self)->Tuple[int]:
         pass
 
+    @property
+    def n_elements(self)->int:
+        return math.prod(self.shape)
+    
+    @property
+    def internal_n_elements(self)->int:
+        return len(self._data)
+
+    @property
+    def align_pow2(self)->bool:
+        return False
+
     def __array__(self, dtype=None):
         np = importlib.import_module("numpy")
-        
-        if dtype is None:
-            return np.frombuffer(self._data, dtype=self.dtype)
-        else:
-            return np.frombuffer(self._data, dtype=self.dtype).astype(dtype)
+
+        result = np.frombuffer(self._data, dtype=self.dtype)
+        if dtype is not None:
+            result = result.astype(dtype)
+
+        return result
 
     @staticmethod
     def gen_type(math_form:MathForm, dtype:type, shape:Tuple[int])->type:
@@ -155,7 +172,7 @@ class genType(ABC):
         second_has_negative:bool = False
         if operator == "**":
             if isinstance(value2, genType):
-                for i in range(len(value2._data)):
+                for i in range(value2.n_elements):
                     if value2._data[i] < 0:
                         second_has_negative = True
                         break
@@ -181,7 +198,7 @@ class genType(ABC):
             result_type = self.gen_type(self.math_form, ctypes.c_int, self.shape)
 
         result:genType = result_type()
-        for i in range(len(result._data)):
+        for i in range(result.n_elements):
             result._data[i] = ((not self._data[i]) if self.dtype == ctypes.c_bool else -self._data[i])
 
         return result
@@ -198,7 +215,7 @@ class genType(ABC):
         result:genType = result_type()
         other_is_homo:bool = self._is_homo(other)
         operator_func:Callable[[Any,Any], Any] = self._operator_funcs[operator]
-        for i in range(len(result._data)):
+        for i in range(result.n_elements):
             result._data[i] = operator_func(self._data[i], other._data[i] if other_is_homo else other)
 
         return result
@@ -207,7 +224,7 @@ class genType(ABC):
         result_type = self._bin_op_type(operator, other, self)
         result:genType = result_type()
         operator_func:Callable[[Any,Any], Any] = self._operator_funcs[operator]
-        for i in range(len(result._data)):
+        for i in range(result.n_elements):
             result._data[i] = operator_func(other, self._data[i])
 
         return result
@@ -218,7 +235,7 @@ class genType(ABC):
             raise TypeError(f"unsupported operand type(s) for {operator}=: '{self.__class__.__name__}' and '{other.__class__.__name__}'")
         
         operator_func:Callable[[Any,Any], Any] = self._operator_funcs[operator]
-        for i in range(len(self._data)):
+        for i in range(self.n_elements):
             self._data[i] = operator_func(self._data[i], other._data[i] if other_is_homo else other)
 
         self._update_data()
@@ -234,7 +251,7 @@ class genType(ABC):
             raise TypeError(f"unsupported operand type(s) for {operator}: '{self.__class__.__name__}' and '{other.__class__.__name__}'")
         
         operator_func:Callable[[Any,Any], Any] = self._operator_funcs[operator]
-        for i in range(len(self._data)):
+        for i in range(self.n_elements):
             result._data[i] = operator_func(self._data[i], other._data[i] if other_is_homo else other)
         
         return result
@@ -244,7 +261,7 @@ class genType(ABC):
         result:genType = btype()
 
         operator_func:Callable[[Any,Any], Any] = self._operator_funcs[operator]
-        for i in range(len(result._data)):
+        for i in range(result.n_elements):
             result._data[i] = operator_func(other, self._data[i])
         
         return result
@@ -316,7 +333,7 @@ class genType(ABC):
         if not isinstance(other, self.__class__):
             return False
         
-        for i in range(len(self._data)):
+        for i in range(self.n_elements):
             if self._data[i] != other._data[i]:
                 return False
             
@@ -329,7 +346,7 @@ class genType(ABC):
         if not isinstance(other, self.__class__):
             return True
         
-        for i in range(len(self._data)):
+        for i in range(self.n_elements):
             if self._data[i] != other._data[i]:
                 return True
             
