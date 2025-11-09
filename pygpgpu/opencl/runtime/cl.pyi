@@ -7,7 +7,10 @@ from .cltypes import (
     cl_platform_id,
     cl_program,
     cl_device_id,
+    cl_command_queue,
+    cl_ulong,
     ptr_ptr_char,
+    ptr_cl_kernel,
     cl_device_info,
     ptr_cl_platform_id,
     ptr_cl_uint,
@@ -18,12 +21,20 @@ from .cltypes import (
     ptr_cl_int,
     ptr_int64,
     ptr_ptr_ubyte,
+    ptr_cl_ulong,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK,
     cl_context,
     cl_context_info,
     cl_program_info,
-    cl_program_build_info
+    cl_program_build_info,
+    cl_kernel,
+    cl_kernel_info,
+    cl_command_queue_info,
+    cl_bitfield,
+    cl_mem,
+    cl_mem_flags,
+    cl_mem_info
 )
 
 
@@ -64,3 +75,14 @@ class CL:
     def clGetProgramInfo(program:cl_program, param_name:cl_program_info, param_value_size:c_size_t, param_value:c_void_p, param_value_size_ret:ptr_size_t)->ErrorCode:...
     def clGetProgramBuildInfo(program:cl_program, device:cl_device_id, param_name:cl_program_build_info, param_value_size:c_size_t, param_value:c_void_p, param_value_size_ret:ptr_size_t)->ErrorCode:...
     def clReleaseProgram(program:cl_program)->ErrorCode:...
+    def clCreateKernelsInProgram(program:cl_program, num_kernels:cl_uint, kernels:ptr_cl_kernel, num_kernels_ret:ptr_cl_uint)->ErrorCode:...
+    def clGetKernelInfo(kernel:cl_kernel, param_name:cl_kernel_info, param_value_size:c_size_t, param_value:c_void_p, param_value_size_ret:ptr_size_t)->ErrorCode:...
+    def clReleaseKernel(kernel:cl_kernel)->ErrorCode:...
+    def clCreateCommandQueue(context:cl_context, device:cl_device_id, properties:cl_bitfield, errcode_ret:ptr_cl_int)->cl_command_queue: ...
+    def clCreateCommandQueueWithProperties(context:cl_context, device:cl_device_id, properties:ptr_cl_ulong, errcode_ret:ptr_cl_int)->cl_command_queue: ...
+    def clGetCommandQueueInfo(command_queue:cl_command_queue, param_name:cl_command_queue_info, param_value_size:c_size_t, param_value:c_void_p, param_value_size_ret: ptr_size_t)->ErrorCode: ...
+    def clReleaseCommandQueue(command_queue:cl_command_queue)->ErrorCode: ...
+    def clCreateBuffer(context:cl_context, flags:cl_mem_flags, size:c_size_t, host_ptr:c_void_p, errcode_ret:ptr_cl_int)->cl_mem: ...
+    def clCreateBufferWithProperties(context:cl_context, properties:ptr_cl_ulong, flags:cl_mem_flags, size:c_size_t, host_ptr:c_void_p, errcode_ret:ptr_cl_int)->cl_mem: ...
+    def clGetMemObjectInfo(memobj:cl_mem, param_name:cl_mem_info, param_value_size:c_size_t, param_value:c_void_p,param_value_size_ret:ptr_size_t)->ErrorCode: ...
+    def clReleaseMemObject(memobj:cl_mem)->ErrorCode: ...

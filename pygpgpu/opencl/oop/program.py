@@ -16,9 +16,11 @@ from ..runtime import (
     cl_uint,
     cl_program_build_info,
     ErrorCode,
-    cl_program
+    cl_program,
+    cl_kernel
 )
 from .kernel_parser import KernelParser
+from .kernel import Kernel
 from ...exceptions import CompileError, CompileWarning
 from ...utils import save_bin, load_bin, modify_time
 
@@ -32,6 +34,7 @@ class Program(CLObject):
         self._context:Context = context
         self._binaries:Dict[Device, bytes] = {}
         self._kernel_parser:KernelParser = KernelParser()
+        self._kernels:Dict[str, Kernel] = {}
         newest_mtime = self._kernel_parser.parse(file_name, includes, defines, options)
 
         old_check_error = CL.check_error
@@ -230,12 +233,41 @@ class Program(CLObject):
     @property
     def kernel_infos(self)->Dict[str, Dict[str, Any]]:
         return self._kernel_parser._kernel_infos
+    
+    @property
+    def kernel_names(self)->List[str]:
+        return list(self.kernel_infos.keys())
+    
+    @property
+    def n_kernels(self)->int:
+        return len(self.kernel_infos)
+    
+    @property
+    def kernels(self)->Dict[str, Kernel]:
+        self._fetch_kernels()
+        return self._kernels
+    
+    def _fetch_kernels(self):
+        if self._kernels:
+            return
+        
+        kernel_ids = (cl_kernel * self.n_kernels)()
+        CL.clCreateKernelsInProgram(self.id, self.n_kernels, kernel_ids, None)
+        for kernel_id in kernel_ids:
+            kernel = Kernel(kernel_id, self)
+            kernel.args = self.kernel_infos[kernel.name]["args"]
+            self._kernels[kernel.name] = kernel
 
-    def __getattr__(self, name:str):        
+    def __getattr__(self, name:str):
         if name in ["build_status", "build_options", "build_log", "binary_type", "global_variable_total_size"]:
             return self._get_build_attr(name)
+        elif name in self.kernel_infos:
+            return self.kernels[name]
         else:
             return CLObject.__getattr__(self, name)
+        
+    def __getitem__(self, name:str)->Kernel:
+        return self.kernels[name]
 
     def _get_build_attr(self, name:str)->Any:
         if name in self._info:

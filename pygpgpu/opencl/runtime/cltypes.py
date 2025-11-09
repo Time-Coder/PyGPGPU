@@ -10,8 +10,13 @@ cl_platform_id = c_void_p
 cl_device_id = c_void_p
 cl_context = c_void_p
 cl_program = c_void_p
+cl_kernel = c_void_p
+cl_command_queue = c_void_p
+cl_mem = c_void_p
+
 cl_bitfield = cl_ulong
 cl_semaphore_type_khr = cl_uint
+cl_properties = cl_ulong
 
 ptr_cl_platform_id:TypeAlias = POINTER(cl_platform_id)
 ptr_cl_uint:TypeAlias = POINTER(cl_uint)
@@ -22,6 +27,8 @@ ptr_int64:TypeAlias = POINTER(c_int64)
 ptr_ptr_char:TypeAlias = POINTER(c_char_p)
 ptr_ubyte:TypeAlias = POINTER(c_ubyte)
 ptr_ptr_ubyte:TypeAlias = POINTER(ptr_ubyte)
+ptr_cl_kernel:TypeAlias = POINTER(cl_kernel)
+ptr_cl_ulong:TypeAlias = POINTER(cl_ulong)
 CL_CONTEXT_NOTIFY_CALLBACK:TypeAlias = CFUNCTYPE(None, c_char_p, c_void_p, c_size_t, c_void_p)
 CL_BULD_PROGRAM_CALLBACK:TypeAlias = CFUNCTYPE(None, cl_program, c_void_p)
 
@@ -577,6 +584,100 @@ class cl_kernel_arg_type_qualifier(IntFlag):
     CL_KERNEL_ARG_TYPE_RESTRICT                 = (1 << 1)
     CL_KERNEL_ARG_TYPE_VOLATILE                 = (1 << 2)
     CL_KERNEL_ARG_TYPE_PIPE                     = (1 << 3)
+
+class cl_kernel_info(IntEnum):
+    CL_KERNEL_FUNCTION_NAME                     = 0x1190
+    CL_KERNEL_NUM_ARGS                          = 0x1191
+    CL_KERNEL_REFERENCE_COUNT                   = 0x1192
+    CL_KERNEL_CONTEXT                           = 0x1193
+    CL_KERNEL_PROGRAM                           = 0x1194
+    CL_KERNEL_ATTRIBUTES                        = 0x1195
+    CL_KERNEL_MAX_WARP_COUNT_ARM                = 0x41E9
+
+class cl_queue_properties(IntEnum):
+    CL_QUEUE_PRIORITY_KHR                       = 0x1096
+    CL_QUEUE_THROTTLE_KHR                       = 0x1097
+    CL_QUEUE_JOB_SLOT_ARM                       = 0x41E1
+    CL_QUEUE_KERNEL_BATCHING_ARM                = 0x41E7
+    CL_QUEUE_DEFERRED_FLUSH_ARM                 = 0x41EC
+    CL_QUEUE_FAMILY_INTEL                       = 0x418C
+    CL_QUEUE_INDEX_INTEL                        = 0x418D
+
+    @property
+    def dtype(self):
+        return cl_ulong
+    
+class cl_command_queue_info(IntEnum):
+    CL_QUEUE_CONTEXT                           = 0x1090
+    CL_QUEUE_DEVICE                            = 0x1091
+    CL_QUEUE_REFERENCE_COUNT                   = 0x1092
+    CL_QUEUE_PROPERTIES                        = 0x1093
+    CL_QUEUE_SIZE                              = 0x1094
+    CL_QUEUE_DEVICE_DEFAULT                    = 0x1095
+    CL_QUEUE_PROPERTIES_ARRAY                  = 0x1098
+
+class cl_mem_flags(IntFlag):
+    CL_MEM_EXT_HOST_PTR_QCOM                    = (1 << 29)
+    CL_MEM_USE_UNCACHED_CPU_MEMORY_IMG          = (1 << 26)
+    CL_MEM_USE_CACHED_CPU_MEMORY_IMG            = (1 << 27)
+    CL_MEM_USE_GRALLOC_PTR_IMG                  = (1 << 28)
+    CL_MEM_NO_ACCESS_INTEL                      = (1 << 24)
+    CL_MEM_ACCESS_FLAGS_UNRESTRICTED_INTEL      = (1 << 25)
+    CL_MEM_FORCE_HOST_MEMORY_INTEL              = (1 << 20)
+    CL_MEM_READ_WRITE                           = (1 << 0)
+    CL_MEM_WRITE_ONLY                           = (1 << 1)
+    CL_MEM_READ_ONLY                            = (1 << 2)
+    CL_MEM_USE_HOST_PTR                         = (1 << 3)
+    CL_MEM_ALLOC_HOST_PTR                       = (1 << 4)
+    CL_MEM_COPY_HOST_PTR                        = (1 << 5)
+    CL_MEM_HOST_WRITE_ONLY                      = (1 << 7)
+    CL_MEM_HOST_READ_ONLY                       = (1 << 8)
+    CL_MEM_HOST_NO_ACCESS                       = (1 << 9)
+    CL_MEM_KERNEL_READ_AND_WRITE                = (1 << 12)
+
+class cl_mem_properties(IntEnum):
+    CL_MEM_ALLOC_FLAGS_IMG                             = 0x40D7
+    CL_MEM_DEVICE_HANDLE_LIST_KHR                      = 0x2051
+    CL_MEM_DEVICE_HANDLE_LIST_END_KHR                  = 0
+    CL_MEM_LOCALLY_UNCACHED_RESOURCE_INTEL             = 0x4218
+    CL_MEM_DEVICE_ID_INTEL                             = 0x4219
+
+    @property
+    def dtype(self):
+        return cl_ulong
+    
+class cl_mem_info(IntEnum):
+    CL_MEM_TYPE                                = 0x1100
+    CL_MEM_FLAGS                               = 0x1101
+    CL_MEM_SIZE                                = 0x1102
+    CL_MEM_HOST_PTR                            = 0x1103
+    CL_MEM_MAP_COUNT                           = 0x1104
+    CL_MEM_REFERENCE_COUNT                     = 0x1105
+    CL_MEM_CONTEXT                             = 0x1106
+    CL_MEM_ASSOCIATED_MEMOBJECT                = 0x1107
+    CL_MEM_OFFSET                              = 0x1108
+    CL_MEM_USES_SVM_POINTER                    = 0x1109
+    CL_MEM_PROPERTIES                          = 0x110A
+    CL_MEM_D3D9_RESOURCE_NV                    = 0x4027
+    CL_MEM_D3D10_RESOURCE_NV                   = 0x4015
+    CL_MEM_D3D10_RESOURCE_KHR                  = 0x4015
+    CL_MEM_D3D11_RESOURCE_NV                   = 0x401E
+    CL_MEM_D3D11_RESOURCE_KHR                  = 0x401E
+    CL_MEM_DX9_MEDIA_ADAPTER_TYPE_KHR          = 0x2028
+    CL_MEM_DX9_MEDIA_SURFACE_INFO_KHR          = 0x2029
+    CL_MEM_DX9_RESOURCE_INTEL                  = 0x4027
+    CL_MEM_DX9_SHARED_HANDLE_INTEL             = 0x4074
+    CL_MEM_USES_SVM_POINTER_ARM                = 0x40B7
+
+class cl_mem_object_type(IntEnum):
+    CL_MEM_OBJECT_BUFFER                       = 0x10F0
+    CL_MEM_OBJECT_IMAGE2D                      = 0x10F1
+    CL_MEM_OBJECT_IMAGE3D                      = 0x10F2
+    CL_MEM_OBJECT_IMAGE2D_ARRAY                = 0x10F3
+    CL_MEM_OBJECT_IMAGE1D                      = 0x10F4
+    CL_MEM_OBJECT_IMAGE1D_ARRAY                = 0x10F5
+    CL_MEM_OBJECT_IMAGE1D_BUFFER               = 0x10F6
+    CL_MEM_OBJECT_PIPE                         = 0x10F7
 
 CL_VERSION_MAJOR_BITS = IntConstant("CL_VERSION_MAJOR_BITS", 10)
 CL_VERSION_MINOR_BITS = IntConstant("CL_VERSION_MINOR_BITS", 10)

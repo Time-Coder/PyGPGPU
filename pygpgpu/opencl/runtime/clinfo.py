@@ -8,7 +8,9 @@ from .cltypes import (
     cl_version_khr,
     cl_name_version,
     cl_name_version_khr,
+    cl_kernel,
     cl_ulong,
+    cl_command_queue,
     cl_platform_command_buffer_capabilities_khr,
     cl_external_memory_handle_type_khr,
     cl_semaphore_type_khr,
@@ -41,19 +43,30 @@ from .cltypes import (
     cl_program_build_info,
     cl_build_status,
     cl_program_binary_type,
+    cl_kernel_info,
+    cl_command_queue_info,
+    cl_queue_properties,
+    cl_mem_info,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK,
     ptr_int64,
     ptr_cl_device_id,
     ptr_cl_int,
     ptr_ptr_ubyte,
+    ptr_cl_ulong,
     cl_context,
     cl_int,
+    cl_bitfield,
     ptr_size_t,
     ptr_cl_platform_id,
     ptr_cl_uint,
     ptr_ptr_char,
-    ErrorCode
+    ptr_cl_kernel,
+    cl_mem,
+    ErrorCode,
+    cl_mem_flags,
+    cl_mem_properties,
+    cl_mem_object_type
 )
 
 
@@ -395,6 +408,302 @@ class CLInfo:
                 ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
+        },
+
+        # cl_int clCreateKernelsInProgram(
+        #     cl_program program,
+        #     cl_uint num_kernels,
+        #     cl_kernel* kernels,
+        #     cl_uint* num_kernels_ret
+        # );
+        "clCreateKernelsInProgram": {
+            "args": {
+                "program": cl_program,
+                "num_kernels": cl_uint,
+                "kernels": ptr_cl_kernel,
+                "num_kernels_ret": ptr_cl_uint
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_PROGRAM: "program is not a valid program object.",
+                ErrorCode.CL_INVALID_PROGRAM_EXECUTABLE: "there is no successfully built executable for any device in program.",
+                ErrorCode.CL_INVALID_VALUE: "kernels is not NULL and num_kernels is less than the number of kernels in program.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clGetKernelInfo(
+        #     cl_kernel kernel,
+        #     cl_kernel_info param_name,
+        #     size_t param_value_size,
+        #     void* param_value,
+        #     size_t* param_value_size_ret
+        # );
+        "clGetKernelInfo": {
+            "args": {
+                "kernel": cl_kernel,
+                "param_name": cl_uint,
+                "param_value_size": c_size_t,
+                "param_value": c_void_p,
+                "param_value_size_ret": ptr_size_t
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_KERNEL: "kernel is a not a valid kernel object.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Kernel Object Queries table and param_value is not NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clReleaseKernel(cl_kernel kernel);
+        "clReleaseKernel": {
+            "args": {
+                "kernel": cl_kernel
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_KERNEL: "kernel is not a valid kernel object.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_command_queue clCreateCommandQueue(
+        #     cl_context context,
+        #     cl_device_id device,
+        #     cl_command_queue_properties properties,
+        #     cl_int* errcode_ret
+        # );
+        "clCreateCommandQueue": {
+            "args": {
+                "context": cl_context,
+                "device": cl_device_id,
+                "properties": cl_bitfield,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_command_queue,
+            "errors": {
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_DEVICE: "device is not a valid device or is not associated with context.",
+                ErrorCode.CL_INVALID_VALUE: "values specified in properties are not valid.",
+                ErrorCode.CL_INVALID_QUEUE_PROPERTIES: "values specified in properties are valid but are not supported by the device.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_command_queue clCreateCommandQueueWithProperties(
+        #     cl_context context,
+        #     cl_device_id device,
+        #     const cl_queue_properties* properties,
+        #     cl_int* errcode_ret
+        # );
+        "clCreateCommandQueueWithProperties": {
+            "args": {
+                "context": cl_context,
+                "device": cl_device_id,
+                "properties": ptr_cl_ulong,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_command_queue,
+            "errors": {
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_DEVICE: "device is not a valid device or is not associated with context.",
+                ErrorCode.CL_INVALID_VALUE: "values specified in properties are not valid.",
+                ErrorCode.CL_INVALID_QUEUE_PROPERTIES: "values specified in properties are valid but are not supported by the device.",
+                ErrorCode.CL_INVALID_QUEUE_PROPERTIES: "the cl_khr_priority_hints extension is supported, the CL_QUEUE_PRIORITY_KHR property is specified, and the queue is a CL_QUEUE_ON_DEVICE.",
+                ErrorCode.CL_INVALID_QUEUE_PROPERTIES: "the cl_khr_throttle_hints extension is supported, the CL_QUEUE_THROTTLE_KHR property is specified, and the queue is a CL_QUEUE_ON_DEVICE.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clGetCommandQueueInfo(
+        #     cl_command_queue command_queue,
+        #     cl_command_queue_info param_name,
+        #     size_t param_value_size,
+        #     void* param_value,
+        #     size_t* param_value_size_ret
+        # );
+        "clGetCommandQueueInfo": {
+            "args": {
+                "command_queue": cl_command_queue,
+                "param_name": cl_uint,
+                "param_value_size": c_size_t,
+                "param_value": c_void_p,
+                "param_value_size_ret": ptr_size_t
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_COMMAND_QUEUE: "command_queue is not a valid command-queue, or command_queue is not a valid command-queue for param_name.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Command-Queue Queries table and param_value is not NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clReleaseCommandQueue(cl_command_queue command_queue);
+        "clReleaseCommandQueue": {
+            "args": {
+                "command_queue": cl_command_queue
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_COMMAND_QUEUE: "command_queue is not a valid command-queue.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_mem clCreateBuffer(
+        #     cl_context context,
+        #     cl_mem_flags flags,
+        #     size_t size,
+        #     void* host_ptr,
+        #     cl_int* errcode_ret
+        # );
+        "clCreateBuffer": {
+            "args": {
+                "context": cl_context,
+                "flags": cl_bitfield,
+                "size": c_size_t,
+                "host_ptr": c_void_p,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_mem,
+            "errors": {
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context",
+                ErrorCode.CL_INVALID_PROPERTY: """one of following case happend:
+* a property name in properties is not a supported property name
+* the value specified for a supported property name is not valid
+* the same property name is specified more than once
+* properties does not include a supported external memory handle and CL_MEM_DEVICE_HANDLE_LIST_KHR is specified as part of properties
+* properties includes more than one external memory handle""",
+                ErrorCode.CL_INVALID_DEVICE: """one of following case happend:
+* a device identified by the property CL_MEM_DEVICE_HANDLE_LIST_KHR is not a valid device or is not associated with context
+* a device identified by property CL_MEM_DEVICE_HANDLE_LIST_KHR cannot import the requested external memory object type
+* CL_MEM_DEVICE_HANDLE_LIST_KHR is not specified as part of properties and one or more devices in context cannot import the requested external memory object type""",
+                ErrorCode.CL_INVALID_VALUE: """one of following case happend:
+* values specified in flags are not valid as defined in the Memory Flags table
+* properties includes a supported external memory handle and flags includes CL_MEM_USE_HOST_PTR, CL_MEM_ALLOC_HOST_PTR, or CL_MEM_COPY_HOST_PTR
+* CL_MEM_IMMUTABLE_EXT is set in flags and CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY, or CL_MEM_HOST_WRITE_ONLY is set in flags
+* CL_MEM_IMMUTABLE_EXT is set in flags and none of the following conditions are met:
+* CL_MEM_COPY_HOST_PTR or CL_MEM_USE_HOST_PTR is set in flags
+* properties includes an external memory handle""",
+                ErrorCode.CL_INVALID_BUFFER_SIZE: """one of following case happend:
+* size is zero and properties does not include an AHardwareBuffer external memory handle
+* size is non-zero and properties includes an AHardwareBuffer external memory handle
+* size is greater than CL_DEVICE_MAX_MEM_ALLOC_SIZE for all devices in context
+* CL_MEM_USE_HOST_PTR or CL_MEM_COPY_HOST_PTR is set in flags, and host_ptr is a pointer returned by clSVMAlloc, and size is greater than the size passed to clSVMAlloc""",
+                ErrorCode.CL_INVALID_HOST_PTR: """one of following case happend:
+* host_ptr is NULL, and CL_MEM_USE_HOST_PTR or CL_MEM_COPY_HOST_PTR are set in flags
+* host_ptr is not NULL but CL_MEM_COPY_HOST_PTR or CL_MEM_USE_HOST_PTR are not set in flags
+* properties includes a supported external memory handle and host_ptr is not NULL""",
+                ErrorCode.CL_INVALID_OPERATION: """one of following case happend:
+* properties includes an AHardwareBuffer external memory handle and the AHardwareBuffer format is not AHARDWAREBUFFER_FORMAT_BLOB
+* properties includes CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT and there are no devices in the context that support the cl_ext_buffer_device_address extension""",
+                ErrorCode.CL_MEM_OBJECT_ALLOCATION_FAILURE: "there is a failure to allocate memory for the buffer object",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host"
+            }
+        },
+
+        # cl_mem clCreateBufferWithProperties(
+        #     cl_context context,
+        #     const cl_mem_properties* properties,
+        #     cl_mem_flags flags,
+        #     size_t size,
+        #     void* host_ptr,
+        #     cl_int* errcode_ret
+        # );
+        "clCreateBufferWithProperties": {
+            "args": {
+                "context": cl_context,
+                "properties": ptr_cl_ulong,
+                "flags": cl_bitfield,
+                "size": c_size_t,
+                "host_ptr": c_void_p,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_mem,
+            "errors": {
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context",
+                ErrorCode.CL_INVALID_PROPERTY: """one of following case happend:
+* a property name in properties is not a supported property name
+* the value specified for a supported property name is not valid
+* the same property name is specified more than once
+* properties does not include a supported external memory handle and CL_MEM_DEVICE_HANDLE_LIST_KHR is specified as part of properties
+* properties includes more than one external memory handle""",
+                ErrorCode.CL_INVALID_DEVICE: """one of following case happend:
+* a device identified by the property CL_MEM_DEVICE_HANDLE_LIST_KHR is not a valid device or is not associated with context
+* a device identified by property CL_MEM_DEVICE_HANDLE_LIST_KHR cannot import the requested external memory object type
+* CL_MEM_DEVICE_HANDLE_LIST_KHR is not specified as part of properties and one or more devices in context cannot import the requested external memory object type""",
+                ErrorCode.CL_INVALID_VALUE: """one of following case happend:
+* values specified in flags are not valid as defined in the Memory Flags table
+* properties includes a supported external memory handle and flags includes CL_MEM_USE_HOST_PTR, CL_MEM_ALLOC_HOST_PTR, or CL_MEM_COPY_HOST_PTR
+* CL_MEM_IMMUTABLE_EXT is set in flags and CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY, or CL_MEM_HOST_WRITE_ONLY is set in flags
+* CL_MEM_IMMUTABLE_EXT is set in flags and none of the following conditions are met:
+* CL_MEM_COPY_HOST_PTR or CL_MEM_USE_HOST_PTR is set in flags
+* properties includes an external memory handle""",
+                ErrorCode.CL_INVALID_BUFFER_SIZE: """one of following case happend:
+* size is zero and properties does not include an AHardwareBuffer external memory handle
+* size is non-zero and properties includes an AHardwareBuffer external memory handle
+* size is greater than CL_DEVICE_MAX_MEM_ALLOC_SIZE for all devices in context
+* CL_MEM_USE_HOST_PTR or CL_MEM_COPY_HOST_PTR is set in flags, and host_ptr is a pointer returned by clSVMAlloc, and size is greater than the size passed to clSVMAlloc""",
+                ErrorCode.CL_INVALID_HOST_PTR: """one of following case happend:
+* host_ptr is NULL, and CL_MEM_USE_HOST_PTR or CL_MEM_COPY_HOST_PTR are set in flags
+* host_ptr is not NULL but CL_MEM_COPY_HOST_PTR or CL_MEM_USE_HOST_PTR are not set in flags
+* properties includes a supported external memory handle and host_ptr is not NULL""",
+                ErrorCode.CL_INVALID_OPERATION: """one of following case happend:
+* properties includes an AHardwareBuffer external memory handle and the AHardwareBuffer format is not AHARDWAREBUFFER_FORMAT_BLOB
+* properties includes CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT and there are no devices in the context that support the cl_ext_buffer_device_address extension""",
+                ErrorCode.CL_MEM_OBJECT_ALLOCATION_FAILURE: "there is a failure to allocate memory for the buffer object",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host"
+            }
+        },
+
+        # cl_int clGetMemObjectInfo(
+        #     cl_mem memobj,
+        #     cl_mem_info param_name,
+        #     size_t param_value_size,
+        #     void* param_value,
+        #     size_t* param_value_size_ret
+        # );
+        "clGetMemObjectInfo": {
+            "args": {
+                "memobj": cl_mem,
+                "param_name": cl_mem_info,
+                "param_value_size": c_size_t,
+                "param_value": c_void_p,
+                "param_value_size_ret": ptr_size_t
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_MEM_OBJECT: "memobj is a not a valid memory object.",
+                ErrorCode.CL_INVALID_OPERATION: "the cl_ext_buffer_device_address is not supported or the buffer was not allocated with CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Memory Object Queries table and param_value is not NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+                ErrorCode.CL_INVALID_DX9_MEDIA_SURFACE_KHR: "param_name is CL_MEM_DX9_MEDIA_SURFACE_INFO_KHR and memobj was not created by calling clCreateFromDX9MediaSurfaceKHR from a Direct3D9 surface.",
+                ErrorCode.CL_INVALID_D3D10_RESOURCE_KHR: "param_name is CL_MEM_D3D10_RESOURCE_KHR and memobj was not created by calling clCreateFromD3D10BufferKHR, clCreateFromD3D10Texture2DKHR, or clCreateFromD3D10Texture3DKHR.",
+                ErrorCode.CL_INVALID_D3D11_RESOURCE_KHR: "param_name is CL_MEM_D3D11_RESOURCE_KHR and memobj was not created by calling clCreateFromD3D11BufferKHR, clCreateFromD3D11Texture2DKHR, or clCreateFromD3D11Texture3DKHR."
+            }
+        },
+
+        # cl_int clReleaseMemObject(cl_mem memobj);
+        "clReleaseMemObject": {
+            "args": {
+                "memobj": cl_mem
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_MEM_OBJECT: "memobj is not a valid memory object.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
         }
     }
 
@@ -598,4 +907,42 @@ class CLInfo:
         cl_program_build_info.CL_PROGRAM_BUILD_LOG: str,
         cl_program_build_info.CL_PROGRAM_BINARY_TYPE: cl_program_binary_type,
         cl_program_build_info.CL_PROGRAM_BUILD_GLOBAL_VARIABLE_TOTAL_SIZE: c_size_t
+    }
+
+    kernel_info_types = {
+        cl_kernel_info.CL_KERNEL_FUNCTION_NAME: str,
+        cl_kernel_info.CL_KERNEL_NUM_ARGS: cl_uint,
+        cl_kernel_info.CL_KERNEL_REFERENCE_COUNT: cl_uint,
+        cl_kernel_info.CL_KERNEL_CONTEXT: cl_context,
+        cl_kernel_info.CL_KERNEL_PROGRAM: cl_program,
+        cl_kernel_info.CL_KERNEL_ATTRIBUTES: str
+    }
+
+    command_queue_info_types = {
+        cl_command_queue_info.CL_QUEUE_CONTEXT: cl_context,
+        cl_command_queue_info.CL_QUEUE_DEVICE: cl_device_id,
+        cl_command_queue_info.CL_QUEUE_REFERENCE_COUNT: cl_uint,
+        cl_command_queue_info.CL_QUEUE_PROPERTIES: cl_command_queue_properties,
+        cl_command_queue_info.CL_QUEUE_PROPERTIES_ARRAY: List[cl_queue_properties],
+        cl_command_queue_info.CL_QUEUE_SIZE: cl_uint,
+        cl_command_queue_info.CL_QUEUE_DEVICE_DEFAULT: cl_command_queue
+    }
+
+    mem_info_types = {
+        cl_mem_info.CL_MEM_TYPE: cl_mem_object_type,
+        cl_mem_info.CL_MEM_FLAGS: cl_mem_flags,
+        cl_mem_info.CL_MEM_SIZE: c_size_t,
+        cl_mem_info.CL_MEM_HOST_PTR: c_void_p,
+        cl_mem_info.CL_MEM_MAP_COUNT: cl_uint,
+        cl_mem_info.CL_MEM_REFERENCE_COUNT: cl_uint,
+        cl_mem_info.CL_MEM_CONTEXT: cl_context,
+        cl_mem_info.CL_MEM_ASSOCIATED_MEMOBJECT: cl_mem,
+        cl_mem_info.CL_MEM_OFFSET: c_size_t,
+        cl_mem_info.CL_MEM_USES_SVM_POINTER: cl_bool,
+        cl_mem_info.CL_MEM_PROPERTIES: List[cl_mem_properties],
+        cl_mem_info.CL_MEM_DX9_MEDIA_ADAPTER_TYPE_KHR: cl_uint,
+        # cl_mem_info.CL_MEM_DX9_MEDIA_SURFACE_INFO_KHR: cl_dx9_surface_info_khr,
+        cl_mem_info.CL_MEM_D3D10_RESOURCE_KHR: c_void_p,
+        cl_mem_info.CL_MEM_D3D11_RESOURCE_KHR: c_void_p,
+        # cl_mem_info.CL_MEM_DEVICE_ADDRESS_EXT: List[cl_mem_device_address_ext]
     }

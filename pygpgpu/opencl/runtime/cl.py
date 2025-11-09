@@ -137,7 +137,9 @@ class CL(metaclass=MetaCL):
                 'c_float': 'float',
                 'c_double': 'double',
                 'c_bool': 'bool',
-                'c_void_p': 'void*'
+                'c_void_p': 'void*',
+                'c_char_p': 'char*',
+                'LP_c_ubyte': 'uchar*'
             }
             return name_map[name]
 

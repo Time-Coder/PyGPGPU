@@ -1,5 +1,5 @@
 from ctypes import pointer
-from typing import List, Dict, Iterator
+from typing import List, Dict, Tuple
 
 from ..runtime import (
     CL, CLInfo, IntEnum,
@@ -19,20 +19,11 @@ class Platform(CLObject):
     def __init__(self, id:cl_platform_id):
         CLObject.__init__(self, id)
         self.__n_devices:int = 0
-        self.__devices_list:List[Device] = []
-        self.__devices_map:Dict[cl_device_id, Device] = {}
+        self.__devices:Tuple[Device] = ()
     
     @property
     def extensions(self)->List[str]:
         return self.__getattr__("extensions").split(" ")
-    
-    def __iter__(self)->Iterator[Device]:
-        self.__fetch_devices()
-        return iter(self.__devices_list)
-    
-    def __contains__(self, device:Device)->bool:
-        self.__fetch_devices()
-        return (device.id.value in self.__devices_map)
     
     @property
     def n_devices(self)->int:
@@ -44,19 +35,22 @@ class Platform(CLObject):
         return self.__n_devices
 
     def __fetch_devices(self):
-        if self.__devices_list:
+        if self.__devices:
             return
         
+        devices = []
         device_ids = (cl_device_id * self.n_devices)()
         CL.clGetDeviceIDs(self.id, cl_device_type.CL_DEVICE_TYPE_ALL, self.n_devices, device_ids, None)
         for device_id in device_ids:
             device = Device(cl_device_id(device_id), self)
-            self.__devices_list.append(device)
-            self.__devices_map[device_id] = device
+            devices.append(device)
 
-    def device(self, index:int)->Device:
+        self.__devices = tuple(devices)
+
+    @property
+    def devices(self)->Tuple[Device]:
         self.__fetch_devices()
-        return self.__devices_list[index]
+        return self.__devices
     
     @property
     def _prefix(self)->str:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p
-from typing import List, TYPE_CHECKING, Iterator
+from typing import List, TYPE_CHECKING, Iterator, Tuple
 
 from ..runtime import (
     cl_version,
@@ -30,7 +30,8 @@ class Platform:
     @property
     def n_devices(self)->int: ...
 
-    def device(self, index:int)->Device: ...
+    @property
+    def devices(self)->Tuple[Device]: ...
 
     def __iter__(self)->Iterator[Device]: ...
 
