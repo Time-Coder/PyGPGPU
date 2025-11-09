@@ -23,6 +23,9 @@ class Kernel(CLObject):
         self._program:Program = program
         self._args:Dict[str, Dict[str, Any]] = {}
 
+    def _set_arg(self, index:int, value:Any):
+        
+
     @property
     def program(self)->Program:
         return self._program

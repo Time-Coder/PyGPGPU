@@ -75,6 +75,8 @@ from .cltypes import (
     cl_mem_properties,
     cl_mem_info,
     cl_mem_object_type,
+    cl_event,
+    ptr_cl_event,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK
 )

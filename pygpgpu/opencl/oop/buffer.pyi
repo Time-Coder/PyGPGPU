@@ -29,6 +29,9 @@ class Buffer(CLObject):
     @property
     def host_ptr(self)->c_void_p: ...
 
+    @property
+    def data(self)->bytes: ...
+
     def __len__(self)->int: ...
 
     @property

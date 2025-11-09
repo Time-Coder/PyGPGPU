@@ -94,7 +94,7 @@ class BuildOptions:
             options.append("-Werror")
 
         if self.cl_std:
-            options.append(f"-cl-std={self.cl_std:.1f}")
+            options.append(f"-cl-std=CL{self.cl_std:.1f}")
 
         if self.kernel_arg_info:
             options.append("-cl-kernel-arg-info")

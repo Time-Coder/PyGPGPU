@@ -66,7 +66,9 @@ from .cltypes import (
     ErrorCode,
     cl_mem_flags,
     cl_mem_properties,
-    cl_mem_object_type
+    cl_mem_object_type,
+    ptr_cl_event,
+    cl_event
 )
 
 
@@ -701,6 +703,122 @@ class CLInfo:
             "restype": cl_int,
             "errors": {
                 ErrorCode.CL_INVALID_MEM_OBJECT: "memobj is not a valid memory object.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clEnqueueWriteBuffer(
+        #     cl_command_queue command_queue,
+        #     cl_mem buffer,
+        #     cl_bool blocking_write,
+        #     size_t offset,
+        #     size_t size,
+        #     const void *ptr,
+        #     cl_uint num_events_in_wait_list,
+        #     const cl_event *event_wait_list,
+        #     cl_event *event
+        # );
+        "clEnqueueWriteBuffer": {
+            "args": {
+                "command_queue": cl_command_queue,
+                "buffer": cl_mem,
+                "blocking_write": cl_bool,
+                "offset": c_size_t,
+                "size": c_size_t,
+                "ptr": c_void_p,
+                "num_events_in_wait_list": cl_uint,
+                "event_wait_list": ptr_cl_event,
+                "event": ptr_cl_event
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_COMMAND_QUEUE: "command_queue is not a valid host command-queue.",
+                ErrorCode.CL_INVALID_CONTEXT: "the context associated with command_queue and buffer are not the same or the context associated with command_queue and events in event_wait_list are not the same.",
+                ErrorCode.CL_INVALID_MEM_OBJECT: "buffer is not a valid buffer object.",
+                ErrorCode.CL_INVALID_VALUE: "the region being read or written specified by (offset, size) is out of bounds or ptr is a NULL value.",
+                ErrorCode.CL_INVALID_EVENT_WAIT_LIST: "event_wait_list is NULL and num_events_in_wait_list > 0, or event_wait_list is not NULL and num_events_in_wait_list is 0, or event objects in event_wait_list are not valid events.",
+                ErrorCode.CL_MISALIGNED_SUB_BUFFER_OFFSET: "buffer is a sub-buffer object and offset specified when the sub-buffer object is created is not aligned to CL_DEVICE_MEM_BASE_ADDR_ALIGN value for device associated with queue. This error code is missing before version 1.1.",
+                ErrorCode.CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST: "the read and write operations are blocking and the execution status of any of the events in event_wait_list is a negative integer value. This error code is missing before version 1.1.",
+                ErrorCode.CL_MEM_OBJECT_ALLOCATION_FAILURE: "there is a failure to allocate memory for data store associated with buffer.",
+                ErrorCode.CL_INVALID_OPERATION: """one of following case happend:
+* clEnqueueWriteBuffer is called on buffer which has been created with CL_MEM_HOST_READ_ONLY or CL_MEM_HOST_NO_ACCESS.
+* clEnqueueWriteBuffer is called on buffer which has been created with CL_MEM_IMMUTABLE_EXT.""",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+            }
+        },
+
+        # cl_int clEnqueueReadBuffer(
+        #     cl_command_queue command_queue,
+        #     cl_mem buffer,
+        #     cl_bool blocking_read,
+        #     size_t offset,
+        #     size_t size,
+        #     void* ptr,
+        #     cl_uint num_events_in_wait_list,
+        #     const cl_event* event_wait_list,
+        #     cl_event* event
+        # );
+        "clEnqueueReadBuffer": {
+            "args": {
+                "command_queue": cl_command_queue,
+                "buffer": cl_mem,
+                "blocking_read": cl_bool,
+                "offset": c_size_t,
+                "size": c_size_t,
+                "ptr": c_void_p,
+                "num_events_in_wait_list": cl_uint,
+                "event_wait_list": ptr_cl_event,
+                "event": ptr_cl_event
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_COMMAND_QUEUE: "command_queue is not a valid host command-queue.",
+                ErrorCode.CL_INVALID_CONTEXT: "the context associated with command_queue and buffer are not the same or the context associated with command_queue and events in event_wait_list are not the same.",
+                ErrorCode.CL_INVALID_MEM_OBJECT: "buffer is not a valid buffer object.",
+                ErrorCode.CL_INVALID_VALUE: "the region being read or written specified by (offset, size) is out of bounds or ptr is a NULL value.",
+                ErrorCode.CL_INVALID_EVENT_WAIT_LIST: "event_wait_list is NULL and num_events_in_wait_list > 0, or event_wait_list is not NULL and num_events_in_wait_list is 0, or event objects in event_wait_list are not valid events.",
+                ErrorCode.CL_MISALIGNED_SUB_BUFFER_OFFSET: "buffer is a sub-buffer object and offset specified when the sub-buffer object is created is not aligned to CL_DEVICE_MEM_BASE_ADDR_ALIGN value for device associated with queue. This error code is missing before version 1.1.",
+                ErrorCode.CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST: "the read and write operations are blocking and the execution status of any of the events in event_wait_list is a negative integer value. This error code is missing before version 1.1.",
+                ErrorCode.CL_MEM_OBJECT_ALLOCATION_FAILURE: "there is a failure to allocate memory for data store associated with buffer.",
+                ErrorCode.CL_INVALID_OPERATION: "clEnqueueReadBuffer is called on buffer which has been created with CL_MEM_HOST_WRITE_ONLY or CL_MEM_HOST_NO_ACCESS.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+            }
+        },
+
+        # cl_int clSetKernelArg(
+        #     cl_kernel kernel,
+        #     cl_uint arg_index,
+        #     size_t arg_size,
+        #     const void* arg_value
+        # );
+        "clSetKernelArg": {
+            "args": {
+                "kernel": cl_kernel,
+                "arg_index": cl_uint,
+                "arg_size": c_size_t,
+                "arg_value": c_void_p
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_KERNEL: "kernel is not a valid kernel object.",
+                ErrorCode.CL_INVALID_ARG_INDEX: "arg_index is not a valid argument index.",
+                ErrorCode.CL_INVALID_ARG_VALUE: "arg_value specified is not a valid value.",
+                ErrorCode.CL_INVALID_MEM_OBJECT: "for an argument declared to be a memory object when the specified arg_value is not a valid memory object.",
+                ErrorCode.CL_INVALID_MEM_OBJECT: "for an argument declared to be a depth image, depth image array, multi-sample image, multi-sample image array, multi-sample depth image, or a multi-sample depth image array when the specified arg_value does not follow the rules described above for a depth memory object or memory array object argument.",
+                ErrorCode.CL_INVALID_SAMPLER: "for an argument declared to be of type sampler_t when the specified arg_value is not a valid sampler object.",
+                ErrorCode.CL_INVALID_DEVICE_QUEUE: "for an argument declared to be of type queue_t when the specified arg_value is not a valid device queue object. This error code is missing before version 2.0.",
+                ErrorCode.CL_INVALID_ARG_SIZE: """one of following case happend:
+* arg_size does not match the size of the data type for an argument that is not a memory object, or
+* the argument is a memory object and arg_size != sizeof(cl_mem), or
+* arg_size is zero and the argument is declared with the local qualifier, or
+* the argument is a sampler and arg_size != sizeof(cl_sampler).""",
+                ErrorCode.CL_MAX_SIZE_RESTRICTION_EXCEEDED: "the size in bytes of the memory object (if the argument is a memory object) or arg_size (if the argument is declared with local qualifier) exceeds a language- specified maximum size restriction for this argument, such as the MaxByteOffset SPIR-V decoration. This error code is missing before version 2.2.",
+                ErrorCode.CL_INVALID_ARG_VALUE: """one of following case happend:
+* the argument is an image declared with the read_only qualifier and arg_value refers to an image object created with cl_mem_flags of CL_MEM_WRITE_ONLY
+* the image argument is declared with the write_only qualifier and arg_value refers to an image object created with cl_mem_flags of CL_MEM_READ_ONLY.""",
                 ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }

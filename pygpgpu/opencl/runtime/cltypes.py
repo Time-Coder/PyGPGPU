@@ -17,6 +17,7 @@ cl_mem = c_void_p
 cl_bitfield = cl_ulong
 cl_semaphore_type_khr = cl_uint
 cl_properties = cl_ulong
+cl_event = c_void_p
 
 ptr_cl_platform_id:TypeAlias = POINTER(cl_platform_id)
 ptr_cl_uint:TypeAlias = POINTER(cl_uint)
@@ -29,6 +30,7 @@ ptr_ubyte:TypeAlias = POINTER(c_ubyte)
 ptr_ptr_ubyte:TypeAlias = POINTER(ptr_ubyte)
 ptr_cl_kernel:TypeAlias = POINTER(cl_kernel)
 ptr_cl_ulong:TypeAlias = POINTER(cl_ulong)
+ptr_cl_event:TypeAlias = POINTER(cl_event)
 CL_CONTEXT_NOTIFY_CALLBACK:TypeAlias = CFUNCTYPE(None, c_char_p, c_void_p, c_size_t, c_void_p)
 CL_BULD_PROGRAM_CALLBACK:TypeAlias = CFUNCTYPE(None, cl_program, c_void_p)
 

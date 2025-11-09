@@ -1,0 +1,9 @@
+from typing import override, Union
+
+from .genVec3 import genVec3
+from .genVec2 import genVec2
+from .{basename}2 import {basename}2
+from .{basename}4 import {basename}4
+
+
+class {basename}3(genVec3):

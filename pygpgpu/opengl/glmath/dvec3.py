@@ -1,0 +1,10 @@
+from ...vectorization import genVec3
+
+import ctypes
+
+
+class dvec3(genVec3):
+    
+    @property
+    def dtype(self)->type:
+        return ctypes.c_double
