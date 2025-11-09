@@ -1,5 +1,5 @@
 from ctypes import c_char, c_ubyte, c_int64, c_void_p, c_int, c_uint, c_ulong, c_size_t, c_char_p, POINTER, LittleEndianStructure, CFUNCTYPE
-from .clconstantes import IntConstante, IntEnum, IntFlag
+from .clconstantes import IntConstant, IntEnum, IntFlag
 from typing import TypeAlias
 
 cl_int = c_int
@@ -559,13 +559,32 @@ class cl_program_binary_type(IntEnum):
     CL_PROGRAM_BINARY_TYPE_EXECUTABLE           = 0x4
     CL_PROGRAM_BINARY_TYPE_INTERMEDIATE         = 0x40E1
 
-CL_VERSION_MAJOR_BITS = IntConstante("CL_VERSION_MAJOR_BITS", 10)
-CL_VERSION_MINOR_BITS = IntConstante("CL_VERSION_MINOR_BITS", 10)
-CL_VERSION_PATCH_BITS = IntConstante("CL_VERSION_PATCH_BITS", 12)
+class cl_kernel_arg_address_qualifier(IntEnum):
+    CL_KERNEL_ARG_ADDRESS_GLOBAL                = 0x119B
+    CL_KERNEL_ARG_ADDRESS_LOCAL                 = 0x119C
+    CL_KERNEL_ARG_ADDRESS_CONSTANT              = 0x119D
+    CL_KERNEL_ARG_ADDRESS_PRIVATE               = 0x119E
 
-CL_VERSION_MAJOR_MASK = IntConstante("CL_VERSION_MAJOR_MASK", (1 << CL_VERSION_MAJOR_BITS) - 1)
-CL_VERSION_MINOR_MASK = IntConstante("CL_VERSION_MINOR_MASK", (1 << CL_VERSION_MINOR_BITS) - 1)
-CL_VERSION_PATCH_MASK = IntConstante("CL_VERSION_PATCH_MASK", (1 << CL_VERSION_PATCH_BITS) - 1)
+class cl_kernel_arg_access_qualifier(IntEnum):
+    CL_KERNEL_ARG_ACCESS_READ_ONLY              = 0x11A0
+    CL_KERNEL_ARG_ACCESS_WRITE_ONLY             = 0x11A1
+    CL_KERNEL_ARG_ACCESS_READ_WRITE             = 0x11A2
+    CL_KERNEL_ARG_ACCESS_NONE                   = 0x11A3
+
+class cl_kernel_arg_type_qualifier(IntFlag):
+    CL_KERNEL_ARG_TYPE_NONE                     = 0
+    CL_KERNEL_ARG_TYPE_CONST                    = (1 << 0)
+    CL_KERNEL_ARG_TYPE_RESTRICT                 = (1 << 1)
+    CL_KERNEL_ARG_TYPE_VOLATILE                 = (1 << 2)
+    CL_KERNEL_ARG_TYPE_PIPE                     = (1 << 3)
+
+CL_VERSION_MAJOR_BITS = IntConstant("CL_VERSION_MAJOR_BITS", 10)
+CL_VERSION_MINOR_BITS = IntConstant("CL_VERSION_MINOR_BITS", 10)
+CL_VERSION_PATCH_BITS = IntConstant("CL_VERSION_PATCH_BITS", 12)
+
+CL_VERSION_MAJOR_MASK = IntConstant("CL_VERSION_MAJOR_MASK", (1 << CL_VERSION_MAJOR_BITS) - 1)
+CL_VERSION_MINOR_MASK = IntConstant("CL_VERSION_MINOR_MASK", (1 << CL_VERSION_MINOR_BITS) - 1)
+CL_VERSION_PATCH_MASK = IntConstant("CL_VERSION_PATCH_MASK", (1 << CL_VERSION_PATCH_BITS) - 1)
 
 class cl_version(cl_uint):
 
@@ -590,8 +609,8 @@ class cl_version(cl_uint):
 cl_version_khr = cl_version
 
 
-CL_NAME_VERSION_MAX_NAME_SIZE = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE", 64)
-CL_NAME_VERSION_MAX_NAME_SIZE_KHR = IntConstante("CL_NAME_VERSION_MAX_NAME_SIZE_KHR", 64)
+CL_NAME_VERSION_MAX_NAME_SIZE = IntConstant("CL_NAME_VERSION_MAX_NAME_SIZE", 64)
+CL_NAME_VERSION_MAX_NAME_SIZE_KHR = IntConstant("CL_NAME_VERSION_MAX_NAME_SIZE_KHR", 64)
 
 class cl_name_version(LittleEndianStructure):
     _fields_ = [

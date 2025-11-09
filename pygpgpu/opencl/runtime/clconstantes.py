@@ -4,24 +4,24 @@ from ctypes import c_uint, sizeof
 import enum
 
 
-class Constante:
+class Constant:
 
-    __instances:Dict[Union[str, int], Constante] = {}
+    __instances:Dict[Union[str, int], Constant] = {}
 
     def __init__(self, name:str, value:Any):
         self.__name:str = name
-        Constante.__instances[name] = self
+        Constant.__instances[name] = self
 
     @property
     def name(self)->str:
         return self.__name
     
     @staticmethod
-    def get(key:int)->Constante:
-        return Constante.__instances[key]
+    def get(key:int)->Constant:
+        return Constant.__instances[key]
 
 
-class IntConstante(int, Constante):
+class IntConstant(int, Constant):
 
     def __new__(cls, name:str, value:int):
         instance = int.__new__(cls, value)
@@ -38,7 +38,7 @@ class IntConstante(int, Constante):
         return str(self)
 
 
-class FloatConstante(float, Constante):
+class FloatConstant(float, Constant):
 
     def __new__(cls, name:str, value:float):
         instance = float.__new__(cls, value)
@@ -75,10 +75,10 @@ class IntEnum(enum.IntEnum):
 class IntFlag(enum.IntFlag):
 
     def __str__(self)->str:
-        if len(list(self)) != 1:
-            return "0"
-        else:
+        if len(list(self)) < 2:
             return f"{self.name}({self.value})"
+        else:
+            return enum.Flag.__str__(self)
     
     def __repr__(self)->str:
         return str(self)

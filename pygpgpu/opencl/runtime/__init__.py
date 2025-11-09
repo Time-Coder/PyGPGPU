@@ -1,8 +1,8 @@
 from .cl import CL
 from .clconstantes import (
-    Constante,
-    IntConstante,
-    FloatConstante,
+    Constant,
+    IntConstant,
+    FloatConstant,
     IntEnum,
     IntFlag
 )
@@ -58,6 +58,9 @@ from .cltypes import (
     cl_program_build_info,
     cl_program_binary_type,
     cl_build_status,
+    cl_kernel_arg_address_qualifier,
+    cl_kernel_arg_access_qualifier,
+    cl_kernel_arg_type_qualifier,
     ptr_ptr_ubyte,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK

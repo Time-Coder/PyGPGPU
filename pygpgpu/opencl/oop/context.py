@@ -16,6 +16,7 @@ from .device import Device
 from .platform import Platform
 from .program import Program
 from .build_options import BuildOptions
+from .kernel_parser import KernelParser
 
 
 class Context(CLObject):
@@ -128,20 +129,21 @@ class Context(CLObject):
             x_spir,
             spir_std
         )
-        key:str = Program._md5_of(file_name, includes, defines, options)
+        key:str = KernelParser.md5_of(file_name, includes, defines, options)
         if key not in self._programs:
             program = Program(self, file_name, includes, defines, options)
-            program.build()
             self._programs[key] = program
 
         return self._programs[key]
 
+    @staticmethod
     def _pfn_notify(errinfo:bytes, private_info, cb, user_data):
-        if errinfo:
-            message = errinfo.decode('utf-8', errors='replace')
-            print(f"[OpenCL Context Notify] {message}")
-        else:
-            print("[OpenCL Context Notify] (no message)")
+        if CL.print_info:
+            if errinfo:
+                message = errinfo.decode('utf-8', errors='replace')
+                print(f"[OpenCL Context Notify] {message}")
+            else:
+                print("[OpenCL Context Notify] (no message)")
 
     @property
     def _prefix(self)->str:

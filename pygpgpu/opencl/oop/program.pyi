@@ -1,19 +1,43 @@
-from typing import Dict, List
+from ctypes import c_char_p
+from typing import Dict, List, Any, Set
 
 from .device import Device
 from .context import Context
 from ..runtime import cl_build_status, cl_program_binary_type
+from .build_options import BuildOptions
 
 
 class Program:
 
-    def build(self)->None: ...
+    @property
+    def file_name(self)->str: ...
+    
+    @property
+    def base_name(self)->str: ...
+    
+    @property
+    def includes(self)->List[str]: ...
+    
+    @property
+    def defines(self)->Dict[str, Any]: ...
+    
+    @property
+    def options(self)->BuildOptions: ...
+    
+    @property
+    def options_ptr(self)->c_char_p: ...
+    
+    @property
+    def clean_code(self)->str: ...
 
     @property
-    def clean_cose(self)->str: ...
-
+    def line_map(self)->Dict[int, str]: ...
+    
     @property
-    def options(self)->List[str]: ...
+    def related_files(self)->Set[str]: ...
+    
+    @property
+    def kernel_infos(self)->Dict[str, Dict[str, Any]]: ...
 
     @property
     def reference_count(self)->int: ...
