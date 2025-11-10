@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Set, List, Dict, Union, Any, Optional, Tuple, TYPE_CHECKING
 from .helper import generate_getter_swizzles, generate_setter_swizzles, is_number
-from .genType import genType, MathForm
+from .genType import genType, MathForm, Flavor
 from abc import abstractmethod
 
 if TYPE_CHECKING:
@@ -110,8 +110,8 @@ class genVec(genType):
         return (len(self),)
     
     @staticmethod
-    def vec_type(dtype:type, size:int)->type:
-        return genType.gen_type(MathForm.Vec, dtype, (size,))
+    def vec_type(flavor:Flavor, dtype:type, size:int)->type:
+        return genType.gen_type(flavor, MathForm.Vec, dtype, (size,))
 
     def _update_data(self, indices:Optional[List[int]] = None):
         genType._update_data(self, indices)

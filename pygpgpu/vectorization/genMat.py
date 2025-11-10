@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Tuple, Union, Any
 from .genVec import genVec
-from .genType import genType, MathForm
+from .genType import genType, MathForm, Flavor
 from .helper import is_number
 
 
@@ -89,8 +89,8 @@ class genMat(genType):
         return self.shape[0]
     
     @staticmethod
-    def mat_type(dtype:type, shape:Tuple[int]):
-        return genType.gen_type(MathForm.Mat, dtype, shape)
+    def mat_type(flavor:Flavor, dtype:type, shape:Tuple[int]):
+        return genType.gen_type(flavor, MathForm.Mat, dtype, shape)
     
     def __getitem__(self, index:Union[int,Tuple[int]])->Union[int,bool,float,genVec]:
         if isinstance(index, int):
