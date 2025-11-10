@@ -120,7 +120,7 @@ class genType(ABC):
         return self.__class__(*self._data)
 
     def __repr__(self)->str:
-        return f"{self.__class__.__name__}({', '.join([str(value) for value in self])})"
+        return f"{self.__class__.__name__}({', '.join([str(self[i]) for i in range(self.n_elements)])})"
 
     @property
     def on_changed(self)->Optional[Callable[[], None]]:

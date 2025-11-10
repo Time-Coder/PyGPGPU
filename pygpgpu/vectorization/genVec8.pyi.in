@@ -1,0 +1,6 @@
+from typing import Union
+
+from ..genVec8 import genVec8
+
+
+class {basename}8(genVec8):

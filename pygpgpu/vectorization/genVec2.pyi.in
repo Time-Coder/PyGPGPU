@@ -1,6 +1,6 @@
-from typing import override, Union
+from typing import Union
 
-from .genVec2 import genVec2
+from ..genVec2 import genVec2
 from .{basename}3 import {basename}3
 from .{basename}4 import {basename}4
 

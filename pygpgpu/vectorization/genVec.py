@@ -136,7 +136,7 @@ class genVec(genType):
         if not self.__in_getter_swizzles(name):
             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
         
-        if self.flavor == Flavor.CL and name.startswith('s'):
+        if self.flavor == Flavor.CL and name[0] == 's':
             name = name[1:]
 
         vec_type = self.vec_type(self.flavor, self.dtype, len(name))
@@ -160,7 +160,7 @@ class genVec(genType):
         update_indices:List[int] = []
 
         used_name:str = name
-        if self.flavor == Flavor.CL and name.startswith('s'):
+        if self.flavor == Flavor.CL and name[0] == 's':
             used_name:str = name[1:]
 
         value_is_vec:bool = (isinstance(value, genVec) and len(value) == len(used_name))
@@ -176,11 +176,14 @@ class genVec(genType):
     def __getitem__(self, index:Union[int,slice])->Union[float,int,bool,genVec]:
         result = self._data[index]
         if isinstance(result, list):
-            if len(result) == 1:
+            n_result = len(result)
+            if n_result == 1:
                 return result[0]
-            else:
-                result_type = self.vec_type(self.flavor, self.dtype, len(result))
+            elif n_result in [1, 2, 3, 4, 8, 16]:
+                result_type = self.vec_type(self.flavor, self.dtype, n_result)
                 return result_type(*result)
+            else:
+                return result
         else:
             return result
     
@@ -204,7 +207,7 @@ class genVec(genType):
         
     def __in_getter_swizzles(self, name:str):
         if self.flavor == Flavor.CL:
-            if name.startswith('s'):
+            if name[0] == 's':
                 name = name[1:]
             if len(name) not in [1, 2, 3, 4, 8, 16]:
                 return False
@@ -228,7 +231,7 @@ class genVec(genType):
     def __in_setter_swizzles(self, name:str):
         len_self:int = len(self)
         if self.flavor == Flavor.CL:
-            if name.startswith('s'):
+            if name[0] == 's':
                 name = name[1:]
             len_name = len(name)
             if len_name not in [1, 2, 3, 4, 8, 16] or len_name > len_self:
@@ -251,7 +254,7 @@ class genVec(genType):
     
     def __in_total_swizzles(self, name:str):
         if self.flavor == Flavor.CL:
-            if name.startswith('s'):
+            if name[0] == 's':
                 name = name[1:]
             if len(name) not in [1, 2, 3, 4, 8, 16]:
                 return False
