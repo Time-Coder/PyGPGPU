@@ -1,4 +1,4 @@
-from .. import genMat2x4
+from .. import genMat2x4, Flavor
 
 import ctypes
 

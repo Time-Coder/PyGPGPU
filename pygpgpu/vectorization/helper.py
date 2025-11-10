@@ -1,3 +1,4 @@
+from __future__ import annotations
 import itertools
 from typing import List, Set, Dict, Any
 from types import ModuleType
@@ -45,23 +46,40 @@ def align_to_pow2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 def generate_getter_swizzles(char_sets:List[str])->Set[str]:
-    result:List[str] = []
-    
+    flavor:str = "GL"
     for char_set in char_sets:
-        for length in range(1, 4 + 1):
+        if char_set.startswith('0'):
+            flavor:str = "CL"
+            break
+
+    if flavor == "GL":
+        length_list:List[int] = [1, 2, 3, 4]
+    elif flavor == "CL":
+        length_list:List[int] = [1, 2, 3, 4, 8, 16]
+
+    result:List[str] = []
+    for char_set in char_sets:
+        prefix = 's' if char_set.startswith('0') else ''
+        for length in length_list:
             for combo in itertools.product(char_set, repeat=length):
-                swizzle = ''.join(combo)
+                swizzle = prefix + ''.join(combo)
                 result.append(swizzle)
     
     return result
 
 def generate_setter_swizzles(char_sets:List[str])->Set[str]:
-    result:List[str] = []
+    max_length_list:List[int] = [1, 2, 3, 4, 8, 16]
     
+    result:List[str] = []
     for char_set in char_sets:
-        for length in range(1, len(char_set) + 1):
+        prefix = 's' if char_set.startswith('0') else ''
+        n_char_set = len(char_set)
+        for length in max_length_list:
+            if length > n_char_set:
+                continue
+
             for combo in itertools.permutations(char_set, length):
-                swizzle = ''.join(combo)
+                swizzle = prefix + ''.join(combo)
                 result.append(swizzle)
     
     return result

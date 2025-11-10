@@ -24,37 +24,44 @@ class genType(ABC):
 
     __type_order:List[type] = [
         bool, ctypes.c_bool,
-        int, ctypes.c_int, ctypes.c_uint,
+        str, ctypes.c_char,
+        bytes, ctypes.c_ubyte,
+        ctypes.c_int16, ctypes.c_uint16,
+        int, ctypes.c_int32, ctypes.c_uint32,
+        ctypes.c_int64, ctypes.c_uint64,
         float, ctypes.c_float, ctypes.c_double
     ]
     __uint_index:int = __type_order.index(ctypes.c_uint)
     __gen_type_map:Dict[Tuple[type,int], type] = {}
-    __gl_dtype_prefix_map:Dict[type, str] = {
-        ctypes.c_bool: 'b',
-        ctypes.c_int: 'i',
-        ctypes.c_uint: 'u',
-        ctypes.c_float: '',
-        ctypes.c_double: 'd',
-        bool: 'b',
-        int: 'i',
-        float: ''
-    }
-    __cl_dtype_prefix_map:Dict[type, str] = {
-        ctypes.c_char: 'char',
-        ctypes.c_ubyte: 'uchar',
-        ctypes.c_int16: 'short',
-        ctypes.c_uint16: 'ushort',
-        ctypes.c_int32: 'int',
-        ctypes.c_uint32: 'uint',
-        ctypes.c_int64: 'long',
-        ctypes.c_uint64: 'ulong',
-        ctypes.c_float: 'float',
-        ctypes.c_double: 'double',
-        bytes: 'uchar',
-        str: 'char',
-        bool: 'int',
-        int: 'int',
-        float: 'float'
+    __dtype_prefix_map:Dict[Flavor, Dict[type, str]] = {
+        Flavor.GL: {
+            ctypes.c_bool: 'b',
+            ctypes.c_int: 'i',
+            ctypes.c_uint: 'u',
+            ctypes.c_float: '',
+            ctypes.c_double: 'd',
+            bool: 'b',
+            int: 'i',
+            float: ''
+        },
+        Flavor.CL: {
+            ctypes.c_bool: 'int',
+            ctypes.c_char: 'char',
+            ctypes.c_ubyte: 'uchar',
+            ctypes.c_int16: 'short',
+            ctypes.c_uint16: 'ushort',
+            ctypes.c_int32: 'int',
+            ctypes.c_uint32: 'uint',
+            ctypes.c_int64: 'long',
+            ctypes.c_uint64: 'ulong',
+            ctypes.c_float: 'float',
+            ctypes.c_double: 'double',
+            bytes: 'uchar',
+            str: 'char',
+            bool: 'int',
+            int: 'int',
+            float: 'float'
+        }
     }
     __dtype_python_type_map:Dict[type, type] = {
         ctypes.c_bool: bool,
@@ -68,6 +75,18 @@ class genType(ABC):
         ctypes.c_uint64: int,
         ctypes.c_float: float,
         ctypes.c_double: float,
+    }
+    __signed_unsigned_map:Dict[type, type] = {
+        ctypes.c_char: ctypes.c_ubyte,
+        ctypes.c_int16: ctypes.c_uint16,
+        ctypes.c_int32: ctypes.c_uint32,
+        ctypes.c_int64: ctypes.c_uint64,
+    }
+    __unsigned_signed_map:Dict[type, type] = {
+        ctypes.c_ubyte: ctypes.c_char,
+        ctypes.c_uint16: ctypes.c_int16,
+        ctypes.c_uint32: ctypes.c_int32,
+        ctypes.c_uint64: ctypes.c_int64
     }
 
     _operator_funcs:Dict[str, Callable[[Any,Any], Any]] = {
@@ -161,21 +180,22 @@ class genType(ABC):
         if key not in genType.__gen_type_map:
             if math.prod(shape) == 1 or math_form == MathForm.Scalar:
                 genType.__gen_type_map[key] = genType.__dtype_python_type_map[dtype]
-
-            if flavor == Flavor.GL:
-                if math_form == MathForm.Vec:
-                    result_name:str = f"{genType.__gl_dtype_prefix_map[dtype]}vec{shape[0]}"
-                    genType.__gen_type_map[key] = from_import(".glmath." + result_name, result_name)
-                elif math_form == MathForm.Mat:
-                    result_name:str = f"{genType.__gl_dtype_prefix_map[dtype]}mat{shape[0]}x{shape[1]}"
-                    genType.__gen_type_map[key] = from_import(".glmath." + result_name, result_name)
-                elif math_form == MathForm.Quat:
-                    result_name:str = f"{genType.__gl_dtype_prefix_map[dtype]}quat"
-                    genType.__gen_type_map[key] = from_import(".glmath." + result_name, result_name)
-            elif flavor == Flavor.CL:
-                if math_form == MathForm.Vec:
-                    result_name:str = f"{genType.__cl_dtype_prefix_map[dtype]}{shape[0]}"
-                    genType.__gen_type_map[key] = from_import(".clmath." + result_name, result_name)
+            else:
+                dtype_prefix_map = genType.__dtype_prefix_map[flavor]
+                if flavor == Flavor.GL:
+                    if math_form == MathForm.Vec:
+                        result_name:str = f"{dtype_prefix_map[dtype]}vec{shape[0]}"
+                        genType.__gen_type_map[key] = from_import(".glmath." + result_name, result_name)
+                    elif math_form == MathForm.Mat:
+                        result_name:str = f"{dtype_prefix_map[dtype]}mat{shape[0]}x{shape[1]}"
+                        genType.__gen_type_map[key] = from_import(".glmath." + result_name, result_name)
+                    elif math_form == MathForm.Quat:
+                        result_name:str = f"{dtype_prefix_map[dtype]}quat"
+                        genType.__gen_type_map[key] = from_import(".glmath." + result_name, result_name)
+                elif flavor == Flavor.CL:
+                    if math_form == MathForm.Vec:
+                        result_name:str = f"{dtype_prefix_map[dtype]}{shape[0]}"
+                        genType.__gen_type_map[key] = from_import(".clmath." + result_name, result_name)
 
         return genType.__gen_type_map[key]
     
@@ -227,13 +247,14 @@ class genType(ABC):
             shape = value2.shape
         
         result_dtype:type = genType._bin_op_dtype(operator, value1_dtype, value2_dtype, second_has_negative)
-        result_type:type = genType.gen_type(math_form, result_dtype, shape)
+        result_type:type = genType.gen_type(value1.flavor, math_form, result_dtype, shape)
         return result_type
 
     def __neg__(self)->genType:
         result_type = self.__class__
-        if self.dtype == ctypes.c_uint:
-            result_type = self.gen_type(self.math_form, ctypes.c_int, self.shape)
+        if self.dtype in self.__unsigned_signed_map:
+            signed_dtype = self.__unsigned_signed_map[self.dtype]
+            result_type = self.gen_type(self.flavor, self.math_form, signed_dtype, self.shape)
 
         result:genType = result_type()
         for i in range(result.n_elements):
@@ -244,6 +265,7 @@ class genType(ABC):
     def _is_homo(self, other:Any)->bool:
         return (
             isinstance(other, genType) and
+            self.flavor == other.flavor and 
             self.math_form == other.math_form and
             self.shape == other.shape
         )
@@ -281,7 +303,7 @@ class genType(ABC):
         return self
     
     def _compare_op(self, operator:str, other:Union[float, bool, int, genType])->genType:
-        btype = self.gen_type(self.math_form, ctypes.c_bool, self.shape)
+        btype = self.gen_type(self.flavor, self.math_form, ctypes.c_bool, self.shape)
         result:genType = btype()
 
         other_is_homo:bool = self._is_homo(other)
@@ -295,7 +317,7 @@ class genType(ABC):
         return result
     
     def _compare_rop(self, operator:str, other:Union[float, bool, int, genType])->genType:
-        btype = self.gen_type(self.math_form, ctypes.c_bool, self.shape)
+        btype = self.gen_type(self.flavor, self.math_form, ctypes.c_bool, self.shape)
         result:genType = btype()
 
         operator_func:Callable[[Any,Any], Any] = self._operator_funcs[operator]

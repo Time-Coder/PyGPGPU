@@ -1,8 +1,10 @@
-from .genType import MathForm, genType
+from .genType import Flavor, MathForm, genType
 from .genVec import genVec
 from .genVec2 import genVec2
 from .genVec3 import genVec3
 from .genVec4 import genVec4
+from .genVec8 import genVec8
+from .genVec16 import genVec16
 from .genMat import genMat
 from .genMat2x2 import genMat2x2, genMat2
 from .genMat2x3 import genMat2x3

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .genType import genType, MathForm
+from .genType import genType, MathForm, Flavor
 from .genVec import genVec
 from .genVec3 import genVec3
 from .helper import is_number
@@ -93,7 +93,7 @@ class genQuat(genType):
 
     @property
     def xyz(self)->genVec3:
-        vec_type = genVec.vec_type(self.dtype, 3)
+        vec_type = genVec.vec_type(self.flavor, self.dtype, 3)
         return vec_type(self._data[1], self._data[2], self._data[3])
     
     @xyz.setter
@@ -107,8 +107,8 @@ class genQuat(genType):
         self._update_data()
 
     @staticmethod
-    def quat_type(dtype:type)->type:
-        return genType.gen_type(MathForm.Quat, dtype, (4,))
+    def quat_type(flavor:Flavor, dtype:type)->type:
+        return genType.gen_type(flavor, MathForm.Quat, dtype, (4,))
 
     @property
     def shape(self)->Tuple[int]:
@@ -142,7 +142,7 @@ class genQuat(genType):
                 raise TypeError(f"unsupported operand type(s) for {operator}: '{self.__class__.__name__}' and '{other.__class__.__name__}'")
 
             result_dtype = self._bin_op_dtype(operator, self.dtype, other.dtype, False)
-            quat_type = self.quat_type(result_dtype)
+            quat_type = self.quat_type(self.flavor, result_dtype)
             if isinstance(other, genQuat):
                 result:genQuat = quat_type()
                 result.w = self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z

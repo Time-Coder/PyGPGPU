@@ -1,4 +1,4 @@
-from .. import genVec4
+from .. import genVec4, Flavor
 
 import ctypes
 
@@ -8,3 +8,7 @@ class long4(genVec4):
     @property
     def dtype(self)->type:
         return ctypes.c_int64
+    
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.CL

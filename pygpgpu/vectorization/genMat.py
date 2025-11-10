@@ -94,7 +94,7 @@ class genMat(genType):
     
     def __getitem__(self, index:Union[int,Tuple[int]])->Union[int,bool,float,genVec]:
         if isinstance(index, int):
-            result_type = genVec.vec_type(self.dtype, self.rows)
+            result_type = genVec.vec_type(self.flavor, self.dtype, self.rows)
             result:genVec = result_type(*self._data[self.rows * index : self.rows * (index + 1)])
             result._mat_start_index = self.rows * index
             result._related_mat = self
@@ -123,16 +123,17 @@ class genMat(genType):
         return False
 
     def _op(self, operator:str, other:Union[float, bool, int, genMat, genVec])->Union[genMat, genVec]:
+        error_message = f"unsupported operand type(s) for {operator}: '{self.__class__.__name__}' and '{other.__class__.__name__}'"
         if operator == "**" or (operator in ["/", "//", "%"] and isinstance(other, genType)):
-            raise TypeError(f"unsupported operand type(s) for {operator}: '{self.__class__.__name__}' and '{other.__class__.__name__}'")
+            raise TypeError(error_message)
         
         if operator == "*" and isinstance(other, genType):
             if not isinstance(other, (genMat, genVec)) or self.cols != (other.rows if isinstance(other, genMat) else len(other)):
-                raise TypeError(f"unsupported operand type(s) for {operator}: '{self.__class__.__name__}' and '{other.__class__.__name__}'")
+                raise TypeError(error_message)
             
             result_dtype = self._bin_op_dtype(operator, self.dtype, other.dtype, False)
             result_shape = (self.rows, other.cols) if isinstance(other, genMat) else (self.rows,)
-            result_type = self.gen_type(other.math_form, result_dtype, result_shape)
+            result_type = self.gen_type(self.flavor, other.math_form, result_dtype, result_shape)
             result = result_type()
             if isinstance(result, genMat):
                 for i in range(result.rows):
@@ -155,15 +156,16 @@ class genMat(genType):
         return genType._op(self, operator, other)
 
     def _iop(self, operator:str, other:Union[float, bool, int, genMat])->genMat:
+        error_message = f"unsupported operand type(s) for {operator}=: '{self.__class__.__name__}' and '{other.__class__.__name__}'"
         if operator == "**" or (operator in ["/", "//", "%"] and isinstance(other, genType)):
-            raise TypeError(f"unsupported operand type(s) for {operator}=: '{self.__class__.__name__}' and '{other.__class__.__name__}'")
+            raise TypeError(error_message)
 
         if operator == "*" and isinstance(other, genType):
             if not isinstance(other, genMat):
-                raise TypeError(f"unsupported operand type(s) for {operator}=: '{self.__class__.__name__}' and '{other.__class__.__name__}'")
+                raise TypeError(error_message)
             
             if self.cols != other.rows or other.rows != other.cols:
-                raise TypeError(f"unsupported operand type(s) for {operator}=: '{self.__class__.__name__}' and '{other.__class__.__name__}'")
+                raise TypeError(error_message)
 
             result:genMat = self * other
             self._data[:] = result._data[:]

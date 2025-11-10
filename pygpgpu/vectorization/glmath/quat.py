@@ -1,6 +1,6 @@
 import ctypes
 
-from .. import genQuat
+from .. import genQuat, Flavor
 
 
 class quat(genQuat):

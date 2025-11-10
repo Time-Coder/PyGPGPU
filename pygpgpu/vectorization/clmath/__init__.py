@@ -57,15 +57,3 @@ from .double3 import double3
 from .double4 import double4
 from .double8 import double8
 from .double16 import double16
-
-from .. import (
-    abs, sign, floor, ceil, trunc, round, roundEven, fract, mod,
-    min, max, clamp, mix, step, smoothstep, sqrt, inversesqrt,
-    pow, exp, exp2, exp10, log, log2, log10,
-    sin, cos, tan, asin, acos, atan,
-    sinh, cosh, tanh, asinh, acosh, atanh,
-    length, normalize, distance, dot, cross, faceforward, reflect, refract,
-    transpose, determinant, inverse, trace, conjugate,
-    matrixCompMult, outerProduct, lessThan, lessThanEqual,
-    greaterThan, greaterThanEqual, equal, notEqual, any, all, not_, sizeof, value_ptr
-)

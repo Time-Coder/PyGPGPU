@@ -1,4 +1,4 @@
-from .. import genVec2
+from .. import genVec2, Flavor
 
 import ctypes
 

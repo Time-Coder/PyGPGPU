@@ -24,31 +24,38 @@ class genVec(genType):
         't': 1,
         'p': 2,
         'q': 3,
-        's0': 0,
-        's1': 1,
-        's2': 2,
-        's3': 3,
-        's4': 4,
-        's5': 5,
-        's6': 6,
-        's7': 7,
-        's8': 8,
-        's9': 9,
-        'sA': 10,
-        'sB': 11,
-        'sC': 12,
-        'sD': 13, 
-        'sE': 14,
-        'sF': 15
+        '0': 0,
+        '1': 1,
+        '2': 2,
+        '3': 3,
+        '4': 4,
+        '5': 5,
+        '6': 6,
+        '7': 7,
+        '8': 8,
+        '9': 9,
+        'A': 10,
+        'B': 11,
+        'C': 12,
+        'D': 13, 
+        'E': 14,
+        'F': 15,
+        'a': 10,
+        'b': 11,
+        'c': 12,
+        'd': 13, 
+        'e': 14,
+        'f': 15,
     }
 
     _all_attrs:Set[str] = {
         '_data', '_related_mat', '_mat_start_index', '_on_changed'
     }
-    _all_getter_swizzles:Set[str] = set()
-    _all_setter_swizzles:Set[str] = set()
-    __all_total_swizzles:Set[str] = set()
-    __namespaces:List[str] = ['xyzw', 'rgba', 'stpq']
+
+    __namespaces:Dict[Flavor, List[str]] = {
+        Flavor.GL: ['xyzw', 'rgba', 'stpq'],
+        Flavor.CL:  ['xyzw', 'rgba', '0123456789ABCDEF']
+    }
 
     def __init__(self, *args):
         genType.__init__(self)
@@ -126,10 +133,13 @@ class genVec(genType):
             self._related_mat._call_on_changed()
 
     def __getattr__(self, name:str)->Union[float,bool,int,genVec]:
-        if name not in self.__getter_swizzles():
+        if not self.__in_getter_swizzles(name):
             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
         
-        vec_type = self.vec_type(self.dtype, len(name))
+        if self.flavor == Flavor.CL and name.startswith('s'):
+            name = name[1:]
+
+        vec_type = self.vec_type(self.flavor, self.dtype, len(name))
         return vec_type(*(self._data[self._attr_index_map[ch]] for ch in name))
 
     def __setattr__(self, name:str, value:Union[float,bool,int,genVec]):
@@ -137,22 +147,27 @@ class genVec(genType):
             super().__setattr__(name, value)
             return
         
-        if name not in self.__setter_swizzles():
-            if name in self.__getter_swizzles():
+        if not self.__in_setter_swizzles(name):
+            if self.__in_getter_swizzles(name):
                 raise AttributeError(f"property '{name}' of '{self.__class__.__name__}' object has no setter")
             
-            if name in self.__total_swizzles():
+            if self.__in_total_swizzles(name):
                 raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
             
             super().__setattr__(name, value)
             return
 
         update_indices:List[int] = []
-        value_is_vec:bool = (isinstance(value, genVec) and len(value) == len(name))
+
+        used_name:str = name
+        if self.flavor == Flavor.CL and name.startswith('s'):
+            used_name:str = name[1:]
+
+        value_is_vec:bool = (isinstance(value, genVec) and len(value) == len(used_name))
         if not value_is_vec and not is_number(value):
             raise TypeError(f"can not set '{value.__class__.__name__}' object to property '{name}' of '{self.__class__.__name__}' object")
         
-        for i, ch in enumerate(name):
+        for i, ch in enumerate(used_name):
             index:int = self._attr_index_map[ch]
             self._data[index] = value[i] if value_is_vec else value
             update_indices.append(index)
@@ -164,7 +179,7 @@ class genVec(genType):
             if len(result) == 1:
                 return result[0]
             else:
-                result_type = self.vec_type(self.dtype, len(result))
+                result_type = self.vec_type(self.flavor, self.dtype, len(result))
                 return result_type(*result)
         else:
             return result
@@ -187,34 +202,73 @@ class genVec(genType):
     def value_ptr(self):
         return self._data
         
-    def __getter_swizzles(self):
-        if not self.__class__._all_getter_swizzles:
-            n:int = len(self)
-            self.__class__._all_getter_swizzles = set(
-                generate_getter_swizzles(
-                    namespace[:n] for namespace in genVec.__namespaces
-                )
-            )
+    def __in_getter_swizzles(self, name:str):
+        if self.flavor == Flavor.CL:
+            if name.startswith('s'):
+                name = name[1:]
+            if len(name) not in [1, 2, 3, 4, 8, 16]:
+                return False
+        elif self.flavor == Flavor.GL:
+            if len(name) not in [1, 2, 3, 4]:
+                return False
 
-        return self.__class__._all_getter_swizzles
+        len_self:int = len(self)
+        for namespace in genVec.__namespaces[self.flavor]:
+            namespace = namespace[:len_self]
+            all_in_namespace:bool = True
+            for ch in name:
+                if ch not in namespace:
+                    all_in_namespace:bool = False
+                    break
+            if all_in_namespace:
+                return True
+
+        return False
     
-    def __setter_swizzles(self):
-        if not self.__class__._all_setter_swizzles:
-            n:int = len(self)
-            self.__class__._all_setter_swizzles = set(
-                generate_setter_swizzles(
-                    namespace[:n] for namespace in genVec.__namespaces
-                )
-            )
+    def __in_setter_swizzles(self, name:str):
+        len_self:int = len(self)
+        if self.flavor == Flavor.CL:
+            if name.startswith('s'):
+                name = name[1:]
+            len_name = len(name)
+            if len_name not in [1, 2, 3, 4, 8, 16] or len_name > len_self:
+                return False
+        elif self.flavor == Flavor.GL:
+            if len(name) not in [1, 2, 3, 4] or len_name > len_self:
+                return False
 
-        return self.__class__._all_setter_swizzles
+        for namespace in genVec.__namespaces[self.flavor]:
+            namespace = namespace[:len_self]
+            all_in_namespace:bool = True
+            for ch in name:
+                if ch not in namespace:
+                    all_in_namespace:bool = False
+                    break
+            if all_in_namespace:
+                return True
+
+        return False
     
-    @staticmethod
-    def __total_swizzles():
-        if not genVec.__all_total_swizzles:
-            genVec.__all_total_swizzles = set(generate_getter_swizzles(genVec.__namespaces))
+    def __in_total_swizzles(self, name:str):
+        if self.flavor == Flavor.CL:
+            if name.startswith('s'):
+                name = name[1:]
+            if len(name) not in [1, 2, 3, 4, 8, 16]:
+                return False
+        elif self.flavor == Flavor.GL:
+            if len(name) not in [1, 2, 3, 4]:
+                return False
 
-        return genVec.__all_total_swizzles
+        for namespace in genVec.__namespaces[self.flavor]:
+            all_in_namespace:bool = True
+            for ch in name:
+                if ch not in namespace:
+                    all_in_namespace:bool = False
+                    break
+            if all_in_namespace:
+                return True
+
+        return False
 
     def __iter__(self):
         return iter(self._data)

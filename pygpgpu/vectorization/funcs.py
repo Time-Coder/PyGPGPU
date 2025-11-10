@@ -196,7 +196,7 @@ def cross(x: genVec3, y: genVec3)->genVec3:
         raise TypeError(f"not defined cross between '{x.__class__.__name__}' and '{y.__class__.__name__}'")
 
     result_dtype:type = ctypes.c_double if (x.dtype == ctypes.c_double or y.dtype == ctypes.c_double) else ctypes.c_float
-    result_type:type = genVec.vec_type(result_dtype, 3)
+    result_type:type = genVec.vec_type(x.flavor, result_dtype, 3)
     return result_type(x.y * y.z - x.z * y.y, x.z * y.x - x.x * y.z, x.x * y.y - x.y * y.x)
 
 def reflect(I:genVec, N:genVec)->genVec:
@@ -234,7 +234,7 @@ def determinant(m:genMat)->float:
                     submatrix_data.append(m[i, j])
             
             import ctypes
-            submatrix_type = genMat.mat_type(ctypes.c_double, 3, 3)
+            submatrix_type = genMat.mat_type(m.flavor, ctypes.c_double, 3, 3)
             submatrix = submatrix_type()
             for i in range(3):
                 for j in range(3):
@@ -249,7 +249,7 @@ def transpose(m:genMat)->genMat:
     if not isinstance(m, genMat):
         raise TypeError(f'not defined transpose for {m.__class__.__name__}')
     
-    result_type:type = genMat.mat_type(m.dtype, m.shape[::-1])
+    result_type:type = genMat.mat_type(m.flavor, m.dtype, m.shape[::-1])
     result:genMat = result_type()
     for i in range(result.rows):
         for j in range(result.cols):
@@ -281,7 +281,7 @@ def inverse(m:Union[genMat, genQuat])->Union[genMat, genQuat]:
         raise TypeError(f'not defined inverse for {m.__class__.__name__}')
     
     result_dtype:type = (ctypes.c_double if m.dtype == ctypes.c_double else ctypes.c_float)
-    result_type:type = genMat.mat_type(result_dtype, m.shape)
+    result_type:type = genMat.mat_type(m.flavor, result_dtype, m.shape)
 
     det = determinant(m)
     if det == 0:
@@ -323,7 +323,7 @@ def inverse(m:Union[genMat, genQuat])->Union[genMat, genQuat]:
                             continue
                         submatrix_data.append(m[col, row])
                 
-                submatrix_type = genMat.mat_type(ctypes.c_double, 3, 3)
+                submatrix_type = genMat.mat_type(m.flavor, ctypes.c_double, 3, 3)
                 submatrix = submatrix_type()
                 for col in range(3):
                     for row in range(3):
@@ -352,7 +352,7 @@ def outerProduct(x:genVec, y:genVec)->genMat:
         raise TypeError(f"not defined outerProduct between '{x.__class__.__name__}' and '{y.__class__.__name__}'")
     
     result_dtype:type = genType._bin_op_dtype('*', x.dtype, y.dtype)
-    result_type:type = genMat.gen_type(result_dtype, (len(y), len(x)))
+    result_type:type = genMat.mat_type(x.flavor, result_dtype, (len(y), len(x)))
     result:genMat = result_type()
 
     for i in range(len(x)):
@@ -403,8 +403,8 @@ def not_(x:genType):
     if not isinstance(x, genType):
         return (not x)
 
-    result:genType = genType.gen_type(x.math_form, ctypes.c_bool, x.shape)
-    for i in range(len(x._data)):
+    result:genType = genType.gen_type(x.flavor, x.math_form, ctypes.c_bool, x.shape)
+    for i in range(x.n_elements):
         result._data[i] = not x._data[i]
 
     return result
