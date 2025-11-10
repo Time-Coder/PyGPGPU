@@ -167,7 +167,7 @@ class KernelParser:
                 arg_item = arg_item.strip("\r\n\t ")
                 address_qualifier = self._find_address_qualifier(arg_item)
                 access_qualifier = self._find_access_qualifier(arg_item)
-                type_qualifier = self._find_type_qualifier(arg_item)
+                type_qualifiers = self._find_type_qualifiers(arg_item)
                 arg_name:str = self._find_arg_name(arg_item)
                 arg_type:str = self._find_arg_type(arg_item)
                 self._kernel_infos[kernel_name]["args"][arg_name] = {
@@ -175,7 +175,7 @@ class KernelParser:
                     "type": arg_type,
                     "address_qualifier": address_qualifier,
                     "access_qualifier": access_qualifier,
-                    "type_qualifier": type_qualifier
+                    "type_qualifiers": type_qualifiers
                 }
     
     @property
@@ -275,14 +275,14 @@ class KernelParser:
 
         return access_qualifier
     
-    def _find_type_qualifier(self, arg_code:str)->cl_kernel_arg_type_qualifier:
-        type_qualifier = cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_NONE
+    def _find_type_qualifiers(self, arg_code:str)->cl_kernel_arg_type_qualifier:
+        type_qualifiers = cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_NONE
         matches:Iterator[re.Match] = self._type_qualifier_pattern.finditer(arg_code)
         for match in matches:
             match_str:str = match.group(1)
-            type_qualifier |= getattr(cl_kernel_arg_type_qualifier, f"CL_KERNEL_ARG_TYPE_{match_str.upper()}")
+            type_qualifiers |= getattr(cl_kernel_arg_type_qualifier, f"CL_KERNEL_ARG_TYPE_{match_str.upper()}")
 
-        return type_qualifier
+        return type_qualifiers
     
     def _find_arg_name(self, arg_code:str)->str:
         arg_name:str = ""

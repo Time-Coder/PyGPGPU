@@ -410,7 +410,7 @@ def not_(x:genType):
     return result
 
 def sizeof(x:genType)->int:
-    return ctypes.sizeof(x._data)
+    return (ctypes.sizeof(x._data) if isinstance(x, genType) else ctypes.sizeof(x))
 
 def value_ptr(x:genType):
-    return x._data
+    return (x._data if isinstance(x, genType) else ctypes.pointer(x))

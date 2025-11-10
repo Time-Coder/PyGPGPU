@@ -1,4 +1,23 @@
-from ctypes import c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER, c_int64, c_char_p
+from ctypes import (
+    c_char, c_ubyte,
+    c_int16, c_uint16,
+    c_int32, c_uint32,
+    c_int64, c_uint64,
+    c_float, c_double,
+    c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER, c_int64, c_char_p
+)
+from ...vectorization.clmath import (
+    char2, char3, char4, char8, char16,
+    uchar2, uchar3, uchar4, uchar8, uchar16,
+    short2, short3, short4, short8, short16,
+    ushort2, ushort3, ushort4, ushort8, ushort16,
+    int2, int3, int4, int8, int16,
+    uint2, uint3, uint4, uint8, uint16,
+    long2, long3, long4, long8, long16,
+    ulong2, ulong3, ulong4, ulong8, ulong16,
+    float2, float3, float4, float8, float16,
+    double2, double3, double4, double8, double16
+)
 from typing import List
 
 from .cltypes import (
@@ -73,6 +92,79 @@ from .cltypes import (
 
 
 class CLInfo:
+
+    basic_types = {
+        'char': c_char,
+        'char2': char2,
+        'char3': char3,
+        'char4': char4,
+        'char8': char8,
+        'char16': char16,
+
+        'uchar': c_ubyte,
+        'uchar2': uchar2,
+        'uchar3': uchar3,
+        'uchar4': uchar4,
+        'uchar8': uchar8,
+        'uchar16': uchar16,
+
+        'short': c_int16,
+        'short2': short2,
+        'short3': short3,
+        'short4': short4,
+        'short8': short8,
+        'short16': short16,
+
+        'ushort': c_uint16,
+        'ushort2': ushort2,
+        'ushort3': ushort3,
+        'ushort4': ushort4,
+        'ushort8': ushort8,
+        'ushort16': ushort16,
+
+        'int': c_int32,
+        'int2': int2,
+        'int3': int3,
+        'int4': int4,
+        'int8': int8,
+        'int16': int16,
+
+        'uint': c_uint32,
+        'uint2': uint2,
+        'uint3': uint3,
+        'uint4': uint4,
+        'uint8': uint8,
+        'uint16': uint16,
+
+        'long': c_int64,
+        'long2': long2,
+        'long3': long3,
+        'long4': long4,
+        'long8': long8,
+        'long16': long16,
+
+        'ulong': c_uint64,
+        'ulong2': ulong2,
+        'ulong3': ulong3,
+        'ulong4': ulong4,
+        'ulong8': ulong8,
+        'ulong16': ulong16,
+
+        'float': c_float,
+        'float2': float2,
+        'float3': float3,
+        'float4': float4,
+        'float8': float8,
+        'float16': float16,
+
+        'double': c_double,
+        'double2': double2,
+        'double3': double3,
+        'double4': double4,
+        'double8': double8,
+        'double16': double16,
+    },
+
     func_signatures = {
         # cl_int clGetPlatformInfo(
         #   cl_platform_id platform,
