@@ -8,3 +8,7 @@ class bmat3x2(genMat3x2):
     @property
     def dtype(self)->type:
         return ctypes.c_bool
+    
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL

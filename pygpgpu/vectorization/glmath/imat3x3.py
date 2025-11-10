@@ -9,4 +9,8 @@ class imat3x3(genMat3x3):
     def dtype(self)->type:
         return ctypes.c_int
     
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL
+    
 imat3 = imat3x3

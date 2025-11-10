@@ -8,3 +8,7 @@ class bvec4(genVec4):
     @property
     def dtype(self)->type:
         return ctypes.c_bool
+    
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL

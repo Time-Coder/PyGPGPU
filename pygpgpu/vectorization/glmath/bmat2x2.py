@@ -9,4 +9,8 @@ class bmat2x2(genMat2x2):
     def dtype(self)->type:
         return ctypes.c_bool
     
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL
+    
 bmat2 = bmat2x2

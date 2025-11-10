@@ -9,4 +9,8 @@ class mat3x3(genMat3x3):
     def dtype(self)->type:
         return ctypes.c_float
     
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL
+    
 mat3 = mat3x3

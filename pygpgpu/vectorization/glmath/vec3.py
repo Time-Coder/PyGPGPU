@@ -9,3 +9,7 @@ class vec3(genVec3):
     def dtype(self)->type:
         return ctypes.c_float
     
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL
+    

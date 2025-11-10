@@ -9,4 +9,8 @@ class umat2x2(genMat2x2):
     def dtype(self)->type:
         return ctypes.c_uint
     
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL
+    
 umat2 = umat2x2

@@ -9,4 +9,8 @@ class mat4x4(genMat4x4):
     def dtype(self)->type:
         return ctypes.c_float
     
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL
+    
 mat4 = mat4x4

@@ -9,4 +9,8 @@ class mat2x2(genMat2x2):
     def dtype(self)->type:
         return ctypes.c_float
     
+    @property
+    def flavor(self)->Flavor:
+        return Flavor.GL
+    
 mat2 = mat2x2
