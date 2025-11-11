@@ -1,5 +1,6 @@
+from __future__ import annotations
 from ctypes import pointer
-from typing import Tuple, Dict, Optional, Any, List, Union
+from typing import Tuple, Dict, Optional, Any, List, Union, TYPE_CHECKING
 
 import numpy as np
 
@@ -14,9 +15,12 @@ from ..runtime import (
     cl_mem_flags,
     CL_CONTEXT_NOTIFY_CALLBACK
 )
-from .clobject import CLObject
+
+if TYPE_CHECKING:
+    from .platform import Platform
+
 from .device import Device
-from .platform import Platform
+from .clobject import CLObject
 from .program import Program
 from .build_options import BuildOptions
 from .kernel_parser import KernelParser

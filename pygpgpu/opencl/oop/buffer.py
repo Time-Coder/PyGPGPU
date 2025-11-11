@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 class Buffer(CLObject):
 
     def __init__(self, context:Context, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None, auto_share:bool=True):
+        
         error_code = cl_int(0)
 
         data = data_or_size
@@ -39,12 +40,11 @@ class Buffer(CLObject):
             size = len(data)
             host_ptr = (ctypes.c_ubyte * size).from_buffer(data)
         elif isinstance(data, np.ndarray):
-            used_data = data
-            if not used_data.flags['C_CONTIGUOUS']:
-                used_data = np.ascontiguousarray(used_data)
+            if not data.flags['C_CONTIGUOUS']:
+                data = np.ascontiguousarray(data)
 
-            host_ptr = used_data.ctypes.data_as(c_void_p)
-            size = used_data.nbytes
+            host_ptr = data.ctypes.data_as(c_void_p)
+            size = data.nbytes
 
         if flags is None:
             flags = cl_mem_flags.CL_MEM_READ_WRITE
@@ -56,7 +56,6 @@ class Buffer(CLObject):
                 flags = (flags & ~cl_mem_flags.CL_MEM_USE_HOST_PTR) | cl_mem_flags.CL_MEM_COPY_HOST_PTR
 
         buffer_id:cl_mem = CL.clCreateBuffer(context.id, flags, size, host_ptr, pointer(error_code))
-
         self._context:Context = context
         self._flags:cl_mem_flags = flags
         self._size:int = size
@@ -64,15 +63,23 @@ class Buffer(CLObject):
         self._data:Union[bytes, bytearray, np.ndarray, None] = data
         CLObject.__init__(self, buffer_id)
 
-    def write(self, offset:int, data:bytes, cmd_queue:CommandQueue):
-        size = len(data)
-        ptr = ctypes.cast(data, ctypes.c_void_p)
-        CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, True, offset, size, ptr, 0, None, None)
+    def write(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None):
+        if size is None:
+            size = self._size
 
-    def read(self, offset:int, size:int, cmd_queue:CommandQueue)->bytes:
-        result = (c_ubyte * size)()
-        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, result, 0, None, None)
-        return result.raw
+        if host_ptr is None:
+            host_ptr = self._host_ptr
+
+        CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, 0, None, None)
+
+    def read(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None):
+        if size is None:
+            size = self._size
+
+        if host_ptr is None:
+            host_ptr = self._host_ptr
+
+        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, 0, None, None)
 
     @property
     def context(self)->Context:

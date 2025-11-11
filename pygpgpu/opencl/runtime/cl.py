@@ -3,7 +3,7 @@ import ctypes
 import os
 import platform
 from typing import Dict, Callable
-from ctypes import c_int
+from ctypes import c_int, c_void_p
 
 from .clinfo import CLInfo
 from .cltypes import ErrorCode
@@ -94,6 +94,8 @@ class CL(metaclass=MetaCL):
                     error_code = return_value
                 except:
                     pass
+            elif func_info["restype"] == c_void_p:
+                return_value = c_void_p(return_value)
             
             if CL.print_call:
                 print(f"->{return_value}", flush=True)

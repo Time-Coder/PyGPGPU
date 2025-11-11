@@ -163,7 +163,7 @@ class CLInfo:
         'double4': double4,
         'double8': double8,
         'double16': double16,
-    },
+    }
 
     func_signatures = {
         # cl_int clGetPlatformInfo(

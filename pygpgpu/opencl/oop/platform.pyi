@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p
-from typing import List, TYPE_CHECKING, Iterator, Tuple
+from typing import List, TYPE_CHECKING, Iterator, Tuple, Optional, Dict, Any
 
 from ..runtime import (
     cl_version,
@@ -17,9 +17,37 @@ from ..runtime import (
 
 if TYPE_CHECKING:
     from .device import Device
+    from .program import Program
 
 
 class Platform:
+
+    def compile(self,
+        file_name:str,
+        includes:Optional[List[str]] = None,
+        defines:Optional[Dict[str, Any]] = None,
+        single_precision_constant:bool=False,
+        denorms_are_zero:bool=False,
+        fp32_correctly_rounded_divide_sqrt:bool=False,
+        opt_disable:bool=False,
+        strict_aliasing:bool=False,
+        uniform_work_group_size:bool=False,
+        no_subgroup_ifp:bool=False,
+        mad_enable:bool=False,
+        no_signed_zeros:bool=False,
+        unsafe_math_optimizations:bool=False,
+        finite_math_only:bool=False,
+        fast_relaxed_math:bool=False,
+        w:bool=False,
+        Werror:bool=False,
+        cl_std:Optional[float]=None,
+        kernel_arg_info:bool=False,
+        g:bool=False,
+        create_library:bool=False,
+        enable_link_options:bool=False,
+        x_spir:bool=False,
+        spir_std:Optional[float]=None
+    )->Program: ...
 
     @property
     def id(self)->c_void_p: ...

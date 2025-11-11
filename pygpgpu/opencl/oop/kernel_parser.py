@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
 @dataclass
 class ArgInfo:
-
     name: str
     type_str: str
     address_qualifier: cl_kernel_arg_address_qualifier
@@ -33,12 +32,11 @@ class ArgInfo:
     buffer: Optional[Buffer] = None
 
 
-@dataclass
 class KernelInfo:
 
-    name: str
-    args: Dict[str, ArgInfo] = {}
-
+    def __init__(self, name:str):
+        self.name: str = name
+        self.args: Dict[str, ArgInfo] = {}
 
 
 class KernelParser:

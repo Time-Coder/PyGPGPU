@@ -114,6 +114,25 @@ class Kernel(CLObject):
         CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, None)
         cmd_queue.wait()
 
+        for arg_info in self._arg_list:
+            if (
+                arg_info.buffer is not None and (
+                    (arg_info.buffer.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) or
+                    (arg_info.buffer.flags & cl_mem_flags.CL_MEM_READ_WRITE)
+                ) and not (arg_info.buffer.flags & cl_mem_flags.CL_MEM_READ_ONLY) and
+                arg_info.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY and
+                arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL and
+                not (arg_info.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST)
+            ):
+                if arg_info.buffer.flags & cl_mem_flags.CL_MEM_COPY_HOST_PTR:
+                    arg_info.buffer.read(cmd_queue)
+
+                if arg_info.value is not arg_info.buffer.data:
+                    if isinstance(arg_info.value, list):
+                        arg_info.value[:] = arg_info.buffer.data.tolist()
+                    else:
+                        arg_info.value[:] = arg_info.buffer.data
+
     def __check_args(self, args, kwargs)->Dict[str, Any]:
         for key in kwargs:
             if key not in self._args:
@@ -179,7 +198,6 @@ class Kernel(CLObject):
         if len(max_shape) > 3:
             max_shape = (math.prod(max_shape),)
 
-        work_dim:int = len(max_shape)
         total_local_size:int = 256
         if self._used_device.type == cl_device_type.CL_DEVICE_TYPE_GPU:
             if "nvidia" in self._used_device.vendor.lower():
@@ -216,7 +234,7 @@ class Kernel(CLObject):
             arg_type = CLInfo.basic_types[arg_type_str]
             used_value = (value if isinstance(value, arg_type) else arg_type(value))
             CL.clSetKernelArg(self.id, index, sizeof(used_value), value_ptr(used_value))
-            arg_info.value = used_value
+            arg_info.value = value
         elif is_ptr and content_type_str in CLInfo.basic_types:
             content_type = CLInfo.basic_types[content_type_str]
             if arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_LOCAL:
@@ -245,7 +263,7 @@ class Kernel(CLObject):
 
                 if not used_value.flags['C_CONTIGUOUS']:
                     used_value = np.ascontiguousarray(used_value)
-
+                
                 if (
                     arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_CONSTANT or
                     arg_info.access_qualifier == cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY or
@@ -256,7 +274,7 @@ class Kernel(CLObject):
                     flags = cl_mem_flags.CL_MEM_READ_WRITE
 
                 buffer = self.context.create_buffer(used_value, flags)
-                CL.clSetKernelArg(self.id, index, sizeof(cl_mem), buffer.id)
+                CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
                 arg_info.value = value
                 arg_info.buffer = buffer
         

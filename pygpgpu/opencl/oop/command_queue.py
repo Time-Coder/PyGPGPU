@@ -1,3 +1,4 @@
+from __future__ import annotations
 from ctypes import pointer
 from typing import TYPE_CHECKING, Dict
 

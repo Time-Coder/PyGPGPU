@@ -1,16 +1,11 @@
-# from pygpgpu.opencl.oop import Platforms, Context
-# from pygpgpu.opencl.runtime import CL, cl_kernel_arg_type_qualifier
+from pygpgpu.opencl.oop import Platforms, Context
+from pygpgpu.opencl.runtime import CL, cl_kernel_arg_type_qualifier, CLInfo
 
-# context = Platforms[0].devices[0].create_context()
-# program = context.compile("test.cl")
-# print(program.test_kernel)
+import numpy as np
 
-# from pygpgpu.opencl import char2, short2, int2, long2, float2, int3, sizeof
+CL.print_call = True
 
-# a = int3()
-# print(sizeof(a))
-
-import math
-from typing import Tuple, List
-
-
+program = Platforms[0].compile("test.cl")
+a = np.zeros((100,), dtype=np.int32)
+program.test_kernel(a, 100)
+print(a)
