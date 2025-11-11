@@ -5,7 +5,12 @@
 # program = context.compile("test.cl")
 # print(program.test_kernel)
 
-from pygpgpu.opencl import char2, short2, int2, long2, float2, int3, sizeof
+# from pygpgpu.opencl import char2, short2, int2, long2, float2, int3, sizeof
 
-a = int3()
-print(sizeof(a))
+# a = int3()
+# print(sizeof(a))
+
+def test(a, b, c, d):
+    print(a, b, c, d)
+
+test(a=1,d=3)

@@ -19,7 +19,7 @@ from ..runtime import (
     cl_program,
     cl_kernel
 )
-from .kernel_parser import KernelParser
+from .kernel_parser import KernelParser, KernelInfo
 from .kernel import Kernel
 from ...exceptions import CompileError, CompileWarning
 from ...utils import save_bin, load_bin, modify_time
@@ -54,7 +54,7 @@ class Program(CLObject):
     def _create_with_source(self)->cl_program:
         source_len:int = c_size_t(len(self._kernel_parser.clean_code))
         error_code = cl_int(0)
-        source = (c_char_p * 1)(self._kernel_parser._clean_code.encode("utf-8"))
+        source = (c_char_p * 1)(self._kernel_parser.clean_code.encode("utf-8"))
         program_id = CL.clCreateProgramWithSource(self.context.id, cl_uint(1), source, pointer(source_len), pointer(error_code))
         CLObject.__init__(self, program_id)
         self._build(True)
@@ -102,7 +102,7 @@ class Program(CLObject):
     def _build(self, save:bool):
         try:
             if CL.print_info:
-                print(f"building {self._kernel_parser._base_name} ... ", end="", flush=True)
+                print(f"building {self._kernel_parser.base_name} ... ", end="", flush=True)
 
             error_code = CL.clBuildProgram(self.id, self.n_devices, self.device_ids, self._kernel_parser.options_ptr, None, None)
             success = (error_code == ErrorCode.CL_SUCCESS)
@@ -196,27 +196,27 @@ class Program(CLObject):
     
     @property
     def file_name(self)->str:
-        return self._kernel_parser._file_name
+        return self._kernel_parser.file_name
     
     @property
     def base_name(self)->str:
-        return self._kernel_parser._base_name
+        return self._kernel_parser.base_name
     
     @property
     def includes(self)->List[str]:
-        return self._kernel_parser._includes
+        return self._kernel_parser.includes
     
     @property
     def defines(self)->Dict[str, Any]:
-        return self._kernel_parser._defines
+        return self._kernel_parser.defines
     
     @property
     def options(self)->BuildOptions:
-        return self._kernel_parser._options
+        return self._kernel_parser.options
     
     @property
     def options_ptr(self)->c_char_p:
-        return self._kernel_parser._options_ptr
+        return self._kernel_parser.options_ptr
     
     @property
     def clean_code(self)->str:
@@ -224,15 +224,15 @@ class Program(CLObject):
 
     @property
     def line_map(self)->Dict[int, str]:
-        return self._kernel_parser._line_map
+        return self._kernel_parser.line_map
     
     @property
     def related_files(self)->Set[str]:
-        return self._kernel_parser._related_files
+        return self._kernel_parser.related_files
     
     @property
-    def kernel_infos(self)->Dict[str, Dict[str, Any]]:
-        return self._kernel_parser._kernel_infos
+    def kernel_infos(self)->Dict[str, KernelInfo]:
+        return self._kernel_parser.kernel_infos
     
     @property
     def kernel_names(self)->List[str]:
@@ -255,7 +255,7 @@ class Program(CLObject):
         CL.clCreateKernelsInProgram(self.id, self.n_kernels, kernel_ids, None)
         for kernel_id in kernel_ids:
             kernel = Kernel(kernel_id, self)
-            kernel.args = self.kernel_infos[kernel.name]["args"]
+            kernel.args = self.kernel_infos[kernel.name].args
             self._kernels[kernel.name] = kernel
 
     def __getattr__(self, name:str):

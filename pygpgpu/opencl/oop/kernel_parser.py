@@ -1,9 +1,11 @@
+from __future__ import annotations
 import re
 import os
 import copy
 import json
+from dataclasses import dataclass
 from ctypes import c_char_p
-from typing import Optional, Dict, Any, List, Set, Union, Iterator
+from typing import Optional, Dict, Any, List, Set, Union, Iterator, TYPE_CHECKING
 
 from ...kernel_parser import CPreprocessor
 from ..runtime import (
@@ -14,6 +16,29 @@ from ..runtime import (
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
+
+if TYPE_CHECKING:
+    from .buffer import Buffer
+
+
+@dataclass
+class ArgInfo:
+
+    name: str
+    type_str: str
+    address_qualifier: cl_kernel_arg_address_qualifier
+    access_qualifier: cl_kernel_arg_access_qualifier
+    type_qualifiers: cl_kernel_arg_type_qualifier
+    value: Any = None
+    buffer: Optional[Buffer] = None
+
+
+@dataclass
+class KernelInfo:
+
+    name: str
+    args: Dict[str, ArgInfo] = {}
+
 
 
 class KernelParser:
@@ -33,7 +58,7 @@ class KernelParser:
         self._options_ptr:c_char_p = c_char_p(str(self._options).encode("utf-8"))
         self._line_map:Dict[int, str] = {}
         self._related_files:Set[str] = set()
-        self._kernel_infos:Dict[str, Dict[str, Any]] = {}
+        self._kernel_infos:Dict[str, KernelInfo] = {}
 
     def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
         self._file_name:str = file_name
@@ -142,7 +167,7 @@ class KernelParser:
         return self._related_files
     
     @property
-    def kernel_infos(self)->Dict[str, Dict[str, Any]]:
+    def kernel_infos(self)->Dict[str, KernelInfo]:
         return self._kernel_infos
 
     def _preprocess(self, file_name:str, includes:List[str], defines:Dict[str, Any]):
@@ -157,9 +182,7 @@ class KernelParser:
         kernel_matches:List[re.Match] = self._find_kernel_defs(self._clean_code)
         for kernel_match in kernel_matches:
             kernel_name:str = kernel_match.group(1)
-            self._kernel_infos[kernel_name] = {}
-            self._kernel_infos[kernel_name]["name"] = kernel_name
-            self._kernel_infos[kernel_name]["args"] = {}
+            self._kernel_infos[kernel_name] = KernelInfo(name=kernel_name)
 
             args_str:str = kernel_match.group(2)
             args_items:List[str] = args_str.split(",")
@@ -170,13 +193,13 @@ class KernelParser:
                 type_qualifiers = self._find_type_qualifiers(arg_item)
                 arg_name:str = self._find_arg_name(arg_item)
                 arg_type:str = self._find_arg_type(arg_item)
-                self._kernel_infos[kernel_name]["args"][arg_name] = {
-                    "name": arg_name,
-                    "type": arg_type,
-                    "address_qualifier": address_qualifier,
-                    "access_qualifier": access_qualifier,
-                    "type_qualifiers": type_qualifiers
-                }
+                self._kernel_infos[kernel_name].args[arg_name] = ArgInfo(
+                    name=arg_name,
+                    type_str=arg_type,
+                    address_qualifier=address_qualifier,
+                    access_qualifier=access_qualifier,
+                    type_qualifiers=type_qualifiers
+                )
     
     @property
     def _cache_folder(self)->str:

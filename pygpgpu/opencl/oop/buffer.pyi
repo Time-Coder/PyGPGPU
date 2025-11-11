@@ -13,9 +13,14 @@ from ..runtime import (
     cl_mem_properties
 )
 from .clobject import CLObject
+from .command_queue import CommandQueue
 
 
 class Buffer(CLObject):
+
+    def write(self, offset:int, data:bytes, cmd_queue:CommandQueue)->None: ...
+
+    def read(self, offset:int, size:int, cmd_queue:CommandQueue)->bytes: ...
 
     @property
     def context(self)->Context: ...

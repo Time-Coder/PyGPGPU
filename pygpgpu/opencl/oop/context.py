@@ -1,5 +1,7 @@
 from ctypes import pointer
-from typing import Tuple, Dict, Optional, Any, List
+from typing import Tuple, Dict, Optional, Any, List, Union
+
+import numpy as np
 
 from ..runtime import (
     cl_device_id,
@@ -9,6 +11,7 @@ from ..runtime import (
     IntEnum,
     cl_context,
     cl_context_info,
+    cl_mem_flags,
     CL_CONTEXT_NOTIFY_CALLBACK
 )
 from .clobject import CLObject
@@ -17,6 +20,8 @@ from .platform import Platform
 from .program import Program
 from .build_options import BuildOptions
 from .kernel_parser import KernelParser
+from .buffer import Buffer
+from .command_queue import CommandQueue
 
 
 class Context(CLObject):
@@ -39,6 +44,8 @@ class Context(CLObject):
         self._platform:Platform = platform
         self._devices:Tuple[Device] = devices
         self._programs:Dict[str, Program] = {}
+        self._default_command_queues:Dict[Device, CommandQueue] = {}
+
         n_devices = len(self._devices)
         self._devices_ids = (cl_device_id * n_devices)()
         for i in range(n_devices):
@@ -80,6 +87,20 @@ class Context(CLObject):
     def platform(self)->Platform:
         return self._platform
     
+    def default_cmd_queue(self, device:Device)->CommandQueue:
+        if device in self._default_command_queues:
+            return self._default_command_queues[device]
+
+        if device not in self.devices:
+            raise KeyError(str(device))
+        
+        cmd_queue = CommandQueue(self, device)
+        self._default_command_queues[device] = cmd_queue
+        return cmd_queue
+
+    def create_buffer(self, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None, auto_share:bool=True)->Buffer:
+        return Buffer(self, data_or_size, flags, auto_share)
+
     def compile(self,
         file_name:str,
         includes:Optional[List[str]] = None,

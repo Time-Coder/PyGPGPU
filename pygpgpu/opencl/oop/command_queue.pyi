@@ -14,6 +14,8 @@ from .clobject import CLObject
 
 class CommandQueue(CLObject):
 
+    def wait(self)->None: ...
+
     @property
     def context(self)->Context: ...
     

@@ -31,6 +31,9 @@ class CommandQueue(CLObject):
 
         CLObject.__init__(self, cmd_queue_id)
 
+    def wait(self):
+        CL.clFinish(self.id)
+
     @property
     def context(self)->Context:
         return self._context
