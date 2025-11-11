@@ -3,7 +3,7 @@ import re
 import os
 import pickle
 from charset_normalizer import from_path
-from typing import Union, Any
+from typing import Union, Any, Tuple
 
 import numpy as np
 
@@ -97,3 +97,97 @@ def sanitize_filename(filename: str, max_length: int = 255) -> str:
 
 def complete_basename(file_name:str):
     return '.'.join(os.path.basename(file_name).split('.')[:-1])
+
+def detect_work_size(total_size: int, shape: Tuple[int, ...]) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    local_size = detect_local_size(total_size, shape)
+    global_size = detect_global_size(local_size, shape)
+    return global_size, local_size
+
+def detect_global_size(local_size:Tuple[int, ...], shape: Tuple[int, ...]):
+    global_ws = []
+    for s, l in zip(shape, local_size):
+        if l == 0:
+            raise ValueError("Local size cannot be zero.")
+        g = ((s + l - 1) // l) * l
+        global_ws.append(g)
+
+    return tuple(global_ws)
+
+def detect_local_size(total_size: int, shape: Tuple[int, ...]) -> Tuple[int, ...]:
+    ndim = len(shape)
+    
+    if ndim == 1:
+        l = min(total_size, shape[0])
+        l = 1 << (l.bit_length() - 1)
+        return (l,)
+    
+    if ndim == 2:
+        w, h = shape
+        exp_total = total_size.bit_length() - 1
+        if (1 << exp_total) != total_size:
+            raise ValueError("total_size must be a power of two")
+        
+        candidates = []
+        for ex in range(exp_total + 1):
+            ey = exp_total - ex
+            lx, ly = 1 << ex, 1 << ey
+            if lx <= w and ly <= h:
+                candidates.append((lx, ly))
+        
+        if not candidates:
+            best_prod = 0
+            best_pair = None
+            for ex in range(10):
+                for ey in range(10):
+                    lx, ly = 1 << ex, 1 << ey
+                    if lx <= w and ly <= h:
+                        prod = lx * ly
+                        if prod <= total_size and prod > best_prod:
+                            best_prod = prod
+                            best_pair = (lx, ly)
+            if best_pair:
+                return best_pair
+            else:
+                raise ValueError(f"No valid local size for {shape}, {total_size}")
+        
+        def score(pair):
+            lx, ly = pair
+            ratio_x = lx / w
+            ratio_y = ly / h
+            imbalance = abs(ratio_x - ratio_y)
+            penalty = 0
+            if lx < 8: penalty += 10
+            if ly < 8: penalty += 10
+            return imbalance + penalty
+        
+        best = min(candidates, key=score)
+        return best
+    
+    if ndim == 3:
+        w, h, d = shape
+        exp_total = total_size.bit_length() - 1
+        if (1 << exp_total) != total_size:
+            raise ValueError("total_size must be a power of two")
+        
+        candidates = []
+        for ex in range(exp_total + 1):
+            for ey in range(exp_total - ex + 1):
+                ez = exp_total - ex - ey
+                lx, ly, lz = 1 << ex, 1 << ey, 1 << ez
+                if lx <= w and ly <= h and lz <= d:
+                    candidates.append((lx, ly, lz))
+        
+        if not candidates:
+            raise ValueError(f"No valid 3D local size for {shape}, {total_size}")
+        
+        def score(triple):
+            lx, ly, lz = triple
+            rx, ry, rz = lx / w, ly / h, lz / d
+            avg = (rx + ry + rz) / 3
+            var = (rx - avg)**2 + (ry - avg)**2 + (rz - avg)**2
+            penalty = sum(10 for x in triple if x < 8)
+            return var + penalty
+        
+        return min(candidates, key=score)
+    
+    raise NotImplementedError("Only 1D/2D/3D supported")

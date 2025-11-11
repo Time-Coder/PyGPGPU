@@ -10,7 +10,7 @@
 # a = int3()
 # print(sizeof(a))
 
-def test(a, b, c, d):
-    print(a, b, c, d)
+import math
+from typing import Tuple, List
 
-test(a=1,d=3)
+

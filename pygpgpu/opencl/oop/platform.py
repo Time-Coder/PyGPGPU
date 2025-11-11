@@ -1,5 +1,5 @@
 from ctypes import pointer
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Any
 
 from ..runtime import (
     CL, CLInfo, IntEnum,
@@ -12,6 +12,8 @@ from ..runtime import (
 
 from .clobject import CLObject
 from .device import Device
+from .context import Context
+from .program import Program
 
 
 class Platform(CLObject):
@@ -20,6 +22,7 @@ class Platform(CLObject):
         CLObject.__init__(self, id)
         self.__n_devices:int = 0
         self.__devices:Tuple[Device] = ()
+        self.__default_context:Optional[Context] = None
     
     @property
     def extensions(self)->List[str]:
@@ -51,6 +54,64 @@ class Platform(CLObject):
     def devices(self)->Tuple[Device]:
         self.__fetch_devices()
         return self.__devices
+    
+    @property
+    def default_context(self)->Context:
+        if self.__default_context is None:
+            self.__default_context = Context(*self.devices)
+
+        return self.__default_context
+    
+    def compile(self,
+        file_name:str,
+        includes:Optional[List[str]] = None,
+        defines:Optional[Dict[str, Any]] = None,
+        single_precision_constant:bool=False,
+        denorms_are_zero:bool=False,
+        fp32_correctly_rounded_divide_sqrt:bool=False,
+        opt_disable:bool=False,
+        strict_aliasing:bool=False,
+        uniform_work_group_size:bool=False,
+        no_subgroup_ifp:bool=False,
+        mad_enable:bool=False,
+        no_signed_zeros:bool=False,
+        unsafe_math_optimizations:bool=False,
+        finite_math_only:bool=False,
+        fast_relaxed_math:bool=False,
+        w:bool=False,
+        Werror:bool=False,
+        cl_std:Optional[float]=None,
+        kernel_arg_info:bool=False,
+        g:bool=False,
+        create_library:bool=False,
+        enable_link_options:bool=False,
+        x_spir:bool=False,
+        spir_std:Optional[float]=None
+    )->Program:
+        return self.default_context.compile(
+            file_name, includes, defines,
+            single_precision_constant,
+            denorms_are_zero,
+            fp32_correctly_rounded_divide_sqrt,
+            opt_disable,
+            strict_aliasing,
+            uniform_work_group_size,
+            no_subgroup_ifp,
+            mad_enable,
+            no_signed_zeros,
+            unsafe_math_optimizations,
+            finite_math_only,
+            fast_relaxed_math,
+            w,
+            Werror,
+            cl_std,
+            kernel_arg_info,
+            g,
+            create_library,
+            enable_link_options,
+            x_spir,
+            spir_std
+        )
     
     @property
     def _prefix(self)->str:

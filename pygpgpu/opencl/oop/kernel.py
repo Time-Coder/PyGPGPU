@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 from ctypes import c_size_t, pointer
 from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional
 
@@ -14,11 +15,13 @@ from ..runtime import (
     cl_kernel_arg_type_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_mem_flags,
-    cl_mem
+    cl_mem,
+    cl_device_type
 )
 from .clobject import CLObject
 from .kernel_parser import ArgInfo
 from ...vectorization import sizeof, value_ptr
+from ...utils import detect_work_size
 
 if TYPE_CHECKING:
     from .program import Program
@@ -40,14 +43,25 @@ class Kernel(CLObject):
         self._local_work_size:Optional[Tuple[int]] = None
 
     def __getitem__(self, work_sizes:Tuple[Union[int, Tuple[int]]])->Kernel:
-        if len(work_sizes) < 2:
-            raise ValueError("local_work_size is not given")
-        
-        global_work_size = work_sizes[0]
-        local_work_size = work_sizes[1]
-        device = self._program.context.devices[0]
-        if len(work_sizes) >= 3:
+        if not isinstance(work_sizes, tuple):
+            work_sizes = (work_sizes,)
+
+        if len(work_sizes) == 0:
+            raise TypeError("Kernel.__getitem__ takes at least 1 argument, 0 were given")
+        elif len(work_sizes) == 1:
+            global_work_size = None
+            local_work_size = None
+            device = work_sizes[0]
+        elif len(work_sizes) == 2:
+            global_work_size = work_sizes[0]
+            local_work_size = work_sizes[1]
+            device = self._program.context.devices[0]
+        elif len(work_sizes) == 3:
+            global_work_size = work_sizes[0]
+            local_work_size = work_sizes[1]
             device = work_sizes[2]
+        else:
+            raise TypeError(f"Kernel.__getitem__ takes at most 3 argument, {len(work_sizes)} were given")
         
         if isinstance(global_work_size, int):
             global_work_size = (global_work_size,)
@@ -55,15 +69,16 @@ class Kernel(CLObject):
         if isinstance(local_work_size, int):
             local_work_size = (local_work_size,)
 
-        work_dim = len(global_work_size)
-        if work_dim > 3:
-            raise ValueError("dimension over 3 is not supported")
-        
-        if work_dim <= 0:
-            raise ValueError("dimension should be at least 1")
-        
-        if work_dim != len(local_work_size):
-            raise ValueError(f"global_work_size={global_work_size} and local_work_size={local_work_size} do not have same dimension")
+        if global_work_size is not None and local_work_size is not None:
+            work_dim = len(global_work_size)
+            if work_dim > 3:
+                raise ValueError("dimension over 3 is not supported")
+            
+            if work_dim <= 0:
+                raise ValueError("dimension should be at least 1")
+            
+            if work_dim != len(local_work_size):
+                raise ValueError(f"global_work_size={global_work_size} and local_work_size={local_work_size} do not have same dimension")
         
         self._used_device = device
         self._global_work_size = global_work_size
@@ -73,13 +88,10 @@ class Kernel(CLObject):
 
     def __call__(self, *args, **kwargs)->None:
         used_device = self._used_device
-        work_dim = self._work_dim
         global_work_size = self._global_work_size
         local_work_size = self._local_work_size
-        cmd_queue = self.context.default_cmd_queue(used_device)
 
         self._used_device = None
-        self._work_dim = 0
         self._global_work_size = None
         self._local_work_size = None
 
@@ -87,13 +99,20 @@ class Kernel(CLObject):
         for key, value in used_kwargs.items():
             self._set_arg(key, value)
 
+        if global_work_size is None or local_work_size is None:
+            global_work_size, local_work_size = self.__detect_work_size()
+
+        if used_device is None:
+            used_device = self._program.context.devices[0]
+
+        cmd_queue = self.context.default_cmd_queue(used_device)
+
+        work_dim = len(global_work_size)
+
         global_work_size = (c_size_t * work_dim)(*global_work_size)
         local_work_size = (c_size_t * work_dim)(*local_work_size)
         CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, None)
         cmd_queue.wait()
-        
-    def __launch_info(self):
-        pass
 
     def __check_args(self, args, kwargs)->Dict[str, Any]:
         for key in kwargs:
@@ -141,6 +160,39 @@ class Kernel(CLObject):
             return ' and '.join(items)
         
         return ', '.join(items[:-1]) + ', and ' + items[-1]
+    
+    def __detect_work_size(self):
+        max_shape = None
+        for arg in self._arg_list:
+            if arg.buffer is not None and ((arg.buffer.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) or (arg.buffer.flags & cl_mem_flags.CL_MEM_READ_WRITE)) and not (arg.buffer.flags & cl_mem_flags.CL_MEM_READ_ONLY):
+                arg_shape = arg.buffer.data.shape
+                if max_shape is None:
+                    max_shape = arg_shape
+                elif len(arg_shape) > len(max_shape):
+                    max_shape = arg_shape
+                elif len(arg_shape) == len(max_shape):
+                    for n1, n2 in zip(arg_shape, max_shape):
+                        if n1 > n2:
+                            max_shape = arg_shape
+                            break
+
+        if len(max_shape) > 3:
+            max_shape = (math.prod(max_shape),)
+
+        work_dim:int = len(max_shape)
+        total_local_size:int = 256
+        if self._used_device.type == cl_device_type.CL_DEVICE_TYPE_GPU:
+            if "nvidia" in self._used_device.vendor.lower():
+                total_local_size:int = 128
+            elif "amd" in self._used_device.vendor.lower():
+                total_local_size:int = 256
+            elif "intel" in self._used_device.vendor.lower():
+                total_local_size:int = 64
+        elif self._used_device.type == cl_device_type.CL_DEVICE_TYPE_CPU:
+            total_local_size:int = 64
+
+        global_work_size, local_work_size = detect_work_size(total_local_size, max_shape)
+        return global_work_size, local_work_size
 
     def _set_arg(self, index_or_name:Union[int, str], value:Any):
         if isinstance(index_or_name, int):
