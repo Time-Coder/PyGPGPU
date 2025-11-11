@@ -3,33 +3,91 @@ import re
 import os
 import copy
 import json
+import numpy as np
+from collections import defaultdict
 from dataclasses import dataclass
-from ctypes import c_char_p
-from typing import Optional, Dict, Any, List, Set, Union, Iterator, TYPE_CHECKING
+from ctypes import c_char_p, c_void_p
+from typing import Optional, Dict, Any, List, Set, Union, Iterator, TYPE_CHECKING, Tuple
 
 from ...kernel_parser import CPreprocessor
 from ..runtime import (
     CL,
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
-    cl_kernel_arg_type_qualifier
+    cl_kernel_arg_type_qualifier,
+    cl_mem_flags
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
 
 if TYPE_CHECKING:
     from .buffer import Buffer
+    from .command_queue import CommandQueue
 
 
-@dataclass
 class ArgInfo:
-    name: str
-    type_str: str
-    address_qualifier: cl_kernel_arg_address_qualifier
-    access_qualifier: cl_kernel_arg_access_qualifier
-    type_qualifiers: cl_kernel_arg_type_qualifier
-    value: Any = None
-    buffer: Optional[Buffer] = None
+
+    def __init__(self, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+        self.name = name
+        self.type_str = type_str
+        self.address_qualifier = address_qualifier
+        self.access_qualifier = access_qualifier
+        self.type_qualifiers = type_qualifiers
+        self.value: Any = None
+        self.buffer: Optional[Buffer] = None
+        self.__buffers: Dict[Tuple[int, cl_mem_flags], List[Buffer]] = defaultdict(list)
+        self.__busy_buffers: Set[Buffer] = set()
+
+    @property
+    def is_ptr(self)->bool:
+        return (self.type_str[-1] == "*")
+    
+    @property
+    def base_type_str(self)->str:
+        return (self.type_str[:-1] if self.is_ptr else self.type_str)
+    
+    @property
+    def need_read_back(self)->bool:
+        return (
+            self.is_ptr and
+            self.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL and
+            self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY and
+            not (self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST)
+        )
+    
+    @property
+    def readonly(self)->bool:
+        return (
+            self.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_CONSTANT or
+            self.access_qualifier == cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY or
+            self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST
+        )
+
+    def use_buffer(self, data:np.ndarray, cmd_queue:CommandQueue):
+        if self.readonly:
+            flags = cl_mem_flags.CL_MEM_READ_ONLY
+        else:
+            flags = cl_mem_flags.CL_MEM_READ_WRITE
+
+        buffer_key = (data.nbytes, flags)
+
+        used_buffer = None
+        for buffer in self.__buffers[buffer_key]:
+            if buffer not in self.__busy_buffers:
+                used_buffer = buffer
+                break
+
+        if used_buffer is None:
+            used_buffer = cmd_queue.context.create_buffer(data, flags)
+            self.__buffers[buffer_key].append(used_buffer)
+        else:
+            used_buffer.set_data(data, cmd_queue)
+
+        self.__busy_buffers.add(used_buffer)
+        return used_buffer
+    
+    def unuse_buffer(self, buffer:Buffer):
+        self.__busy_buffers.remove(buffer)
 
 
 class KernelInfo:

@@ -76,7 +76,11 @@ from .cltypes import (
     cl_mem_info,
     cl_mem_object_type,
     cl_event,
+    cl_event_info,
+    cl_command_execution_status,
+    cl_command_type,
     ptr_cl_event,
     CL_CONTEXT_NOTIFY_CALLBACK,
-    CL_BULD_PROGRAM_CALLBACK
+    CL_BULD_PROGRAM_CALLBACK,
+    CL_EVENT_NOTIFY_CALLBACK
 )

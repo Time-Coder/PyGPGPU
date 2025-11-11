@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p, sizeof, _SimpleCData, LittleEndianStructure, c_size_t, pointer, c_char
-from typing import Dict, Any, get_args, Optional
+from typing import Dict, Any, get_args
 from abc import ABC, abstractmethod
 import weakref
 
@@ -11,6 +11,9 @@ from ..runtime import CL, IntEnum, IntFlag, cl_bool, cl_uint
 class CLObject(ABC):
 
     def __init__(self, id:c_void_p):
+        if isinstance(id, int):
+            id = c_void_p(id)
+            
         self._id = id
         self._info:Dict[str, Any] = {}
         self._finalizer = weakref.finalize(self, self._release, self._id)

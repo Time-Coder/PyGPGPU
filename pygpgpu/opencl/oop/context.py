@@ -48,7 +48,6 @@ class Context(CLObject):
         self._platform:Platform = platform
         self._devices:Tuple[Device] = devices
         self._programs:Dict[str, Program] = {}
-        self._default_command_queues:Dict[Device, CommandQueue] = {}
 
         n_devices = len(self._devices)
         self._devices_ids = (cl_device_id * n_devices)()
@@ -91,16 +90,11 @@ class Context(CLObject):
     def platform(self)->Platform:
         return self._platform
     
-    def default_cmd_queue(self, device:Device)->CommandQueue:
-        if device in self._default_command_queues:
-            return self._default_command_queues[device]
-
+    def create_command_queue(self, device:Device)->CommandQueue:
         if device not in self.devices:
-            raise KeyError(str(device))
+            raise KeyError(device)
         
-        cmd_queue = CommandQueue(self, device)
-        self._default_command_queues[device] = cmd_queue
-        return cmd_queue
+        return CommandQueue(self, device)
 
     def create_buffer(self, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None, auto_share:bool=True)->Buffer:
         return Buffer(self, data_or_size, flags, auto_share)

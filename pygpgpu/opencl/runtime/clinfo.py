@@ -66,8 +66,12 @@ from .cltypes import (
     cl_command_queue_info,
     cl_queue_properties,
     cl_mem_info,
+    cl_event_info,
+    cl_command_type,
+    cl_command_execution_status,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK,
+    CL_EVENT_NOTIFY_CALLBACK,
     ptr_int64,
     ptr_cl_device_id,
     ptr_cl_int,
@@ -815,7 +819,7 @@ class CLInfo:
             "args": {
                 "command_queue": cl_command_queue,
                 "buffer": cl_mem,
-                "blocking_write": cl_bool,
+                "blocking_write": cl_uint,
                 "offset": c_size_t,
                 "size": c_size_t,
                 "ptr": c_void_p,
@@ -856,7 +860,7 @@ class CLInfo:
             "args": {
                 "command_queue": cl_command_queue,
                 "buffer": cl_mem,
-                "blocking_read": cl_bool,
+                "blocking_read": cl_uint,
                 "offset": c_size_t,
                 "size": c_size_t,
                 "ptr": c_void_p,
@@ -977,6 +981,122 @@ class CLInfo:
                 ErrorCode.CL_INVALID_COMMAND_QUEUE: "command_queue is not a valid host command-queue.",
                 ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clGetEventInfo(
+        #     cl_event event,
+        #     cl_event_info param_name,
+        #     size_t param_value_size,
+        #     void* param_value,
+        #     size_t* param_value_size_ret
+        # );
+        "clGetEventInfo": {
+            "args": {
+                "event": cl_event,
+                "param_name": cl_uint,
+                "param_value_size": c_size_t,
+                "param_value": c_void_p,
+                "param_value_size_ret": ptr_size_t
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_EVENT: "event is a not a valid event object.",
+                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Event Object Queries table and param_value is not NULL.",
+                ErrorCode.CL_INVALID_VALUE: "the information to query given in param_name cannot be queried for event.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clWaitForEvents(
+        #     cl_uint num_events,
+        #     const cl_event* event_list
+        # );
+        "clWaitForEvents": {
+            "args": {
+                "num_events": cl_uint,
+                "event_list": ptr_cl_event
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_VALUE: "num_events is zero or event_list is NULL.",
+                ErrorCode.CL_INVALID_CONTEXT: "events specified in event_list do not belong to the same context.",
+                ErrorCode.CL_INVALID_EVENT: "event objects specified in event_list are not valid event objects.",
+                ErrorCode.CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST: "the execution status of any of the events in event_list is a negative integer value. This error code is missing before version 1.1.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_event clCreateUserEvent(
+        #     cl_context context,
+        #     cl_int* errcode_ret
+        # );
+        "clCreateUserEvent": {
+            "args": {
+                "context": cl_context,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_event,
+            "errors": {
+                ErrorCode.CL_INVALID_CONTEXT: "if context is not a valid context.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "if there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "if there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clSetUserEventStatus(
+        #     cl_event event,
+        #     cl_int execution_status
+        # );
+        "clSetUserEventStatus": {
+            "args": {
+                "event": cl_event,
+                "execution_status": cl_int
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_EVENT: "event is not a valid user event object.",
+                ErrorCode.CL_INVALID_VALUE: "the execution_status is not CL_COMPLETE or a negative integer value.",
+                ErrorCode.CL_INVALID_OPERATION: "the execution_status for event has already been changed by a previous call to clSetUserEventStatus.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clSetEventCallback(
+        #     cl_event event,
+        #     cl_int command_exec_callback_type,
+        #     void (CL_CALLBACK* pfn_notify)(cl_event event, cl_int event_command_status, void *user_data),
+        #     void* user_data
+        # );
+        "clSetEventCallback": {
+            "args": {
+                "event": cl_event,
+                "command_exec_callback_type": cl_int,
+                "pfn_notify": CL_EVENT_NOTIFY_CALLBACK,
+                "user_data": c_void_p
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_EVENT: "event is not a valid event object.",
+                ErrorCode.CL_INVALID_VALUE: "pfn_event_notify is NULL or command_exec_callback_type is not CL_SUBMITTED, CL_RUNNING, or CL_COMPLETE.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_int clReleaseEvent(cl_event event);
+        "clReleaseEvent": {
+            "args": {
+                "event": cl_event
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_EVENT: "if event is not a valid event object.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "if there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "if there is a failure to allocate resources required by the OpenCL implementation on the host."
             }
         }
     }
@@ -1219,4 +1339,12 @@ class CLInfo:
         cl_mem_info.CL_MEM_D3D10_RESOURCE_KHR: c_void_p,
         cl_mem_info.CL_MEM_D3D11_RESOURCE_KHR: c_void_p,
         # cl_mem_info.CL_MEM_DEVICE_ADDRESS_EXT: List[cl_mem_device_address_ext]
+    }
+
+    event_info_types = {
+        cl_event_info.CL_EVENT_COMMAND_QUEUE: cl_command_queue,
+        cl_event_info.CL_EVENT_CONTEXT: cl_context,
+        cl_event_info.CL_EVENT_COMMAND_TYPE: cl_command_type,
+        cl_event_info.CL_EVENT_COMMAND_EXECUTION_STATUS: cl_command_execution_status,
+        cl_event_info.CL_EVENT_REFERENCE_COUNT: cl_uint
     }

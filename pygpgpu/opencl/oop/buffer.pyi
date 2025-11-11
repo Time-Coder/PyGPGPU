@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from ctypes import c_void_p
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Union
+import numpy as np
 
 if TYPE_CHECKING:
     from .context import Context
@@ -21,6 +22,8 @@ class Buffer(CLObject):
     def write(self, offset:int, size:int, host_ptr:c_void_p, cmd_queue:CommandQueue): ...
 
     def read(self, offset:int, size:int, host_ptr:c_void_p, cmd_queue:CommandQueue): ...
+
+    def set_data(self, data:Union[bytes, bytearray, np.ndarray], cmd_queue:CommandQueue): ...
 
     @property
     def context(self)->Context: ...

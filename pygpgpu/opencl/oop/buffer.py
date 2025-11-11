@@ -81,6 +81,27 @@ class Buffer(CLObject):
 
         CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, 0, None, None)
 
+    def set_data(self, data:Union[bytes, bytearray, np.ndarray], cmd_queue:CommandQueue):
+        if isinstance(data, bytes):
+            size = len(data)
+            host_ptr = (ctypes.c_ubyte * size).from_buffer_copy(data)
+        elif isinstance(data, bytearray):
+            size = len(data)
+            host_ptr = (ctypes.c_ubyte * size).from_buffer(data)
+        elif isinstance(data, np.ndarray):
+            if not data.flags['C_CONTIGUOUS']:
+                data = np.ascontiguousarray(data)
+
+            host_ptr = data.ctypes.data_as(c_void_p)
+            size = data.nbytes
+
+        if size != self._size:
+            raise ValueError("data size is not equal to buffer size")
+
+        self.write(cmd_queue, 0, size, host_ptr)
+        self._host_ptr = host_ptr
+        self._data = data
+
     @property
     def context(self)->Context:
         return self._context

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import math
-from ctypes import c_size_t, pointer
+from ctypes import c_size_t, pointer, c_void_p
 from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional
 
 import numpy as np
@@ -20,6 +20,7 @@ from ..runtime import (
 )
 from .clobject import CLObject
 from .kernel_parser import ArgInfo
+from .command_queue import CommandQueue
 from ...vectorization import sizeof, value_ptr
 from ...utils import detect_work_size
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from .program import Program
     from .context import Context
     from .device import Device
+    from .buffer import Buffer
 
 
 class Kernel(CLObject):
@@ -96,42 +98,40 @@ class Kernel(CLObject):
         self._local_work_size = None
 
         used_kwargs = self.__check_args(args, kwargs)
-        for key, value in used_kwargs.items():
-            self._set_arg(key, value)
-
-        if global_work_size is None or local_work_size is None:
-            global_work_size, local_work_size = self.__detect_work_size()
 
         if used_device is None:
             used_device = self._program.context.devices[0]
 
-        cmd_queue = self.context.default_cmd_queue(used_device)
+        cmd_queue = self.context.create_command_queue(used_device)
+        need_read_back_buffers:List[Tuple[ArgInfo, Any, Buffer]] = []
+        for key, value in used_kwargs.items():
+            buffer_tuple = self._set_arg(key, value, cmd_queue)
+            if buffer_tuple:
+                need_read_back_buffers.append(buffer_tuple)
+
+        if global_work_size is None or local_work_size is None:
+            global_work_size, local_work_size = self.__detect_work_size(used_device)
+
+        if CL.print_info:
+            print(f"launch {self} on {cmd_queue.device} with global_work_size={global_work_size}, local_work_size={local_work_size}")
 
         work_dim = len(global_work_size)
-
         global_work_size = (c_size_t * work_dim)(*global_work_size)
         local_work_size = (c_size_t * work_dim)(*local_work_size)
         CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, None)
         cmd_queue.wait()
 
-        for arg_info in self._arg_list:
-            if (
-                arg_info.buffer is not None and (
-                    (arg_info.buffer.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) or
-                    (arg_info.buffer.flags & cl_mem_flags.CL_MEM_READ_WRITE)
-                ) and not (arg_info.buffer.flags & cl_mem_flags.CL_MEM_READ_ONLY) and
-                arg_info.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY and
-                arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL and
-                not (arg_info.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST)
-            ):
-                if arg_info.buffer.flags & cl_mem_flags.CL_MEM_COPY_HOST_PTR:
-                    arg_info.buffer.read(cmd_queue)
+        for arg_info, arg_value, buffer in need_read_back_buffers:
+            if buffer.flags & cl_mem_flags.CL_MEM_COPY_HOST_PTR:
+                buffer.read(cmd_queue)
 
-                if arg_info.value is not arg_info.buffer.data:
-                    if isinstance(arg_info.value, list):
-                        arg_info.value[:] = arg_info.buffer.data.tolist()
-                    else:
-                        arg_info.value[:] = arg_info.buffer.data
+            if arg_value is not buffer.data:
+                if isinstance(arg_value, list):
+                    arg_value[:] = buffer.data.tolist()
+                else:
+                    arg_value[:] = buffer.data
+
+            arg_info.unuse_buffer(buffer)
 
     def __check_args(self, args, kwargs)->Dict[str, Any]:
         for key in kwargs:
@@ -180,7 +180,7 @@ class Kernel(CLObject):
         
         return ', '.join(items[:-1]) + ', and ' + items[-1]
     
-    def __detect_work_size(self):
+    def __detect_work_size(self, device:Device):
         max_shape = None
         for arg in self._arg_list:
             if arg.buffer is not None and ((arg.buffer.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) or (arg.buffer.flags & cl_mem_flags.CL_MEM_READ_WRITE)) and not (arg.buffer.flags & cl_mem_flags.CL_MEM_READ_ONLY):
@@ -199,20 +199,20 @@ class Kernel(CLObject):
             max_shape = (math.prod(max_shape),)
 
         total_local_size:int = 256
-        if self._used_device.type == cl_device_type.CL_DEVICE_TYPE_GPU:
-            if "nvidia" in self._used_device.vendor.lower():
+        if device.type == cl_device_type.CL_DEVICE_TYPE_GPU:
+            if "nvidia" in device.vendor.lower():
                 total_local_size:int = 128
-            elif "amd" in self._used_device.vendor.lower():
+            elif "amd" in device.vendor.lower():
                 total_local_size:int = 256
-            elif "intel" in self._used_device.vendor.lower():
+            elif "intel" in device.vendor.lower():
                 total_local_size:int = 64
-        elif self._used_device.type == cl_device_type.CL_DEVICE_TYPE_CPU:
+        elif device.type == cl_device_type.CL_DEVICE_TYPE_CPU:
             total_local_size:int = 64
 
         global_work_size, local_work_size = detect_work_size(total_local_size, max_shape)
         return global_work_size, local_work_size
 
-    def _set_arg(self, index_or_name:Union[int, str], value:Any):
+    def _set_arg(self, index_or_name:Union[int, str], value:Any, cmd_queue:CommandQueue)->Optional[Tuple[ArgInfo, Any, Buffer]]:
         if isinstance(index_or_name, int):
             arg_info = self._arg_list[index_or_name]
             index = index_or_name
@@ -263,21 +263,16 @@ class Kernel(CLObject):
 
                 if not used_value.flags['C_CONTIGUOUS']:
                     used_value = np.ascontiguousarray(used_value)
-                
-                if (
-                    arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_CONSTANT or
-                    arg_info.access_qualifier == cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY or
-                    arg_info.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST
-                ):
-                    flags = cl_mem_flags.CL_MEM_READ_ONLY
-                else:
-                    flags = cl_mem_flags.CL_MEM_READ_WRITE
 
-                buffer = self.context.create_buffer(used_value, flags)
-                CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                buffer = arg_info.use_buffer(used_value, cmd_queue)
+                if arg_info.buffer != buffer:
+                    CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+
                 arg_info.value = value
                 arg_info.buffer = buffer
-        
+                if arg_info.need_read_back:
+                    return arg_info, value, buffer
+
     @property
     def _func_head(self)->str:
         return self.name + "(" + ", ".join(self._arg_names) + ")"
