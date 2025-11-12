@@ -74,28 +74,29 @@ class CLObject(ABC):
 
         return result
 
-    @property
+    @staticmethod
     @abstractmethod
-    def _prefix(self)->str:
-        pass
-
-    @property
-    @abstractmethod
-    def _get_info_func(self)->CL.Func:
-        pass
-
-    @property
-    @abstractmethod
-    def _info_types_map(self)->Dict[IntEnum, type]:
-        pass
-
-    @property
-    @abstractmethod
-    def _info_enum(self)->type:
+    def _prefix()->str:
         pass
 
     @staticmethod
-    def _release(id_):
+    @abstractmethod
+    def _get_info_func()->CL.Func:
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def _info_types_map()->Dict[IntEnum, type]:
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def _info_enum()->type:
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def _release_func()->CL.Func:
         pass
 
     @staticmethod
