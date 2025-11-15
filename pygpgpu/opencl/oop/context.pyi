@@ -2,7 +2,7 @@ from typing import Tuple, List, Optional, Dict, Any, Union
 
 import numpy as np
 
-from ..runtime import cl_context_properties, cl_mem_flags
+from ..runtime import cl_context_properties, cl_mem_flags, cl_command_queue_properties
 from .clobject import CLObject
 from .device import Device
 from .platform import Platform
@@ -42,9 +42,9 @@ class Context(CLObject):
         spir_std:Optional[float]=None
     )->Program:...
 
-    def create_buffer(self, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None, auto_share:bool=True)->Buffer:...
+    def create_buffer(self, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None)->Buffer:...
 
-    def create_command_queue(self, device:Device)->CommandQueue:...
+    def create_command_queue(self, device:Device, properties:Optional[cl_command_queue_properties]=None)->CommandQueue:...
 
     @property
     def devices(self)->Tuple[Device]: ...

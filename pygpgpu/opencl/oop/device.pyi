@@ -32,12 +32,13 @@ from ..runtime import (
     cl_device_terminate_capability_khr
 )
 
+from .clobject import CLObject
 if TYPE_CHECKING:
     from .platform import Platform
     from .context import Context
     
 
-class Device:
+class Device(CLObject):
 
     def create_context(self)->Context: ...
 

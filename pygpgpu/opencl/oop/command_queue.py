@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, Optional
 
 if TYPE_CHECKING:
     from .context import Context
@@ -12,23 +12,32 @@ from ..runtime import (
     cl_int,
     IntEnum,
     CLInfo,
-    cl_command_queue_info
+    cl_command_queue_info,
+    cl_command_queue_properties,
+    cl_queue_properties
 )
 from .clobject import CLObject
 
 
 class CommandQueue(CLObject):
 
-    def __init__(self, context:Context, device:Device):
+    def __init__(self, context:Context, device:Device, properties:Optional[cl_command_queue_properties]=None):
         self._context:Context = context
         self._device:Device = device
 
         error_code = cl_int(0)
 
         try:
-            cmd_queue_id:cl_command_queue = CL.clCreateCommandQueue(context.id, device.id, 0, pointer(error_code))
+            if properties is None:
+                properties = 0
+
+            cmd_queue_id:cl_command_queue = CL.clCreateCommandQueue(context.id, device.id, properties, pointer(error_code))
         except:
-            cmd_queue_id:cl_command_queue = CL.clCreateCommandQueueWithProperties(context.id, device.id, 0, pointer(error_code))
+            if properties is None:
+                used_properties = None
+            else:
+                used_properties = (cl_queue_properties * 3)(cl_command_queue_info.CL_QUEUE_PROPERTIES, properties, 0)
+            cmd_queue_id:cl_command_queue = CL.clCreateCommandQueueWithProperties(context.id, device.id, used_properties, pointer(error_code))
 
         CLObject.__init__(self, cmd_queue_id)
 
@@ -46,25 +55,22 @@ class CommandQueue(CLObject):
     def __len__(self)->int:
         return self.size
 
-    @property
-    def _prefix(self)->str:
+    @staticmethod
+    def _prefix()->str:
         return "CL_QUEUE"
 
-    @property
-    def _get_info_func(self)->CL.Func:
+    @staticmethod
+    def _get_info_func()->CL.Func:
         return CL.clGetCommandQueueInfo
 
-    @property
-    def _info_types_map(self)->Dict[IntEnum, type]:
+    @staticmethod
+    def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.command_queue_info_types
 
-    @property
-    def _info_enum(self)->type:
+    @staticmethod
+    def _info_enum()->type:
         return cl_command_queue_info
 
     @staticmethod
-    def _release(command_queue_id):
-        if not command_queue_id:
-            return
-        
-        CL.clReleaseCommandQueue(command_queue_id)
+    def _release_func():        
+        return CL.clReleaseCommandQueue

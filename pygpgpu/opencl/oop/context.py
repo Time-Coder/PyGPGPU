@@ -10,10 +10,10 @@ from ..runtime import (
     CL,
     CLInfo,
     IntEnum,
-    cl_context,
     cl_context_info,
     cl_mem_flags,
-    CL_CONTEXT_NOTIFY_CALLBACK
+    CL_CONTEXT_NOTIFY_CALLBACK,
+    cl_command_queue_properties
 )
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ from .build_options import BuildOptions
 from .kernel_parser import KernelParser
 from .buffer import Buffer
 from .command_queue import CommandQueue
+from .event import Event
 
 
 class Context(CLObject):
@@ -54,8 +55,6 @@ class Context(CLObject):
         for i in range(n_devices):
             self._devices_ids[i] = self._devices[i].id
         
-        pfn_notify = CL_CONTEXT_NOTIFY_CALLBACK(Context._pfn_notify)
-
         properties = None
         device_ids = (cl_device_id * n_devices)()
         for i in range(n_devices):
@@ -64,15 +63,12 @@ class Context(CLObject):
         user_data = None
         errcode = cl_int()
 
-        context_id = CL.clCreateContext(properties, n_devices, device_ids, pfn_notify, user_data, pointer(errcode))
+        context_id = CL.clCreateContext(properties, n_devices, device_ids, Context._pfn_notify, user_data, pointer(errcode))
         CLObject.__init__(self, context_id)
 
     @staticmethod
-    def _release(context_id:cl_context):
-        if not context_id:
-            return
-        
-        CL.clReleaseContext(context_id)
+    def _release_func()->CL.Func:
+        return CL.clReleaseContext
 
     @property
     def devices(self)->Tuple[Device]:
@@ -90,14 +86,17 @@ class Context(CLObject):
     def platform(self)->Platform:
         return self._platform
     
-    def create_command_queue(self, device:Device)->CommandQueue:
+    def create_command_queue(self, device:Device, properties:Optional[cl_command_queue_properties]=None)->CommandQueue:
         if device not in self.devices:
             raise KeyError(device)
         
-        return CommandQueue(self, device)
+        return CommandQueue(self, device, properties)
 
-    def create_buffer(self, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None, auto_share:bool=True)->Buffer:
-        return Buffer(self, data_or_size, flags, auto_share)
+    def create_buffer(self, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None)->Buffer:
+        return Buffer(self, data_or_size, flags)
+    
+    def create_event(self)->Event:
+        return Event(self)
 
     def compile(self,
         file_name:str,
@@ -155,7 +154,7 @@ class Context(CLObject):
 
         return self._programs[key]
 
-    @staticmethod
+    @CL_CONTEXT_NOTIFY_CALLBACK
     def _pfn_notify(errinfo:bytes, private_info, cb, user_data):
         if CL.print_info:
             if errinfo:
@@ -164,18 +163,18 @@ class Context(CLObject):
             else:
                 print("[OpenCL Context Notify] (no message)")
 
-    @property
-    def _prefix(self)->str:
+    @staticmethod
+    def _prefix()->str:
         return "CL_CONTEXT"
 
-    @property
-    def _get_info_func(self)->CL.Func:
+    @staticmethod
+    def _get_info_func()->CL.Func:
         return CL.clGetContextInfo
 
-    @property
-    def _info_types_map(self)->Dict[IntEnum, type]:
+    @staticmethod
+    def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.context_info_types
 
-    @property
-    def _info_enum(self)->type:
+    @staticmethod
+    def _info_enum()->type:
         return cl_context_info

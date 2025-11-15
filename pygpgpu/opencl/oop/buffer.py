@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ctypes import c_void_p, pointer, c_ubyte
 import ctypes
-from typing import TYPE_CHECKING, Dict, Union, Optional
+from typing import TYPE_CHECKING, Dict, Union, Optional, List
 
 import numpy as np
 
@@ -13,10 +13,12 @@ from ..runtime import (
     cl_int,
     CLInfo,
     IntEnum,
-    cl_mem_info
+    cl_mem_info,
+    cl_event
 )
 from .clobject import CLObject
 from .command_queue import CommandQueue
+from .event import Event
 
 if TYPE_CHECKING:
     from .context import Context
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
 
 class Buffer(CLObject):
 
-    def __init__(self, context:Context, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None, auto_share:bool=True):
+    def __init__(self, context:Context, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None):
         
         error_code = cl_int(0)
 
@@ -49,12 +51,6 @@ class Buffer(CLObject):
         if flags is None:
             flags = cl_mem_flags.CL_MEM_READ_WRITE
 
-        if auto_share:
-            if size > 4*1024*1024:
-                flags = (flags & ~cl_mem_flags.CL_MEM_COPY_HOST_PTR) | cl_mem_flags.CL_MEM_USE_HOST_PTR
-            else:
-                flags = (flags & ~cl_mem_flags.CL_MEM_USE_HOST_PTR) | cl_mem_flags.CL_MEM_COPY_HOST_PTR
-
         buffer_id:cl_mem = CL.clCreateBuffer(context.id, flags, size, host_ptr, pointer(error_code))
         self._context:Context = context
         self._flags:cl_mem_flags = flags
@@ -63,25 +59,48 @@ class Buffer(CLObject):
         self._data:Union[bytes, bytearray, np.ndarray, None] = data
         CLObject.__init__(self, buffer_id)
 
-    def write(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None):
+    def write(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+        if cmd_queue.context != self.context:
+            raise ValueError("cmd_queue should be in the same context as buffer")
+        
         if size is None:
             size = self._size
 
         if host_ptr is None:
             host_ptr = self._host_ptr
 
-        CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, 0, None, None)
+        if after_events is None:
+            after_events = []
 
-    def read(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None):
+        wait_list = Event.wait_list(after_events)
+        event_id = cl_event(0)
+        CL.clEnqueueWriteBuffer.record_call_stack()
+        CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, False, offset, size, host_ptr, len(after_events), wait_list, pointer(event_id))
+        return Event(self.context, event_id, CL.clEnqueueWriteBuffer)
+
+    def read(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+        if cmd_queue.context != self.context:
+            raise ValueError("cmd_queue should be in the same context as buffer")
+        
         if size is None:
             size = self._size
 
         if host_ptr is None:
             host_ptr = self._host_ptr
 
-        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, 0, None, None)
+        if after_events is None:
+            after_events = []
 
-    def set_data(self, data:Union[bytes, bytearray, np.ndarray], cmd_queue:CommandQueue):
+        wait_list = Event.wait_list(after_events)
+        event_id = cl_event(0)
+        CL.clEnqueueReadBuffer.record_call_stack()
+        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, len(after_events), wait_list, pointer(event_id))
+        return Event(self.context, event_id, CL.clEnqueueReadBuffer)
+
+    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event:
+        if cmd_queue.context != self.context:
+            raise ValueError("cmd_queue should be in the same context as buffer")
+        
         if isinstance(data, bytes):
             size = len(data)
             host_ptr = (ctypes.c_ubyte * size).from_buffer_copy(data)
@@ -98,9 +117,10 @@ class Buffer(CLObject):
         if size != self._size:
             raise ValueError("data size is not equal to buffer size")
 
-        self.write(cmd_queue, 0, size, host_ptr)
+        event = self.write(cmd_queue, 0, size, host_ptr, after_events)
         self._host_ptr = host_ptr
         self._data = data
+        return event
 
     @property
     def context(self)->Context:
@@ -125,25 +145,22 @@ class Buffer(CLObject):
     def __len__(self)->int:
         return self._size
 
-    @property
-    def _prefix(self)->str:
+    @staticmethod
+    def _prefix()->str:
         return "CL_MEM"
 
-    @property
-    def _get_info_func(self)->CL.Func:
+    @staticmethod
+    def _get_info_func()->CL.Func:
         return CL.clGetMemObjectInfo
 
-    @property
-    def _info_types_map(self)->Dict[IntEnum, type]:
+    @staticmethod
+    def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.mem_info_types
 
-    @property
-    def _info_enum(self)->type:
+    @staticmethod
+    def _info_enum()->type:
         return cl_mem_info
 
     @staticmethod
-    def _release(buffer_id):
-        if not buffer_id:
-            return
-        
-        CL.clReleaseMemObject(buffer_id)
+    def _release_func()->CL.Func:
+        return CL.clReleaseMemObject

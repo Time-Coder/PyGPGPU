@@ -32,18 +32,22 @@ class Device(CLObject):
     def unique_key(self)->str:
         return sanitize_filename(f"{self.name} {self.version} {self.driver_version}")
     
-    @property
-    def _prefix(self)->str:
+    @staticmethod
+    def _prefix()->str:
         return "CL_DEVICE"
 
-    @property
-    def _get_info_func(self)->CL.Func:
+    @staticmethod
+    def _get_info_func()->CL.Func:
         return CL.clGetDeviceInfo
 
-    @property
-    def _info_types_map(self)->Dict[IntEnum, type]:
+    @staticmethod
+    def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.device_info_types
 
-    @property
-    def _info_enum(self)->type:
+    @staticmethod
+    def _info_enum()->type:
         return cl_device_info
+    
+    @staticmethod
+    def _release_func()->CL.Func:
+        return None

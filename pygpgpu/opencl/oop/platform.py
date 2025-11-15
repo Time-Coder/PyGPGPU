@@ -113,18 +113,22 @@ class Platform(CLObject):
             spir_std
         )
     
-    @property
-    def _prefix(self)->str:
+    @staticmethod
+    def _prefix()->str:
         return "CL_PLATFORM"
 
-    @property
-    def _get_info_func(self)->CL.Func:
+    @staticmethod
+    def _get_info_func()->CL.Func:
         return CL.clGetPlatformInfo
 
-    @property
-    def _info_types_map(self)->Dict[IntEnum, type]:
+    @staticmethod
+    def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.platform_info_types
 
-    @property
-    def _info_enum(self)->type:
+    @staticmethod
+    def _info_enum()->type:
         return cl_platform_info
+    
+    @staticmethod
+    def _release_func()->CL.Func:
+        return None

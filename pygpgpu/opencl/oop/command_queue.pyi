@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     from .context import Context
@@ -13,6 +13,8 @@ from .clobject import CLObject
 
 
 class CommandQueue(CLObject):
+
+    def __init__(self, context:Context, device:Device, properties:Optional[cl_command_queue_properties]=None): ...
 
     def wait(self)->None: ...
 

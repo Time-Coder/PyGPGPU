@@ -169,6 +169,68 @@ class CLInfo:
         'double16': double16,
     }
 
+    vec_types = {
+        'char2': char2,
+        'char3': char3,
+        'char4': char4,
+        'char8': char8,
+        'char16': char16,
+
+        'uchar2': uchar2,
+        'uchar3': uchar3,
+        'uchar4': uchar4,
+        'uchar8': uchar8,
+        'uchar16': uchar16,
+
+        'short2': short2,
+        'short3': short3,
+        'short4': short4,
+        'short8': short8,
+        'short16': short16,
+
+        'ushort2': ushort2,
+        'ushort3': ushort3,
+        'ushort4': ushort4,
+        'ushort8': ushort8,
+        'ushort16': ushort16,
+
+        'int2': int2,
+        'int3': int3,
+        'int4': int4,
+        'int8': int8,
+        'int16': int16,
+
+        'uint2': uint2,
+        'uint3': uint3,
+        'uint4': uint4,
+        'uint8': uint8,
+        'uint16': uint16,
+
+        'long2': long2,
+        'long3': long3,
+        'long4': long4,
+        'long8': long8,
+        'long16': long16,
+
+        'ulong2': ulong2,
+        'ulong3': ulong3,
+        'ulong4': ulong4,
+        'ulong8': ulong8,
+        'ulong16': ulong16,
+
+        'float2': float2,
+        'float3': float3,
+        'float4': float4,
+        'float8': float8,
+        'float16': float16,
+
+        'double2': double2,
+        'double3': double3,
+        'double4': double4,
+        'double8': double8,
+        'double16': double16,
+    }
+
     func_signatures = {
         # cl_int clGetPlatformInfo(
         #   cl_platform_id platform,
@@ -1345,6 +1407,15 @@ class CLInfo:
         cl_event_info.CL_EVENT_COMMAND_QUEUE: cl_command_queue,
         cl_event_info.CL_EVENT_CONTEXT: cl_context,
         cl_event_info.CL_EVENT_COMMAND_TYPE: cl_command_type,
-        cl_event_info.CL_EVENT_COMMAND_EXECUTION_STATUS: cl_command_execution_status,
+        cl_event_info.CL_EVENT_COMMAND_EXECUTION_STATUS: cl_int,
         cl_event_info.CL_EVENT_REFERENCE_COUNT: cl_uint
+    }
+
+    no_cached_info = {
+        cl_device_info.CL_DEVICE_REFERENCE_COUNT,
+        cl_context_info.CL_CONTEXT_REFERENCE_COUNT,
+        cl_program_info.CL_PROGRAM_REFERENCE_COUNT,
+        cl_kernel_info.CL_KERNEL_REFERENCE_COUNT,
+        cl_event_info.CL_EVENT_REFERENCE_COUNT,
+        cl_event_info.CL_EVENT_COMMAND_EXECUTION_STATUS
     }

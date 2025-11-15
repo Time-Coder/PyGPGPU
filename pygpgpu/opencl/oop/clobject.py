@@ -5,7 +5,7 @@ from typing import Dict, Any, get_args
 from abc import ABC, abstractmethod
 import weakref
 
-from ..runtime import CL, IntEnum, IntFlag, cl_bool, cl_uint
+from ..runtime import CL, IntEnum, IntFlag, cl_bool, cl_uint, CLInfo
 
 
 class CLObject(ABC):
@@ -33,33 +33,39 @@ class CLObject(ABC):
             return self._info[name]
 
         key = None
-        if hasattr(self._info_enum, f"{self._prefix}_{name.upper()}"):
-            key = getattr(self._info_enum, f"{self._prefix}_{name.upper()}")
-        elif hasattr(self._info_enum, f"{self._prefix}_{name.upper()}_KHR"):
-            key = getattr(self._info_enum, f"{self._prefix}_{name.upper()}_KHR")
-        elif hasattr(self._info_enum, f"CL_{name.upper()}"):
-            key = getattr(self._info_enum, f"CL_{name.upper()}")
-        elif hasattr(self._info_enum, f"CL_{name.upper()}_KHR"):
-            key = getattr(self._info_enum, f"CL_{name.upper()}_KHR")
+        info_enum = self._info_enum()
+        if hasattr(info_enum, f"{self._prefix()}_{name.upper()}"):
+            key = getattr(info_enum, f"{self._prefix()}_{name.upper()}")
+        elif hasattr(info_enum, f"{self._prefix()}_{name.upper()}_KHR"):
+            key = getattr(info_enum, f"{self._prefix()}_{name.upper()}_KHR")
+        elif hasattr(info_enum, f"CL_{name.upper()}"):
+            key = getattr(info_enum, f"CL_{name.upper()}")
+        elif hasattr(info_enum, f"CL_{name.upper()}_KHR"):
+            key = getattr(info_enum, f"CL_{name.upper()}_KHR")
 
         if key is None:
             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
-        self._info[name] = self._fetch_info(key)
+        value = self._fetch_info(key)
+        if key not in CLInfo.no_cached_info:
+            self._info[name] = self._fetch_info(key)
 
-        return self._info[name]
+        return value
     
     def __eq__(self, other:CLObject)->bool:
         return (self.__class__ == other.__class__ and self.id == other.id)
     
     def _fetch_info(self, key)->Any:
+        get_info_func = self._get_info_func()
+
         result_size = c_size_t()
-        self._get_info_func(self.id, key, 0, None, pointer(result_size))
+        get_info_func(self.id, key, 0, None, pointer(result_size))
 
         result_bytes = (c_char * result_size.value)()
-        self._get_info_func(self.id, key, result_size, result_bytes, None)
+        get_info_func(self.id, key, result_size, result_bytes, None)
 
-        cls = self._info_types_map[key]
+        info_types_map = self._info_types_map()
+        cls = info_types_map[key]
         return self._parse_result(result_bytes, cls)
 
     def __repr__(self)->str:
@@ -98,6 +104,12 @@ class CLObject(ABC):
     @abstractmethod
     def _release_func()->CL.Func:
         pass
+
+    @classmethod
+    def _release(cls, obj_id:c_void_p):
+        release_func = cls._release_func()
+        if obj_id and release_func is not None:
+            release_func(obj_id)
 
     @staticmethod
     def _parse_result(buffer:bytes, cls:type):

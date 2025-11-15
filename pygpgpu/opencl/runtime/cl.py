@@ -2,6 +2,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+import traceback
 from typing import Dict, Callable
 from ctypes import c_int, c_void_p
 
@@ -62,8 +63,14 @@ class CL(metaclass=MetaCL):
 
         def __init__(self, name:str):
             self.name = name
+            self.__last_call_stack:str = ""
+            self.__record_call_stack:bool = False
 
         def __call__(self, *args, **kwargs):
+            if self.__record_call_stack:
+                self.__record_call_stack = False
+                self.__last_call_stack = "".join(traceback.format_stack()[:-1])
+
             if CL.print_call:
                 call_str = self.name + "(" + ", ".join([self.__str_arg(arg) for arg in args] + [f"{key}={self.__str_arg(value)}" for key, value in kwargs.items()]) + ")"
                 print(call_str, end="", flush=True)
@@ -113,8 +120,15 @@ class CL(metaclass=MetaCL):
                         raise RuntimeError(f"{error_code}: {func_info['errors'][error_code]}")
                     else:
                         raise RuntimeError(f"{error_code}: unknown error.")
-            
+
             return return_value
+
+        @property
+        def last_call_stack(self)->str:
+            return self.__last_call_stack
+        
+        def record_call_stack(self):
+            self.__record_call_stack = True
 
         @staticmethod
         def __get_ctypes_type_name(tp) -> str:

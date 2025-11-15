@@ -322,25 +322,22 @@ class Program(CLObject):
     def n_devices(self)->int:
         return self._context.n_devices
 
-    @property
-    def _prefix(self)->str:
+    @staticmethod
+    def _prefix()->str:
         return "CL_PROGRAM"
 
-    @property
-    def _get_info_func(self)->CL.Func:
+    @staticmethod
+    def _get_info_func()->CL.Func:
         return CL.clGetProgramInfo
 
-    @property
-    def _info_types_map(self)->Dict[IntEnum, type]:
+    @staticmethod
+    def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.program_info_types
 
-    @property
-    def _info_enum(self)->type:
+    @staticmethod
+    def _info_enum()->type:
         return cl_program_info
     
     @staticmethod
-    def _release(program_id):
-        if not program_id:
-            return
-        
-        CL.clReleaseProgram(program_id)
+    def _release_func():
+        return CL.clReleaseProgram

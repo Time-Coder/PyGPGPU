@@ -19,6 +19,7 @@ from ..runtime import (
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
+from .event import Event
 
 if TYPE_CHECKING:
     from .buffer import Buffer
@@ -63,7 +64,7 @@ class ArgInfo:
             self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST
         )
 
-    def use_buffer(self, data:np.ndarray, cmd_queue:CommandQueue):
+    def use_buffer(self, data:np.ndarray, cmd_queue:CommandQueue)->Tuple[Buffer, Event]:
         if self.readonly:
             flags = cl_mem_flags.CL_MEM_READ_ONLY
         else:
@@ -78,13 +79,13 @@ class ArgInfo:
                 break
 
         if used_buffer is None:
-            used_buffer = cmd_queue.context.create_buffer(data, flags)
+            used_buffer = cmd_queue.context.create_buffer(data.nbytes, flags)
             self.__buffers[buffer_key].append(used_buffer)
-        else:
-            used_buffer.set_data(data, cmd_queue)
-
+        
+        event = used_buffer.set_data(cmd_queue, data)
         self.__busy_buffers.add(used_buffer)
-        return used_buffer
+        
+        return used_buffer, event
     
     def unuse_buffer(self, buffer:Buffer):
         self.__busy_buffers.remove(buffer)

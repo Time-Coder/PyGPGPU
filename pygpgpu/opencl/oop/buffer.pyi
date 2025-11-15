@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p
-from typing import TYPE_CHECKING, List, Union
+from typing import TYPE_CHECKING, List, Union, Optional
 import numpy as np
 
 if TYPE_CHECKING:
@@ -15,15 +15,18 @@ from ..runtime import (
 )
 from .clobject import CLObject
 from .command_queue import CommandQueue
+from .event import Event
 
 
 class Buffer(CLObject):
 
-    def write(self, offset:int, size:int, host_ptr:c_void_p, cmd_queue:CommandQueue): ...
+    def __init__(self, context:Context, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None): ...
 
-    def read(self, offset:int, size:int, host_ptr:c_void_p, cmd_queue:CommandQueue): ...
+    def write(self, cmd_queue:CommandQueue, offset:int, size:int, host_ptr:c_void_p, after_events:List[Event])->Event: ...
 
-    def set_data(self, data:Union[bytes, bytearray, np.ndarray], cmd_queue:CommandQueue): ...
+    def read(self, cmd_queue:CommandQueue, offset:int, size:int, host_ptr:c_void_p, after_events:List[Event])->Event: ...
+
+    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event])->Event: ...
 
     @property
     def context(self)->Context: ...
