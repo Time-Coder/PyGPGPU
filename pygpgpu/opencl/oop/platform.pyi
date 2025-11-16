@@ -18,6 +18,7 @@ from ..runtime import (
 if TYPE_CHECKING:
     from .device import Device
     from .program import Program
+    from .context import Context
 
 
 class Platform:
@@ -109,3 +110,9 @@ class Platform:
 
     @property
     def icd_suffix(self)->str: ...
+
+    @property
+    def default_context(self)->Context: ...
+
+    @property
+    def create_context(self, *devices)->Context: ...

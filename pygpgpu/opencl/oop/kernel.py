@@ -4,7 +4,7 @@ from ctypes import c_size_t, pointer
 from functools import partial
 import concurrent.futures
 import asyncio
-from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional
+from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional, override
 
 import numpy as np
 
@@ -27,7 +27,7 @@ from .kernel_parser import ArgInfo
 from .command_queue import CommandQueue
 from .event import Event
 from ...vectorization import sizeof, value_ptr
-from ...utils import detect_work_size
+from ...utils import detect_work_size, join_with_and
 
 if TYPE_CHECKING:
     from .program import Program
@@ -38,18 +38,19 @@ if TYPE_CHECKING:
 
 class Kernel(CLObject):
 
-    def __init__(self, kernel_id:cl_kernel, program:Program)->None:
+    def __init__(self, program:Program, kernel_id:cl_kernel)->None:
         CLObject.__init__(self, kernel_id)
         self._program:Program = program
         self._args:Dict[str, ArgInfo] = {}
         self._arg_list:List[ArgInfo] = []
         self._arg_names:List[str] = []
 
+        self.type_checked:bool = False
         self._used_device:Optional[Device] = None
         self._global_work_size:Optional[Tuple[int]] = None
         self._local_work_size:Optional[Tuple[int]] = None
 
-    def __getitem__(self, work_sizes:Tuple[Union[int, Tuple[int]]])->Kernel:
+    def __getitem__(self, work_sizes:Tuple[Union[int, Tuple[int], Device], ...])->Kernel:
         if not isinstance(work_sizes, tuple):
             work_sizes = (work_sizes,)
 
@@ -95,13 +96,13 @@ class Kernel(CLObject):
 
     def __call__(self, *args, **kwargs)->None:
         all_events = self._call(args, kwargs)
-        return Event.wait_all(all_events)
+        return Event.wait(all_events)
 
     def submit(self, *args, **kwargs)->concurrent.futures.Future:
         all_events = self._call(args, kwargs)
         return Event.create_future(all_events, concurrent.futures.Future)
     
-    def create_task(self, *args, **kwargs)->asyncio.Future:
+    def async_call(self, *args, **kwargs)->asyncio.Future:
         all_events = self._call(args, kwargs)
         return Event.create_future(all_events, asyncio.Future)
 
@@ -111,7 +112,7 @@ class Kernel(CLObject):
 
         event_id = cl_event()
         CL.clEnqueueNDRangeKernel.record_call_stack()
-        CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, len(copy_to_device_events), Event.wait_list(copy_to_device_events), pointer(event_id))
+        CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, len(copy_to_device_events), Event.events_ptr(copy_to_device_events), pointer(event_id))
         if CL.print_info:
             print(f"launch {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
 
@@ -134,7 +135,11 @@ class Kernel(CLObject):
         if used_device is None:
             used_device = self._program.context.devices[0]
 
-        cmd_queue = self.context.create_command_queue(used_device, cl_command_queue_properties.CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)
+        if used_device.queue_properties & cl_command_queue_properties.CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE:
+            cmd_queue = self.context.create_command_queue(used_device, cl_command_queue_properties.CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)
+        else:
+            cmd_queue = self.context.create_command_queue(used_device)
+
         need_read_back_buffers:List[Tuple[ArgInfo, Any, Buffer]] = []
         copy_to_device_events:List[Event] = []
         for key, value in used_kwargs.items():
@@ -205,22 +210,14 @@ class Kernel(CLObject):
             else:
                 word = "arguments"
 
-            raise TypeError(f"{self._func_head} missing {len(missed_keys)} required positional {word}: {Kernel.__join_with_and(missed_keys)}")
+            raise TypeError(f"{self._func_head} missing {len(missed_keys)} required positional {word}: {join_with_and(missed_keys)}")
+
+        if self.type_checked:
+            for key, value in used_kwargs.items():
+                arg_info = self._args[key]
+                arg_info.check_type(value)
 
         return used_kwargs
-
-    @staticmethod
-    def __join_with_and(items):
-        if not items:
-            return ''
-        
-        if len(items) == 1:
-            return items[0]
-        
-        if len(items) == 2:
-            return ' and '.join(items)
-        
-        return ', '.join(items[:-1]) + ', and ' + items[-1]
     
     def __detect_work_size(self, device:Device):
         max_shape = None
@@ -277,7 +274,14 @@ class Kernel(CLObject):
 
         if arg_type_str in CLInfo.basic_types:
             arg_type = CLInfo.basic_types[arg_type_str]
-            used_value = (value if isinstance(value, arg_type) else arg_type(value))
+            if isinstance(value, arg_type):
+                used_value = value
+            else:
+                if arg_type_str in CLInfo.alter_types:
+                    used_value = arg_type(CLInfo.alter_types[arg_type_str][1](value))
+                else:
+                    used_value = arg_type(value)
+
             CL.clSetKernelArg(self.id, index, sizeof(used_value), value_ptr(used_value))
             arg_info.value = value
         elif is_ptr and content_type_str in CLInfo.basic_types:
@@ -344,22 +348,27 @@ class Kernel(CLObject):
         self._arg_list = list(self._args.values())
         self._arg_names = list(self._args.keys())
 
+    @override    
     @staticmethod
     def _prefix()->str:
         return "CL_KERNEL"
 
+    @override    
     @staticmethod
     def _get_info_func()->CL.Func:
         return CL.clGetKernelInfo
 
+    @override    
     @staticmethod
     def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.kernel_info_types
 
+    @override    
     @staticmethod
     def _info_enum()->type:
         return cl_kernel_info
 
+    @override    
     @staticmethod
     def _release_func():
         return CL.clReleaseKernel

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from ctypes import c_void_p, pointer, c_ubyte
+from ctypes import c_void_p, pointer
 import ctypes
-from typing import TYPE_CHECKING, Dict, Union, Optional, List
+from typing import TYPE_CHECKING, Dict, Union, Optional, List, override
 
 import numpy as np
 
@@ -72,10 +72,10 @@ class Buffer(CLObject):
         if after_events is None:
             after_events = []
 
-        wait_list = Event.wait_list(after_events)
+        events_ptr = Event.events_ptr(after_events)
         event_id = cl_event(0)
         CL.clEnqueueWriteBuffer.record_call_stack()
-        CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, False, offset, size, host_ptr, len(after_events), wait_list, pointer(event_id))
+        CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, False, offset, size, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueWriteBuffer)
 
     def read(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
@@ -91,10 +91,10 @@ class Buffer(CLObject):
         if after_events is None:
             after_events = []
 
-        wait_list = Event.wait_list(after_events)
+        events_ptr = Event.events_ptr(after_events)
         event_id = cl_event(0)
         CL.clEnqueueReadBuffer.record_call_stack()
-        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, len(after_events), wait_list, pointer(event_id))
+        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueReadBuffer)
 
     def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event:
@@ -145,22 +145,27 @@ class Buffer(CLObject):
     def __len__(self)->int:
         return self._size
 
+    @override
     @staticmethod
     def _prefix()->str:
         return "CL_MEM"
 
+    @override
     @staticmethod
     def _get_info_func()->CL.Func:
         return CL.clGetMemObjectInfo
 
+    @override
     @staticmethod
     def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.mem_info_types
 
+    @override
     @staticmethod
     def _info_enum()->type:
         return cl_mem_info
 
+    @override
     @staticmethod
     def _release_func()->CL.Func:
         return CL.clReleaseMemObject

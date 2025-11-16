@@ -50,7 +50,7 @@ class genMat(genType):
         
         for i_arg, arg in enumerate(args):
             if is_number(arg):
-                self._data[i] = arg
+                self._data[i] = self.cast(arg)
 
                 i += 1
                 if i == n_data:
@@ -59,10 +59,10 @@ class genMat(genType):
                     
                     return
 
-            elif isinstance(arg, genVec):
-                sub_n_arg: int = len(arg._data)
-                for sub_i_arg, value in enumerate(arg._data):
-                    self._data[i] = value
+            elif isinstance(arg, (genVec,tuple,list)):
+                sub_n_arg: int = len(arg)
+                for sub_i_arg, value in enumerate(arg):
+                    self._data[i] = self.cast(value)
 
                     i += 1
                     if i == n_data:

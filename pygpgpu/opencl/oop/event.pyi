@@ -3,7 +3,7 @@ from __future__ import annotations
 from .clobject import CLObject
 import concurrent.futures
 import asyncio
-from typing import Optional, List, TYPE_CHECKING, Callable, Union
+from typing import Optional, List, TYPE_CHECKING, Callable, Union, overload
 
 from ..runtime import (
     cl_event,
@@ -24,14 +24,15 @@ class Event(CLObject):
 
     def wait(self)->None: ...
 
+    @overload
     @staticmethod
-    def wait_all(events:List[Event])->None: ...
+    def wait(events:List[Event])->None: ...
 
     @staticmethod
     def create_future(events:List[Event], future_type:type)->Union[concurrent.futures.Future, asyncio.Future]: ...
 
     @staticmethod
-    def wait_list(events:List[Event])->ptr_cl_event: ...
+    def events_ptr(events:List[Event])->ptr_cl_event: ...
 
     @property
     def context(self)->Context: ...

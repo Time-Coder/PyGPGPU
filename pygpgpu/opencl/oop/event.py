@@ -5,7 +5,7 @@ from ctypes import pointer, c_void_p, cast, POINTER, py_object
 import concurrent.futures
 import asyncio
 import traceback
-from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union
+from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, override
 
 from ..runtime import (
     CL,
@@ -50,14 +50,11 @@ class Event(CLObject):
         CL.clSetEventCallback(self.id, cl_command_execution_status.CL_RUNNING, Event._pfn_notify, user_data)
         CL.clSetEventCallback(self.id, cl_command_execution_status.CL_COMPLETE, Event._pfn_notify, user_data)
 
-    def wait(self)->None:
-        CL.clWaitForEvents(1, pointer(self.id))
-        if self.status != cl_command_execution_status.CL_COMPLETE:
-            raise RuntimeError(self.error_message)
+    def wait(events:Union[Event, List[Event]])->None:
+        if isinstance(events, Event):
+            events = [events]
 
-    @staticmethod
-    def wait_all(events:List[Event])->None:
-        CL.clWaitForEvents(len(events), Event.wait_list(events))
+        CL.clWaitForEvents(len(events), Event.events_ptr(events))
         error_messages:List[str] = []
         for event in events:
             if event.status != cl_command_execution_status.CL_COMPLETE:
@@ -67,7 +64,7 @@ class Event(CLObject):
             raise RuntimeError("\n\n".join(error_messages))
 
     @staticmethod
-    def wait_list(events:List[Event])->ptr_cl_event:
+    def events_ptr(events:List[Event])->ptr_cl_event:
         if len(events) == 0:
             return None
         else:
@@ -167,22 +164,27 @@ class Event(CLObject):
             for on_completed in self.on_completed_callbacks:
                 on_completed(self, error_code)
 
+    @override
     @staticmethod
     def _prefix()->str:
         return "CL_EVENT"
 
+    @override
     @staticmethod
     def _get_info_func()->CL.Func:
         return CL.clGetEventInfo
 
+    @override
     @staticmethod
     def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.event_info_types
 
+    @override
     @staticmethod
     def _info_enum()->type:
         return cl_event_info
 
+    @override
     @staticmethod
     def _release_func():        
         return CL.clReleaseEvent

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Tuple, Union, Any, Optional, Callable
+from typing import List, Dict, Tuple, Union, Any, Optional, Callable, Set
 import ctypes
 from .helper import from_import, is_number, align_to_pow2
 import math
@@ -87,6 +87,10 @@ class genType(ABC):
         ctypes.c_uint16: ctypes.c_int16,
         ctypes.c_uint32: ctypes.c_int32,
         ctypes.c_uint64: ctypes.c_int64
+    }
+    __float_types:Set[type] = {
+        float,
+        ctypes.c_float, ctypes.c_double
     }
 
     _operator_funcs:Dict[str, Callable[[Any,Any], Any]] = {
@@ -199,6 +203,17 @@ class genType(ABC):
 
         return genType.__gen_type_map[key]
     
+    def cast(self, value:Any)->Any:
+        if self.dtype in genType.__signed_unsigned_map or self.dtype in genType.__unsigned_signed_map or self.dtype == int and not isinstance(value, int):
+            if isinstance(value, str):
+                value = ord(value)
+            elif isinstance(value, (bytes,bytearray)):
+                value = int.from_bytes(value, 'little', signed=(self.dtype not in genType.__unsigned_signed_map))
+            else:
+                value = int(value)
+
+        return self.dtype(value)
+
     def _call_on_changed(self):
         if self._on_changed is None:
             return
@@ -296,7 +311,7 @@ class genType(ABC):
         
         operator_func:Callable[[Any,Any], Any] = self._operator_funcs[operator]
         for i in range(self.n_elements):
-            self._data[i] = operator_func(self._data[i], other._data[i] if other_is_homo else other)
+            self._data[i] = self.cast(operator_func(self._data[i], other._data[i] if other_is_homo else other))
 
         self._update_data()
 

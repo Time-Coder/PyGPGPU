@@ -2,7 +2,7 @@ from __future__ import annotations
 from ctypes import c_char_p, pointer, c_size_t, c_char, POINTER, c_ubyte, string_at
 import os
 import warnings
-from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union, Set
+from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union, Set, override
 
 from .clobject import CLObject
 from .device import Device
@@ -30,12 +30,18 @@ if TYPE_CHECKING:
 
 class Program(CLObject):
 
-    def __init__(self, context:Context, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None):
+    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, kernel_parser:KernelParser=None):
         self._context:Context = context
         self._binaries:Dict[Device, bytes] = {}
-        self._kernel_parser:KernelParser = KernelParser()
         self._kernels:Dict[str, Kernel] = {}
-        newest_mtime = self._kernel_parser.parse(file_name, includes, defines, options)
+        self._type_checked:bool = type_checked
+
+        if kernel_parser is None:
+            self._kernel_parser:KernelParser = KernelParser()
+            newest_mtime = self._kernel_parser.parse(file_name, includes, defines, options)
+        else:
+            self._kernel_parser = kernel_parser
+            newest_mtime = kernel_parser.newest_mtime
 
         old_check_error = CL.check_error
         if not self._load_bin(newest_mtime):
@@ -254,8 +260,9 @@ class Program(CLObject):
         kernel_ids = (cl_kernel * self.n_kernels)()
         CL.clCreateKernelsInProgram(self.id, self.n_kernels, kernel_ids, None)
         for kernel_id in kernel_ids:
-            kernel = Kernel(kernel_id, self)
+            kernel = Kernel(self, kernel_id)
             kernel.args = self.kernel_infos[kernel.name].args
+            kernel.type_checked = self._type_checked
             self._kernels[kernel.name] = kernel
 
     def __getattr__(self, name:str):
@@ -322,22 +329,27 @@ class Program(CLObject):
     def n_devices(self)->int:
         return self._context.n_devices
 
+    @override    
     @staticmethod
     def _prefix()->str:
         return "CL_PROGRAM"
 
+    @override    
     @staticmethod
     def _get_info_func()->CL.Func:
         return CL.clGetProgramInfo
 
+    @override    
     @staticmethod
     def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.program_info_types
 
+    @override    
     @staticmethod
     def _info_enum()->type:
         return cl_program_info
-    
+
+    @override    
     @staticmethod
     def _release_func():
         return CL.clReleaseProgram

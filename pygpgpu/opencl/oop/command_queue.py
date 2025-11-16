@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional, override
 
 if TYPE_CHECKING:
     from .context import Context
@@ -14,7 +14,7 @@ from ..runtime import (
     CLInfo,
     cl_command_queue_info,
     cl_command_queue_properties,
-    cl_queue_properties
+    cl_ulong
 )
 from .clobject import CLObject
 
@@ -36,7 +36,7 @@ class CommandQueue(CLObject):
             if properties is None:
                 used_properties = None
             else:
-                used_properties = (cl_queue_properties * 3)(cl_command_queue_info.CL_QUEUE_PROPERTIES, properties, 0)
+                used_properties = (cl_ulong * 3)(cl_command_queue_info.CL_QUEUE_PROPERTIES, properties, 0)
             cmd_queue_id:cl_command_queue = CL.clCreateCommandQueueWithProperties(context.id, device.id, used_properties, pointer(error_code))
 
         CLObject.__init__(self, cmd_queue_id)
@@ -55,22 +55,27 @@ class CommandQueue(CLObject):
     def __len__(self)->int:
         return self.size
 
+    @override
     @staticmethod
     def _prefix()->str:
         return "CL_QUEUE"
 
+    @override
     @staticmethod
     def _get_info_func()->CL.Func:
         return CL.clGetCommandQueueInfo
 
+    @override
     @staticmethod
     def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.command_queue_info_types
 
+    @override
     @staticmethod
     def _info_enum()->type:
         return cl_command_queue_info
 
+    @override
     @staticmethod
     def _release_func():        
         return CL.clReleaseCommandQueue

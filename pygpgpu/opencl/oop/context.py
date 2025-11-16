@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import Tuple, Dict, Optional, Any, List, Union, TYPE_CHECKING
+from typing import Tuple, Dict, Optional, Any, List, Union, TYPE_CHECKING, override
 
 import numpy as np
 
@@ -122,7 +122,8 @@ class Context(CLObject):
         create_library:bool=False,
         enable_link_options:bool=False,
         x_spir:bool=False,
-        spir_std:Optional[float]=None
+        spir_std:Optional[float]=None,
+        type_checked:bool=False
     )->Program:
         options:BuildOptions = BuildOptions(
             single_precision_constant,
@@ -149,7 +150,7 @@ class Context(CLObject):
         )
         key:str = KernelParser.md5_of(file_name, includes, defines, options)
         if key not in self._programs:
-            program = Program(self, file_name, includes, defines, options)
+            program = Program(self, file_name, includes, defines, options, type_checked)
             self._programs[key] = program
 
         return self._programs[key]
@@ -163,18 +164,22 @@ class Context(CLObject):
             else:
                 print("[OpenCL Context Notify] (no message)")
 
+    @override
     @staticmethod
     def _prefix()->str:
         return "CL_CONTEXT"
 
+    @override
     @staticmethod
     def _get_info_func()->CL.Func:
         return CL.clGetContextInfo
 
+    @override
     @staticmethod
     def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.context_info_types
 
+    @override
     @staticmethod
     def _info_enum()->type:
         return cl_context_info

@@ -191,3 +191,15 @@ def detect_local_size(total_size: int, shape: Tuple[int, ...]) -> Tuple[int, ...
         return min(candidates, key=score)
     
     raise NotImplementedError("Only 1D/2D/3D supported")
+
+def join_with_and(items):
+    if not items:
+        return ''
+    
+    if len(items) == 1:
+        return items[0]
+    
+    if len(items) == 2:
+        return ' and '.join(items)
+    
+    return ', '.join(items[:-1]) + ', and ' + items[-1]

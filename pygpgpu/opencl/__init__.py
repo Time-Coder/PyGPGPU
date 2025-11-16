@@ -22,3 +22,5 @@ from ..vectorization import (
     matrixCompMult, outerProduct, lessThan, lessThanEqual,
     greaterThan, greaterThanEqual, equal, notEqual, any, all, not_, sizeof, value_ptr
 )
+
+from .common import compile

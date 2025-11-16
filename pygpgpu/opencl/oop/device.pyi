@@ -43,6 +43,9 @@ class Device(CLObject):
     def create_context(self)->Context: ...
 
     @property
+    def default_context(self)->Context: ...
+
+    @property
     def unique_key(self)->str: ...
 
     @property

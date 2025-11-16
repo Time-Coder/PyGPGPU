@@ -65,6 +65,7 @@ class genVec(genType):
         i: int = 0
         n_elements: int = self.n_elements
         n_args: int = len(args)
+        error_message:str = f"invalid arguments for {self.__class__.__name__}()"
 
         if n_args == 0:
             return
@@ -73,36 +74,35 @@ class genVec(genType):
             arg = args[0]
             if is_number(arg):
                 for i in range(n_elements):
-                    self._data[i] = arg
+                    self._data[i] = self.cast(arg)
                 return
         
         for i_arg, arg in enumerate(args):
             if is_number(arg):
-                self._data[i] = arg
+                self._data[i] = self.cast(arg)
 
                 i += 1
                 if i == n_elements:
                     if n_args != 1 and i_arg != n_args - 1:
-                        raise ValueError(f"invalid arguments for {self.__class__.__name__}()")
+                        raise ValueError(error_message)
                     
                     return
 
-            elif isinstance(arg, genVec):
-                sub_n_arg: int = len(arg._data)
-                for sub_i_arg, value in enumerate(arg._data):
-                    self._data[i] = value
+            elif isinstance(arg, (genVec,tuple,list,str,bytes,bytearray)):
+                sub_n_arg: int = len(arg)
+                for sub_i_arg, value in enumerate(arg):
+                    self._data[i] = self.cast(value)
 
                     i += 1
                     if i == n_elements:
                         if n_args != 1 and (i_arg != n_args - 1 or sub_i_arg != sub_n_arg - 1):
-                            raise ValueError(f"invalid arguments for {self.__class__.__name__}()")
+                            raise ValueError(error_message)
                         
                         return
-            
             else:
                 raise TypeError(f"invalid argument type(s) for {self.__class__.__name__}()")
             
-        raise ValueError(f"invalid arguments for {self.__class__.__name__}()")
+        raise ValueError(error_message)
     
     @property
     def math_form(self)->MathForm:
@@ -197,7 +197,7 @@ class genVec(genType):
         value_is_vec:bool = (not is_number(value))
         update_indices:List[int] = []
         for i in range(start, stop, step):
-            self._data[i] = value[i] if value_is_vec else value
+            self._data[i] = self.cast(value[i] if value_is_vec else value)
             update_indices.append(i)
 
         self._update_data(update_indices)

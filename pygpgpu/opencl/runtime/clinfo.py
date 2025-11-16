@@ -18,6 +18,7 @@ from ...vectorization.clmath import (
     float2, float3, float4, float8, float16,
     double2, double3, double4, double8, double16
 )
+import numpy as np
 from typing import List
 
 from .cltypes import (
@@ -169,6 +170,19 @@ class CLInfo:
         'double16': double16,
     }
 
+    scalar_types = {
+        'char': c_char,
+        'uchar': c_ubyte,
+        'short': c_int16,
+        'ushort': c_uint16,
+        'int': c_int32,
+        'uint': c_uint32,
+        'long': c_int64,
+        'ulong': c_uint64,
+        'float': c_float,
+        'double': c_double
+    }
+
     vec_types = {
         'char2': char2,
         'char3': char3,
@@ -229,6 +243,91 @@ class CLInfo:
         'double4': double4,
         'double8': double8,
         'double16': double16,
+    }
+
+    dtypes = {
+        'char': np.dtype('int8'),
+        'char2': np.dtype('int8'),
+        'char3': np.dtype('int8'),
+        'char4': np.dtype('int8'),
+        'char8': np.dtype('int8'),
+        'char16': np.dtype('int8'),
+
+        'uchar': np.dtype('uint8'),
+        'uchar2': np.dtype('uint8'),
+        'uchar3': np.dtype('uint8'),
+        'uchar4': np.dtype('uint8'),
+        'uchar8': np.dtype('uint8'),
+        'uchar16': np.dtype('uint8'),
+
+        'short': np.dtype('int16'),
+        'short2': np.dtype('int16'),
+        'short3': np.dtype('int16'),
+        'short4': np.dtype('int16'),
+        'short8': np.dtype('int16'),
+        'short16': np.dtype('int16'),
+
+        'ushort': np.dtype('uint16'),
+        'ushort2': np.dtype('uint16'),
+        'ushort3': np.dtype('uint16'),
+        'ushort4': np.dtype('uint16'),
+        'ushort8': np.dtype('uint16'),
+        'ushort16': np.dtype('uint16'),
+
+        'int': np.dtype('int32'),
+        'int2': np.dtype('int32'),
+        'int3': np.dtype('int32'),
+        'int4': np.dtype('int32'),
+        'int8': np.dtype('int32'),
+        'int16': np.dtype('int32'),
+
+        'uint': np.dtype('uint32'),
+        'uint2': np.dtype('uint32'),
+        'uint3': np.dtype('uint32'),
+        'uint4': np.dtype('uint32'),
+        'uint8': np.dtype('uint32'),
+        'uint16': np.dtype('uint32'),
+
+        'long': np.dtype('int64'),
+        'long2': np.dtype('int64'),
+        'long3': np.dtype('int64'),
+        'long4': np.dtype('int64'),
+        'long8': np.dtype('int64'),
+        'long16': np.dtype('int64'),
+
+        'ulong': np.dtype('uint64'),
+        'ulong2': np.dtype('uint64'),
+        'ulong3': np.dtype('uint64'),
+        'ulong4': np.dtype('uint64'),
+        'ulong8': np.dtype('uint64'),
+        'ulong16': np.dtype('uint64'),
+
+        'float': np.dtype('float32'),
+        'float2': np.dtype('float32'),
+        'float3': np.dtype('float32'),
+        'float4': np.dtype('float32'),
+        'float8': np.dtype('float32'),
+        'float16': np.dtype('float32'),
+
+        'double': np.dtype('float64'),
+        'double2': np.dtype('float64'),
+        'double3': np.dtype('float64'),
+        'double4': np.dtype('float64'),
+        'double8': np.dtype('float64'),
+        'double16': np.dtype('float64'),
+    }
+
+    alter_types = {
+        'char': (c_char, int),
+        'uchar': (c_ubyte, int),
+        'short': (c_int16, int),
+        'ushort': (c_uint16, int),
+        'int': (c_int32, int),
+        'uint': (c_uint32, int),
+        'long': (c_int64, int),
+        'ulong': (c_uint64, int),
+        'float': (c_float, float),
+        'double': (c_double, float)
     }
 
     func_signatures = {
@@ -672,9 +771,10 @@ class CLInfo:
                 ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
                 ErrorCode.CL_INVALID_DEVICE: "device is not a valid device or is not associated with context.",
                 ErrorCode.CL_INVALID_VALUE: "values specified in properties are not valid.",
-                ErrorCode.CL_INVALID_QUEUE_PROPERTIES: "values specified in properties are valid but are not supported by the device.",
-                ErrorCode.CL_INVALID_QUEUE_PROPERTIES: "the cl_khr_priority_hints extension is supported, the CL_QUEUE_PRIORITY_KHR property is specified, and the queue is a CL_QUEUE_ON_DEVICE.",
-                ErrorCode.CL_INVALID_QUEUE_PROPERTIES: "the cl_khr_throttle_hints extension is supported, the CL_QUEUE_THROTTLE_KHR property is specified, and the queue is a CL_QUEUE_ON_DEVICE.",
+                ErrorCode.CL_INVALID_QUEUE_PROPERTIES: """one of following case happend:
+* values specified in properties are valid but are not supported by the device.
+* the cl_khr_priority_hints extension is supported, the CL_QUEUE_PRIORITY_KHR property is specified, and the queue is a CL_QUEUE_ON_DEVICE.
+* the cl_khr_throttle_hints extension is supported, the CL_QUEUE_THROTTLE_KHR property is specified, and the queue is a CL_QUEUE_ON_DEVICE.""",
                 ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }

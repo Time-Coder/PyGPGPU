@@ -1,5 +1,5 @@
 from ctypes import pointer
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, override
 
 from ..runtime import (
     CL, CLInfo, IntEnum,
@@ -62,6 +62,16 @@ class Platform(CLObject):
 
         return self.__default_context
     
+    def create_context(self, *devices)->Context:
+        if not devices:
+            devices = self.devices
+
+        for device in devices:
+            if device.platform != self:
+                raise ValueError(f"{device} is not in {self}")
+
+        return Context(*devices)
+    
     def compile(self,
         file_name:str,
         includes:Optional[List[str]] = None,
@@ -86,7 +96,8 @@ class Platform(CLObject):
         create_library:bool=False,
         enable_link_options:bool=False,
         x_spir:bool=False,
-        spir_std:Optional[float]=None
+        spir_std:Optional[float]=None,
+        type_checked:bool=False
     )->Program:
         return self.default_context.compile(
             file_name, includes, defines,
@@ -110,25 +121,31 @@ class Platform(CLObject):
             create_library,
             enable_link_options,
             x_spir,
-            spir_std
+            spir_std,
+            type_checked
         )
     
+    @override
     @staticmethod
     def _prefix()->str:
         return "CL_PLATFORM"
 
+    @override
     @staticmethod
     def _get_info_func()->CL.Func:
         return CL.clGetPlatformInfo
 
+    @override
     @staticmethod
     def _info_types_map()->Dict[IntEnum, type]:
         return CLInfo.platform_info_types
 
+    @override
     @staticmethod
     def _info_enum()->type:
         return cl_platform_info
     
+    @override
     @staticmethod
     def _release_func()->CL.Func:
         return None

@@ -15,7 +15,8 @@ from ..runtime import (
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,
-    cl_mem_flags
+    cl_mem_flags,
+    CLInfo
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
@@ -63,6 +64,29 @@ class ArgInfo:
             self.access_qualifier == cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY or
             self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST
         )
+    
+    def check_type(self, value:Any)->None:
+        base_type_str = self.base_type_str
+        if self.is_ptr:
+            if not isinstance(value, np.ndarray):
+                raise TypeError(f"type of argument '{self.name}' must be np.ndarray, got {value.__class__.__name__}.")
+            
+            if base_type_str in CLInfo.dtypes:
+                dtype = CLInfo.dtypes[base_type_str]
+                if value.dtype != dtype:
+                    raise TypeError(f"type of argument '{self.name}' must be NDArray[{dtype.name}], got NDArray[{value.dtype.name}].")
+        else:
+            base_type = None
+            if base_type_str in CLInfo.basic_types:
+                base_type = CLInfo.basic_types[base_type_str]
+
+            if base_type_str in CLInfo.alter_types:
+                base_type = CLInfo.alter_types[base_type_str]
+
+            same_type = (value.__class__.__name__ == base_type_str if base_type is None else isinstance(value, base_type))
+
+            if not same_type:
+                raise TypeError(f"type of argument '{self.name}' must be {base_type_str}, got {value.__class__.__name__}.")
 
     def use_buffer(self, data:np.ndarray, cmd_queue:CommandQueue)->Tuple[Buffer, Event]:
         if self.readonly:
@@ -116,6 +140,7 @@ class KernelParser:
         self._line_map:Dict[int, str] = {}
         self._related_files:Set[str] = set()
         self._kernel_infos:Dict[str, KernelInfo] = {}
+        self._newest_mtime:Union[float, bool] = False
 
     def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
         self._file_name:str = file_name
@@ -144,6 +169,8 @@ class KernelParser:
             if CL.print_info:
                 print(f"load {self.base_name}'s meta info from cache.", flush=True)
 
+        self._newest_mtime = newest_mtime
+        
         return newest_mtime
 
     def format_error(self, error_message:str)->str:
@@ -186,6 +213,10 @@ class KernelParser:
         self._line_map = meta["line_map"]
         self._kernel_infos = meta["kernel_infos"]
         return newest_mtime
+
+    @property
+    def newest_mtime(self)->Union[float, bool]:
+        return self._newest_mtime
 
     @property
     def file_name(self)->str:
