@@ -1,13 +1,17 @@
 from ctypes import c_char_p
-from typing import Dict, List, Any, Set
+from typing import Dict, List, Any, Set, Optional
 
 from .device import Device
 from .context import Context
 from ..runtime import cl_build_status, cl_program_binary_type
 from .build_options import BuildOptions
+from .kernel_parser import KernelParser
+from .kernel import Kernel
 
 
 class Program:
+
+    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, kernel_parser:KernelParser=None): ...
 
     @property
     def file_name(self)->str: ...
@@ -95,3 +99,7 @@ class Program:
     
     @property
     def global_variable_total_size(self)->Dict[Device, int]: ...
+
+    def __getitem__(self, name:str)->Kernel: ...
+
+    def __getattr__(self, name:str)->Kernel: ...
