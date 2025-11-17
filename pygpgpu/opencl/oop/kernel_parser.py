@@ -103,7 +103,7 @@ class ArgInfo:
                 break
 
         if used_buffer is None:
-            used_buffer = cmd_queue.context.create_buffer(data.nbytes, flags)
+            used_buffer = cmd_queue.context.create_buffer(size=data.nbytes, flags=flags)
             self.__buffers[buffer_key].append(used_buffer)
         
         event = used_buffer.set_data(cmd_queue, data)

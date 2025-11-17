@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p
-from typing import TYPE_CHECKING, List, Union, Optional
-import numpy as np
+from typing import TYPE_CHECKING, List, Union
 
 if TYPE_CHECKING:
     from .context import Context
@@ -14,37 +13,30 @@ from ..runtime import (
     cl_mem_properties
 )
 from .clobject import CLObject
-from .command_queue import CommandQueue
-from .event import Event
+import numpy as np
 
 
-class Buffer(CLObject):
+class Mem(CLObject):
 
-    def __init__(self, context:Context, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None): ...
-
-    def write(self, cmd_queue:CommandQueue, offset:int, size:int, host_ptr:c_void_p, after_events:List[Event])->Event: ...
-
-    def read(self, cmd_queue:CommandQueue, offset:int, size:int, host_ptr:c_void_p, after_events:List[Event])->Event: ...
-
-    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event])->Event: ...
+    def __init__(self, context:Context, mem_id:cl_mem, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:c_void_p, size:int, flags:cl_mem_flags): ...
 
     @property
     def context(self)->Context: ...
+
+    @property
+    def data(self)->Union[bytes, bytearray, np.ndarray, None]: ...
     
     @property
     def flags(self)->cl_mem_flags: ...
 
     @property
-    def size(self)->int: ...
-    
-    @property
     def host_ptr(self)->c_void_p: ...
 
     @property
-    def data(self)->bytes: ...
-
+    def size(self)->int: ...
+    
     def __len__(self)->int: ...
-
+    
     @property
     def type(self)->cl_mem_object_type: ...
 

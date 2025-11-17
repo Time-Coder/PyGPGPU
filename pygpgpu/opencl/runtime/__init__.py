@@ -82,5 +82,16 @@ from .cltypes import (
     ptr_cl_event,
     CL_CONTEXT_NOTIFY_CALLBACK,
     CL_BULD_PROGRAM_CALLBACK,
-    CL_EVENT_NOTIFY_CALLBACK
+    CL_EVENT_NOTIFY_CALLBACK,
+    cl_image_format,
+    ptr_cl_image_format,
+    cl_image_desc,
+    ptr_cl_image_desc,
+    cl_channel_order,
+    cl_channel_type,
+    cl_sampler,
+    cl_sampler_properties,
+    cl_addressing_mode,
+    cl_filter_mode,
+    cl_sampler_info
 )

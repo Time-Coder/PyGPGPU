@@ -92,8 +92,8 @@ class Context(CLObject):
         
         return CommandQueue(self, device, properties)
 
-    def create_buffer(self, data_or_size:Union[bytes, bytearray, np.ndarray, int], flags:Optional[cl_mem_flags]=None)->Buffer:
-        return Buffer(self, data_or_size, flags)
+    def create_buffer(self, data:Union[bytes, bytearray, np.ndarray, None]=None, size:int=0, flags:Optional[cl_mem_flags]=None)->Buffer:
+        return Buffer(self, data=data, size=size, flags=flags)
     
     def create_event(self)->Event:
         return Event(self)
