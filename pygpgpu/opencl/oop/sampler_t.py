@@ -1,53 +1,42 @@
-from ctypes import pointer
-from typing import override, Dict
-
 from ..runtime import (
     cl_addressing_mode,
-    cl_filter_mode,
-    cl_sampler,
-    CL,
-    cl_int,
-    CLInfo,
-    IntEnum,
-    cl_sampler_info
+    cl_filter_mode
 )
 
-from .clobject import CLObject
-from .context import Context
 
+class sampler_t:
 
-class sampler_t(CLObject):
-
-    def __init__(self, context:Context, normalized_coords:bool, addressing_mode:cl_addressing_mode, filter_mode:cl_filter_mode)->None:
-        error_code = cl_int(0)
-        sampler_id:cl_sampler = CL.clCreateSampler(context.id, normalized_coords, addressing_mode, filter_mode, pointer(error_code))
-        self._context:Context = context
+    def __init__(self, normalized_coords:bool=False, addressing_mode:cl_addressing_mode=cl_addressing_mode.CL_ADDRESS_REPEAT, filter_mode:cl_filter_mode=cl_filter_mode.CL_FILTER_LINEAR)->None:
         self._normalized_coords:bool = normalized_coords
         self._addressing_mode:cl_addressing_mode = addressing_mode
         self._filter_mode:cl_filter_mode = filter_mode
-        CLObject.__init__(self, sampler_id)
+    
+    @property
+    def normalized_coords(self)->bool:
+        return self._normalized_coords
+    
+    @normalized_coords.setter
+    def normalized_coords(self, normalized:bool)->None:
+        self._normalized_coords = normalized
+    
+    @property
+    def addressing_mode(self)->cl_addressing_mode:
+        return self._addressing_mode
+    
+    @addressing_mode.setter
+    def addressing_mode(self, mode:cl_addressing_mode)->None:
+        self._addressing_mode = mode
+    
+    @property
+    def filter_mode(self)->cl_filter_mode:
+        return self._filter_mode
+    
+    @filter_mode.setter
+    def filter_mode(self, mode:cl_filter_mode)->None:
+        self._filter_mode = mode
 
-    @override
-    @staticmethod
-    def _prefix()->str:
-        return "CL_SAMPLER"
-
-    @override
-    @staticmethod
-    def _get_info_func()->CL.Func:
-        return CL.clGetSamplerInfo
-
-    @override
-    @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
-        return CLInfo.sampler_info_types
-
-    @override
-    @staticmethod
-    def _info_enum()->type:
-        return cl_sampler_info
-
-    @override
-    @staticmethod
-    def _release_func()->CL.Func:
-        return CL.clReleaseSampler
+    def __repr__(self)->str:
+        return f"sampler_t({self._normalized_coords}, {self._addressing_mode}, {self._filter_mode})"
+    
+    def __str__(self)->str:
+        return f"sampler_t({self._normalized_coords}, {self._addressing_mode}, {self._filter_mode})"
