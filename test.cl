@@ -1,6 +1,6 @@
 __kernel void gaussian_blur(__read_only image2d_t src_image, __write_only image2d_t dest_image, sampler_t sampler)
 {
-    int2 coord = (int2)(get_global_id(0), get_global_id(1));
+    int2 coord = (int2)(get_global_id(1), get_global_id(0));
 
     int width = get_image_width(src_image);
     int height = get_image_height(src_image);

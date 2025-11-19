@@ -76,7 +76,6 @@ class Buffer(Mem):
         event_id = cl_event(0)
         CL.clEnqueueWriteBuffer.record_call_stack()
         CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, False, offset, size, host_ptr, len(after_events), events_ptr, pointer(event_id))
-        print("write buffer event", event_id)
         return Event(self.context, event_id, CL.clEnqueueWriteBuffer)
 
     def read(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
@@ -96,7 +95,6 @@ class Buffer(Mem):
         event_id = cl_event(0)
         CL.clEnqueueReadBuffer.record_call_stack()
         CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, len(after_events), events_ptr, pointer(event_id))
-        print("read buffer event", event_id)
         return Event(self.context, event_id, CL.clEnqueueReadBuffer)
 
     def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event:

@@ -1553,6 +1553,27 @@ class CLInfo:
             }
         },
 
+        # cl_sampler clCreateSamplerWithProperties(
+        #     cl_context context,
+        #     const cl_sampler_properties* sampler_properties,
+        #     cl_int* errcode_ret
+        # );
+        "clCreateSamplerWithProperties": {
+            "args": {
+                "context": cl_context,
+                "sampler_properties": ptr_cl_ulong,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_sampler,
+            "errors": {
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_VALUE: "the property name in sampler_properties is not a supported property name, if the value specified for a supported property name is not valid, or the same property name is specified more than once.",
+                ErrorCode.CL_INVALID_OPERATION: "images are not supported by any device associated with context (i.e. CL_DEVICE_IMAGE_SUPPORT specified in the Device Queries table is CL_FALSE).",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
         # cl_int clGetSamplerInfo(
         #     cl_sampler sampler,
         #     cl_sampler_info param_name,

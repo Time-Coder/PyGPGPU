@@ -102,7 +102,7 @@ class Kernel(CLObject):
 
     def __call__(self, *args, **kwargs)->None:
         all_events = self._call(args, kwargs)
-        return Event.wait(all_events)
+        Event.wait(all_events)
 
     def submit(self, *args, **kwargs)->concurrent.futures.Future:
         all_events = self._call(args, kwargs)
@@ -236,7 +236,13 @@ class Kernel(CLObject):
         for arg in self._arg_list:
             if arg.mem is not None and ((arg.mem.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) or (arg.mem.flags & cl_mem_flags.CL_MEM_READ_WRITE)) and not (arg.mem.flags & cl_mem_flags.CL_MEM_READ_ONLY):
                 arg_shape = (arg.mem.data.shape if arg.mem.data is not None else arg.mem.shape)
-                if arg.base_type_str in CLInfo.vec_types and arg_shape[-1] == CLInfo.vec_types[arg.base_type_str].__len__(None):
+                if ((
+                        arg.base_type_str in CLInfo.vec_types and
+                        arg_shape[-1] == CLInfo.vec_types[arg.base_type_str].__len__(None)
+                    ) or (
+                        len(arg_shape) == 3 and isinstance(arg.mem, image2d)
+                    )
+                ):
                     arg_shape = arg_shape[:-1]
                     
                 if max_shape is None:

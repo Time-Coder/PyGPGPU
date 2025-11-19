@@ -54,8 +54,7 @@ class image2d(Mem):
         event_id = cl_event(0)
         CL.clEnqueueWriteImage.record_call_stack()
         CL.clEnqueueWriteImage(cmd_queue.id, self.id, False, ptr_origin, ptr_region, 0, 0, host_ptr, len(after_events), events_ptr, pointer(event_id))
-        event = Event(self.context, event_id, CL.clEnqueueWriteImage)
-        return event
+        return Event(self.context, event_id, CL.clEnqueueWriteImage)
 
     def read(self, cmd_queue:CommandQueue, origin:Tuple[int, int]=(0, 0), region:Tuple[int, int]=(0, 0), host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
         if cmd_queue.context != self.context:

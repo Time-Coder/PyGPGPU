@@ -10,7 +10,8 @@ from ..runtime import (
     cl_int,
     CLInfo,
     IntEnum,
-    cl_sampler_info
+    cl_sampler_info,
+    cl_ulong
 )
 
 if TYPE_CHECKING:
@@ -24,7 +25,17 @@ class sampler(CLObject):
 
     def __init__(self, context:Context, sampler_t_:sampler_t)->None:
         error_code = cl_int(0)
-        sampler_id:cl_sampler = CL.clCreateSampler(context.id, sampler_t_.normalized_coords, sampler_t_.addressing_mode, sampler_t_.filter_mode, pointer(error_code))
+        try:
+            sampler_id:cl_sampler = CL.clCreateSampler(context.id, sampler_t_.normalized_coords, sampler_t_.addressing_mode, sampler_t_.filter_mode, pointer(error_code))
+        except RuntimeError:
+            props = (cl_ulong * 7)(
+                cl_sampler_info.CL_SAMPLER_NORMALIZED_COORDS, sampler_t_.normalized_coords,
+                cl_sampler_info.CL_SAMPLER_ADDRESSING_MODE,   sampler_t_.addressing_mode,
+                cl_sampler_info.CL_SAMPLER_FILTER_MODE,       sampler_t_.filter_mode,
+                0
+            )
+            sampler_id:cl_sampler = CL.clCreateSamplerWithProperties(context.id, props, pointer(error_code))
+
         self._context:Context = context
         self._sampler_t:sampler_t = sampler_t_
         CLObject.__init__(self, sampler_id)

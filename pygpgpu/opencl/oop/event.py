@@ -5,7 +5,7 @@ from ctypes import pointer, c_void_p, cast, POINTER, py_object
 import concurrent.futures
 import asyncio
 import traceback
-from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, override
+from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, override, Set
 
 from ..runtime import (
     CL,
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 class Event(CLObject):
 
+    __retained_events:Set[Event] = set()
+
     def __init__(self, context:Context, event_id:Optional[cl_event]=None, func:Optional[CL.Func]=None):
         error_code = cl_int(0)
         self._context:Context = context
@@ -39,16 +41,25 @@ class Event(CLObject):
             event_id = CL.clCreateUserEvent(context, pointer(error_code))
             self._is_user_event:bool = True
 
+        CLObject.__init__(self, event_id)
+        Event.__retained_events.add(self)
+
         self.on_status_changed_callbacks:List[Callable[[Event, Union[cl_command_execution_status, ErrorCode]], None]] = []
         self.on_submitted_callbacks:List[Callable[[Event], None]] = []
         self.on_completed_callbacks:List[Callable[[Event, ErrorCode], None]] = []
         self.on_started_callbacks:List[Callable[[Event], None]] = []
-        CLObject.__init__(self, event_id)
 
         user_data = cast(pointer(py_object(self)), c_void_p)
         CL.clSetEventCallback(self.id, cl_command_execution_status.CL_SUBMITTED, Event._pfn_notify, user_data)
         CL.clSetEventCallback(self.id, cl_command_execution_status.CL_RUNNING, Event._pfn_notify, user_data)
         CL.clSetEventCallback(self.id, cl_command_execution_status.CL_COMPLETE, Event._pfn_notify, user_data)
+        
+        status = self.status
+        if status == cl_command_execution_status.CL_COMPLETE or isinstance(status, ErrorCode):
+            try:
+                Event.__retained_events.remove(self)
+            except:
+                pass
 
     def wait(events:Union[Event, List[Event]])->None:
         if isinstance(events, Event):
@@ -144,12 +155,11 @@ class Event(CLObject):
             status = cl_command_execution_status(event_command_status)
         else:
             status = ErrorCode(event_command_status)
-
-        try:
-            self:Event = cast(user_data, POINTER(py_object)).contents.value
-        except:
-            print(event, status, user_data)
-
+        
+        self:Event = cast(user_data, POINTER(py_object)).contents.value
+        if not isinstance(self, Event):
+            raise RuntimeError("invalid event")
+        
         for on_status_changed in self.on_status_changed_callbacks:
             on_status_changed(self, status)
 
@@ -167,6 +177,9 @@ class Event(CLObject):
 
             for on_completed in self.on_completed_callbacks:
                 on_completed(self, error_code)
+
+        if (status == cl_command_execution_status.CL_COMPLETE or isinstance(status, ErrorCode)) and self in Event.__retained_events:
+            Event.__retained_events.remove(self)
 
     @override
     @staticmethod

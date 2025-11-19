@@ -6,7 +6,7 @@ from ..runtime import (
 
 class sampler_t:
 
-    def __init__(self, normalized_coords:bool=False, addressing_mode:cl_addressing_mode=cl_addressing_mode.CL_ADDRESS_REPEAT, filter_mode:cl_filter_mode=cl_filter_mode.CL_FILTER_LINEAR)->None:
+    def __init__(self, normalized_coords:bool=False, addressing_mode:cl_addressing_mode=cl_addressing_mode.CL_ADDRESS_CLAMP_TO_EDGE, filter_mode:cl_filter_mode=cl_filter_mode.CL_FILTER_LINEAR)->None:
         self._normalized_coords:bool = normalized_coords
         self._addressing_mode:cl_addressing_mode = addressing_mode
         self._filter_mode:cl_filter_mode = filter_mode

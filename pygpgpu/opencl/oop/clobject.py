@@ -48,7 +48,7 @@ class CLObject(ABC):
 
         value = self._fetch_info(key)
         if key not in CLInfo.no_cached_info:
-            self._info[name] = self._fetch_info(key)
+            self._info[name] = value
 
         return value
     
@@ -133,6 +133,8 @@ class CLObject(ABC):
             return cls.from_buffer_copy(buffer).value
         elif issubclass(cls, LittleEndianStructure):
             return cls.from_buffer_copy(buffer)
+        elif issubclass(cls, cl_bool):
+            return bool(cl_uint.from_buffer_copy(buffer).value)
         elif issubclass(cls, IntEnum):
             return cls(cls.dtype().from_buffer_copy(buffer).value)
         elif issubclass(cls, IntFlag):
@@ -141,5 +143,4 @@ class CLObject(ABC):
             return buffer.value.decode("utf-8")
         elif issubclass(cls, bytes):
             return buffer.raw
-        elif issubclass(cls, cl_bool):
-            return bool(cl_uint.from_buffer_copy(buffer).value)
+        
