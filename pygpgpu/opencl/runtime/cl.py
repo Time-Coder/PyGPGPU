@@ -63,7 +63,6 @@ class CL(metaclass=MetaCL):
 
         def __init__(self, name:str):
             self.name = name
-            self.__name__ = name
 
         def __call__(self, *args, **kwargs):
             if CL.print_call:
