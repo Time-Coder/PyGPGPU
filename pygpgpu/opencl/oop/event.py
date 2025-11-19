@@ -145,7 +145,11 @@ class Event(CLObject):
         else:
             status = ErrorCode(event_command_status)
 
-        self:Event = cast(user_data, POINTER(py_object)).contents.value
+        try:
+            self:Event = cast(user_data, POINTER(py_object)).contents.value
+        except:
+            print(event, status, user_data)
+
         for on_status_changed in self.on_status_changed_callbacks:
             on_status_changed(self, status)
 

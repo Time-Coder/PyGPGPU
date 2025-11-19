@@ -13,7 +13,9 @@ from ..runtime import (
     cl_context_info,
     cl_mem_flags,
     CL_CONTEXT_NOTIFY_CALLBACK,
-    cl_command_queue_properties
+    cl_command_queue_properties,
+    cl_addressing_mode,
+    cl_filter_mode
 )
 
 if TYPE_CHECKING:
@@ -27,6 +29,10 @@ from .kernel_parser import KernelParser
 from .buffer import Buffer
 from .command_queue import CommandQueue
 from .event import Event
+from .sampler import sampler
+from .image2d import image2d
+from .sampler_t import sampler_t
+from .image2d_t import image2d_t
 
 
 class Context(CLObject):
@@ -97,6 +103,12 @@ class Context(CLObject):
     
     def create_event(self)->Event:
         return Event(self)
+    
+    def create_sampler(self, sampler_t_:sampler_t)->sampler:
+        return sampler(self, sampler_t_)
+    
+    def create_image2d(self, image2d_t_:image2d_t)->image2d:
+        return image2d(self, image2d_t_)
 
     def compile(self,
         file_name:str,

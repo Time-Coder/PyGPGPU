@@ -9,6 +9,10 @@ from .platform import Platform
 from .program import Program
 from .buffer import Buffer
 from .command_queue import CommandQueue
+from .sampler_t import sampler_t
+from .sampler import sampler
+from .image2d_t import image2d_t
+from .image2d import image2d
 
 
 class Context(CLObject):
@@ -45,6 +49,10 @@ class Context(CLObject):
     def create_buffer(self, data:Union[bytes, bytearray, np.ndarray, None]=None, size:int=0, flags:Optional[cl_mem_flags]=None)->Buffer: ...
 
     def create_command_queue(self, device:Device, properties:Optional[cl_command_queue_properties]=None)->CommandQueue:...
+
+    def create_sampler(self, sampler_t_:sampler_t)->sampler: ...
+    
+    def create_image2d(self, image2d_t_:image2d_t)->image2d: ...
 
     @property
     def devices(self)->Tuple[Device]: ...

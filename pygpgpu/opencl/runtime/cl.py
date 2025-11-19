@@ -157,7 +157,10 @@ class CL(metaclass=MetaCL):
                 'c_char_p': 'char*',
                 'LP_c_ubyte': 'uchar*'
             }
-            return name_map[name]
+            if name in name_map:
+                return name_map[name]
+            else:
+                return "void*"
 
         @staticmethod
         def __str_arg(arg)->str:

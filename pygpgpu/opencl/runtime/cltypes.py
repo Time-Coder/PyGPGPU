@@ -796,7 +796,6 @@ class cl_channel_order(IntEnum):
     CL_YVYU_INTEL                              = 0x4078
     CL_VYUY_INTEL                              = 0x4079
     CL_NV12_INTEL                              = 0x410E
-    CL_DEPTH                                   = 0x10BD
 
 class cl_channel_type(IntEnum):
     CL_SNORM_INT8                              = 0x10D0

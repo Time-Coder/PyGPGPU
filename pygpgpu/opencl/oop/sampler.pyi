@@ -8,11 +8,12 @@ from ..runtime import (
 
 from .clobject import CLObject
 from .context import Context
+from .sampler_t import sampler_t
 
 
 class sampler(CLObject):
 
-    def __init__(self, context:Context, normalized_coords:bool, addressing_mode:cl_addressing_mode, filter_mode:cl_filter_mode)->None: ...
+    def __init__(self, context:Context, sampler_t_:sampler_t)->None: ...
 
     @property
     def context(self)->Context: ...

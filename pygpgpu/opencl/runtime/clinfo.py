@@ -105,6 +105,17 @@ from .cltypes import (
 
 class CLInfo:
 
+    image_types = {
+        "image2d_t",
+        "image3d_t",
+        "image2d_array_t",
+        "image1d_t",
+        "image1d_buffer_t",
+        "image1d_array_t",
+        "image2d_depth_t",
+        "image2d_array_depth_t"
+    }
+
     basic_types = {
         'char': c_char,
         'char2': char2,
@@ -1280,9 +1291,9 @@ class CLInfo:
         "clCreateImage": {
             "args": {
                 "context": cl_context,
-                "flags": cl_mem_flags,
-                "image_format": ptr_cl_uint,
-                "image_desc": ptr_cl_uint,
+                "flags": cl_ulong,
+                "image_format": ptr_cl_image_format,
+                "image_desc": ptr_cl_image_desc,
                 "host_ptr": c_void_p,
                 "errcode_ret": ptr_cl_int
             },

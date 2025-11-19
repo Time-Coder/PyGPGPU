@@ -3,7 +3,7 @@ import concurrent.futures
 import asyncio
 from typing import Dict, List, TYPE_CHECKING, Union, Tuple
 
-from .kernel_parser import ArgInfo
+from .kernel_info import ArgInfo
 
 if TYPE_CHECKING:
     from .program_wrapper import ProgramWrapper

@@ -20,12 +20,18 @@ from ..runtime import (
     cl_device_type,
     cl_event,
     ErrorCode,
-    cl_command_queue_properties
+    cl_command_queue_properties,
+    cl_sampler
 )
 from .clobject import CLObject
-from .kernel_parser import ArgInfo
+from .kernel_info import ArgInfo
 from .command_queue import CommandQueue
 from .event import Event
+from .sampler_t import sampler_t
+from .image2d_t import image2d_t
+from .image2d import image2d
+from .sampler import sampler
+from .mem import Mem
 from ...vectorization import sizeof, value_ptr
 from ...utils import detect_work_size, join_with_and
 
@@ -140,13 +146,15 @@ class Kernel(CLObject):
         else:
             cmd_queue = self.context.create_command_queue(used_device)
 
-        need_read_back_buffers:List[Tuple[ArgInfo, Any, Buffer]] = []
+        need_read_back_buffers:List[Tuple[ArgInfo, Any, Mem]] = []
         copy_to_device_events:List[Event] = []
         for key, value in used_kwargs.items():
-            buffer_tuple = self._set_arg(key, value, cmd_queue)
-            if buffer_tuple:
-                need_read_back_buffers.append(buffer_tuple[0:-1])
-                copy_to_device_events.append(buffer_tuple[-1])
+            result = self._set_arg(key, value, cmd_queue)
+            if "event" in result and result["event"] is not None:
+                copy_to_device_events.append(result["event"])
+
+            if "arg_info" in result:
+                need_read_back_buffers.append((result["arg_info"], result["value"], result["mem"]))
 
         if global_work_size is None or local_work_size is None:
             global_work_size, local_work_size = self.__detect_work_size(used_device)
@@ -157,20 +165,24 @@ class Kernel(CLObject):
         return cmd_queue, global_work_size, local_work_size, need_read_back_buffers, copy_to_device_events
 
     @staticmethod
-    def __copy_to_host(arg_value:Union[np.ndarray, List[Any]], buffer:Buffer):
-        if arg_value is not buffer.data:
-            if isinstance(arg_value, list):
-                arg_value[:] = buffer.data.tolist()
-            else:
-                arg_value[:] = buffer.data
+    def __copy_to_host(arg_value:Union[np.ndarray, image2d_t, List[Any]], buffer:Union[Buffer, image2d]):
+        host_data = arg_value
+        if isinstance(arg_value, image2d_t):
+            host_data = arg_value.data
 
-    def __after_call(self, cmd_queue:CommandQueue, need_read_back_buffers:List[Tuple[ArgInfo, Any, Buffer]], after_events:List[Event])->List[Event]:
+        if host_data is not buffer.data:
+            if isinstance(host_data, list):
+                host_data[:] = buffer.data.tolist()
+            elif isinstance(host_data, np.ndarray):
+                host_data[:] = buffer.data
+
+    def __after_call(self, cmd_queue:CommandQueue, need_read_back_buffers:List[Tuple[ArgInfo, Any, Union[Buffer, image2d]]], after_events:List[Event])->List[Event]:
         
-        def on_completed(arg_value:Union[np.ndarray, List[Any]], buffer:Buffer, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
+        def on_completed(arg_value:Union[np.ndarray, List[Any]], buffer:Union[Buffer, image2d], arg_info:ArgInfo, event:Event, error_code:ErrorCode):
             if error_code == ErrorCode.CL_SUCCESS:
                 self.__copy_to_host(arg_value, buffer)
 
-            arg_info.unuse_buffer(buffer)
+            arg_info.unuse(buffer)
         
         events:List[Event] = []
         for arg_info, arg_value, buffer in need_read_back_buffers:
@@ -222,9 +234,9 @@ class Kernel(CLObject):
     def __detect_work_size(self, device:Device):
         max_shape = None
         for arg in self._arg_list:
-            if arg.buffer is not None and ((arg.buffer.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) or (arg.buffer.flags & cl_mem_flags.CL_MEM_READ_WRITE)) and not (arg.buffer.flags & cl_mem_flags.CL_MEM_READ_ONLY):
-                arg_shape = arg.buffer.data.shape
-                if arg.base_type_str in CLInfo.vec_types:
+            if arg.mem is not None and ((arg.mem.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) or (arg.mem.flags & cl_mem_flags.CL_MEM_READ_WRITE)) and not (arg.mem.flags & cl_mem_flags.CL_MEM_READ_ONLY):
+                arg_shape = (arg.mem.data.shape if arg.mem.data is not None else arg.mem.shape)
+                if arg.base_type_str in CLInfo.vec_types and arg_shape[-1] == CLInfo.vec_types[arg.base_type_str].__len__(None):
                     arg_shape = arg_shape[:-1]
                     
                 if max_shape is None:
@@ -254,7 +266,7 @@ class Kernel(CLObject):
         global_work_size, local_work_size = detect_work_size(total_local_size, max_shape)
         return global_work_size, local_work_size
 
-    def _set_arg(self, index_or_name:Union[int, str], value:Any, cmd_queue:CommandQueue)->Optional[Tuple[ArgInfo, Any, Buffer, Event]]:
+    def _set_arg(self, index_or_name:Union[int, str], value:Any, cmd_queue:CommandQueue)->Dict[str, Any]:
         if isinstance(index_or_name, int):
             arg_info = self._arg_list[index_or_name]
             index = index_or_name
@@ -265,7 +277,7 @@ class Kernel(CLObject):
         arg_type_str = arg_info.type_str
         is_ptr = (arg_type_str[-1] == "*")
         if not is_ptr and arg_info.value is not None and arg_info.value == value:
-            return
+            return {}
         
         arg_type_str = arg_info.type_str
         content_type_str = arg_type_str
@@ -297,7 +309,7 @@ class Kernel(CLObject):
                 bytes_per_group *= sizeof(content_type)
 
                 if arg_info.value is not None and arg_info.value == bytes_per_group:
-                    return
+                    return {}
                 
                 CL.clSetKernelArg(self.id, index, bytes_per_group, None)
                 arg_info.value = bytes_per_group
@@ -313,14 +325,57 @@ class Kernel(CLObject):
                 if not used_value.flags['C_CONTIGUOUS']:
                     used_value = np.ascontiguousarray(used_value)
 
-                buffer, event = arg_info.use_buffer(used_value, cmd_queue)
-                if arg_info.buffer != buffer:
+                buffer, event = arg_info.use_buffer(cmd_queue, used_value)
+                if arg_info.mem != buffer:
                     CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
 
                 arg_info.value = value
-                arg_info.buffer = buffer
+                arg_info.mem = buffer
                 if arg_info.need_read_back:
-                    return arg_info, value, buffer, event
+                    return {
+                        "arg_info": arg_info,
+                        "value": value,
+                        "mem": buffer,
+                        "event": event
+                    }
+                else:
+                    return {
+                        "event": event
+                    }
+        elif arg_type_str == "image2d_t":
+            if not isinstance(value, (np.ndarray, image2d_t)):
+                raise TypeError(f"type of argument '{arg_info.name}' must be image2d_t or np.ndarray, got {value.__class__.__name__}.")
+            
+            if isinstance(value, np.ndarray):
+                value = image2d_t(value)
+
+            image, event = arg_info.use_image2d(cmd_queue, value)
+            if arg_info.mem != image:
+                CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(image.id))
+
+            arg_info.value = value
+            arg_info.mem = image
+            if arg_info.need_read_back:
+                return {
+                    "arg_info": arg_info,
+                    "value": value,
+                    "mem": image,
+                    "event": event
+                }
+            else:
+                return {
+                    "event": event
+                }
+        elif arg_type_str == "sampler_t":
+            if not isinstance(value, sampler_t):
+                raise TypeError(f"type of argument '{arg_info.name}' must be sampler_t, got {value.__class__.__name__}.")
+            
+            sampler_ = arg_info.use_sampler(self.context, value)
+            if arg_info.value != sampler_.id:
+                CL.clSetKernelArg(self.id, index, sizeof(cl_sampler), pointer(sampler_.id))
+                arg_info.value = sampler_.id
+
+        return {}
 
     @property
     def _func_head(self)->str:

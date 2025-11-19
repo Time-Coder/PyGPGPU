@@ -7,5 +7,6 @@ from .kernel import Kernel
 from .command_queue import CommandQueue
 from .buffer import Buffer
 from .image2d import image2d
+from .image2d_t import image2d_t
 from .sampler import sampler
 from .sampler_t import sampler_t

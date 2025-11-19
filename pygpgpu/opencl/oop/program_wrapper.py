@@ -4,7 +4,8 @@ from typing import Dict, List, Any, Optional, Set
 
 from .device import Device
 from .build_options import BuildOptions
-from .kernel_parser import KernelParser, KernelInfo
+from .kernel_parser import KernelParser
+from .kernel_info import KernelInfo
 from .kernel_wrapper import KernelWrapper
 from .program import Program
 from .platform import Platform

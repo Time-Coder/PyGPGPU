@@ -5,9 +5,8 @@ import copy
 import json
 import numpy as np
 from collections import defaultdict
-from dataclasses import dataclass
 from ctypes import c_char_p, c_void_p
-from typing import Optional, Dict, Any, List, Set, Union, Iterator, TYPE_CHECKING, Tuple
+from typing import Optional, Dict, Any, List, Set, Union, Iterator
 
 from ...kernel_parser import CPreprocessor
 from ..runtime import (
@@ -20,106 +19,7 @@ from ..runtime import (
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
-from .event import Event
-
-if TYPE_CHECKING:
-    from .buffer import Buffer
-    from .command_queue import CommandQueue
-
-
-class ArgInfo:
-
-    def __init__(self, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
-        self.name = name
-        self.type_str = type_str
-        self.address_qualifier = address_qualifier
-        self.access_qualifier = access_qualifier
-        self.type_qualifiers = type_qualifiers
-        self.value: Any = None
-        self.buffer: Optional[Buffer] = None
-        self.__buffers: Dict[Tuple[int, cl_mem_flags], List[Buffer]] = defaultdict(list)
-        self.__busy_buffers: Set[Buffer] = set()
-
-    @property
-    def is_ptr(self)->bool:
-        return (self.type_str[-1] == "*")
-    
-    @property
-    def base_type_str(self)->str:
-        return (self.type_str[:-1] if self.is_ptr else self.type_str)
-    
-    @property
-    def need_read_back(self)->bool:
-        return (
-            self.is_ptr and
-            self.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL and
-            self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY and
-            not (self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST)
-        )
-    
-    @property
-    def readonly(self)->bool:
-        return (
-            self.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_CONSTANT or
-            self.access_qualifier == cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY or
-            self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST
-        )
-    
-    def check_type(self, value:Any)->None:
-        base_type_str = self.base_type_str
-        if self.is_ptr:
-            if not isinstance(value, np.ndarray):
-                raise TypeError(f"type of argument '{self.name}' must be np.ndarray, got {value.__class__.__name__}.")
-            
-            if base_type_str in CLInfo.dtypes:
-                dtype = CLInfo.dtypes[base_type_str]
-                if value.dtype != dtype:
-                    raise TypeError(f"type of argument '{self.name}' must be NDArray[{dtype.name}], got NDArray[{value.dtype.name}].")
-        else:
-            base_type = None
-            if base_type_str in CLInfo.basic_types:
-                base_type = CLInfo.basic_types[base_type_str]
-
-            if base_type_str in CLInfo.alter_types:
-                base_type = CLInfo.alter_types[base_type_str]
-
-            same_type = (value.__class__.__name__ == base_type_str if base_type is None else isinstance(value, base_type))
-
-            if not same_type:
-                raise TypeError(f"type of argument '{self.name}' must be {base_type_str}, got {value.__class__.__name__}.")
-
-    def use_buffer(self, data:np.ndarray, cmd_queue:CommandQueue)->Tuple[Buffer, Event]:
-        if self.readonly:
-            flags = cl_mem_flags.CL_MEM_READ_ONLY
-        else:
-            flags = cl_mem_flags.CL_MEM_READ_WRITE
-
-        buffer_key = (data.nbytes, flags)
-
-        used_buffer = None
-        for buffer in self.__buffers[buffer_key]:
-            if buffer not in self.__busy_buffers:
-                used_buffer = buffer
-                break
-
-        if used_buffer is None:
-            used_buffer = cmd_queue.context.create_buffer(size=data.nbytes, flags=flags)
-            self.__buffers[buffer_key].append(used_buffer)
-        
-        event = used_buffer.set_data(cmd_queue, data)
-        self.__busy_buffers.add(used_buffer)
-        
-        return used_buffer, event
-    
-    def unuse_buffer(self, buffer:Buffer):
-        self.__busy_buffers.remove(buffer)
-
-
-class KernelInfo:
-
-    def __init__(self, name:str):
-        self.name: str = name
-        self.args: Dict[str, ArgInfo] = {}
+from .kernel_info import KernelInfo, ArgInfo
 
 
 class KernelParser:

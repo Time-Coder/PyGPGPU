@@ -1,5 +1,6 @@
+from __future__ import annotations
 from ctypes import pointer
-from typing import override, Dict
+from typing import override, Dict, TYPE_CHECKING
 
 from ..runtime import (
     cl_addressing_mode,
@@ -12,19 +13,20 @@ from ..runtime import (
     cl_sampler_info
 )
 
+if TYPE_CHECKING:
+    from .context import Context
+
 from .clobject import CLObject
-from .context import Context
+from .sampler_t import sampler_t
 
 
 class sampler(CLObject):
 
-    def __init__(self, context:Context, normalized_coords:bool, addressing_mode:cl_addressing_mode, filter_mode:cl_filter_mode)->None:
+    def __init__(self, context:Context, sampler_t_:sampler_t)->None:
         error_code = cl_int(0)
-        sampler_id:cl_sampler = CL.clCreateSampler(context.id, normalized_coords, addressing_mode, filter_mode, pointer(error_code))
+        sampler_id:cl_sampler = CL.clCreateSampler(context.id, sampler_t_.normalized_coords, sampler_t_.addressing_mode, sampler_t_.filter_mode, pointer(error_code))
         self._context:Context = context
-        self._normalized_coords:bool = normalized_coords
-        self._addressing_mode:cl_addressing_mode = addressing_mode
-        self._filter_mode:cl_filter_mode = filter_mode
+        self._sampler_t:sampler_t = sampler_t_
         CLObject.__init__(self, sampler_id)
 
     @property
@@ -33,15 +35,15 @@ class sampler(CLObject):
     
     @property
     def normalized_coords(self)->bool:
-        return self._normalized_coords
+        return self._sampler_t.normalized_coords
     
     @property
     def addressing_mode(self)->cl_addressing_mode:
-        return self._addressing_mode
+        return self._sampler_t._addressing_mode
     
     @property
     def filter_mode(self)->cl_filter_mode:
-        return self._filter_mode
+        return self._sampler_t._filter_mode
 
     @override
     @staticmethod

@@ -19,7 +19,8 @@ from ..runtime import (
     cl_program,
     cl_kernel
 )
-from .kernel_parser import KernelParser, KernelInfo
+from .kernel_parser import KernelParser
+from .kernel_info import KernelInfo
 from .kernel import Kernel
 from ...exceptions import CompileError, CompileWarning
 from ...utils import save_bin, load_bin, modify_time
