@@ -33,10 +33,6 @@ class Event(CLObject):
         self._context:Context = context
         self._is_user_event:bool = False
         self._func:Optional[CL.Func] = func
-        self._call_stack:Optional[str] = None
-        if func is not None:
-            self._call_stack = ''.join(traceback.format_stack()[:-1])
-
         if not event_id:
             event_id = CL.clCreateUserEvent(context, pointer(error_code))
             self._is_user_event:bool = True
@@ -143,7 +139,7 @@ class Event(CLObject):
         error_code = self.status
         if error_code < 0:
             if self._func is not None:
-                return f"{self._call_stack}\n{error_code}:\n" + CLInfo.func_signatures[self._func.__name__]["errors"][error_code]
+                return f"{error_code}:\n" + CLInfo.func_signatures[self._func.__name__]["errors"][error_code]
             else:
                 return str(error_code)
         else:

@@ -9,5 +9,5 @@ import numpy as np
 program = compile("test.cl", type_checked=True)
 src_image = image2d_t("test.png")
 dest_image = image2d_t(np.zeros_like(src_image.data))
-program.gaussian_blur[Platforms[0].devices[0]](src_image, dest_image, sampler_t())
+program.gaussian_blur[Platforms[1].devices[0]](src_image, dest_image, sampler_t())
 dest_image.save("dest.png")

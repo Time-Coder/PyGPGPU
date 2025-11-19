@@ -117,7 +117,6 @@ class Kernel(CLObject):
         work_dim = len(global_work_size)
 
         event_id = cl_event()
-        CL.clEnqueueNDRangeKernel.record_call_stack()
         CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, len(copy_to_device_events), Event.events_ptr(copy_to_device_events), pointer(event_id))
         if CL.print_info:
             print(f"launch {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)

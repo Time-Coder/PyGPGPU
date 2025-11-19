@@ -52,7 +52,6 @@ class image2d(Mem):
 
         events_ptr = Event.events_ptr(after_events)
         event_id = cl_event(0)
-        CL.clEnqueueWriteImage.record_call_stack()
         CL.clEnqueueWriteImage(cmd_queue.id, self.id, False, ptr_origin, ptr_region, 0, 0, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueWriteImage)
 
@@ -74,7 +73,6 @@ class image2d(Mem):
 
         events_ptr = Event.events_ptr(after_events)
         event_id = cl_event(0)
-        CL.clEnqueueReadImage.record_call_stack()
         CL.clEnqueueReadImage(cmd_queue.id, self.id, False, ptr_origin, ptr_region, 0, 0, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueReadImage)
 
