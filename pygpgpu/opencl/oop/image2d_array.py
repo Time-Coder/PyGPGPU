@@ -17,18 +17,18 @@ if TYPE_CHECKING:
     from .context import Context
 
 from .imagend import imagend
-from .image3d_t import image3d_t
+from .image2d_array_t import image2d_array_t
 
 
-class image3d(imagend):
+class image2d_array(imagend):
 
-    def __init__(self, context:Context, image:image3d_t):
+    def __init__(self, context:Context, image:image2d_array_t):
         imagend.__init__(self, context, image)
 
     @override
     def write(self, cmd_queue:CommandQueue, origin:Tuple[int, int, int]=(0, 0, 0), region:Optional[Tuple[int, int, int]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
         if cmd_queue.context != self.context:
-            raise ValueError("cmd_queue should be in the same context as current image3d")
+            raise ValueError("cmd_queue should be in the same context as current image2d_array")
         
         if region is None:
             region = self._image.shape
@@ -50,7 +50,7 @@ class image3d(imagend):
     @override
     def read(self, cmd_queue:CommandQueue, origin:Tuple[int, int, int]=(0, 0, 0), region:Optional[Tuple[int, int, int]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
         if cmd_queue.context != self.context:
-            raise ValueError("cmd_queue should be in the same context as current image3d")
+            raise ValueError("cmd_queue should be in the same context as current image2d_array")
         
         if region is None:
             region = self._image.shape
@@ -72,7 +72,7 @@ class image3d(imagend):
     @override
     def set_data(self, cmd_queue:CommandQueue, data:np.ndarray, after_events:List[Event]=None)->Event:
         if cmd_queue.context != self.context:
-            raise ValueError("cmd_queue should be in the same context as current image3d")
+            raise ValueError("cmd_queue should be in the same context as current image2d_array")
         
         if not data.flags['C_CONTIGUOUS']:
             data = np.ascontiguousarray(data)

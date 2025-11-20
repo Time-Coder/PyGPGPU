@@ -10,6 +10,6 @@ import imageio.v3 as iio
 program = compile("test.cl", type_checked=False)
 src_image = image2d_t("test.png")
 dest_image = np.zeros_like(src_image.data)
-program.gaussian_blur[Platforms[1].devices[0]](src_image, dest_image, sampler_t())
+program.gaussian_blur[Platforms[0].devices[0]](src_image, dest_image, sampler_t())
 iio.imwrite("dest.png", dest_image)
 # dest_image.save("dest.png")
