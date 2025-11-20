@@ -12,3 +12,6 @@ class uchar2(genVec2):
     @property
     def flavor(self)->Flavor:
         return Flavor.CL
+    
+    def __sizeof__(self)->int:
+        return 2

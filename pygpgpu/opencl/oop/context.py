@@ -41,7 +41,7 @@ from .image1d import image1d
 from .image3d import image3d
 from .image2d_array import image2d_array
 from .image1d_array import image1d_array
-from .pipe import Pipe
+from .pipe import Pipe, pipe
 
 
 class Context(CLObject):
@@ -81,6 +81,9 @@ class Context(CLObject):
         context_id = CL.clCreateContext(properties, n_devices, device_ids, Context._pfn_notify, user_data, pointer(errcode))
         CLObject.__init__(self, context_id)
 
+        self.__pipes:Dict[pipe, Pipe] = {}
+        self.__samplers:Dict[str, sampler] = {}
+
     @staticmethod
     def _release_func()->CL.Func:
         return CL.clReleaseContext
@@ -113,9 +116,6 @@ class Context(CLObject):
     def create_event(self)->Event:
         return Event(self)
     
-    def create_sampler(self, sampler_t_:sampler_t)->sampler:
-        return sampler(self, sampler_t_)
-    
     def create_image(self, image:imagend_t)->imagend:
         if isinstance(image, image2d_t):
             return self.create_image2d(image)
@@ -143,8 +143,18 @@ class Context(CLObject):
     def create_image1d_array(self, image:image1d_array_t)->image1d_array:
         return image1d_array(self, image)
     
-    def create_pipe(self, packet_size:int, max_packets:int, flags:cl_mem_flags=cl_mem_flags.CL_MEM_READ_WRITE|cl_mem_flags.CL_MEM_HOST_NO_ACCESS)->Pipe:
-        return Pipe(self, packet_size, max_packets, flags)
+    def get_sampler(self, sampler_t_:sampler_t)->sampler:
+        sampler_key:str = str(sampler_t_)
+        if sampler_key not in self.__samplers:
+            self.__samplers[sampler_key] = sampler(self, sampler_t_)
+
+        return self.__samplers[sampler_key]
+
+    def get_pipe(self, pipe_:pipe)->Pipe:
+        if pipe_ not in self.__pipes:
+            self.__pipes[pipe_] = Pipe(self, pipe_)
+
+        return self.__pipes[pipe_]
 
     def compile(self,
         file_name:str,

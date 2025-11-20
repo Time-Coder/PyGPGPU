@@ -23,7 +23,8 @@ from ..runtime import (
     cl_command_queue_properties,
     cl_sampler,
     sampler_t,
-    image2d_t
+    image2d_t,
+    cl_kernel_arg_type_qualifier
 )
 from .clobject import CLObject
 from .kernel_info import ArgInfo
@@ -31,6 +32,7 @@ from .command_queue import CommandQueue
 from .event import Event
 from .image2d import image2d
 from .mem_object import MemObject
+from .pipe import pipe, Pipe
 from ...vectorization import sizeof, value_ptr
 from ...utils import detect_work_size, join_with_and
 
@@ -146,7 +148,7 @@ class Kernel(CLObject):
         need_read_back_mem_objs:List[Tuple[ArgInfo, Any, MemObject]] = []
         copy_to_device_events:List[Event] = []
         for key, value in used_kwargs.items():
-            result = self._set_arg(key, value, cmd_queue)
+            result = self._set_arg(cmd_queue, key, value)
             if "event" in result and result["event"] is not None:
                 copy_to_device_events.append(result["event"])
 
@@ -269,7 +271,7 @@ class Kernel(CLObject):
         global_work_size, local_work_size = detect_work_size(total_local_size, max_shape)
         return global_work_size, local_work_size
 
-    def _set_arg(self, index_or_name:Union[int, str], value:Any, cmd_queue:CommandQueue)->Dict[str, Any]:
+    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any)->Dict[str, Any]:
         if isinstance(index_or_name, int):
             arg_info = self._arg_list[index_or_name]
             index = index_or_name
@@ -283,11 +285,33 @@ class Kernel(CLObject):
             return {}
         
         arg_type_str = arg_info.type_str
+        type_qualifiers = arg_info.type_qualifiers
         content_type_str = arg_type_str
         if is_ptr:
             content_type_str = arg_type_str[:-1]
 
-        if arg_type_str in CLInfo.basic_types:
+        if type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
+            arg_type = CLInfo.basic_types[arg_type_str]
+            
+            if not isinstance(value, pipe):
+                raise TypeError(f"type of argument '{arg_info.name}' must be pipe<{arg_type.__name__}>, got {value.__class__.__name__}.")
+            
+            if value.packet_type != arg_type:
+                raise TypeError(f"type of argument '{arg_info.name}' must be pipe<{arg_type.__name__}>, got pipe<{value.packet_type.__name__}>.")
+
+            used_value = self.context.get_pipe(value)
+            if arg_info.value != used_value.id:
+                CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
+                arg_info.value = used_value.id
+        elif arg_type_str == "sampler_t":
+            if not isinstance(value, sampler_t):
+                raise TypeError(f"type of argument '{arg_info.name}' must be sampler_t, got {value.__class__.__name__}.")
+            
+            used_value = self.context.get_sampler(value)
+            if arg_info.value != used_value.id:
+                CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
+                arg_info.value = used_value.id
+        elif arg_type_str in CLInfo.basic_types:
             arg_type = CLInfo.basic_types[arg_type_str]
             if isinstance(value, arg_type):
                 used_value = value
@@ -370,14 +394,6 @@ class Kernel(CLObject):
                 return {
                     "event": event
                 }
-        elif arg_type_str == "sampler_t":
-            if not isinstance(value, sampler_t):
-                raise TypeError(f"type of argument '{arg_info.name}' must be sampler_t, got {value.__class__.__name__}.")
-            
-            sampler_ = arg_info.use_sampler(self.context, value)
-            if arg_info.value != sampler_.id:
-                CL.clSetKernelArg(self.id, index, sizeof(cl_sampler), pointer(sampler_.id))
-                arg_info.value = sampler_.id
 
         return {}
 

@@ -24,6 +24,7 @@ from .mem_object import MemObject
 from .event import Event
 from .sampler import sampler
 from .imagend import imagend
+from .pipe import pipe
 
 
 class ArgInfo:
@@ -40,8 +41,6 @@ class ArgInfo:
         self.__buffers: Dict[Tuple[cl_context, int, cl_mem_flags], List[Buffer]] = defaultdict(list)
         self.__images: Dict[Tuple[cl_context, Tuple[int, ...], type], List[imagend]] = defaultdict(list)
         self.__busy_mems: Set[MemObject] = set()
-
-        self.__samplers: Dict[Tuple[cl_context, str], sampler] = {}
 
     @property
     def is_ptr(self)->bool:
@@ -76,7 +75,13 @@ class ArgInfo:
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str
-        if self.is_ptr:
+        if self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
+            if not isinstance(value, pipe):
+                raise TypeError(f"type of argument '{self.name}' must be pipe<{base_type_str}>, got {value.__class__.__name__}.")
+            
+            if value.packet_type.__name__ != base_type_str:
+                raise TypeError(f"type of argument '{self.name}' must be pipe<{base_type_str}>, got pipe<{value.packet_type.__name__}>.")
+        elif self.is_ptr:
             if not isinstance(value, np.ndarray):
                 raise TypeError(f"type of argument '{self.name}' must be np.ndarray, got {value.__class__.__name__}.")
             
@@ -119,14 +124,6 @@ class ArgInfo:
         self.__busy_mems.add(used_buffer)
         
         return used_buffer, event
-
-    def use_sampler(self, context:Context, sampler_t_:sampler_t)->sampler:
-        sampler_key = (context.id.value, str(sampler_t_))
-
-        if sampler_key not in self.__samplers:
-            self.__samplers[sampler_key] = sampler(context, sampler_t_)
-        
-        return self.__samplers[sampler_key]
     
     def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
         if self.readonly:

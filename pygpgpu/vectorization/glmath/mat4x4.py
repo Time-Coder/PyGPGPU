@@ -13,4 +13,7 @@ class mat4x4(genMat4x4):
     def flavor(self)->Flavor:
         return Flavor.GL
     
+    def __sizeof__(self)->int:
+        return 64
+    
 mat4 = mat4x4

@@ -125,6 +125,10 @@ class genType(ABC):
 
     def __repr__(self)->str:
         return f"{self.__class__.__name__}({', '.join([str(self[i]) for i in range(self.n_elements)])})"
+    
+    @abstractmethod
+    def __sizeof__(self)->int:
+        pass
 
     @property
     def on_changed(self)->Optional[Callable[[], None]]:

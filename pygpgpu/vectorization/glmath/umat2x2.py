@@ -13,4 +13,7 @@ class umat2x2(genMat2x2):
     def flavor(self)->Flavor:
         return Flavor.GL
     
+    def __sizeof__(self)->int:
+        return 16
+    
 umat2 = umat2x2

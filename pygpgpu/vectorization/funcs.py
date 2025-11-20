@@ -409,8 +409,16 @@ def not_(x:genType):
 
     return result
 
-def sizeof(x:genType)->int:
-    return (ctypes.sizeof(x._data) if isinstance(x, genType) else ctypes.sizeof(x))
+def sizeof(x:Union[genType,type])->int:
+    if isinstance(x, type):
+        if issubclass(x, genType):
+            return x.__sizeof__(None)
+        else:
+            return ctypes.sizeof(x)
+    elif isinstance(x, genType):
+        return x.__sizeof__()
+    else:
+        return ctypes.sizeof(x)
 
 def value_ptr(x:genType):
     return (x._data if isinstance(x, genType) else ctypes.pointer(x))

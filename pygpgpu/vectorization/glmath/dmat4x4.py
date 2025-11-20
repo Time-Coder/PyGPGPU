@@ -13,4 +13,7 @@ class dmat4x4(genMat4x4):
     def flavor(self)->Flavor:
         return Flavor.GL
     
+    def __sizeof__(self)->int:
+        return 128
+    
 dmat4 = dmat4x4

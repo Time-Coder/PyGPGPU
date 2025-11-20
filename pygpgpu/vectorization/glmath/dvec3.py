@@ -12,3 +12,6 @@ class dvec3(genVec3):
     @property
     def flavor(self)->Flavor:
         return Flavor.GL
+    
+    def __sizeof__(self)->int:
+        return 24

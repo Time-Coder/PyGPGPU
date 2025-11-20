@@ -13,3 +13,5 @@ class vec3(genVec3):
     def flavor(self)->Flavor:
         return Flavor.GL
     
+    def __sizeof__(self)->int:
+        return 12

@@ -12,3 +12,6 @@ class double16(genVec16):
     @property
     def flavor(self)->Flavor:
         return Flavor.CL
+    
+    def __sizeof__(self)->int:
+        return 128

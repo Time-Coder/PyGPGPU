@@ -3,9 +3,7 @@ import re
 import os
 import copy
 import json
-import numpy as np
-from collections import defaultdict
-from ctypes import c_char_p, c_void_p
+from ctypes import c_char_p
 from typing import Optional, Dict, Any, List, Set, Union, Iterator
 
 from ...kernel_parser import CPreprocessor
@@ -14,8 +12,6 @@ from ..runtime import (
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,
-    cl_mem_flags,
-    CLInfo
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions

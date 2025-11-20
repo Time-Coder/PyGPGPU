@@ -12,3 +12,6 @@ class quat(genQuat):
     @property
     def flavor(self)->Flavor:
         return Flavor.GL
+    
+    def __sizeof__(self)->int:
+        return 16

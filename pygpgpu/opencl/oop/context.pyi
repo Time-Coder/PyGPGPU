@@ -2,7 +2,18 @@ from typing import Tuple, List, Optional, Dict, Any, Union
 
 import numpy as np
 
-from ..runtime import cl_context_properties, cl_mem_flags, cl_command_queue_properties
+from ..runtime import (
+    cl_context_properties,
+    cl_mem_flags,
+    cl_command_queue_properties,
+    sampler_t,
+    imagend_t,
+    image2d_t,
+    image1d_t,
+    image3d_t,
+    image2d_array_t,
+    image1d_array_t
+)
 from .clobject import CLObject
 from .device import Device
 from .platform import Platform
@@ -10,19 +21,13 @@ from .program import Program
 from .buffer import Buffer
 from .command_queue import CommandQueue
 from .sampler import sampler
-from .sampler_t import sampler_t
 from .imagend import imagend
-from .imagend_t import imagend_t
 from .image2d import image2d
-from .image2d_t import image2d_t
 from .image1d import image1d
-from .image1d_t import image1d_t
 from .image3d import image3d
-from .image3d_t import image3d_t
 from .image2d_array import image2d_array
-from .image2d_array_t import image2d_array_t
 from .image1d_array import image1d_array
-from .image1d_array_t import image1d_array_t
+from .pipe import Pipe, pipe
 
 
 class Context(CLObject):
@@ -60,7 +65,9 @@ class Context(CLObject):
 
     def create_command_queue(self, device:Device, properties:Optional[cl_command_queue_properties]=None)->CommandQueue:...
 
-    def create_sampler(self, sampler_t_:sampler_t)->sampler: ...
+    def get_sampler(self, sampler_t_:sampler_t)->sampler: ...
+
+    def get_pipe(self, pipe_:pipe)->Pipe: ...
     
     def create_image(self, image:imagend_t)->imagend: ...
 
