@@ -41,6 +41,7 @@ from .image1d import image1d
 from .image3d import image3d
 from .image2d_array import image2d_array
 from .image1d_array import image1d_array
+from .pipe import Pipe
 
 
 class Context(CLObject):
@@ -141,6 +142,9 @@ class Context(CLObject):
     
     def create_image1d_array(self, image:image1d_array_t)->image1d_array:
         return image1d_array(self, image)
+    
+    def create_pipe(self, packet_size:int, max_packets:int, flags:cl_mem_flags=cl_mem_flags.CL_MEM_READ_WRITE|cl_mem_flags.CL_MEM_HOST_NO_ACCESS)->Pipe:
+        return Pipe(self, packet_size, max_packets, flags)
 
     def compile(self,
         file_name:str,

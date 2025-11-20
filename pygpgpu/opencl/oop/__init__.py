@@ -12,3 +12,4 @@ from .image3d import image3d
 from .image2d_array import image2d_array
 from .image1d_array import image1d_array
 from .sampler import sampler
+from .pipe import Pipe
