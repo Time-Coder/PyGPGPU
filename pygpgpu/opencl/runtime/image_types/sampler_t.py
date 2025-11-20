@@ -1,4 +1,4 @@
-from ..runtime import (
+from ..cltypes import (
     cl_addressing_mode,
     cl_filter_mode
 )

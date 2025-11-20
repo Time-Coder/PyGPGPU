@@ -10,7 +10,9 @@ from ..runtime import (
     cl_kernel_arg_type_qualifier,
     cl_mem_flags,
     cl_context,
-    CLInfo
+    CLInfo,
+    sampler_t,
+    imagend_t
 )
 
 if TYPE_CHECKING:
@@ -21,9 +23,7 @@ if TYPE_CHECKING:
 from .mem_object import MemObject
 from .event import Event
 from .sampler import sampler
-from .sampler_t import sampler_t
-from .image2d import image2d
-from .image2d_t import image2d_t
+from .imagend import imagend
 
 
 class ArgInfo:
@@ -38,7 +38,7 @@ class ArgInfo:
         self.mem_obj: Optional[MemObject] = None
 
         self.__buffers: Dict[Tuple[cl_context, int, cl_mem_flags], List[Buffer]] = defaultdict(list)
-        self.__image2ds: Dict[Tuple[cl_context, Tuple[int, ...], type], List[image2d]] = defaultdict(list)
+        self.__images: Dict[Tuple[cl_context, Tuple[int, ...], type], List[imagend]] = defaultdict(list)
         self.__busy_mems: Set[MemObject] = set()
 
         self.__samplers: Dict[Tuple[cl_context, str], sampler] = {}
@@ -128,7 +128,7 @@ class ArgInfo:
         
         return self.__samplers[sampler_key]
     
-    def use_image2d(self, cmd_queue:CommandQueue, image:image2d_t)->Tuple[image2d, Event]:
+    def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
         if self.readonly:
             image.flags = cl_mem_flags.CL_MEM_READ_ONLY
         elif self.writeonly:
@@ -136,10 +136,10 @@ class ArgInfo:
         else:
             image.flags = cl_mem_flags.CL_MEM_READ_WRITE
 
-        image_key = (cmd_queue.context.id.value, image.shape, image.dtype, image.flags)
+        image_key = (cmd_queue.context.id.value, image.__class__.__name__, image.shape, image.dtype, image.flags)
 
         used_image = None
-        for image in self.__image2ds[image_key]:
+        for image in self.__images[image_key]:
             if image not in self.__busy_mems:
                 used_image = image
                 break
@@ -147,8 +147,8 @@ class ArgInfo:
         image_data = image.data
         image.data = None
         if used_image is None:
-            used_image = cmd_queue.context.create_image2d(image)
-            self.__image2ds[image_key].append(used_image)
+            used_image = cmd_queue.context.create_image(image)
+            self.__images[image_key].append(used_image)
         
         event = used_image.set_data(cmd_queue, image_data)
         self.__busy_mems.add(used_image)

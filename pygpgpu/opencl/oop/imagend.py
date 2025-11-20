@@ -12,14 +12,14 @@ from ..runtime import (
     cl_image_format,
     cl_image_desc,
     cl_channel_order,
-    cl_channel_type
+    cl_channel_type,
+    imagend_t
 )
 
 if TYPE_CHECKING:
     from .context import Context
 
 from .mem_object import MemObject
-from .imagend_t import imagend_t
 
 
 class imagend(MemObject):

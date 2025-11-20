@@ -8,7 +8,8 @@ import numpy as np
 from ..runtime import (
     CL,
     cl_event,
-    cl_mem_flags
+    cl_mem_flags,
+    image2d_array_t
 )
 from .command_queue import CommandQueue
 from .event import Event
@@ -17,7 +18,6 @@ if TYPE_CHECKING:
     from .context import Context
 
 from .imagend import imagend
-from .image2d_array_t import image2d_array_t
 
 
 class image2d_array(imagend):

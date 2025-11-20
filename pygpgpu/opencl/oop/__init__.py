@@ -7,6 +7,8 @@ from .kernel import Kernel
 from .command_queue import CommandQueue
 from .buffer import Buffer
 from .image2d import image2d
-from .image2d_t import image2d_t
+from .image1d import image1d
+from .image3d import image3d
+from .image2d_array import image2d_array
+from .image1d_array import image1d_array
 from .sampler import sampler
-from .sampler_t import sampler_t

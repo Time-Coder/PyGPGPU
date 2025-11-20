@@ -3,12 +3,12 @@ from typing import List
 from ..runtime import (
     cl_addressing_mode,
     cl_filter_mode,
-    cl_sampler_properties
+    cl_sampler_properties,
+    sampler_t
 )
 
 from .clobject import CLObject
 from .context import Context
-from .sampler_t import sampler_t
 
 
 class sampler(CLObject):

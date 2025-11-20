@@ -10,7 +10,14 @@ from ..vectorization.clmath import (
     float2, float3, float4, float8, float16,
     double2, double3, double4, double8, double16
 )
-from .oop import image2d_t, sampler_t
+from .runtime import (
+    image1d_t,
+    image2d_t,
+    image3d_t,
+    image1d_array_t,
+    image2d_array_t,
+    sampler_t
+)
 
 from ..vectorization import (
     abs, sign, floor, ceil, trunc, round, roundEven, fract, mod,

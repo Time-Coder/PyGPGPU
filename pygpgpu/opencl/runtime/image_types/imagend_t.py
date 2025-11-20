@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import imageio.v3 as iio
 
-from ..runtime import (
+from ..cltypes import (
     cl_mem_flags,
     cl_image_format,
     cl_image_desc,

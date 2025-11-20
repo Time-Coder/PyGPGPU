@@ -11,6 +11,8 @@ from .buffer import Buffer
 from .command_queue import CommandQueue
 from .sampler import sampler
 from .sampler_t import sampler_t
+from .imagend import imagend
+from .imagend_t import imagend_t
 from .image2d import image2d
 from .image2d_t import image2d_t
 from .image1d import image1d
@@ -60,6 +62,8 @@ class Context(CLObject):
 
     def create_sampler(self, sampler_t_:sampler_t)->sampler: ...
     
+    def create_image(self, image:imagend_t)->imagend: ...
+
     def create_image2d(self, image2d_t_:image2d_t)->image2d: ...
 
     def create_image1d(self, image:image1d_t)->image1d: ...

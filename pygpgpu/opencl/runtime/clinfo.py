@@ -101,19 +101,26 @@ from .cltypes import (
     cl_filter_mode,
     cl_sampler_properties
 )
+from .image_types import (
+    image1d_t,
+    image2d_t,
+    image3d_t,
+    image1d_array_t,
+    image2d_array_t
+)
 
 
 class CLInfo:
 
     image_types = {
-        "image2d_t",
-        "image3d_t",
-        "image2d_array_t",
-        "image1d_t",
-        "image1d_buffer_t",
-        "image1d_array_t",
-        "image2d_depth_t",
-        "image2d_array_depth_t"
+        "image2d_t": image2d_t,
+        "image3d_t": image3d_t,
+        "image2d_array_t": image2d_array_t,
+        "image1d_t": image1d_t,
+        # "image1d_buffer_t",
+        "image1d_array_t": image1d_array_t,
+        # "image2d_depth_t",
+        # "image2d_array_depth_t"
     }
 
     basic_types = {

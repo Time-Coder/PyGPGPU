@@ -21,16 +21,15 @@ from ..runtime import (
     cl_event,
     ErrorCode,
     cl_command_queue_properties,
-    cl_sampler
+    cl_sampler,
+    sampler_t,
+    image2d_t
 )
 from .clobject import CLObject
 from .kernel_info import ArgInfo
 from .command_queue import CommandQueue
 from .event import Event
-from .sampler_t import sampler_t
-from .image2d_t import image2d_t
 from .image2d import image2d
-from .sampler import sampler
 from .mem_object import MemObject
 from ...vectorization import sizeof, value_ptr
 from ...utils import detect_work_size, join_with_and
@@ -39,7 +38,6 @@ if TYPE_CHECKING:
     from .program import Program
     from .context import Context
     from .device import Device
-    from .buffer import Buffer
 
 
 class Kernel(CLObject):
@@ -320,9 +318,8 @@ class Kernel(CLObject):
                 arg_info.value = bytes_per_group
             else:
                 if isinstance(value, np.ndarray):
-                    if value.dtype == content_type:
-                        used_value = value
-                    else:
+                    used_value = value
+                    if value.dtype != content_type:
                         used_value = value.astype(content_type)
                 else:
                     used_value = np.array(value, dtype=content_type)
@@ -347,14 +344,16 @@ class Kernel(CLObject):
                     return {
                         "event": event
                     }
-        elif arg_type_str == "image2d_t":
-            if not isinstance(value, (np.ndarray, image2d_t)):
-                raise TypeError(f"type of argument '{arg_info.name}' must be image2d_t or np.ndarray, got {value.__class__.__name__}.")
+        elif arg_type_str in CLInfo.image_types:
+            image_type = CLInfo.image_types[arg_type_str]
+            if not isinstance(value, (np.ndarray, image_type)):
+                raise TypeError(f"type of argument '{arg_info.name}' must be {image_type.__name__} or np.ndarray, got {value.__class__.__name__}.")
             
+            used_value = value
             if isinstance(value, np.ndarray):
-                value = image2d_t(value)
+                used_value = image_type(value)
 
-            image, event = arg_info.use_image2d(cmd_queue, value)
+            image, event = arg_info.use_image(cmd_queue, used_value)
             if arg_info.mem_obj != image:
                 CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(image.id))
 

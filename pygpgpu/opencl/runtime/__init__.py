@@ -95,3 +95,12 @@ from .cltypes import (
     cl_filter_mode,
     cl_sampler_info
 )
+from .image_types import (
+    imagend_t,
+    image1d_t,
+    image2d_t,
+    image3d_t,
+    image1d_array_t,
+    image2d_array_t,
+    sampler_t
+)
