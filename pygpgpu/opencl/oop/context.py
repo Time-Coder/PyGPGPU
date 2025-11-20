@@ -13,9 +13,7 @@ from ..runtime import (
     cl_context_info,
     cl_mem_flags,
     CL_CONTEXT_NOTIFY_CALLBACK,
-    cl_command_queue_properties,
-    cl_addressing_mode,
-    cl_filter_mode
+    cl_command_queue_properties
 )
 
 if TYPE_CHECKING:
@@ -30,9 +28,17 @@ from .buffer import Buffer
 from .command_queue import CommandQueue
 from .event import Event
 from .sampler import sampler
-from .image2d import image2d
 from .sampler_t import sampler_t
+from .image2d import image2d
 from .image2d_t import image2d_t
+from .image1d import image1d
+from .image1d_t import image1d_t
+from .image3d import image3d
+from .image3d_t import image3d_t
+from .image2d_array import image2d_array
+from .image2d_array_t import image2d_array_t
+from .image1d_array import image1d_array
+from .image1d_array_t import image1d_array_t
 
 
 class Context(CLObject):
@@ -107,8 +113,20 @@ class Context(CLObject):
     def create_sampler(self, sampler_t_:sampler_t)->sampler:
         return sampler(self, sampler_t_)
     
-    def create_image2d(self, image2d_t_:image2d_t)->image2d:
-        return image2d(self, image2d_t_)
+    def create_image2d(self, image:image2d_t)->image2d:
+        return image2d(self, image)
+    
+    def create_image1d(self, image:image1d_t)->image1d:
+        return image1d(self, image)
+    
+    def create_image3d(self, image:image3d_t)->image3d:
+        return image3d(self, image)
+    
+    def create_image2d_array(self, image:image2d_array_t)->image2d_array:
+        return image2d_array(self, image)
+    
+    def create_image1d_array(self, image:image1d_array_t)->image1d_array:
+        return image1d_array(self, image)
 
     def compile(self,
         file_name:str,
