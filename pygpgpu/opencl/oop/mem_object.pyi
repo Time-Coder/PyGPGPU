@@ -16,7 +16,7 @@ from .clobject import CLObject
 import numpy as np
 
 
-class Mem(CLObject):
+class MemObject(CLObject):
 
     def __init__(self, context:Context, mem_id:cl_mem, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:c_void_p, size:int, flags:cl_mem_flags): ...
 

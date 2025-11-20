@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from .command_queue import CommandQueue
     from .context import Context
 
-from .mem import Mem
+from .mem_object import MemObject
 from .event import Event
 from .sampler import sampler
 from .sampler_t import sampler_t
@@ -35,11 +35,11 @@ class ArgInfo:
         self.access_qualifier = access_qualifier
         self.type_qualifiers = type_qualifiers
         self.value: Any = None
-        self.mem: Optional[Mem] = None
+        self.mem_obj: Optional[MemObject] = None
 
         self.__buffers: Dict[Tuple[cl_context, int, cl_mem_flags], List[Buffer]] = defaultdict(list)
         self.__image2ds: Dict[Tuple[cl_context, Tuple[int, ...], type], List[image2d]] = defaultdict(list)
-        self.__busy_mems: Set[Mem] = set()
+        self.__busy_mems: Set[MemObject] = set()
 
         self.__samplers: Dict[Tuple[cl_context, str], sampler] = {}
 
@@ -155,8 +155,8 @@ class ArgInfo:
         
         return used_image, event
 
-    def unuse(self, mem:Union[Mem])->None:
-        self.__busy_mems.remove(mem)
+    def unuse(self, mem_obj:Union[MemObject])->None:
+        self.__busy_mems.remove(mem_obj)
 
 
 class KernelInfo:

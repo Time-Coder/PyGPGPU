@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ctypes import c_void_p, pointer
 import ctypes
-from typing import TYPE_CHECKING, Union, Optional, List
+from typing import TYPE_CHECKING, Union, Optional, List, override
 
 import numpy as np
 
@@ -19,10 +19,10 @@ from .event import Event
 if TYPE_CHECKING:
     from .context import Context
 
-from .mem import Mem
+from .mem_object import MemObject
 
 
-class Buffer(Mem):
+class Buffer(MemObject):
 
     def __init__(self, context:Context, data:Union[bytes, bytearray, np.ndarray, None]=None, size:int=0, flags:Optional[cl_mem_flags]=None):
         data_is_valid = (data is not None)
@@ -57,14 +57,15 @@ class Buffer(Mem):
 
         error_code = cl_int(0)
         buffer_id:cl_mem = CL.clCreateBuffer(context.id, flags, size, host_ptr, pointer(error_code))
-        Mem.__init__(self, context, buffer_id, data, host_ptr, size, flags)
+        MemObject.__init__(self, context, buffer_id, data, host_ptr, size, flags)
 
-    def write(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    @override
+    def write(self, cmd_queue:CommandQueue, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as buffer")
         
-        if size is None:
-            size = self._size
+        if region is None:
+            region = self._size
 
         if host_ptr is None:
             host_ptr = self._host_ptr
@@ -74,15 +75,16 @@ class Buffer(Mem):
 
         events_ptr = Event.events_ptr(after_events)
         event_id = cl_event(0)
-        CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, False, offset, size, host_ptr, len(after_events), events_ptr, pointer(event_id))
+        CL.clEnqueueWriteBuffer(cmd_queue.id, self.id, False, origin, region, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueWriteBuffer)
 
-    def read(self, cmd_queue:CommandQueue, offset:int=0, size:int=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    @override
+    def read(self, cmd_queue:CommandQueue, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as buffer")
         
-        if size is None:
-            size = self._size
+        if region is None:
+            region = self._size
 
         if host_ptr is None:
             host_ptr = self._host_ptr
@@ -92,9 +94,10 @@ class Buffer(Mem):
 
         events_ptr = Event.events_ptr(after_events)
         event_id = cl_event(0)
-        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, offset, size, host_ptr, len(after_events), events_ptr, pointer(event_id))
+        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, origin, region, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueReadBuffer)
 
+    @override
     def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as buffer")
