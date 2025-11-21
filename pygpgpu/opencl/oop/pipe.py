@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import override, TYPE_CHECKING
+from typing import override, TYPE_CHECKING, Optional
 
 from ..runtime import (
     CL,
@@ -16,8 +16,11 @@ if TYPE_CHECKING:
 
 class pipe:
 
-    def __init__(self, packet_type:type, max_packets:int, flags:cl_mem_flags=(cl_mem_flags.CL_MEM_READ_WRITE|cl_mem_flags.CL_MEM_HOST_NO_ACCESS)):
-        packet_size:int = sizeof(packet_type)
+    def __init__(self, max_packets:int, packet_type:Optional[type]=None, flags:cl_mem_flags=(cl_mem_flags.CL_MEM_READ_WRITE|cl_mem_flags.CL_MEM_HOST_NO_ACCESS)):
+        packet_size:int = 0
+        if packet_type is not None:
+            packet_size:int = sizeof(packet_type)
+
         self._packet_size = packet_size
         self._max_packets = max_packets
         self._packet_type = packet_type
@@ -34,6 +37,15 @@ class pipe:
     @property
     def packet_type(self)->type:
         return self._packet_type
+    
+    @packet_type.setter
+    def packet_type(self, packet_type:type)->None:
+        packet_size:int = 0
+        if packet_type is not None:
+            packet_size:int = sizeof(packet_type)
+
+        self._packet_size = packet_size
+        self._packet_type = packet_type
     
     @property
     def flags(self)->cl_mem_flags:

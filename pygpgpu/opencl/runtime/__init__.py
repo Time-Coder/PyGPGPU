@@ -93,7 +93,8 @@ from .cltypes import (
     cl_sampler_properties,
     cl_addressing_mode,
     cl_filter_mode,
-    cl_sampler_info
+    cl_sampler_info,
+    queue_t
 )
 from .image_types import (
     imagend_t,

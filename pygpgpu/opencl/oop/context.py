@@ -20,7 +20,8 @@ from ..runtime import (
     image1d_t,
     image3d_t,
     image2d_array_t,
-    image1d_array_t
+    image1d_array_t,
+    queue_t
 )
 
 if TYPE_CHECKING:
@@ -82,6 +83,7 @@ class Context(CLObject):
         CLObject.__init__(self, context_id)
 
         self.__pipes:Dict[pipe, Pipe] = {}
+        self.__queues:Dict[queue_t, CommandQueue] = {}
         self.__samplers:Dict[str, sampler] = {}
 
     @staticmethod
@@ -155,6 +157,12 @@ class Context(CLObject):
             self.__pipes[pipe_] = Pipe(self, pipe_)
 
         return self.__pipes[pipe_]
+    
+    def get_queue(self, queue:queue_t)->CommandQueue:
+        if queue not in self.__queues:
+            self.__queues[queue] = Pipe(self, queue)
+
+        return self.__queues[queue]
 
     def compile(self,
         file_name:str,

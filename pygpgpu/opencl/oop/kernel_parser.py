@@ -166,7 +166,8 @@ class KernelParser:
         kernel_matches:List[re.Match] = self._find_kernel_defs(self._clean_code)
         for kernel_match in kernel_matches:
             kernel_name:str = kernel_match.group(1)
-            self._kernel_infos[kernel_name] = KernelInfo(name=kernel_name)
+            kernel_info = KernelInfo(name=kernel_name)
+            self._kernel_infos[kernel_name] = kernel_info
 
             args_str:str = kernel_match.group(2)
             args_items:List[str] = args_str.split(",")
@@ -177,7 +178,8 @@ class KernelParser:
                 type_qualifiers = self._find_type_qualifiers(arg_item)
                 arg_name:str = self._find_arg_name(arg_item)
                 arg_type:str = self._find_arg_type(arg_item)
-                self._kernel_infos[kernel_name].args[arg_name] = ArgInfo(
+                kernel_info.args[arg_name] = ArgInfo(
+                    parent=kernel_info,
                     name=arg_name,
                     type_str=arg_type,
                     address_qualifier=address_qualifier,

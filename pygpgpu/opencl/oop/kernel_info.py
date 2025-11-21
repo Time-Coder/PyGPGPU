@@ -29,7 +29,8 @@ from .pipe import pipe
 
 class ArgInfo:
 
-    def __init__(self, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+    def __init__(self, parent:KernelInfo, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+        self.parent = parent
         self.name = name
         self.type_str = type_str
         self.address_qualifier = address_qualifier
@@ -49,6 +50,22 @@ class ArgInfo:
     @property
     def base_type_str(self)->str:
         return (self.type_str[:-1] if self.is_ptr else self.type_str)
+    
+    @property
+    def type_annotation(self)->str:
+        base_type_str = self.base_type_str
+        if self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
+            return 'pipe'
+        elif self.is_ptr:
+            dtype = CLInfo.dtypes[base_type_str]
+            return f"NDArray[{dtype.name}]"
+        else:
+            if base_type_str in ['char', 'uchar', 'short', 'ushort', 'int', 'uint', 'long', 'ulong']:
+                return 'int'
+            elif base_type_str in ['float', 'double']:
+                return 'float'
+            else:
+                return base_type_str            
     
     @property
     def need_read_back(self)->bool:
@@ -77,18 +94,18 @@ class ArgInfo:
         base_type_str = self.base_type_str
         if self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
             if not isinstance(value, pipe):
-                raise TypeError(f"type of argument '{self.name}' must be pipe<{base_type_str}>, got {value.__class__.__name__}.")
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be pipe<{base_type_str}>, got {value.__class__.__name__}.")
             
             if value.packet_type.__name__ != base_type_str:
-                raise TypeError(f"type of argument '{self.name}' must be pipe<{base_type_str}>, got pipe<{value.packet_type.__name__}>.")
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be pipe<{base_type_str}>, got pipe<{value.packet_type.__name__}>.")
         elif self.is_ptr:
+            dtype = CLInfo.dtypes[base_type_str]
             if not isinstance(value, np.ndarray):
-                raise TypeError(f"type of argument '{self.name}' must be np.ndarray, got {value.__class__.__name__}.")
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[{dtype.name}], got {value.__class__.__name__}.")
             
             if base_type_str in CLInfo.dtypes:
-                dtype = CLInfo.dtypes[base_type_str]
                 if value.dtype != dtype:
-                    raise TypeError(f"type of argument '{self.name}' must be NDArray[{dtype.name}], got NDArray[{value.dtype.name}].")
+                    raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[{dtype.name}], got NDArray[{value.dtype.name}].")
         else:
             base_type = None
             if base_type_str in CLInfo.basic_types:
@@ -100,7 +117,7 @@ class ArgInfo:
             same_type = (value.__class__.__name__ == base_type_str if base_type is None else isinstance(value, base_type))
 
             if not same_type:
-                raise TypeError(f"type of argument '{self.name}' must be {base_type_str}, got {value.__class__.__name__}.")
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be {base_type_str}, got {value.__class__.__name__}.")
 
     def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
         if self.readonly:
@@ -135,16 +152,16 @@ class ArgInfo:
 
         image_key = (cmd_queue.context.id.value, image.__class__.__name__, image.shape, image.dtype, image.flags)
 
-        used_image = None
+        used_image:Optional[imagend] = None
         for image in self.__images[image_key]:
             if image not in self.__busy_mems:
-                used_image = image
+                used_image:imagend = image
                 break
 
         image_data = image.data
         image.data = None
         if used_image is None:
-            used_image = cmd_queue.context.create_image(image)
+            used_image:imagend = cmd_queue.context.create_image(image)
             self.__images[image_key].append(used_image)
         
         event = used_image.set_data(cmd_queue, image_data)
@@ -161,3 +178,9 @@ class KernelInfo:
     def __init__(self, name:str):
         self.name: str = name
         self.args: Dict[str, ArgInfo] = {}
+
+    def signature(self, with_annotation:bool=False)->str:
+        if with_annotation:
+            return self.name + "(" + ", ".join([arg.name + ": " + arg.type_annotation for arg in self.args.values()]) + ")->None"
+        else:
+            return self.name + "(" + ", ".join(list(self.args.keys())) + ")"

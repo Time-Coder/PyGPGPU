@@ -951,3 +951,9 @@ class cl_image_desc(LittleEndianStructure):
         self.buffer = value
 
 ptr_cl_image_desc:TypeAlias = POINTER(cl_image_desc)
+
+
+class queue_t:
+
+    def __init__(self, properties:cl_command_queue_properties):
+        self.properties = (cl_command_queue_properties.CL_QUEUE_ON_DEVICE | properties)

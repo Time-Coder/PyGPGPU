@@ -23,6 +23,7 @@ from ..runtime import (
     cl_command_queue_properties,
     cl_sampler,
     sampler_t,
+    queue_t,
     image2d_t,
     cl_kernel_arg_type_qualifier
 )
@@ -296,10 +297,21 @@ class Kernel(CLObject):
             if not isinstance(value, pipe):
                 raise TypeError(f"type of argument '{arg_info.name}' must be pipe<{arg_type.__name__}>, got {value.__class__.__name__}.")
             
-            if value.packet_type != arg_type:
+            if value.packet_type is not None and value.packet_type != arg_type:
                 raise TypeError(f"type of argument '{arg_info.name}' must be pipe<{arg_type.__name__}>, got pipe<{value.packet_type.__name__}>.")
 
+            if value.packet_type is None:
+                value.packet_type = arg_type
+
             used_value = self.context.get_pipe(value)
+            if arg_info.value != used_value.id:
+                CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
+                arg_info.value = used_value.id
+        elif arg_type_str == "queue_t":
+            if not isinstance(value, queue_t):
+                raise TypeError(f"type of argument '{arg_info.name}' must be queue_t, got {value.__class__.__name__}.")
+            
+            used_value = self.context.get_queue(value)
             if arg_info.value != used_value.id:
                 CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
                 arg_info.value = used_value.id

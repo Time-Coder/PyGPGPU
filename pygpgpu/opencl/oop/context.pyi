@@ -12,7 +12,8 @@ from ..runtime import (
     image1d_t,
     image3d_t,
     image2d_array_t,
-    image1d_array_t
+    image1d_array_t,
+    queue_t
 )
 from .clobject import CLObject
 from .device import Device
@@ -68,6 +69,8 @@ class Context(CLObject):
     def get_sampler(self, sampler_t_:sampler_t)->sampler: ...
 
     def get_pipe(self, pipe_:pipe)->Pipe: ...
+
+    def get_queue(self, queue:queue_t)->CommandQueue: ...
     
     def create_image(self, image:imagend_t)->imagend: ...
 
