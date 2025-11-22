@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p
-from typing import TYPE_CHECKING, List, Union
+from typing import TYPE_CHECKING, List, Union, Tuple, Optional
 
 if TYPE_CHECKING:
     from .context import Context
@@ -13,10 +13,12 @@ from ..runtime import (
     cl_mem_properties
 )
 from .clobject import CLObject
+from .command_queue import CommandQueue
+from .event import Event
 import numpy as np
 
 
-class Mem(CLObject):
+class MemObject(CLObject):
 
     def __init__(self, context:Context, mem_id:cl_mem, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:c_void_p, size:int, flags:cl_mem_flags): ...
 
@@ -69,3 +71,9 @@ class Mem(CLObject):
 
     @property
     def d3d11_resource(self)->c_void_p: ...
+
+    def write(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event: ...
+
+    def read(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event: ...
+
+    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event: ...

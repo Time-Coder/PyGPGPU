@@ -13,4 +13,7 @@ class imat3x3(genMat3x3):
     def flavor(self)->Flavor:
         return Flavor.GL
     
+    def __sizeof__(self)->int:
+        return 36
+    
 imat3 = imat3x3

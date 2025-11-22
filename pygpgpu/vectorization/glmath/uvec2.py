@@ -12,3 +12,6 @@ class uvec2(genVec2):
     @property
     def flavor(self)->Flavor:
         return Flavor.GL
+    
+    def __sizeof__(self)->int:
+        return 8

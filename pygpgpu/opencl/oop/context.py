@@ -14,8 +14,14 @@ from ..runtime import (
     cl_mem_flags,
     CL_CONTEXT_NOTIFY_CALLBACK,
     cl_command_queue_properties,
-    cl_addressing_mode,
-    cl_filter_mode
+    sampler_t,
+    imagend_t,
+    image2d_t,
+    image1d_t,
+    image3d_t,
+    image2d_array_t,
+    image1d_array_t,
+    queue_t
 )
 
 if TYPE_CHECKING:
@@ -30,9 +36,13 @@ from .buffer import Buffer
 from .command_queue import CommandQueue
 from .event import Event
 from .sampler import sampler
+from .imagend import imagend
 from .image2d import image2d
-from .sampler_t import sampler_t
-from .image2d_t import image2d_t
+from .image1d import image1d
+from .image3d import image3d
+from .image2d_array import image2d_array
+from .image1d_array import image1d_array
+from .pipe import Pipe, pipe
 
 
 class Context(CLObject):
@@ -72,6 +82,10 @@ class Context(CLObject):
         context_id = CL.clCreateContext(properties, n_devices, device_ids, Context._pfn_notify, user_data, pointer(errcode))
         CLObject.__init__(self, context_id)
 
+        self.__pipes:Dict[pipe, Pipe] = {}
+        self.__queues:Dict[queue_t, CommandQueue] = {}
+        self.__samplers:Dict[str, sampler] = {}
+
     @staticmethod
     def _release_func()->CL.Func:
         return CL.clReleaseContext
@@ -104,11 +118,51 @@ class Context(CLObject):
     def create_event(self)->Event:
         return Event(self)
     
-    def create_sampler(self, sampler_t_:sampler_t)->sampler:
-        return sampler(self, sampler_t_)
+    def create_image(self, image:imagend_t)->imagend:
+        if isinstance(image, image2d_t):
+            return self.create_image2d(image)
+        elif isinstance(image, image3d_t):
+            return self.create_image3d(image)
+        elif isinstance(image, image1d_t):
+            return self.create_image1d(image)
+        elif isinstance(image, image2d_array_t):
+            return self.create_image2d_array(image)
+        elif isinstance(image, image1d_array_t):
+            return self.create_image1d_array(image)
+
+    def create_image2d(self, image:image2d_t)->image2d:
+        return image2d(self, image)
     
-    def create_image2d(self, image2d_t_:image2d_t)->image2d:
-        return image2d(self, image2d_t_)
+    def create_image1d(self, image:image1d_t)->image1d:
+        return image1d(self, image)
+    
+    def create_image3d(self, image:image3d_t)->image3d:
+        return image3d(self, image)
+    
+    def create_image2d_array(self, image:image2d_array_t)->image2d_array:
+        return image2d_array(self, image)
+    
+    def create_image1d_array(self, image:image1d_array_t)->image1d_array:
+        return image1d_array(self, image)
+    
+    def get_sampler(self, sampler_t_:sampler_t)->sampler:
+        sampler_key:str = str(sampler_t_)
+        if sampler_key not in self.__samplers:
+            self.__samplers[sampler_key] = sampler(self, sampler_t_)
+
+        return self.__samplers[sampler_key]
+
+    def get_pipe(self, pipe_:pipe)->Pipe:
+        if pipe_ not in self.__pipes:
+            self.__pipes[pipe_] = Pipe(self, pipe_)
+
+        return self.__pipes[pipe_]
+    
+    def get_queue(self, queue:queue_t)->CommandQueue:
+        if queue not in self.__queues:
+            self.__queues[queue] = Pipe(self, queue)
+
+        return self.__queues[queue]
 
     def compile(self,
         file_name:str,

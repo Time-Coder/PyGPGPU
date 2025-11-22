@@ -3,9 +3,7 @@ import re
 import os
 import copy
 import json
-import numpy as np
-from collections import defaultdict
-from ctypes import c_char_p, c_void_p
+from ctypes import c_char_p
 from typing import Optional, Dict, Any, List, Set, Union, Iterator
 
 from ...kernel_parser import CPreprocessor
@@ -14,8 +12,6 @@ from ..runtime import (
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,
-    cl_mem_flags,
-    CLInfo
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
@@ -170,7 +166,8 @@ class KernelParser:
         kernel_matches:List[re.Match] = self._find_kernel_defs(self._clean_code)
         for kernel_match in kernel_matches:
             kernel_name:str = kernel_match.group(1)
-            self._kernel_infos[kernel_name] = KernelInfo(name=kernel_name)
+            kernel_info = KernelInfo(name=kernel_name)
+            self._kernel_infos[kernel_name] = kernel_info
 
             args_str:str = kernel_match.group(2)
             args_items:List[str] = args_str.split(",")
@@ -181,7 +178,8 @@ class KernelParser:
                 type_qualifiers = self._find_type_qualifiers(arg_item)
                 arg_name:str = self._find_arg_name(arg_item)
                 arg_type:str = self._find_arg_type(arg_item)
-                self._kernel_infos[kernel_name].args[arg_name] = ArgInfo(
+                kernel_info.args[arg_name] = ArgInfo(
+                    parent=kernel_info,
                     name=arg_name,
                     type_str=arg_type,
                     address_qualifier=address_qualifier,

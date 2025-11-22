@@ -12,3 +12,6 @@ class mat3x4(genMat3x4):
     @property
     def flavor(self)->Flavor:
         return Flavor.GL
+    
+    def __sizeof__(self)->int:
+        return 48

@@ -101,19 +101,26 @@ from .cltypes import (
     cl_filter_mode,
     cl_sampler_properties
 )
+from .image_types import (
+    image1d_t,
+    image2d_t,
+    image3d_t,
+    image1d_array_t,
+    image2d_array_t
+)
 
 
 class CLInfo:
 
     image_types = {
-        "image2d_t",
-        "image3d_t",
-        "image2d_array_t",
-        "image1d_t",
-        "image1d_buffer_t",
-        "image1d_array_t",
-        "image2d_depth_t",
-        "image2d_array_depth_t"
+        "image2d_t": image2d_t,
+        "image3d_t": image3d_t,
+        "image2d_array_t": image2d_array_t,
+        "image1d_t": image1d_t,
+        # "image1d_buffer_t",
+        "image1d_array_t": image1d_array_t,
+        # "image2d_depth_t",
+        # "image2d_array_depth_t"
     }
 
     basic_types = {
@@ -1606,6 +1613,37 @@ class CLInfo:
             "restype": cl_int,
             "errors": {
                 ErrorCode.CL_INVALID_SAMPLER: "sampler is not a valid sampler object.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
+        # cl_mem clCreatePipe(
+        #     cl_context context,
+        #     cl_mem_flags flags,
+        #     cl_uint pipe_packet_size,
+        #     cl_uint pipe_max_packets,
+        #     const cl_pipe_properties* properties,
+        #     cl_int* errcode_ret
+        # );
+        "clCreatePipe": {
+            "args": {
+                "context": cl_context,
+                "flags": cl_ulong,
+                "pipe_packet_size": cl_uint,
+                "pipe_max_packets": cl_uint,
+                "properties": ptr_int64,
+                "errcode_ret": ptr_cl_int
+            },
+            "errors": {
+                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_OPERATION: "no devices in context support pipes.",
+                ErrorCode.CL_INVALID_VALUE: """one of following case happend:
+* values specified in flags are not as defined above.,
+* properties is not NULL.,
+* CL_MEM_IMMUTABLE_EXT is set in flags.""",
+                ErrorCode.CL_INVALID_PIPE_SIZE: "pipe_packet_size is 0 or the pipe_packet_size exceeds CL_DEVICE_PIPE_MAX_PACKET_SIZE value specified in the Device Queries table for all devices in context or pipe_max_packets is 0.",
+                ErrorCode.CL_MEM_OBJECT_ALLOCATION_FAILURE: "there is a failure to allocate memory for the pipe object.",
                 ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
                 ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
             }

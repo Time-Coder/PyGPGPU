@@ -29,6 +29,10 @@ class Event(CLObject):
     __retained_events:Set[Event] = set()
 
     def __init__(self, context:Context, event_id:Optional[cl_event]=None, func:Optional[CL.Func]=None):
+        self._py_obj = py_object(self)
+        self._ptr_py_obj = pointer(self._py_obj)
+        self._user_data = cast(self._ptr_py_obj, c_void_p)
+
         error_code = cl_int(0)
         self._context:Context = context
         self._is_user_event:bool = False
@@ -45,11 +49,10 @@ class Event(CLObject):
         self.on_completed_callbacks:List[Callable[[Event, ErrorCode], None]] = []
         self.on_started_callbacks:List[Callable[[Event], None]] = []
 
-        user_data = cast(pointer(py_object(self)), c_void_p)
-        CL.clSetEventCallback(self.id, cl_command_execution_status.CL_SUBMITTED, Event._pfn_notify, user_data)
-        CL.clSetEventCallback(self.id, cl_command_execution_status.CL_RUNNING, Event._pfn_notify, user_data)
-        CL.clSetEventCallback(self.id, cl_command_execution_status.CL_COMPLETE, Event._pfn_notify, user_data)
-        
+        CL.clSetEventCallback(self.id, cl_command_execution_status.CL_SUBMITTED, Event._pfn_notify, self._user_data)
+        CL.clSetEventCallback(self.id, cl_command_execution_status.CL_RUNNING, Event._pfn_notify, self._user_data)
+        CL.clSetEventCallback(self.id, cl_command_execution_status.CL_COMPLETE, Event._pfn_notify, self._user_data)
+
         status = self.status
         if status == cl_command_execution_status.CL_COMPLETE or isinstance(status, ErrorCode):
             try:
@@ -147,12 +150,16 @@ class Event(CLObject):
 
     @CL_EVENT_NOTIFY_CALLBACK
     def _pfn_notify(event:cl_event, event_command_status:cl_int, user_data:c_void_p):
-        if event_command_status> 0:
+        if event_command_status > 0:
             status = cl_command_execution_status(event_command_status)
         else:
             status = ErrorCode(event_command_status)
         
-        self:Event = cast(user_data, POINTER(py_object)).contents.value
+        try:
+            self:Event = cast(user_data, POINTER(py_object)).contents.value
+        except:
+            print("Event", event, "error", user_data)
+
         if not isinstance(self, Event):
             raise RuntimeError("invalid event")
         

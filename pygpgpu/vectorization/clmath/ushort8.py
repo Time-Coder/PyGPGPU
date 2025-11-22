@@ -12,3 +12,6 @@ class ushort8(genVec8):
     @property
     def flavor(self)->Flavor:
         return Flavor.CL
+    
+    def __sizeof__(self)->int:
+        return 16

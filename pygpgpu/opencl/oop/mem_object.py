@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, override, Union
+from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional, List
 from ctypes import c_void_p
+from abc import abstractmethod
 
 from ..runtime import (
     cl_mem,
@@ -15,11 +16,13 @@ from .clobject import CLObject
 
 if TYPE_CHECKING:
     from .context import Context
+    from .command_queue import CommandQueue
+    from .event import Event
 
 import numpy as np
 
 
-class Mem(CLObject):
+class MemObject(CLObject):
 
     def __init__(self, context:Context, mem_id:cl_mem, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:c_void_p, size:int, flags:cl_mem_flags):
         self._context:Context = context
@@ -28,6 +31,18 @@ class Mem(CLObject):
         self._host_ptr:c_void_p = host_ptr
         self._size:int = size
         CLObject.__init__(self, mem_id)
+
+    @abstractmethod
+    def write(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+        pass
+
+    @abstractmethod
+    def read(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+        pass
+
+    @abstractmethod
+    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event:
+        pass
 
     @property
     def context(self)->Context:

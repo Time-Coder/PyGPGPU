@@ -12,3 +12,6 @@ class long4(genVec4):
     @property
     def flavor(self)->Flavor:
         return Flavor.CL
+    
+    def __sizeof__(self)->int:
+        return 32

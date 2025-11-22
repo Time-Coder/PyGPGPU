@@ -13,4 +13,7 @@ class dmat2x2(genMat2x2):
     def flavor(self)->Flavor:
         return Flavor.GL
     
+    def __sizeof__(self)->int:
+        return 32
+    
 dmat2 = dmat2x2

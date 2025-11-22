@@ -12,3 +12,6 @@ class dmat2x3(genMat2x3):
     @property
     def flavor(self)->Flavor:
         return Flavor.GL
+    
+    def __sizeof__(self)->int:
+        return 48

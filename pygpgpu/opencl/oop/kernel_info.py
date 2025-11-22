@@ -10,7 +10,9 @@ from ..runtime import (
     cl_kernel_arg_type_qualifier,
     cl_mem_flags,
     cl_context,
-    CLInfo
+    CLInfo,
+    sampler_t,
+    imagend_t
 )
 
 if TYPE_CHECKING:
@@ -18,30 +20,28 @@ if TYPE_CHECKING:
     from .command_queue import CommandQueue
     from .context import Context
 
-from .mem import Mem
+from .mem_object import MemObject
 from .event import Event
 from .sampler import sampler
-from .sampler_t import sampler_t
-from .image2d import image2d
-from .image2d_t import image2d_t
+from .imagend import imagend
+from .pipe import pipe
 
 
 class ArgInfo:
 
-    def __init__(self, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+    def __init__(self, parent:KernelInfo, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+        self.parent = parent
         self.name = name
         self.type_str = type_str
         self.address_qualifier = address_qualifier
         self.access_qualifier = access_qualifier
         self.type_qualifiers = type_qualifiers
         self.value: Any = None
-        self.mem: Optional[Mem] = None
+        self.mem_obj: Optional[MemObject] = None
 
         self.__buffers: Dict[Tuple[cl_context, int, cl_mem_flags], List[Buffer]] = defaultdict(list)
-        self.__image2ds: Dict[Tuple[cl_context, Tuple[int, ...], type], List[image2d]] = defaultdict(list)
-        self.__busy_mems: Set[Mem] = set()
-
-        self.__samplers: Dict[Tuple[cl_context, str], sampler] = {}
+        self.__images: Dict[Tuple[cl_context, Tuple[int, ...], type], List[imagend]] = defaultdict(list)
+        self.__busy_mems: Set[MemObject] = set()
 
     @property
     def is_ptr(self)->bool:
@@ -50,6 +50,22 @@ class ArgInfo:
     @property
     def base_type_str(self)->str:
         return (self.type_str[:-1] if self.is_ptr else self.type_str)
+    
+    @property
+    def type_annotation(self)->str:
+        base_type_str = self.base_type_str
+        if self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
+            return 'pipe'
+        elif self.is_ptr:
+            dtype = CLInfo.dtypes[base_type_str]
+            return f"NDArray[{dtype.name}]"
+        else:
+            if base_type_str in ['char', 'uchar', 'short', 'ushort', 'int', 'uint', 'long', 'ulong']:
+                return 'int'
+            elif base_type_str in ['float', 'double']:
+                return 'float'
+            else:
+                return base_type_str            
     
     @property
     def need_read_back(self)->bool:
@@ -76,14 +92,20 @@ class ArgInfo:
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str
-        if self.is_ptr:
+        if self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
+            if not isinstance(value, pipe):
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be pipe<{base_type_str}>, got {value.__class__.__name__}.")
+            
+            if value.packet_type.__name__ != base_type_str:
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be pipe<{base_type_str}>, got pipe<{value.packet_type.__name__}>.")
+        elif self.is_ptr:
+            dtype = CLInfo.dtypes[base_type_str]
             if not isinstance(value, np.ndarray):
-                raise TypeError(f"type of argument '{self.name}' must be np.ndarray, got {value.__class__.__name__}.")
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[{dtype.name}], got {value.__class__.__name__}.")
             
             if base_type_str in CLInfo.dtypes:
-                dtype = CLInfo.dtypes[base_type_str]
                 if value.dtype != dtype:
-                    raise TypeError(f"type of argument '{self.name}' must be NDArray[{dtype.name}], got NDArray[{value.dtype.name}].")
+                    raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[{dtype.name}], got NDArray[{value.dtype.name}].")
         else:
             base_type = None
             if base_type_str in CLInfo.basic_types:
@@ -95,7 +117,7 @@ class ArgInfo:
             same_type = (value.__class__.__name__ == base_type_str if base_type is None else isinstance(value, base_type))
 
             if not same_type:
-                raise TypeError(f"type of argument '{self.name}' must be {base_type_str}, got {value.__class__.__name__}.")
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be {base_type_str}, got {value.__class__.__name__}.")
 
     def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
         if self.readonly:
@@ -119,16 +141,8 @@ class ArgInfo:
         self.__busy_mems.add(used_buffer)
         
         return used_buffer, event
-
-    def use_sampler(self, context:Context, sampler_t_:sampler_t)->sampler:
-        sampler_key = (context.id.value, str(sampler_t_))
-
-        if sampler_key not in self.__samplers:
-            self.__samplers[sampler_key] = sampler(context, sampler_t_)
-        
-        return self.__samplers[sampler_key]
     
-    def use_image2d(self, cmd_queue:CommandQueue, image:image2d_t)->Tuple[image2d, Event]:
+    def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
         if self.readonly:
             image.flags = cl_mem_flags.CL_MEM_READ_ONLY
         elif self.writeonly:
@@ -136,27 +150,27 @@ class ArgInfo:
         else:
             image.flags = cl_mem_flags.CL_MEM_READ_WRITE
 
-        image_key = (cmd_queue.context.id.value, image.shape, image.dtype, image.flags)
+        image_key = (cmd_queue.context.id.value, image.__class__.__name__, image.shape, image.dtype, image.flags)
 
-        used_image = None
-        for image in self.__image2ds[image_key]:
+        used_image:Optional[imagend] = None
+        for image in self.__images[image_key]:
             if image not in self.__busy_mems:
-                used_image = image
+                used_image:imagend = image
                 break
 
         image_data = image.data
         image.data = None
         if used_image is None:
-            used_image = cmd_queue.context.create_image2d(image)
-            self.__image2ds[image_key].append(used_image)
+            used_image:imagend = cmd_queue.context.create_image(image)
+            self.__images[image_key].append(used_image)
         
         event = used_image.set_data(cmd_queue, image_data)
         self.__busy_mems.add(used_image)
         
         return used_image, event
 
-    def unuse(self, mem:Union[Mem])->None:
-        self.__busy_mems.remove(mem)
+    def unuse(self, mem_obj:Union[MemObject])->None:
+        self.__busy_mems.remove(mem_obj)
 
 
 class KernelInfo:
@@ -164,3 +178,9 @@ class KernelInfo:
     def __init__(self, name:str):
         self.name: str = name
         self.args: Dict[str, ArgInfo] = {}
+
+    def signature(self, with_annotation:bool=False)->str:
+        if with_annotation:
+            return self.name + "(" + ", ".join([arg.name + ": " + arg.type_annotation for arg in self.args.values()]) + ")->None"
+        else:
+            return self.name + "(" + ", ".join(list(self.args.keys())) + ")"

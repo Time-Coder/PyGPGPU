@@ -1,24 +1,29 @@
 from __future__ import annotations
 
-from ctypes import c_void_p, pointer
+from ctypes import c_void_p
 from typing import Optional, Tuple, Union
+from abc import ABC, abstractmethod
 
 import numpy as np
 import imageio.v3 as iio
 
-from ..runtime import (
+from ..cltypes import (
     cl_mem_flags,
     cl_image_format,
     cl_image_desc,
     cl_channel_order,
-    cl_channel_type,
-    cl_mem_object_type
+    cl_channel_type
 )
 
 
-class image2d_t:
+class imagend_t(ABC):
 
     def __init__(self, data:Union[str, np.ndarray, None]=None, shape:Optional[Tuple[int,...]]=None, dtype:Optional[type]=None, flags:Optional[cl_mem_flags]=None):
+        self._format:Optional[cl_image_format] = None
+        self._desc:Optional[cl_image_desc] = None
+        self._channel_order:Optional[cl_channel_order] = None
+        self._channel_type:Optional[cl_channel_type] = None
+        
         if isinstance(data, str):
             data = iio.imread(data)
 
@@ -115,47 +120,40 @@ class image2d_t:
     def save(self, file_name:str)->None:
         iio.imwrite(file_name, self.data)
 
-    def _update_format(self)->None:
-        if len(self._shape) == 2:
-            self._channel_order = cl_channel_order.CL_LUMINANCE
-        elif len(self._shape) == 3:
-            if self._shape[2] == 1:
-                self._channel_order = cl_channel_order.CL_LUMINANCE
-            elif self._shape[2] == 2:
-                self._channel_order = cl_channel_order.CL_RG
-            elif self._shape[2] == 3:
-                self._channel_order = cl_channel_order.CL_RGB
-            elif self._shape[2] == 4:
-                self._channel_order = cl_channel_order.CL_RGBA
-            else:
-                raise ValueError(f"image shape {self._shape} is not supported")
+    @staticmethod
+    def _get_channel_type(dtype)->cl_channel_type:
+        if dtype == np.int8:
+            return cl_channel_type.CL_SIGNED_INT8
+        elif dtype == np.uint8:
+            return cl_channel_type.CL_UNSIGNED_INT8
+        elif dtype == np.int16:
+            return cl_channel_type.CL_SIGNED_INT16
+        elif dtype == np.uint16:
+            return cl_channel_type.CL_UNSIGNED_INT16
+        elif dtype == np.int32:
+            return cl_channel_type.CL_SIGNED_INT32
+        elif dtype == np.uint32:
+            return cl_channel_type.CL_UNSIGNED_INT32
+        elif dtype == np.float16:
+            return cl_channel_type.CL_HALF_FLOAT
+        elif dtype == np.float32:
+            return cl_channel_type.CL_FLOAT
         else:
-            raise ValueError(f"image shape {self._shape} is not supported")
+            raise ValueError(f"dtype {dtype} is not supported")
         
-        if self._dtype == np.int8:
-            self._channel_type = cl_channel_type.CL_SIGNED_INT8
-        elif self._dtype == np.uint8:
-            self._channel_type = cl_channel_type.CL_UNSIGNED_INT8
-        elif self._dtype == np.int16:
-            self._channel_type = cl_channel_type.CL_SIGNED_INT16
-        elif self._dtype == np.uint16:
-            self._channel_type = cl_channel_type.CL_UNSIGNED_INT16
-        elif self._dtype == np.int32:
-            self._channel_type = cl_channel_type.CL_SIGNED_INT32
-        elif self._dtype == np.uint32:
-            self._channel_type = cl_channel_type.CL_UNSIGNED_INT32
-        elif self._dtype == np.float16:
-            self._channel_type = cl_channel_type.CL_HALF_FLOAT
-        elif self._dtype == np.float32:
-            self._channel_type = cl_channel_type.CL_FLOAT
+    @staticmethod
+    def _get_channel_order(n_channels:int)->cl_channel_order:
+        if n_channels == 1:
+            return cl_channel_order.CL_LUMINANCE
+        elif n_channels == 2:
+            return cl_channel_order.CL_RG
+        elif n_channels == 3:
+            return cl_channel_order.CL_RGB
+        elif n_channels == 4:
+            return cl_channel_order.CL_RGBA
         else:
-            raise ValueError("channel type is not supported")
-        
-        self._format:cl_image_format = cl_image_format(self._channel_order, self._channel_type)
-        self._desc:cl_image_desc = cl_image_desc(cl_mem_object_type.CL_MEM_OBJECT_IMAGE2D, self._shape[1], self._shape[0], 0, 0, 0, 0, 0, 0)
+            raise ValueError(f"{n_channels} channels is not supported")
 
-    def __repr__(self)->str:
-        return f"image2d_t(format={self._format}, desc={self._desc}, flags={self._flags})"
-    
-    def __str__(self)->str:
-        return f"image2d_t(format={self._format}, desc={self._desc}, flags={self._flags})"
+    @abstractmethod
+    def _update_format(self)->None:
+        pass

@@ -11,14 +11,14 @@ from ..runtime import (
     CLInfo,
     IntEnum,
     cl_sampler_info,
-    cl_ulong
+    cl_ulong,
+    sampler_t
 )
 
 if TYPE_CHECKING:
     from .context import Context
 
 from .clobject import CLObject
-from .sampler_t import sampler_t
 
 
 class sampler(CLObject):
