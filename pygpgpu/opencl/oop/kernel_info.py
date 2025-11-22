@@ -11,7 +11,6 @@ from ..runtime import (
     cl_mem_flags,
     cl_context,
     CLInfo,
-    sampler_t,
     imagend_t,
     CL
 )
@@ -19,30 +18,21 @@ from ..runtime import (
 if TYPE_CHECKING:
     from .buffer import Buffer
     from .command_queue import CommandQueue
-    from .context import Context
 
 from .mem_object import MemObject
 from .event import Event
-from .sampler import sampler
 from .imagend import imagend
 from .pipe import pipe
 
 
-class ArgInfo:
+class VarInfo:
 
-    def __init__(self, parent:KernelInfo, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
-        self.parent = parent
+    def __init__(self, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
         self.name = name
         self.type_str = type_str
         self.address_qualifier = address_qualifier
         self.access_qualifier = access_qualifier
         self.type_qualifiers = type_qualifiers
-        self.value: Any = None
-        self.mem_obj: Optional[MemObject] = None
-
-        self.__buffers: Dict[Tuple[cl_context, int, cl_mem_flags], List[Buffer]] = defaultdict(list)
-        self.__images: Dict[Tuple[cl_context, Tuple[int, ...], type], List[imagend]] = defaultdict(list)
-        self.__busy_mems: Set[MemObject] = set()
 
     @property
     def is_ptr(self)->bool:
@@ -66,18 +56,7 @@ class ArgInfo:
             elif base_type_str in ['float', 'double']:
                 return 'float'
             else:
-                return base_type_str            
-    
-    @property
-    def need_read_back(self)->bool:
-        return ((
-            self.is_ptr and
-            self.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL and
-            self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY and
-            not (self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST)
-        ) or (
-            self.type_str in CLInfo.image_types and self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY
-        ))
+                return base_type_str
     
     @property
     def readonly(self)->bool:
@@ -90,6 +69,30 @@ class ArgInfo:
     @property
     def writeonly(self)->bool:
         return self.access_qualifier == cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_WRITE_ONLY
+    
+    @property
+    def need_read_back(self)->bool:
+        return ((
+            self.is_ptr and
+            self.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL and
+            self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY and
+            not (self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST)
+        ) or (
+            self.type_str in CLInfo.image_types and self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY
+        ))
+    
+
+class ArgInfo(VarInfo):
+
+    def __init__(self, parent:KernelInfo, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+        VarInfo.__init__(self, name, type_str, address_qualifier, access_qualifier, type_qualifiers)
+        self.parent = parent
+        self.value: Any = None
+        self.mem_obj: Optional[MemObject] = None
+
+        self.__buffers: Dict[Tuple[cl_context, int, cl_mem_flags], List[Buffer]] = defaultdict(list)
+        self.__images: Dict[Tuple[cl_context, Tuple[int, ...], type], List[imagend]] = defaultdict(list)
+        self.__busy_mems: Set[MemObject] = set()
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str
@@ -178,6 +181,13 @@ class ArgInfo:
 
     def unuse(self, mem_obj:Union[MemObject])->None:
         self.__busy_mems.remove(mem_obj)
+
+
+class StructInfo:
+
+    def __init__(self, name:str):
+        self.name: str = name
+        self.members: Dict[str, VarInfo] = {}
 
 
 class KernelInfo:

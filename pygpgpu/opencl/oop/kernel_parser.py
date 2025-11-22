@@ -4,7 +4,7 @@ import os
 import copy
 import json
 from ctypes import c_char_p
-from typing import Optional, Dict, Any, List, Set, Union, Iterator
+from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple
 
 from ...kernel_parser import CPreprocessor
 from ..runtime import (
@@ -15,16 +15,18 @@ from ..runtime import (
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
-from .kernel_info import KernelInfo, ArgInfo
+from .kernel_info import KernelInfo, ArgInfo, StructInfo
 
 
 class KernelParser:
 
-    __kernel_def_pattern:Optional[re.Pattern] = None
-    __address_qualifier_pattern:Optional[re.Pattern] = None
-    __access_qualifier_pattern:Optional[re.Pattern] = None
-    __type_qualifier_pattern:Optional[re.Pattern] = None
-    __arg_name_pattern:Optional[re.Pattern] = None
+    _struct_def_pattern1:re.Pattern = re.compile(r"^\s*struct\s+(?P<struct_name>[a-zA-Z_]\w*)\{(?P<body>.*?)\}\s*;", re.MULTILINE | re.DOTALL)
+    _struct_def_pattern2:re.Pattern = re.compile(r"^\s*typedef\s+struct(?P<struct_name>\s+[a-zA-Z_]\w*)?\{(?P<body>.*?)\}\s*(?P<type_name>[a-zA-Z_]\w*)\s*;", re.MULTILINE | re.DOTALL)
+    _kernel_def_pattern:re.Pattern = re.compile(r"^\s*(__kernel|kernel)\s+void\s+(?P<name>[a-zA-Z_]\w*)\((?P<body>.*?)\)", re.MULTILINE | re.DOTALL)
+    _address_qualifier_pattern:re.Pattern = re.compile(r"\b(__global|__local|__private|__constant|global|local|private|constant)\b")
+    _access_qualifier_pattern:re.Pattern = re.compile(r"\b(__read_only|__write_only|__read_write|read_only|write_only|read_write)\b")
+    _type_qualifier_pattern:re.Pattern = re.compile(r"\b(const|restrict|volatile|pipe)\b")
+    _arg_name_pattern:re.Pattern = re.compile(r"\b([a-zA-Z_]\w*)\b(?=\W*$)")
 
     def __init__(self):
         self._file_name:str = ""
@@ -218,13 +220,15 @@ class Kernel_{kernel_name}(KernelWrapper):
         self._kernel_infos.clear()
 
     def _parse(self):
-        kernel_matches:List[re.Match] = self._find_kernel_defs(self._clean_code)
+        struct_matches:List[re.Match] = self._find_struct_defs(self._clean_code)
+
+        kernel_matches:Iterator[re.Match] = self._find_kernel_defs(self._clean_code)
         for kernel_match in kernel_matches:
-            kernel_name:str = kernel_match.group(1)
+            kernel_name:str = kernel_match["name"]
             kernel_info = KernelInfo(name=kernel_name)
             self._kernel_infos[kernel_name] = kernel_info
 
-            args_str:str = kernel_match.group(2)
+            args_str:str = kernel_match["body"]
             args_items:List[str] = args_str.split(",")
             for arg_item in args_items:
                 arg_item = arg_item.strip("\r\n\t ")
@@ -281,40 +285,10 @@ class Kernel_{kernel_name}(KernelWrapper):
 
         return md5sums(json.dumps(content, separators=(',', ':'), indent=None))
 
-    @property
-    def _kernel_def_pattern(self)->re.Pattern:
-        if KernelParser.__kernel_def_pattern is None:
-            KernelParser.__kernel_def_pattern = re.compile(r"^\s*__kernel\s+void\s+([a-zA-Z_]\w*)\((.*?)\)", re.MULTILINE | re.DOTALL)
-
-        return KernelParser.__kernel_def_pattern
-    
-    @property
-    def _address_qualifier_pattern(self)->re.Pattern:
-        if KernelParser.__address_qualifier_pattern is None:
-            KernelParser.__address_qualifier_pattern = re.compile(r"\b(__global|__local|__private|__constant|global|local|private|constant)\b")
-
-        return KernelParser.__address_qualifier_pattern
-    
-    @property
-    def _access_qualifier_pattern(self)->re.Pattern:
-        if KernelParser.__access_qualifier_pattern is None:
-            KernelParser.__access_qualifier_pattern = re.compile(r"\b(__read_only|__write_only|__read_write|read_only|write_only|read_write)\b")
-
-        return KernelParser.__access_qualifier_pattern
-    
-    @property
-    def _type_qualifier_pattern(self)->re.Pattern:
-        if KernelParser.__type_qualifier_pattern is None:
-            KernelParser.__type_qualifier_pattern = re.compile(r"\b(const|restrict|volatile|pipe)\b")
-
-        return KernelParser.__type_qualifier_pattern
-    
-    @property
-    def _arg_name_pattern(self)->re.Pattern:
-        if KernelParser.__arg_name_pattern is None:
-            KernelParser.__arg_name_pattern = re.compile(r"\b([a-zA-Z_]\w*)\b(?=\W*$)")
-
-        return KernelParser.__arg_name_pattern
+    def _find_struct_defs(self, code:str)->List[re.Match]:
+        structs = list(self._struct_def_pattern1.finditer(code))
+        structs.extend(list(self._struct_def_pattern2.finditer(code)))
+        return structs
 
     def _find_kernel_defs(self, code:str)->Iterator[re.Match]:
         return self._kernel_def_pattern.finditer(code)
