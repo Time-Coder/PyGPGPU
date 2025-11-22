@@ -18,6 +18,7 @@ from .runtime import (
     image2d_array_t,
     sampler_t
 )
+from .oop import KernelWrapper
 
 from ..vectorization import (
     abs, sign, floor, ceil, trunc, round, roundEven, fract, mod,
@@ -32,3 +33,5 @@ from ..vectorization import (
 )
 
 from .common import compile
+from .climport import climport
+climport.install()

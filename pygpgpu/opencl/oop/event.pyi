@@ -39,6 +39,9 @@ class Event(CLObject):
 
     @property
     def status(self)->cl_command_execution_status: ...
+
+    @property
+    def finished(self)->bool: ...
     
     @status.setter
     def status(self, status:cl_command_execution_status)->None: ...

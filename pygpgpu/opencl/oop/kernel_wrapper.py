@@ -21,37 +21,60 @@ class KernelWrapper:
         self._args:Dict[str, ArgInfo] = args
         self.type_checked:bool = type_checked
         self._kernels:Dict[Device, Kernel] = {}
+        self._global_work_size = None
+        self._local_work_size = None
 
-    def __getitem__(self, work_sizes:Tuple[Union[int, Tuple[int], Device], ...])->Kernel:
-        old_work_sizes = work_sizes
+    def __getitem__(self, work_sizes:Tuple[Union[int, Tuple[int], Device], ...])->Union[Kernel, KernelWrapper]:
         if not isinstance(work_sizes, tuple):
             work_sizes = (work_sizes,)
 
         if len(work_sizes) == 0:
             raise TypeError("KernelWrapper.__getitem__ takes at least 1 argument, 0 were given")
         elif len(work_sizes) == 1:
-            device = work_sizes[0]
+            device_str:str = work_sizes[0]
+            device:Device = Platforms.device(device_str)
+            if device not in self._kernels:
+                self._kernels[device] = self._program_wrapper.program(device)[self._name]
+                self._kernels[device].args = self._args
+
+            kernel:Kernel = self._kernels[device][device_str]
+            global_work_size = self._global_work_size
+            local_work_size = self._local_work_size
+            self._global_work_size = None
+            self._local_work_size = None
+            if global_work_size and local_work_size:
+                kernel:Kernel = kernel[global_work_size, local_work_size]
+
+            return kernel
         elif len(work_sizes) == 2:
-            device = Platforms[0].devices[0]
-        elif len(work_sizes) == 3:
-            device = work_sizes[2]
+            self._global_work_size = work_sizes[0]
+            self._local_work_size = work_sizes[1]
+            return self
         else:
-            raise TypeError(f"KernelWrapper.__getitem__ takes at most 3 argument, {len(work_sizes)} were given")
-        
-        if device not in self._kernels:
-            self._kernels[device] = self._program_wrapper.program(device)[self._name]
-            self._kernels[device].args = self._args
-        
-        return self._kernels[device][old_work_sizes]
+            raise TypeError(f"KernelWrapper.__getitem__ takes at most 2 argument, {len(work_sizes)} were given")
+
+    def _get_kernel(self)->Kernel:
+        global_work_size = self._global_work_size
+        local_work_size = self._local_work_size
+        self._global_work_size = None
+        self._local_work_size = None
+        kernel:Kernel = self[Platforms[0].devices[0].name]
+        if global_work_size and local_work_size:
+            kernel:Kernel = kernel[global_work_size, local_work_size]
+
+        return kernel
 
     def __call__(self, *args, **kwargs)->None:
-        return self[Platforms[0].devices[0]](*args, **kwargs)
+        kernel:Kernel = self._get_kernel()
+        return kernel(*args, **kwargs)
 
     def submit(self, *args, **kwargs)->concurrent.futures.Future:
-        return self[Platforms[0].devices[0]].submit(*args, **kwargs)
+        kernel:Kernel = self._get_kernel()
+        return kernel.submit(*args, **kwargs)
     
     def async_call(self, *args, **kwargs)->asyncio.Future:
-        return self[Platforms[0].devices[0]].async_call(*args, **kwargs)
+        kernel:Kernel = self._get_kernel()
+        return kernel.async_call(*args, **kwargs)
 
     @property
     def program_wrapper(self)->ProgramWrapper:

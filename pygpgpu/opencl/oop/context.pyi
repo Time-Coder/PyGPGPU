@@ -29,6 +29,7 @@ from .image3d import image3d
 from .image2d_array import image2d_array
 from .image1d_array import image1d_array
 from .pipe import Pipe, pipe
+from .build_options import BuildOptions
 
 
 class Context(CLObject):
@@ -59,7 +60,8 @@ class Context(CLObject):
         create_library:bool=False,
         enable_link_options:bool=False,
         x_spir:bool=False,
-        spir_std:Optional[float]=None
+        spir_std:Optional[float]=None,
+        options:Optional[BuildOptions]=None,
     )->Program:...
 
     def create_buffer(self, data:Union[bytes, bytearray, np.ndarray, None]=None, size:int=0, flags:Optional[cl_mem_flags]=None)->Buffer: ...

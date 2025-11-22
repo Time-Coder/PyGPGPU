@@ -15,6 +15,7 @@ from ..runtime import (
     cl_external_semaphore_handle_type_khr
 )
 
+from .build_options import BuildOptions
 if TYPE_CHECKING:
     from .device import Device
     from .program import Program
@@ -47,7 +48,9 @@ class Platform:
         create_library:bool=False,
         enable_link_options:bool=False,
         x_spir:bool=False,
-        spir_std:Optional[float]=None
+        spir_std:Optional[float]=None,
+        type_checked:bool=False,
+        options:Optional[BuildOptions]=None
     )->Program: ...
 
     @property

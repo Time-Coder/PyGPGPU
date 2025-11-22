@@ -33,34 +33,41 @@ def compile(
     enable_link_options:bool=False,
     x_spir:bool=False,
     spir_std:Optional[float]=None,
-    type_checked:bool=False
+    type_checked:bool=False,
+    options:Optional[BuildOptions]=None,
+    generate_pyi:bool=False
 )->ProgramWrapper:
-    options:BuildOptions = BuildOptions(
-        single_precision_constant,
-        denorms_are_zero,
-        fp32_correctly_rounded_divide_sqrt,
-        opt_disable,
-        strict_aliasing,
-        uniform_work_group_size,
-        no_subgroup_ifp,
-        mad_enable,
-        no_signed_zeros,
-        unsafe_math_optimizations,
-        finite_math_only,
-        fast_relaxed_math,
-        w,
-        Werror,
-        cl_std,
-        kernel_arg_info,
-        g,
-        create_library,
-        enable_link_options,
-        x_spir,
-        spir_std
-    )
-    key:str = KernelParser.md5_of(file_name, includes, defines, options)
+    if options is None:
+        options:BuildOptions = BuildOptions(
+            single_precision_constant,
+            denorms_are_zero,
+            fp32_correctly_rounded_divide_sqrt,
+            opt_disable,
+            strict_aliasing,
+            uniform_work_group_size,
+            no_subgroup_ifp,
+            mad_enable,
+            no_signed_zeros,
+            unsafe_math_optimizations,
+            finite_math_only,
+            fast_relaxed_math,
+            w,
+            Werror,
+            cl_std,
+            kernel_arg_info,
+            g,
+            create_library,
+            enable_link_options,
+            x_spir,
+            spir_std
+        )
+
+    key:str = KernelParser.md5_of(includes, defines, options, file_name=file_name)
     if key not in __program_wrappers:
         program_wrapper = ProgramWrapper(file_name, includes, defines, options, type_checked)
+        if generate_pyi:
+            program_wrapper._kernel_parser.generate_pyi()
+            
         __program_wrappers[key] = program_wrapper
 
     return __program_wrappers[key]

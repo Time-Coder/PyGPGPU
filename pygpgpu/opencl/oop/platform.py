@@ -14,6 +14,7 @@ from .clobject import CLObject
 from .device import Device
 from .context import Context
 from .program import Program
+from .build_options import BuildOptions
 
 
 class Platform(CLObject):
@@ -97,7 +98,8 @@ class Platform(CLObject):
         enable_link_options:bool=False,
         x_spir:bool=False,
         spir_std:Optional[float]=None,
-        type_checked:bool=False
+        type_checked:bool=False,
+        options:Optional[BuildOptions]=None
     )->Program:
         return self.default_context.compile(
             file_name, includes, defines,
@@ -122,7 +124,8 @@ class Platform(CLObject):
             enable_link_options,
             x_spir,
             spir_std,
-            type_checked
+            type_checked,
+            options
         )
     
     @override

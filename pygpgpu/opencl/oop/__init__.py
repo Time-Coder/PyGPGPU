@@ -4,6 +4,7 @@ from .device import Device
 from .context import Context
 from .build_options import BuildOptions
 from .kernel import Kernel
+from .kernel_wrapper import KernelWrapper
 from .command_queue import CommandQueue
 from .buffer import Buffer
 from .image2d import image2d

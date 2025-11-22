@@ -12,7 +12,8 @@ from ..runtime import (
     cl_context,
     CLInfo,
     sampler_t,
-    imagend_t
+    imagend_t,
+    CL
 )
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ class ArgInfo:
             return 'pipe'
         elif self.is_ptr:
             dtype = CLInfo.dtypes[base_type_str]
-            return f"NDArray[{dtype.name}]"
+            return f"NDArray[np.{dtype.name}]"
         else:
             if base_type_str in ['char', 'uchar', 'short', 'ushort', 'int', 'uint', 'long', 'ulong']:
                 return 'int'
@@ -99,13 +100,13 @@ class ArgInfo:
             if value.packet_type.__name__ != base_type_str:
                 raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be pipe<{base_type_str}>, got pipe<{value.packet_type.__name__}>.")
         elif self.is_ptr:
-            dtype = CLInfo.dtypes[base_type_str]
             if not isinstance(value, np.ndarray):
-                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[{dtype.name}], got {value.__class__.__name__}.")
+                raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be np.ndarray, got {value.__class__.__name__}.")
             
             if base_type_str in CLInfo.dtypes:
+                dtype = CLInfo.dtypes[base_type_str]
                 if value.dtype != dtype:
-                    raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[{dtype.name}], got NDArray[{value.dtype.name}].")
+                    raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[np.{dtype.name}], got NDArray[np.{value.dtype.name}].")
         else:
             base_type = None
             if base_type_str in CLInfo.basic_types:
@@ -136,8 +137,11 @@ class ArgInfo:
         if used_buffer is None:
             used_buffer = cmd_queue.context.create_buffer(size=data.nbytes, flags=flags)
             self.__buffers[buffer_key].append(used_buffer)
-        
+
         event = used_buffer.set_data(cmd_queue, data)
+        if event is not None and CL.print_info:
+            print(f"copy data to device for argument '{self.name}'")
+
         self.__busy_mems.add(used_buffer)
         
         return used_buffer, event
@@ -165,6 +169,9 @@ class ArgInfo:
             self.__images[image_key].append(used_image)
         
         event = used_image.set_data(cmd_queue, image_data)
+        if event is not None and CL.print_info:
+            print(f"copy data to device for argument '{self.name}'")
+            
         self.__busy_mems.add(used_image)
         
         return used_image, event
@@ -179,8 +186,11 @@ class KernelInfo:
         self.name: str = name
         self.args: Dict[str, ArgInfo] = {}
 
-    def signature(self, with_annotation:bool=False)->str:
+    def args_declare(self, with_annotation:bool=False)->str:
         if with_annotation:
-            return self.name + "(" + ", ".join([arg.name + ": " + arg.type_annotation for arg in self.args.values()]) + ")->None"
+            return ", ".join([arg.name + ": " + arg.type_annotation for arg in self.args.values()])
         else:
-            return self.name + "(" + ", ".join(list(self.args.keys())) + ")"
+            return ", ".join(list(self.args.keys()))
+
+    def signature(self, with_annotation:bool=False)->str:
+        return self.name + "(" + self.args_declare(with_annotation) + ")"

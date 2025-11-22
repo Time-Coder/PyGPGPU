@@ -145,13 +145,8 @@ class Program(CLObject):
                 if error_messages:
                     warnings.warn(final_message, CompileWarning)
     
-    @property
-    def _cache_folder(self)->str:
-        self_folder = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
-        return self_folder + "/__clcache__"
-    
     def _bin_file_name(self, device:Device)->str:
-        return f"{self._cache_folder}/{device.unique_key}/{self._kernel_parser.base_name}_{self._kernel_parser.md5}.bin"
+        return f"{self._kernel_parser.cache_folder}/{device.unique_key}/{self._kernel_parser.base_name}_{self._kernel_parser.md5}.bin"
 
     def _save_bin(self)->None:
         for device in self.devices:

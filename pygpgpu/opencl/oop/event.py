@@ -53,8 +53,7 @@ class Event(CLObject):
         CL.clSetEventCallback(self.id, cl_command_execution_status.CL_RUNNING, Event._pfn_notify, self._user_data)
         CL.clSetEventCallback(self.id, cl_command_execution_status.CL_COMPLETE, Event._pfn_notify, self._user_data)
 
-        status = self.status
-        if status == cl_command_execution_status.CL_COMPLETE or isinstance(status, ErrorCode):
+        if self.finished:
             try:
                 Event.__retained_events.remove(self)
             except:
@@ -102,13 +101,8 @@ class Event(CLObject):
         else:
             for i in range(len(events)-1, -1, -1):
                 event = events[i]
-                event_status = event.status
-                if event_status == cl_command_execution_status.CL_COMPLETE or event_status < 0:
-                    error_code = ErrorCode.CL_SUCCESS
-                    if event_status < 0:
-                        error_code = ErrorCode(event_status)
-
-                    on_completed(event, error_code)
+                if event.finished:
+                    on_completed(event, event.status)
                 else:
                     event.on_completed_callbacks.append(on_completed)
 
@@ -132,6 +126,11 @@ class Event(CLObject):
             raise RuntimeError("cannot set status of a non-user event")
         
         CL.clSetUserEventStatus(self.id, status)
+
+    @property
+    def finished(self)->bool:
+        event_status = self.status
+        return (event_status == cl_command_execution_status.CL_COMPLETE or isinstance(event_status, ErrorCode))
 
     @property
     def func(self)->CL.Func:
@@ -173,7 +172,7 @@ class Event(CLObject):
             for on_submitted in self.on_submitted_callbacks:
                 on_submitted(self)
         else:
-            if event_command_status> 0:
+            if event_command_status > 0:
                 error_code = ErrorCode.CL_SUCCESS
             else:
                 error_code = status

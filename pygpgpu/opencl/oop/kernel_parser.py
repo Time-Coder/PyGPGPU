@@ -28,6 +28,7 @@ class KernelParser:
 
     def __init__(self):
         self._file_name:str = ""
+        self._cache_folder:str = ""
         self._clean_code:str = ""
         self._includes:List[str] = []
         self._defines:Dict[str, Any] = {}
@@ -41,6 +42,7 @@ class KernelParser:
     def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
         self._file_name:str = file_name
         self._base_name:str = os.path.basename(file_name)
+        self._cache_folder:str = os.path.dirname(os.path.abspath(file_name)).replace("\\", "/") + "/__clcache__"
         self._includes:List[str] = copy.deepcopy(includes) if includes is not None else []
         self._defines:Dict[str, Any] = copy.deepcopy(defines) if defines is not None else {}
         self._options:Dict[str, Any] = copy.deepcopy(options) if options is not None else BuildOptions()
@@ -58,7 +60,6 @@ class KernelParser:
             self._preprocess(file_name, includes, defines)
             self._parse()
             self._save()
-
             if CL.print_info:
                 print(f"done. ", flush=True)
         else:
@@ -85,6 +86,60 @@ class KernelParser:
             "kernel_infos": self._kernel_infos
         }
         save_var(meta, self._meta_file_name)
+
+    def generate_pyi(self)->None:
+        pyi_file_name = self._file_name.replace(".cl", ".pyi")
+
+        if self._newest_mtime and modify_time(pyi_file_name) > self._newest_mtime:
+            return
+
+        content = """from typing import override, overload, Tuple
+import concurrent.futures
+import asyncio
+import numpy as np
+from numpy.typing import NDArray
+
+from pygpgpu.opencl import *
+
+"""
+
+        for kernel_name, kernel_info in self._kernel_infos.items():
+            args_declare = kernel_info.args_declare(True)
+            content += f"""
+class Kernel_{kernel_name}(KernelWrapper):
+
+    @override
+    def __call__(self, {args_declare})->None: ...
+
+    @override
+    def submit(self, {args_declare})->concurrent.futures.Future: ...
+    
+    @override
+    def async_call(self, {args_declare})->asyncio.Future: ...
+
+    def __getitem__(self, work_sizes:Tuple[int, int])->Kernel_{kernel_name}: ...
+
+    @overload
+    def __getitem__(self, work_sizes:Tuple[Tuple[int], Tuple[int]])->Kernel_{kernel_name}: ...
+
+    @overload
+    def __getitem__(self, work_sizes:Tuple[Tuple[int, int], Tuple[int, int]])->Kernel_{kernel_name}: ...
+
+    @overload
+    def __getitem__(self, work_sizes:Tuple[Tuple[int, int, int], Tuple[int, int, int]])->Kernel_{kernel_name}: ...
+
+    @overload
+    def __getitem__(self, device:str)->Kernel_{kernel_name}: ...
+
+"""
+        
+        content += "\n"
+
+        for kernel_name in self._kernel_infos:
+            content += f"{kernel_name}: Kernel_{kernel_name}\n"
+
+        with open(pyi_file_name, "w") as out_file:
+            out_file.write(content)
 
     def _load(self)->Union[bool, float]:
         meta_mtime = modify_time(self._meta_file_name)
@@ -188,20 +243,19 @@ class KernelParser:
                 )
     
     @property
-    def _cache_folder(self)->str:
-        self_folder = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
-        return self_folder + "/__clcache__"
-    
-    @property
     def _meta_file_name(self)->str:
         return f"{self._cache_folder}/{self._base_name}_{self.md5}.meta"
     
     @property
     def md5(self)->str:
-        return KernelParser.md5_of(self._file_name, self._includes, self._defines, self._options)
+        return KernelParser.md5_of(self._includes, self._defines, self._options)
+    
+    @property
+    def cache_folder(self)->str:
+        return self._cache_folder
 
     @staticmethod
-    def md5_of(file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->str:
+    def md5_of(includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, file_name:str="")->str:
         if includes is None:
             includes = []
 
@@ -211,7 +265,6 @@ class KernelParser:
         if options is None:
             options = BuildOptions()
         
-        file_name = os.path.abspath(file_name).replace("\\", "/")
         clean_includes:List[str] = []
         for include in includes:
             include = os.path.abspath(include).replace("\\", "/")
@@ -219,11 +272,13 @@ class KernelParser:
                 clean_includes.append(include)
                 
         content = {
-            "file_name": file_name,
             "includes": clean_includes,
             "defines": defines,
             "options": str(options)
         }
+        if file_name:
+            content["file_name"] = os.path.abspath(file_name).replace("\\", "/")
+
         return md5sums(json.dumps(content, separators=(',', ':'), indent=None))
 
     @property

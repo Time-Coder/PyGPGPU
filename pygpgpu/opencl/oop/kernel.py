@@ -21,7 +21,6 @@ from ..runtime import (
     cl_event,
     ErrorCode,
     cl_command_queue_properties,
-    cl_sampler,
     sampler_t,
     queue_t,
     image2d_t,
@@ -33,7 +32,7 @@ from .command_queue import CommandQueue
 from .event import Event
 from .image2d import image2d
 from .mem_object import MemObject
-from .pipe import pipe, Pipe
+from .pipe import pipe
 from ...vectorization import sizeof, value_ptr
 from ...utils import detect_work_size, join_with_and
 
@@ -57,34 +56,27 @@ class Kernel(CLObject):
         self._global_work_size:Optional[Tuple[int]] = None
         self._local_work_size:Optional[Tuple[int]] = None
 
-    def __getitem__(self, work_sizes:Tuple[Union[int, Tuple[int], Device], ...])->Kernel:
-        if not isinstance(work_sizes, tuple):
-            work_sizes = (work_sizes,)
+    def __getitem__(self, sizes_or_device:Tuple[Union[int, Tuple[int,...], str], ...])->Kernel:
+        if not isinstance(sizes_or_device, tuple):
+            sizes_or_device = (sizes_or_device,)
 
-        if len(work_sizes) == 0:
+        if len(sizes_or_device) == 0:
             raise TypeError("Kernel.__getitem__ takes at least 1 argument, 0 were given")
-        elif len(work_sizes) == 1:
-            global_work_size = None
-            local_work_size = None
-            device = work_sizes[0]
-        elif len(work_sizes) == 2:
-            global_work_size = work_sizes[0]
-            local_work_size = work_sizes[1]
-            device = self._program.context.devices[0]
-        elif len(work_sizes) == 3:
-            global_work_size = work_sizes[0]
-            local_work_size = work_sizes[1]
-            device = work_sizes[2]
-        else:
-            raise TypeError(f"Kernel.__getitem__ takes at most 3 argument, {len(work_sizes)} were given")
-        
-        if isinstance(global_work_size, int):
-            global_work_size = (global_work_size,)
+        elif len(sizes_or_device) == 1:
+            from .platforms import Platforms
+            device = Platforms.device(sizes_or_device[0])
+            if device not in self._program.context.devices:
+                raise ValueError(f"device {device} is not in current context")
+            self._used_device = device
+        elif len(sizes_or_device) == 2:
+            global_work_size = sizes_or_device[0]
+            local_work_size = sizes_or_device[1]
+            if isinstance(global_work_size, int):
+                global_work_size = (global_work_size,)
 
-        if isinstance(local_work_size, int):
-            local_work_size = (local_work_size,)
+            if isinstance(local_work_size, int):
+                local_work_size = (local_work_size,)
 
-        if global_work_size is not None and local_work_size is not None:
             work_dim = len(global_work_size)
             if work_dim > 3:
                 raise ValueError("dimension over 3 is not supported")
@@ -95,9 +87,10 @@ class Kernel(CLObject):
             if work_dim != len(local_work_size):
                 raise ValueError(f"global_work_size={global_work_size} and local_work_size={local_work_size} do not have same dimension")
         
-        self._used_device = device
-        self._global_work_size = global_work_size
-        self._local_work_size = local_work_size
+            self._global_work_size = global_work_size
+            self._local_work_size = local_work_size
+        else:
+            raise TypeError(f"Kernel.__getitem__ takes at most 2 argument, {len(sizes_or_device)} were given")
         
         return self
 
@@ -181,14 +174,20 @@ class Kernel(CLObject):
         def on_completed(arg_value:Union[np.ndarray, List[Any]], mem_obj:MemObject, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
             if error_code == ErrorCode.CL_SUCCESS:
                 self.__copy_to_host(arg_value, mem_obj)
+                if CL.print_info:
+                    print(f"copy data to host for argument '{arg_info.name}'")
 
             arg_info.unuse(mem_obj)
         
         events:List[Event] = []
         for arg_info, arg_value, mem_obj in need_read_back_mem_objs:
             event:Event = mem_obj.read(cmd_queue, after_events=after_events)
-            event.on_completed_callbacks.append(partial(on_completed, arg_value, mem_obj, arg_info))
-            events.append(event)
+            call_back = partial(on_completed, arg_value, mem_obj, arg_info)
+            if event.finished:
+                call_back(event, event.status)
+            else:
+                event.on_completed_callbacks.append(call_back)
+                events.append(event)
 
         return events
 
