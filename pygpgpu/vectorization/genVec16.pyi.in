@@ -1,6 +1,0 @@
-from typing import Union
-
-from ..genVec16 import genVec16
-
-
-class {basename}16(genVec16):

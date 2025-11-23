@@ -1,5 +1,5 @@
 from __future__ import annotations
-from ctypes import pointer
+from ctypes import pointer, sizeof
 from typing import override, TYPE_CHECKING, Optional
 
 from ..runtime import (
@@ -7,7 +7,6 @@ from ..runtime import (
     cl_mem_flags,
     cl_int
 )
-from ...vectorization import sizeof
 from .mem_object import MemObject
 
 if TYPE_CHECKING:

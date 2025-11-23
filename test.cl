@@ -16,11 +16,11 @@ __kernel void flip_y(__read_only image2d_t src_image, __write_only image2d_t des
     write_imagef(dest_image, dest_coord, result);
 }
 
-__kernel void test(__global int* a, int length)
+__kernel void test(__global int2* a, int length)
 {
     int i = get_global_id(0);
     if (i < length)
     {
-        a[i] = i;
+        a[i] = (int2)(i, 0);
     }
 }

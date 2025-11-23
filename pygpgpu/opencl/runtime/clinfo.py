@@ -4,9 +4,9 @@ from ctypes import (
     c_int32, c_uint32,
     c_int64, c_uint64,
     c_float, c_double,
-    c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER, c_int64, c_char_p
+    c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER, c_int64, c_char_p,
 )
-from ...vectorization.clmath import (
+from .vec_types import (
     char2, char3, char4, char8, char16,
     uchar2, uchar3, uchar4, uchar8, uchar16,
     short2, short3, short4, short8, short16,
@@ -268,78 +268,6 @@ class CLInfo:
         'double4': double4,
         'double8': double8,
         'double16': double16,
-    }
-
-    dtypes = {
-        'char': np.dtype('int8'),
-        'char2': np.dtype('int8'),
-        'char3': np.dtype('int8'),
-        'char4': np.dtype('int8'),
-        'char8': np.dtype('int8'),
-        'char16': np.dtype('int8'),
-
-        'uchar': np.dtype('uint8'),
-        'uchar2': np.dtype('uint8'),
-        'uchar3': np.dtype('uint8'),
-        'uchar4': np.dtype('uint8'),
-        'uchar8': np.dtype('uint8'),
-        'uchar16': np.dtype('uint8'),
-
-        'short': np.dtype('int16'),
-        'short2': np.dtype('int16'),
-        'short3': np.dtype('int16'),
-        'short4': np.dtype('int16'),
-        'short8': np.dtype('int16'),
-        'short16': np.dtype('int16'),
-
-        'ushort': np.dtype('uint16'),
-        'ushort2': np.dtype('uint16'),
-        'ushort3': np.dtype('uint16'),
-        'ushort4': np.dtype('uint16'),
-        'ushort8': np.dtype('uint16'),
-        'ushort16': np.dtype('uint16'),
-
-        'int': np.dtype('int32'),
-        'int2': np.dtype('int32'),
-        'int3': np.dtype('int32'),
-        'int4': np.dtype('int32'),
-        'int8': np.dtype('int32'),
-        'int16': np.dtype('int32'),
-
-        'uint': np.dtype('uint32'),
-        'uint2': np.dtype('uint32'),
-        'uint3': np.dtype('uint32'),
-        'uint4': np.dtype('uint32'),
-        'uint8': np.dtype('uint32'),
-        'uint16': np.dtype('uint32'),
-
-        'long': np.dtype('int64'),
-        'long2': np.dtype('int64'),
-        'long3': np.dtype('int64'),
-        'long4': np.dtype('int64'),
-        'long8': np.dtype('int64'),
-        'long16': np.dtype('int64'),
-
-        'ulong': np.dtype('uint64'),
-        'ulong2': np.dtype('uint64'),
-        'ulong3': np.dtype('uint64'),
-        'ulong4': np.dtype('uint64'),
-        'ulong8': np.dtype('uint64'),
-        'ulong16': np.dtype('uint64'),
-
-        'float': np.dtype('float32'),
-        'float2': np.dtype('float32'),
-        'float3': np.dtype('float32'),
-        'float4': np.dtype('float32'),
-        'float8': np.dtype('float32'),
-        'float16': np.dtype('float32'),
-
-        'double': np.dtype('float64'),
-        'double2': np.dtype('float64'),
-        'double3': np.dtype('float64'),
-        'double4': np.dtype('float64'),
-        'double8': np.dtype('float64'),
-        'double16': np.dtype('float64'),
     }
 
     alter_types = {

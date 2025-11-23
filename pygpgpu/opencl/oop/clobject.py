@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ctypes import c_void_p, sizeof, _SimpleCData, LittleEndianStructure, c_size_t, pointer, c_char
+from ctypes import c_void_p, sizeof, _SimpleCData, Structure, c_size_t, pointer, c_char
 from typing import Dict, Any, get_args
 from abc import ABC, abstractmethod
 import weakref
@@ -131,7 +131,7 @@ class CLObject(ABC):
 
         if issubclass(cls, _SimpleCData):
             return cls.from_buffer_copy(buffer).value
-        elif issubclass(cls, LittleEndianStructure):
+        elif issubclass(cls, Structure):
             return cls.from_buffer_copy(buffer)
         elif issubclass(cls, cl_bool):
             return bool(cl_uint.from_buffer_copy(buffer).value)

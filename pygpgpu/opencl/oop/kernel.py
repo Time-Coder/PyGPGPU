@@ -1,6 +1,6 @@
 from __future__ import annotations
 import math
-from ctypes import c_size_t, pointer
+from ctypes import c_size_t, pointer, sizeof
 from functools import partial
 import concurrent.futures
 import asyncio
@@ -33,7 +33,6 @@ from .event import Event
 from .image2d import image2d
 from .mem_object import MemObject
 from .pipe import pipe
-from ...vectorization import sizeof, value_ptr
 from ...utils import detect_work_size, join_with_and
 
 if TYPE_CHECKING:
@@ -332,7 +331,7 @@ class Kernel(CLObject):
                 else:
                     used_value = arg_type(value)
 
-            CL.clSetKernelArg(self.id, index, sizeof(used_value), value_ptr(used_value))
+            CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
             arg_info.value = value
         elif is_ptr and content_type_str in CLInfo.basic_types:
             content_type = CLInfo.basic_types[content_type_str]

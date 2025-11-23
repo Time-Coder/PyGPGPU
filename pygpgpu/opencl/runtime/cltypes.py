@@ -1,4 +1,4 @@
-from ctypes import c_char, c_uint64, c_ubyte, c_uint32, c_int32, c_int64, c_void_p, c_size_t, c_char_p, POINTER, WINFUNCTYPE, LittleEndianStructure, CFUNCTYPE
+from ctypes import c_char, c_uint64, c_ubyte, c_uint32, c_int32, c_int64, c_void_p, c_size_t, c_char_p, POINTER, WINFUNCTYPE, Structure, CFUNCTYPE
 from .clconstantes import IntConstant, IntEnum, IntFlag
 from typing import TypeAlias
 
@@ -528,8 +528,8 @@ class cl_context_properties(IntEnum):
     CL_WGL_HDC_KHR                                     = 0x200B
     CL_CGL_SHAREGROUP_KHR                              = 0x200C
 
-    @property
-    def dtype(self):
+    @classmethod
+    def dtype(cls):
         return c_int64
     
 class cl_program_info(IntEnum):
@@ -560,8 +560,8 @@ class cl_build_status(IntEnum):
     CL_BUILD_ERROR                              = -2
     CL_BUILD_IN_PROGRESS                        = -3
 
-    @property
-    def dtype(self):
+    @classmethod
+    def dtype(cls):
         return cl_int
     
 class cl_program_binary_type(IntEnum):
@@ -608,8 +608,8 @@ class cl_queue_properties(IntEnum):
     CL_QUEUE_FAMILY_INTEL                       = 0x418C
     CL_QUEUE_INDEX_INTEL                        = 0x418D
 
-    @property
-    def dtype(self):
+    @classmethod
+    def dtype(cls):
         return cl_ulong
     
 class cl_command_queue_info(IntEnum):
@@ -647,8 +647,8 @@ class cl_mem_properties(IntEnum):
     CL_MEM_LOCALLY_UNCACHED_RESOURCE_INTEL             = 0x4218
     CL_MEM_DEVICE_ID_INTEL                             = 0x4219
 
-    @property
-    def dtype(self):
+    @classmethod
+    def dtype(cls):
         return cl_ulong
     
 class cl_mem_info(IntEnum):
@@ -698,8 +698,8 @@ class cl_command_execution_status(IntEnum):
     CL_SUBMITTED                               = 0x2
     CL_QUEUED                                  = 0x3
 
-    @property
-    def dtype(self):
+    @classmethod
+    def dtype(cls):
         return cl_int
     
 class cl_command_type(IntEnum):
@@ -845,8 +845,8 @@ class cl_sampler_properties(IntEnum):
     CL_SAMPLER_LOD_MIN_KHR                             = 0x1156
     CL_SAMPLER_LOD_MAX_KHR                             = 0x1157
 
-    @property
-    def dtype(self)->type:
+    @classmethod
+    def dtype(cls)->type:
         return cl_ulong
 
 CL_VERSION_MAJOR_BITS = IntConstant("CL_VERSION_MAJOR_BITS", 10)
@@ -883,7 +883,7 @@ cl_version_khr = cl_version
 CL_NAME_VERSION_MAX_NAME_SIZE = IntConstant("CL_NAME_VERSION_MAX_NAME_SIZE", 64)
 CL_NAME_VERSION_MAX_NAME_SIZE_KHR = IntConstant("CL_NAME_VERSION_MAX_NAME_SIZE_KHR", 64)
 
-class cl_name_version(LittleEndianStructure):
+class cl_name_version(Structure):
     _fields_ = [
         ("version", cl_version),
         ("name", c_char * CL_NAME_VERSION_MAX_NAME_SIZE)
@@ -893,7 +893,7 @@ class cl_name_version(LittleEndianStructure):
         return str((self.name.decode("utf-8"), self.version))
 
 
-class cl_name_version_khr(LittleEndianStructure):
+class cl_name_version_khr(Structure):
     _fields_ = [
         ("version", cl_version_khr),
         ("name", c_char * CL_NAME_VERSION_MAX_NAME_SIZE_KHR)
@@ -902,7 +902,7 @@ class cl_name_version_khr(LittleEndianStructure):
     def __repr__(self)->str:
         return str((self.name.decode("utf-8"), self.version))
     
-class cl_device_integer_dot_product_acceleration_properties_khr(LittleEndianStructure):
+class cl_device_integer_dot_product_acceleration_properties_khr(Structure):
     _fields_ = [
         ("signed_accelerated", cl_uint),
         ("unsigned_accelerated", cl_uint),
@@ -912,7 +912,7 @@ class cl_device_integer_dot_product_acceleration_properties_khr(LittleEndianStru
         ("accumulating_saturating_mixed_signedness_accelerated", cl_uint)
     ]
     
-class cl_device_pci_bus_info_khr(LittleEndianStructure):
+class cl_device_pci_bus_info_khr(Structure):
     _fields_ = [
         ("pci_domain", cl_uint),
         ("pci_bus", cl_uint),
@@ -920,7 +920,7 @@ class cl_device_pci_bus_info_khr(LittleEndianStructure):
         ("pci_function", cl_uint)
     ]
 
-class cl_image_format(LittleEndianStructure):
+class cl_image_format(Structure):
     _fields_ = [
         ("image_channel_order", cl_uint),
         ("image_channel_data_type", cl_uint)
@@ -928,7 +928,7 @@ class cl_image_format(LittleEndianStructure):
 
 ptr_cl_image_format:TypeAlias = POINTER(cl_image_format)
 
-class cl_image_desc(LittleEndianStructure):
+class cl_image_desc(Structure):
     _fields_ = [
         ("image_type", cl_uint),
         ("image_width", c_size_t),

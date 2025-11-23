@@ -3,7 +3,7 @@ import re
 import os
 import copy
 import json
-from ctypes import c_char_p
+from ctypes import c_char_p, Structure
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple
 
 from ...kernel_parser import CPreprocessor
@@ -15,7 +15,7 @@ from ..runtime import (
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
-from .kernel_info import KernelInfo, ArgInfo, StructInfo
+from .kernel_info import KernelInfo, ArgInfo, StructInfo, VarInfo
 
 
 class KernelParser:
@@ -26,7 +26,8 @@ class KernelParser:
     _address_qualifier_pattern:re.Pattern = re.compile(r"\b(__global|__local|__private|__constant|global|local|private|constant)\b")
     _access_qualifier_pattern:re.Pattern = re.compile(r"\b(__read_only|__write_only|__read_write|read_only|write_only|read_write)\b")
     _type_qualifier_pattern:re.Pattern = re.compile(r"\b(const|restrict|volatile|pipe)\b")
-    _arg_name_pattern:re.Pattern = re.compile(r"\b([a-zA-Z_]\w*)\b(?=\W*$)")
+    _arg_name_pattern:re.Pattern = re.compile(r"\b([a-zA-Z_]\w*(\[[^\]]*\])*)(?=\W*$)")
+    _array_shape_pattern:re.Pattern = re.compile(r'\[\s*(\d+)\s*\]')
 
     def __init__(self):
         self._file_name:str = ""
@@ -39,6 +40,8 @@ class KernelParser:
         self._line_map:Dict[int, str] = {}
         self._related_files:Set[str] = set()
         self._kernel_infos:Dict[str, KernelInfo] = {}
+        self._struct_infos:Dict[str, StructInfo] = {}
+        self._struct_types:Dict[str, type] = {}
         self._newest_mtime:Union[float, bool] = False
 
     def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
@@ -85,6 +88,7 @@ class KernelParser:
             "clean_code": self._clean_code,
             "related_files": self._related_files,
             "line_map": self._line_map,
+            "struct_infos": self._struct_infos,
             "kernel_infos": self._kernel_infos
         }
         save_var(meta, self._meta_file_name)
@@ -217,10 +221,61 @@ class Kernel_{kernel_name}(KernelWrapper):
             self._line_map,
             self._related_files
         ) = CPreprocessor.macros_expand_file(file_name, includes, defines)
+        self._struct_infos.clear()
         self._kernel_infos.clear()
+
+    def _create_structure(self, struct_info:StructInfo)->type:
+        fields = []
+        for member in struct_info.members.values():
+            fields.append((member.name, ctypeof(member.type_str)))
+
+        struct_type = type(struct_info.name, (Structure,), {
+            "_fields_": fields,
+            "dtype": dtype
+        })
 
     def _parse(self):
         struct_matches:List[re.Match] = self._find_struct_defs(self._clean_code)
+        for struct_match in struct_matches:
+            if "type_name" in struct_match:
+                struct_name:str = struct_match["type_name"]
+            else:
+                struct_name:str = "struct " + struct_match["struct_name"]
+            struct_info = StructInfo(name=struct_name)
+            self._struct_infos[struct_name] = struct_info
+
+            members_str:str = struct_match["body"]
+            members_items:List[str] = members_str.split(";")
+            for member_item in members_items:
+                member_item = member_item.strip("\r\n\t ")
+                submember_items = member_item.split(",")
+                first_member_item = submember_items[0]
+                address_qualifier = self._find_address_qualifier(first_member_item)
+                access_qualifier = self._find_access_qualifier(first_member_item)
+                type_qualifiers = self._find_type_qualifiers(first_member_item)
+                member_name:str = self._find_arg_name(first_member_item)
+                member_type:str = self._find_arg_type(first_member_item)
+                member_name, member_shape = self._extract_array_shape(member_name)
+                struct_info[member_name] = VarInfo(
+                    name=member_name,
+                    type=member_type,
+                    array_shape=member_shape,
+                    address_qualifier=address_qualifier,
+                    access_qualifier=access_qualifier,
+                    type_qualifiers=type_qualifiers
+                )
+                for i in range(1, len(submember_items)):
+                    member_name:str = self._find_arg_name(submember_items[i]).split(",")
+                    struct_info[member_name] = VarInfo(
+                        name=member_name,
+                        type=member_type,
+                        address_qualifier=address_qualifier,
+                        access_qualifier=access_qualifier,
+                        type_qualifiers=type_qualifiers
+                    )
+
+        for struct_info in self._struct_infos.values():
+            self._struct_types[struct_info.name] = self._create_structure(struct_info)
 
         kernel_matches:Iterator[re.Match] = self._find_kernel_defs(self._clean_code)
         for kernel_match in kernel_matches:
@@ -237,10 +292,12 @@ class Kernel_{kernel_name}(KernelWrapper):
                 type_qualifiers = self._find_type_qualifiers(arg_item)
                 arg_name:str = self._find_arg_name(arg_item)
                 arg_type:str = self._find_arg_type(arg_item)
+                arg_name, arg_shape = self._extract_array_shape(arg_name)
                 kernel_info.args[arg_name] = ArgInfo(
                     parent=kernel_info,
                     name=arg_name,
                     type_str=arg_type,
+                    array_shape=arg_shape,
                     address_qualifier=address_qualifier,
                     access_qualifier=access_qualifier,
                     type_qualifiers=type_qualifiers
@@ -339,3 +396,20 @@ class Kernel_{kernel_name}(KernelWrapper):
         arg_code = re.sub(r"\s+\*", "*", arg_code)
         arg_code = arg_code.strip("\r\t\n ")
         return arg_code
+    
+    def _extract_array_shape(self, content: str)->Tuple[str, Tuple[int, ...]]:
+        end_pos = content.find("[")
+        if end_pos == -1:
+            name = content
+        else:
+            name = content[:end_pos].strip()
+
+        matches = re.findall(self._array_shape_pattern, content)
+        
+        if not matches:
+            shape = ()
+        else:
+            shape = tuple(int(x) for x in matches)
+
+        return name, shape
+        

@@ -27,9 +27,10 @@ from .pipe import pipe
 
 class VarInfo:
 
-    def __init__(self, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+    def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
         self.name = name
         self.type_str = type_str
+        self.array_shape = array_shape
         self.address_qualifier = address_qualifier
         self.access_qualifier = access_qualifier
         self.type_qualifiers = type_qualifiers
@@ -48,8 +49,10 @@ class VarInfo:
         if self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
             return 'pipe'
         elif self.is_ptr:
-            dtype = CLInfo.dtypes[base_type_str]
-            return f"NDArray[np.{dtype.name}]"
+            dtype_name = base_type_str
+            if base_type_str in CLInfo.scalar_types:
+                dtype_name = "np." + np.dtype(base_type_str).name
+            return f"NDArray[{dtype_name}]"
         else:
             if base_type_str in ['char', 'uchar', 'short', 'ushort', 'int', 'uint', 'long', 'ulong']:
                 return 'int'
@@ -84,8 +87,8 @@ class VarInfo:
 
 class ArgInfo(VarInfo):
 
-    def __init__(self, parent:KernelInfo, name: str, type_str: str, address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
-        VarInfo.__init__(self, name, type_str, address_qualifier, access_qualifier, type_qualifiers)
+    def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+        VarInfo.__init__(self, name, type_str, array_shape, address_qualifier, access_qualifier, type_qualifiers)
         self.parent = parent
         self.value: Any = None
         self.mem_obj: Optional[MemObject] = None
@@ -106,10 +109,17 @@ class ArgInfo(VarInfo):
             if not isinstance(value, np.ndarray):
                 raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be np.ndarray, got {value.__class__.__name__}.")
             
-            if base_type_str in CLInfo.dtypes:
-                dtype = CLInfo.dtypes[base_type_str]
+            dtype = None
+            dtype_name = base_type_str
+            if base_type_str in CLInfo.scalar_types:
+                dtype = np.dtype(CLInfo.scalar_types[base_type_str])
+                dtype_name = "np." + dtype.name
+            elif base_type_str in CLInfo.vec_types:
+                dtype = CLInfo.vec_types[base_type_str]
+
+            if dtype is not None:
                 if value.dtype != dtype:
-                    raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[np.{dtype.name}], got NDArray[np.{value.dtype.name}].")
+                    raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be NDArray[{dtype_name}], got NDArray[np.{value.dtype.name}].")
         else:
             base_type = None
             if base_type_str in CLInfo.basic_types:
