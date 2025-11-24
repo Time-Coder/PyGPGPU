@@ -1,4 +1,5 @@
 from typing import override, overload, Tuple
+import ctypes
 import concurrent.futures
 import asyncio
 import numpy as np
@@ -7,7 +8,16 @@ from numpy.typing import NDArray
 from pygpgpu.opencl import *
 
 
-class Point:
+class Point(ctypes.Structure):
+
+    _fields_ = [
+        ('x', ctypes.c_float)
+        ('y', ctypes.c_float)
+        ('z', ctypes.c_float)
+    ]
+
+    def __init__(self, x: float, y: float, z: float)->None: ...
+
     x: float
     y: float
     z: float

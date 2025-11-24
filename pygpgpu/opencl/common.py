@@ -75,38 +75,3 @@ def compile(
         __program_wrappers[key] = program_wrapper
 
     return __program_wrappers[key]
-
-
-def __has_structure(arr)->bool:
-    if isinstance(arr, Structure):
-        return True
-
-    try:
-        for ele in arr:
-            if __has_structure(ele):
-                return True
-    except:
-        pass
-
-    return False
-    
-
-np_array = np.array
-
-def __change_element(arr):
-    for i, ele in enumerate(arr):
-        if isinstance(ele, Structure):
-            arr[i] = np_array(ele)
-        
-def array(*args, **kwargs):
-    obj = args[0]
-
-    if isinstance(obj, Structure) or not __has_structure(obj):
-        return np_array(*args, **kwargs)
-    
-    obj = copy.deepcopy(obj)
-    __change_element(obj)
-    return np_array(obj, *args[1:], **kwargs)
-
-if np.array.__class__.__name__ == 'builtin_function_or_method':
-    np.array = array

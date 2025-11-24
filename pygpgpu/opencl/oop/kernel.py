@@ -279,15 +279,12 @@ class Kernel(CLObject):
             index = self._arg_names.index(index_or_name)
 
         arg_type_str = arg_info.type_str
-        is_ptr = (arg_type_str[-1] == "*")
-        if not is_ptr and arg_info.value is not None and arg_info.value == value:
+        if not arg_info.is_ptr and arg_info.value is not None and arg_info.value == value:
             return {}
         
         arg_type_str = arg_info.type_str
         type_qualifiers = arg_info.type_qualifiers
-        content_type_str = arg_type_str
-        if is_ptr:
-            content_type_str = arg_type_str[:-1]
+        base_type_str = arg_info.base_type_str
 
         if type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
             arg_type = CLInfo.basic_types[arg_type_str]
@@ -321,63 +318,74 @@ class Kernel(CLObject):
             if arg_info.value != used_value.id:
                 CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
                 arg_info.value = used_value.id
-        elif arg_type_str in CLInfo.basic_types:
-            arg_type = CLInfo.basic_types[arg_type_str]
-            if isinstance(value, arg_type):
-                used_value = value
+        elif base_type_str in CLInfo.basic_types or base_type_str in self._program._kernel_parser._struct_types:
+            if base_type_str in CLInfo.basic_types:
+                content_type = CLInfo.basic_types[base_type_str]
             else:
-                if arg_type_str in CLInfo.alter_types:
-                    used_value = arg_type(CLInfo.alter_types[arg_type_str][1](value))
-                else:
-                    used_value = arg_type(value)
+                content_type = self._program._kernel_parser._struct_types[arg_info.base_type_str]
 
-            CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
-            arg_info.value = value
-        elif is_ptr and content_type_str in CLInfo.basic_types:
-            content_type = CLInfo.basic_types[content_type_str]
-            if arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_LOCAL:
-                if isinstance(value, int):
-                    bytes_per_group = value
-                elif isinstance(value, np.ndarray):
-                    bytes_per_group = value.size
-                elif isinstance(value, (list,tuple)):
-                    bytes_per_group = np.array(value).size
-
-                bytes_per_group *= sizeof(content_type)
-
-                if arg_info.value is not None and arg_info.value == bytes_per_group:
-                    return {}
-                
-                CL.clSetKernelArg(self.id, index, bytes_per_group, None)
-                arg_info.value = bytes_per_group
-            else:
-                if isinstance(value, np.ndarray):
+            if not arg_info.is_ptr:
+                if isinstance(value, content_type):
                     used_value = value
-                    if value.dtype != content_type:
-                        used_value = value.astype(content_type)
                 else:
-                    used_value = np.array(value, dtype=content_type)
+                    success = True
+                    try:
+                        if base_type_str in CLInfo.alter_types:
+                            used_value = content_type(CLInfo.alter_types[base_type_str][1](value))
+                        else:
+                            used_value = content_type(value)
+                    except BaseException as e:
+                        success = False
 
-                if not used_value.flags['C_CONTIGUOUS']:
-                    used_value = np.ascontiguousarray(used_value)
+                    if not success:
+                        raise TypeError(f"type of argument '{arg_info.name}' need {content_type.__name__}, got {value.__class__.__name__}, and cannot convert {value.__class__.__name__} to {content_type.__name__}")
 
-                buffer, event = arg_info.use_buffer(cmd_queue, used_value)
-                if arg_info.mem_obj != buffer:
-                    CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
-
+                CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
                 arg_info.value = value
-                arg_info.mem_obj = buffer
-                if arg_info.need_read_back:
-                    return {
-                        "arg_info": arg_info,
-                        "value": value,
-                        "mem_obj": buffer,
-                        "event": event
-                    }
+            else:
+                if arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_LOCAL:
+                    if isinstance(value, int):
+                        bytes_per_group = value
+                    elif isinstance(value, np.ndarray):
+                        bytes_per_group = value.size
+                    elif isinstance(value, (list, tuple)):
+                        bytes_per_group = np.array(value).size
+
+                    bytes_per_group *= sizeof(content_type)
+
+                    if arg_info.value is not None and arg_info.value == bytes_per_group:
+                        return {}
+                    
+                    CL.clSetKernelArg(self.id, index, bytes_per_group, None)
+                    arg_info.value = bytes_per_group
                 else:
-                    return {
-                        "event": event
-                    }
+                    if isinstance(value, np.ndarray):
+                        used_value = value
+                        if value.dtype != content_type:
+                            used_value = value.astype(content_type)
+                    else:
+                        used_value = np.array(value, dtype=content_type)
+
+                    if not used_value.flags['C_CONTIGUOUS']:
+                        used_value = np.ascontiguousarray(used_value)
+
+                    buffer, event = arg_info.use_buffer(cmd_queue, used_value)
+                    if arg_info.mem_obj != buffer:
+                        CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+
+                    arg_info.value = value
+                    arg_info.mem_obj = buffer
+                    if arg_info.need_read_back:
+                        return {
+                            "arg_info": arg_info,
+                            "value": value,
+                            "mem_obj": buffer,
+                            "event": event
+                        }
+                    else:
+                        return {
+                            "event": event
+                        }
         elif arg_type_str in CLInfo.image_types:
             image_type = CLInfo.image_types[arg_type_str]
             if not isinstance(value, (np.ndarray, image_type)):
@@ -404,6 +412,8 @@ class Kernel(CLObject):
                 return {
                     "event": event
                 }
+        else:
+            raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
 
         return {}
 

@@ -19,8 +19,8 @@ class CLLoader:
 
     def exec_module(self, module):
         program_wrapper = compile(self.cl_path, type_checked=self.type_checked, options=self.build_options, generate_pyi=True)
-        for struct_info in program_wrapper._kernel_parser._struct_infos.values():
-            setattr(module, struct_info.name, struct_info.struct_type)
+        for struct_name, struct_type in program_wrapper._kernel_parser._struct_types.items():
+            setattr(module, struct_name, struct_type)
 
         for kernel_name, kernel_wrapper in program_wrapper.kernels_wrappers.items():
             setattr(module, kernel_name, kernel_wrapper)

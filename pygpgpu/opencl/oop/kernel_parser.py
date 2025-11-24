@@ -1,7 +1,6 @@
 from __future__ import annotations
 import re
 import os
-import sys
 import copy
 import json
 from ctypes import c_char_p, Structure, POINTER
@@ -45,6 +44,7 @@ class KernelParser:
         self._related_files:Set[str] = set()
         self._kernel_infos:Dict[str, KernelInfo] = {}
         self._struct_infos:Dict[str, StructInfo] = {}
+        self._struct_types:Dict[str, type] = {}
         self._newest_mtime:Union[float, bool] = False
 
     def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
@@ -103,6 +103,7 @@ class KernelParser:
             return
 
         content = """from typing import override, overload, Tuple
+import ctypes
 import concurrent.futures
 import asyncio
 import numpy as np
@@ -113,7 +114,7 @@ from pygpgpu.opencl import *
 """
 
         for struct_info in self._struct_infos.values():
-            content += "\n" + struct_info.declare() + "\n"
+            content += struct_info.declare()
 
         for kernel_name, kernel_info in self._kernel_infos.items():
             args_declare = kernel_info.args_declare(True)
@@ -175,6 +176,10 @@ class Kernel_{kernel_name}(KernelWrapper):
         self._related_files = meta["related_files"]
         self._line_map = meta["line_map"]
         self._kernel_infos = meta["kernel_infos"]
+        self._struct_infos = meta["struct_infos"]
+        for struct_info in self._struct_infos.values():
+            self._create_struct_type(struct_info)
+
         return newest_mtime
 
     @property
@@ -228,43 +233,55 @@ class Kernel_{kernel_name}(KernelWrapper):
             self._related_files
         ) = CPreprocessor.macros_expand_file(file_name, includes, defines)
         self._struct_infos.clear()
+        self._struct_types.clear()
         self._kernel_infos.clear()
 
     def _create_struct_type(self, struct_info:StructInfo)->type:
-        if struct_info.struct_type is not None:
-            return struct_info.struct_type
+        struct_name:str = struct_info.name
+        if struct_name in self._struct_types:
+            return self._struct_types[struct_name]
 
-        fields = []
-        dtype = []
-        for member in struct_info.members.values():
-            if member.base_type_str in CLInfo.basic_types:
-                base_type = CLInfo.basic_types[member.base_type_str]
-                member_type = base_type
-                for n_elements in reversed(member.array_shape):
-                    member_type *= n_elements
+        if not struct_info._fields_ or not struct_info.dtype:
+            _fields_ = []
+            dtype = []
+            for member in struct_info.members.values():
+                if member.base_type_str in CLInfo.basic_types:
+                    base_type = CLInfo.basic_types[member.base_type_str]
+                    member_type = base_type
+                    for n_elements in reversed(member.array_shape):
+                        member_type *= n_elements
 
-                if member.is_ptr:
-                    fields.append((member.name, POINTER(member_type)))
-                    dtype.append((member.name, np.uint64))
+                    if member.is_ptr:
+                        _fields_.append((member.name, POINTER(member_type)))
+                        dtype.append((member.name, np.uint64))
+                    else:
+                        _fields_.append((member.name, member_type))
+                        dtype.append((member.name, base_type, member.array_shape))
                 else:
-                    fields.append((member.name, member_type))
-                    dtype.append((member.name, base_type, member.array_shape))
-            else:
-                struct_type = self._create_struct_type(self._struct_infos[member.base_type_str])
-                if member.is_ptr:
-                    fields.append((member.name, POINTER(struct_type)))
-                    dtype.append((member.name, np.uint64))
-                else:
-                    fields.append((member.name, struct_type))
-                    dtype.append((member.name, struct_type.dtype))
+                    struct_type = self._create_struct_type(self._struct_infos[member.base_type_str])
+                    if member.is_ptr:
+                        _fields_.append((member.name, POINTER(struct_type)))
+                        dtype.append((member.name, np.uint64))
+                    else:
+                        _fields_.append((member.name, struct_type))
+                        dtype.append((member.name, struct_type.dtype))
 
-        struct_info.struct_type = type(struct_info.name, (Structure,), {
-            "_fields_": fields,
-            "dtype": np.dtype(dtype)
+            dtype = np.dtype(dtype)
+            struct_info._fields_ = _fields_
+            struct_info.dtype = dtype
+        else:
+            _fields_ = struct_info._fields_
+            dtype = struct_info.dtype
+
+        struct_type = type(struct_name, (Structure,), {
+            "_fields_": _fields_,
+            "dtype": dtype,
+
+            "__repr__": lambda self: f"{struct_name}({', '.join([field[0] + '=' + str(getattr(self, field[0])) for field in self._fields_ if field[0] != '_'])})"
         })
-        setattr(sys.modules[__name__], struct_info.name, struct_info.struct_type)
+        self._struct_types[struct_name] = struct_type
 
-        return struct_info.struct_type
+        return struct_type
 
     def _parse(self):
         struct_matches:List[re.Match] = self._find_struct_defs(self._clean_code)

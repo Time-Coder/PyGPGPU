@@ -1,3 +1,4 @@
+
 from .runtime import (
     image1d_t,
     image2d_t,
@@ -17,6 +18,7 @@ from .runtime import (
     double2, double3, double4, double8, double16
 )
 from .oop import KernelWrapper
+
 from .common import compile
 from .climport import climport
 climport.install()

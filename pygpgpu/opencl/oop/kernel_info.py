@@ -198,12 +198,24 @@ class StructInfo:
     def __init__(self, name:str):
         self.name: str = name
         self.members: Dict[str, VarInfo] = {}
-        self.struct_type: Optional[type] = None
+        self._fields_: List[Tuple[str, type]] = []
+        self.dtype: Optional[np.dtype] = None
 
     def declare(self)->str:
-        result = f"class {self.name}:\n"
+        result = f"""
+class {self.name}(ctypes.Structure):
+
+    _fields_ = [
+{'\n'.join(["        ('" + field[0] + "', ctypes." + field[1].__name__ + ")" for field in self._fields_])}
+    ]
+
+    def __init__(self, {", ".join([member.name + ": " + member.type_annotation for member in self.members.values()])})->None: ...
+
+"""
         for member in self.members.values():
             result += f"    {member.name}: {member.type_annotation}\n"
+
+        result += "\n"
 
         return result
 
