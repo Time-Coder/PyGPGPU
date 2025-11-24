@@ -2,6 +2,7 @@ import sys
 import os
 import importlib.util
 from typing import Optional
+from types import ModuleType
 
 from .common import compile
 from .oop.build_options import BuildOptions
@@ -17,7 +18,7 @@ class CLLoader:
     def create_module(self, spec):
         return None
 
-    def exec_module(self, module):
+    def exec_module(self, module:ModuleType):
         program_wrapper = compile(self.cl_path, type_checked=self.type_checked, options=self.build_options, generate_pyi=True)
         for struct_name, struct_type in program_wrapper._kernel_parser._struct_types.items():
             setattr(module, struct_name, struct_type)

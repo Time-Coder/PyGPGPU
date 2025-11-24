@@ -200,6 +200,7 @@ class StructInfo:
         self.members: Dict[str, VarInfo] = {}
         self._fields_: List[Tuple[str, type]] = []
         self.dtype: Optional[np.dtype] = None
+        self.pointer_types:Dict[str, type] = {}
 
     def declare(self)->str:
         result = f"""

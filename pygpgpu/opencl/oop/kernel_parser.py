@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 import os
+import sys
 import copy
 import json
 from ctypes import c_char_p, Structure, POINTER
@@ -55,6 +56,21 @@ class KernelParser:
         self._defines:Dict[str, Any] = copy.deepcopy(defines) if defines is not None else {}
         self._options:Dict[str, Any] = copy.deepcopy(options) if options is not None else BuildOptions()
         self._options_ptr:c_char_p = c_char_p(str(self._options).encode("utf-8"))
+
+        for path in sys.path:
+            module_file_path:str = self._file_name
+            pos_point:int = module_file_path.rfind(".")
+            if pos_point != -1:
+                module_file_path = module_file_path[:pos_point]
+
+            module_path:str = os.path.relpath(module_file_path, path).replace("\\", "/")
+            if module_path.startswith("./"):
+                module_path = module_path[2:]
+
+            if not module_path.startswith("../"):
+                break
+
+        self._module_path:str = module_path.replace("/", ".")
 
         try:
             newest_mtime = self._load()
@@ -244,36 +260,36 @@ class Kernel_{kernel_name}(KernelWrapper):
         if not struct_info._fields_ or not struct_info.dtype:
             _fields_ = []
             dtype = []
+            pointer_types = {}
             for member in struct_info.members.values():
                 if member.base_type_str in CLInfo.basic_types:
                     base_type = CLInfo.basic_types[member.base_type_str]
-                    member_type = base_type
-                    for n_elements in reversed(member.array_shape):
-                        member_type *= n_elements
-
-                    if member.is_ptr:
-                        _fields_.append((member.name, POINTER(member_type)))
-                        dtype.append((member.name, np.uint64))
-                    else:
-                        _fields_.append((member.name, member_type))
-                        dtype.append((member.name, base_type, member.array_shape))
                 else:
-                    struct_type = self._create_struct_type(self._struct_infos[member.base_type_str])
-                    if member.is_ptr:
-                        _fields_.append((member.name, POINTER(struct_type)))
-                        dtype.append((member.name, np.uint64))
-                    else:
-                        _fields_.append((member.name, struct_type))
-                        dtype.append((member.name, struct_type.dtype))
+                    base_type = self._create_struct_type(self._struct_infos[member.base_type_str])
+
+                member_type = base_type
+                for n_elements in reversed(member.array_shape):
+                    member_type *= n_elements
+
+                if member.is_ptr:
+                    _fields_.append((f"_{struct_info.name}__{member.name}", POINTER(member_type)))
+                    dtype.append((member.name, np.uint64))
+                    pointer_types[member.name] = member_type
+                else:
+                    _fields_.append((member.name, member_type))
+                    dtype.append((member.name, base_type, member.array_shape))
 
             dtype = np.dtype(dtype)
             struct_info._fields_ = _fields_
             struct_info.dtype = dtype
+            struct_info.pointer_types = pointer_types
         else:
             _fields_ = struct_info._fields_
             dtype = struct_info.dtype
+            pointer_types = struct_info.pointer_types
 
         struct_type = type(struct_name, (Structure,), {
+            '__module__': self._module_path,
             "_fields_": _fields_,
             "dtype": dtype,
 
