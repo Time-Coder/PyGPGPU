@@ -3,7 +3,7 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from test import flip_y, test
+# from test import flip_y, test
 
 
 # src_image = image2d_t("test.png")
@@ -14,7 +14,11 @@ from test import flip_y, test
 
 # dest_image.save("dest.png")
 
+a = int2()
+print(np.array([a]))
 
-a = np.stack([int2()]*100)
-test(a, 100)
-print(a)
+# a = np.stack([int2()]*100)
+# a = np.array([[int2(), int2()], [int2(), int2()]])
+# print(a)
+# test(a, 100)
+# print(a)
