@@ -19,12 +19,11 @@ class CLLoader:
 
     def exec_module(self, module):
         program_wrapper = compile(self.cl_path, type_checked=self.type_checked, options=self.build_options, generate_pyi=True)
-        # for struct_info in program_wrapper.
+        for struct_info in program_wrapper._kernel_parser._struct_infos.values():
+            setattr(module, struct_info.name, struct_info.struct_type)
 
         for kernel_name, kernel_wrapper in program_wrapper.kernels_wrappers.items():
             setattr(module, kernel_name, kernel_wrapper)
-
-        
 
 
 class CLFinder:
@@ -61,6 +60,10 @@ class climport:
 
     @staticmethod
     def install():
+        for finder in sys.meta_path:
+            if isinstance(finder, CLFinder):
+                return
+            
         sys.meta_path.insert(0, CLFinder())
 
     @staticmethod

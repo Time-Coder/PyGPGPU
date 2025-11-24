@@ -51,7 +51,7 @@ class VarInfo:
         elif self.is_ptr:
             dtype_name = base_type_str
             if base_type_str in CLInfo.scalar_types:
-                dtype_name = "np." + np.dtype(base_type_str).name
+                dtype_name = "np." + np.dtype(CLInfo.scalar_types[base_type_str]).name
             return f"NDArray[{dtype_name}]"
         else:
             if base_type_str in ['char', 'uchar', 'short', 'ushort', 'int', 'uint', 'long', 'ulong']:
@@ -199,6 +199,13 @@ class StructInfo:
         self.name: str = name
         self.members: Dict[str, VarInfo] = {}
         self.struct_type: Optional[type] = None
+
+    def declare(self)->str:
+        result = f"class {self.name}:\n"
+        for member in self.members.values():
+            result += f"    {member.name}: {member.type_annotation}\n"
+
+        return result
 
 
 class KernelInfo:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 import os
+import sys
 import copy
 import json
 from ctypes import c_char_p, Structure, POINTER
@@ -18,12 +19,14 @@ from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
 from .kernel_info import KernelInfo, ArgInfo, StructInfo, VarInfo
 
+import numpy as np
+
 
 class KernelParser:
 
     _struct_def_pattern1:re.Pattern = re.compile(r"^\s*struct\s+(?P<struct_name>[a-zA-Z_]\w*)\{(?P<body>.*?)\}\s*;", re.MULTILINE | re.DOTALL)
-    _struct_def_pattern2:re.Pattern = re.compile(r"^\s*typedef\s+struct(?P<struct_name>\s+[a-zA-Z_]\w*)?\{(?P<body>.*?)\}\s*(?P<type_name>[a-zA-Z_]\w*)\s*;", re.MULTILINE | re.DOTALL)
-    _kernel_def_pattern:re.Pattern = re.compile(r"^\s*(__kernel|kernel)\s+void\s+(?P<name>[a-zA-Z_]\w*)\((?P<body>.*?)\)", re.MULTILINE | re.DOTALL)
+    _struct_def_pattern2:re.Pattern = re.compile(r"^\s*typedef\s+struct(?P<struct_name>\s+[a-zA-Z_]\w*)?\s*\{(?P<body>.*?)\}\s*(?P<type_name>[a-zA-Z_]\w*)\s*;", re.MULTILINE | re.DOTALL)
+    _kernel_def_pattern:re.Pattern = re.compile(r"^\s*(__kernel|kernel)\s+void\s+(?P<name>[a-zA-Z_]\w*)\s*\((?P<body>.*?)\)", re.MULTILINE | re.DOTALL)
     _address_qualifier_pattern:re.Pattern = re.compile(r"\b(__global|__local|__private|__constant|global|local|private|constant)\b")
     _access_qualifier_pattern:re.Pattern = re.compile(r"\b(__read_only|__write_only|__read_write|read_only|write_only|read_write)\b")
     _type_qualifier_pattern:re.Pattern = re.compile(r"\b(const|restrict|volatile|pipe)\b")
@@ -108,6 +111,9 @@ from numpy.typing import NDArray
 from pygpgpu.opencl import *
 
 """
+
+        for struct_info in self._struct_infos.values():
+            content += "\n" + struct_info.declare() + "\n"
 
         for kernel_name, kernel_info in self._kernel_infos.items():
             args_declare = kernel_info.args_declare(True)
@@ -231,39 +237,59 @@ class Kernel_{kernel_name}(KernelWrapper):
         fields = []
         dtype = []
         for member in struct_info.members.values():
-            if member.type_str in CLInfo.basic_types:
-                fields.append((member.name, CLInfo.basic_types[member.type_str]))
-                dtype.append((member.name, CLInfo.basic_types[member.type_str]))
-            elif member.is_ptr and member.base_type_str in CLInfo.basic_types:
-                fields.append((member.name, POINTER(CLInfo.basic_types[member.type_str])))
+            if member.base_type_str in CLInfo.basic_types:
+                base_type = CLInfo.basic_types[member.base_type_str]
+                member_type = base_type
+                for n_elements in reversed(member.array_shape):
+                    member_type *= n_elements
+
+                if member.is_ptr:
+                    fields.append((member.name, POINTER(member_type)))
+                    dtype.append((member.name, np.uint64))
+                else:
+                    fields.append((member.name, member_type))
+                    dtype.append((member.name, base_type, member.array_shape))
             else:
                 struct_type = self._create_struct_type(self._struct_infos[member.base_type_str])
                 if member.is_ptr:
                     fields.append((member.name, POINTER(struct_type)))
+                    dtype.append((member.name, np.uint64))
                 else:
                     fields.append((member.name, struct_type))
                     dtype.append((member.name, struct_type.dtype))
 
         struct_info.struct_type = type(struct_info.name, (Structure,), {
             "_fields_": fields,
-            "dtype": dtype
+            "dtype": np.dtype(dtype)
         })
+        setattr(sys.modules[__name__], struct_info.name, struct_info.struct_type)
+
         return struct_info.struct_type
 
     def _parse(self):
         struct_matches:List[re.Match] = self._find_struct_defs(self._clean_code)
         for struct_match in struct_matches:
-            if "type_name" in struct_match:
+            key_names = []
+
+            if "struct_name" in struct_match.groupdict() and struct_match["struct_name"] is not None:
+                struct_name:str = struct_match["struct_name"]
+                key_names.append("struct " + struct_name)
+
+            if "type_name" in struct_match.groupdict() and struct_match["type_name"] is not None:
                 struct_name:str = struct_match["type_name"]
-            else:
-                struct_name:str = "struct " + struct_match["struct_name"]
+                key_names.append(struct_name)
+
             struct_info = StructInfo(name=struct_name)
-            self._struct_infos[struct_name] = struct_info
+            for key_name in key_names:
+                self._struct_infos[key_name] = struct_info
 
             members_str:str = struct_match["body"]
             members_items:List[str] = members_str.split(";")
             for member_item in members_items:
                 member_item = member_item.strip("\r\n\t ")
+                if not member_item:
+                    continue
+
                 submember_items = member_item.split(",")
                 first_member_item = submember_items[0]
                 address_qualifier = self._find_address_qualifier(first_member_item)
@@ -272,9 +298,9 @@ class Kernel_{kernel_name}(KernelWrapper):
                 member_name:str = self._find_arg_name(first_member_item)
                 member_type:str = self._find_arg_type(first_member_item)
                 member_name, member_shape = self._extract_array_shape(member_name)
-                struct_info[member_name] = VarInfo(
+                struct_info.members[member_name] = VarInfo(
                     name=member_name,
-                    type=member_type,
+                    type_str=member_type,
                     array_shape=member_shape,
                     address_qualifier=address_qualifier,
                     access_qualifier=access_qualifier,
@@ -282,9 +308,11 @@ class Kernel_{kernel_name}(KernelWrapper):
                 )
                 for i in range(1, len(submember_items)):
                     member_name:str = self._find_arg_name(submember_items[i]).split(",")
-                    struct_info[member_name] = VarInfo(
+                    member_name, member_shape = self._extract_array_shape(member_name)
+                    struct_info.members[member_name] = VarInfo(
                         name=member_name,
-                        type=member_type,
+                        type_str=member_type,
+                        array_shape=member_shape,
                         address_qualifier=address_qualifier,
                         access_qualifier=access_qualifier,
                         type_qualifiers=type_qualifiers
