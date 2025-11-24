@@ -3,7 +3,7 @@ import re
 import os
 import copy
 import json
-from ctypes import c_char_p, Structure
+from ctypes import c_char_p, Structure, POINTER
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple
 
 from ...kernel_parser import CPreprocessor
@@ -12,6 +12,7 @@ from ..runtime import (
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,
+    CLInfo
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
@@ -41,7 +42,6 @@ class KernelParser:
         self._related_files:Set[str] = set()
         self._kernel_infos:Dict[str, KernelInfo] = {}
         self._struct_infos:Dict[str, StructInfo] = {}
-        self._struct_types:Dict[str, type] = {}
         self._newest_mtime:Union[float, bool] = False
 
     def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
@@ -224,15 +224,31 @@ class Kernel_{kernel_name}(KernelWrapper):
         self._struct_infos.clear()
         self._kernel_infos.clear()
 
-    def _create_structure(self, struct_info:StructInfo)->type:
-        fields = []
-        for member in struct_info.members.values():
-            fields.append((member.name, ctypeof(member.type_str)))
+    def _create_struct_type(self, struct_info:StructInfo)->type:
+        if struct_info.struct_type is not None:
+            return struct_info.struct_type
 
-        struct_type = type(struct_info.name, (Structure,), {
+        fields = []
+        dtype = []
+        for member in struct_info.members.values():
+            if member.type_str in CLInfo.basic_types:
+                fields.append((member.name, CLInfo.basic_types[member.type_str]))
+                dtype.append((member.name, CLInfo.basic_types[member.type_str]))
+            elif member.is_ptr and member.base_type_str in CLInfo.basic_types:
+                fields.append((member.name, POINTER(CLInfo.basic_types[member.type_str])))
+            else:
+                struct_type = self._create_struct_type(self._struct_infos[member.base_type_str])
+                if member.is_ptr:
+                    fields.append((member.name, POINTER(struct_type)))
+                else:
+                    fields.append((member.name, struct_type))
+                    dtype.append((member.name, struct_type.dtype))
+
+        struct_info.struct_type = type(struct_info.name, (Structure,), {
             "_fields_": fields,
             "dtype": dtype
         })
+        return struct_info.struct_type
 
     def _parse(self):
         struct_matches:List[re.Match] = self._find_struct_defs(self._clean_code)
@@ -275,7 +291,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                     )
 
         for struct_info in self._struct_infos.values():
-            self._struct_types[struct_info.name] = self._create_structure(struct_info)
+            self._create_struct_type(struct_info)
 
         kernel_matches:Iterator[re.Match] = self._find_kernel_defs(self._clean_code)
         for kernel_match in kernel_matches:

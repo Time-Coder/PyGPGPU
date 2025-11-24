@@ -198,6 +198,7 @@ class StructInfo:
     def __init__(self, name:str):
         self.name: str = name
         self.members: Dict[str, VarInfo] = {}
+        self.struct_type: Optional[type] = None
 
 
 class KernelInfo:
