@@ -1,6 +1,6 @@
 from __future__ import annotations
 import math
-from ctypes import c_size_t, pointer, sizeof
+from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_p
 from functools import partial
 import concurrent.futures
 import asyncio
@@ -169,6 +169,8 @@ class Kernel(CLObject):
                 host_data[:] = buffer.data.tolist()
             elif isinstance(host_data, np.ndarray):
                 host_data[:] = buffer.data
+            elif isinstance(host_data, Structure):
+                memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
     def __after_call(self, cmd_queue:CommandQueue, need_read_back_mem_objs:List[Tuple[ArgInfo, Any, MemObject]], after_events:List[Event])->List[Event]:
         
@@ -238,12 +240,16 @@ class Kernel(CLObject):
                 arg_shape = (arg.mem_obj.data.shape if arg.mem_obj.data is not None else arg.mem_obj.shape)
                 if ((
                         arg.base_type_str in CLInfo.vec_types and
+                        len(arg_shape) >= 2 and
                         arg_shape[-1] == CLInfo.vec_types[arg.base_type_str].__len__(None)
                     ) or (
                         len(arg_shape) == 3 and isinstance(arg.mem_obj, image2d)
                     )
                 ):
                     arg_shape = arg_shape[:-1]
+
+                if not arg_shape:
+                    arg_shape = (1,)
                     
                 if max_shape is None:
                     max_shape = arg_shape
@@ -345,10 +351,13 @@ class Kernel(CLObject):
                         raise TypeError(f"type of argument '{arg_info.name}' need {content_type.__name__}, got {value.__class__.__name__}, and cannot convert {value.__class__.__name__} to {content_type.__name__}")
 
                 if is_struct:
-                    return used_value.apply_pointers(cmd_queue)
+                    result = used_value.apply_pointers(cmd_queue)
 
                 CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
                 arg_info.value = value
+
+                if is_struct:
+                    return result
             else:
                 if arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_LOCAL:
                     if isinstance(value, int):
@@ -371,7 +380,7 @@ class Kernel(CLObject):
                         if value.dtype != content_type:
                             used_value = value.astype(content_type)
                     else:
-                        KernelParser._apply_structure_pointers(value)
+                        KernelParser._apply_structure_pointers(value, cmd_queue)
                         used_value = np.array(value, dtype=content_type)
 
                     if not used_value.flags['C_CONTIGUOUS']:
@@ -410,20 +419,20 @@ class Kernel(CLObject):
             arg_info.value = value
             arg_info.mem_obj = image
             if arg_info.need_read_back:
-                return {
+                return [{
                     "arg_info": arg_info,
                     "value": value,
                     "mem_obj": image,
                     "event": event
-                }
+                }]
             else:
-                return {
+                return [{
                     "event": event
-                }
+                }]
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
 
-        return {}
+        return []
 
     @property
     def _func_head(self)->str:

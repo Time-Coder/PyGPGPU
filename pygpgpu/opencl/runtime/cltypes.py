@@ -1,6 +1,7 @@
 from ctypes import c_char, c_uint64, c_ubyte, c_uint32, c_int32, c_int64, c_void_p, c_size_t, c_char_p, POINTER, WINFUNCTYPE, Structure, CFUNCTYPE
 from .clconstantes import IntConstant, IntEnum, IntFlag
 from typing import TypeAlias
+import sys
 
 cl_int = c_int32
 cl_uint = c_uint32
@@ -33,9 +34,13 @@ ptr_ptr_ubyte:TypeAlias = POINTER(ptr_ubyte)
 ptr_cl_kernel:TypeAlias = POINTER(cl_kernel)
 ptr_cl_ulong:TypeAlias = POINTER(cl_ulong)
 ptr_cl_event:TypeAlias = POINTER(cl_event)
+ptr_cl_mem:TypeAlias = POINTER(cl_mem)
+ptr_ptr_void:TypeAlias = POINTER(c_void_p)
 CL_CONTEXT_NOTIFY_CALLBACK:TypeAlias = CFUNCTYPE(None, c_char_p, c_void_p, c_size_t, c_void_p)
 CL_BULD_PROGRAM_CALLBACK:TypeAlias = CFUNCTYPE(None, cl_program, c_void_p)
 CL_EVENT_NOTIFY_CALLBACK:TypeAlias = CFUNCTYPE(None, cl_event, cl_int, c_void_p)
+
+setattr(sys.modules[__name__], "LP_c_void_p", ptr_ptr_void)
 
 
 class ErrorCode(IntEnum):

@@ -1,18 +1,25 @@
 typedef struct {
-    float x;
-    float y;
-    float z;
-} Point;
+    float x, y, z;
+} Point3D;
 
-__kernel void compute_distance(__global float* output, int length, Point p)
-{
-    int i = get_global_id(0);
+typedef struct {
+    Point3D position;
+    Point3D velocity;
+    int id;
+    float mass;
+} Particle;
 
-    if (i >= length)
-    {
-        return;
-    }
-    
-    float dist = sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
-    output[i] = dist;
+__kernel void update_particle(
+    __global float4* output,
+    Particle p
+) {
+    int gid = get_global_id(0);
+    if (gid != 0) return;
+
+    float dt = 0.01f;
+    float new_x = p.position.x + p.velocity.x * dt;
+    float new_y = p.position.y + p.velocity.y * dt;
+    float new_z = p.position.z + p.velocity.z * dt;
+
+    output[gid] = (float4)(new_x, new_y, new_z, p.velocity.x);
 }

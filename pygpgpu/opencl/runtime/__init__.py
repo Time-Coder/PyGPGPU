@@ -87,6 +87,7 @@ from .cltypes import (
     ptr_cl_image_format,
     cl_image_desc,
     ptr_cl_image_desc,
+    ptr_cl_mem,
     cl_channel_order,
     cl_channel_type,
     cl_sampler,

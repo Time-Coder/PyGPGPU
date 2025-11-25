@@ -13,7 +13,8 @@ from ..runtime import (
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,
-    CLInfo
+    CLInfo,
+    ptr_cl_mem
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
@@ -283,44 +284,48 @@ class Kernel_{kernel_name}(KernelWrapper):
         struct_name:str = struct_info.name
         if struct_name in self._struct_types:
             return self._struct_types[struct_name]
+        
+        _fields_ = []
+        dtype = []
+        pointer_types = {}
+        for member in struct_info.members.values():
+            if member.base_type_str in CLInfo.basic_types:
+                base_type = CLInfo.basic_types[member.base_type_str]
+            else:
+                base_type = self._create_struct_type(self._struct_infos[member.base_type_str])
 
-        if not struct_info._fields_ or not struct_info.dtype:
-            _fields_ = []
-            dtype = []
-            pointer_types = {}
-            for member in struct_info.members.values():
-                if member.base_type_str in CLInfo.basic_types:
-                    base_type = CLInfo.basic_types[member.base_type_str]
-                else:
-                    base_type = self._create_struct_type(self._struct_infos[member.base_type_str])
+            member_type = base_type
+            for n_elements in reversed(member.array_shape):
+                member_type *= n_elements
 
-                member_type = base_type
-                for n_elements in reversed(member.array_shape):
-                    member_type *= n_elements
+            if member.is_ptr:
+                _fields_.append((f"_{struct_info.name}_ptr_{member.name}", ptr_cl_mem))
+                dtype.append((member.name, np.uint64))
+                pointer_types[member.name] = member_type
+            else:
+                _fields_.append((member.name, member_type))
+                dtype.append((member.name, base_type, member.array_shape))
 
-                if member.is_ptr:
-                    _fields_.append((f"_{struct_info.name}_ptr_{member.name}", POINTER(c_void_p)))
-                    dtype.append((member.name, np.uint64))
-                    pointer_types[member.name] = member_type
-                else:
-                    _fields_.append((member.name, member_type))
-                    dtype.append((member.name, base_type, member.array_shape))
-
-            dtype = np.dtype(dtype)
-            struct_info._fields_ = _fields_
-            struct_info.dtype = dtype
-            struct_info.pointer_types = pointer_types
-        else:
-            _fields_ = struct_info._fields_
-            dtype = struct_info.dtype
-            pointer_types = struct_info.pointer_types
+        dtype = np.dtype(dtype)
 
         def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
             for field in self._fields_:
                 if issubclass(field[1], _Pointer):
                     ori_name:str = field[0].replace(f"_{self.__class__.__name__}_ptr_", "")
                     setattr(self, f"_{self.__class__.__name__}_data_{ori_name}", None)
+
+            used_kwargs = {}
+            for i in range(len(args)):
+                used_kwargs[_fields_[i][0]] = args[i]
+
+            used_kwargs.update(kwargs)
+            keys = list(used_kwargs.keys())
+            for key in keys:
+                if self._members[key].is_ptr:
+                    setattr(self, f"_{self.__class__.__name__}_data_{key}", used_kwargs[key])
+                    del used_kwargs[key]
+
+            Structure.__init__(self, **used_kwargs)
 
         def apply_pointers(self, cmd_queue:CommandQueue)->List[Dict[str, Any]]:
             result = []
@@ -337,7 +342,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                         if data.dtype != content_type:
                             used_value = data.astype(content_type)
                     else:
-                        KernelParser._apply_structure_pointers(data)
+                        KernelParser._apply_structure_pointers(data, cmd_queue)
                         used_value = np.array(data, dtype=content_type)
 
                     if not used_value.flags['C_CONTIGUOUS']:
@@ -366,7 +371,7 @@ class Kernel_{kernel_name}(KernelWrapper):
 
             "apply_pointers": apply_pointers,
             "__init__": __init__,
-            "__repr__": lambda self: f"{struct_name}({', '.join([field[0] + '=' + str(getattr(self, field[0])) for field in self._fields_ if field[0] != '_'])})"
+            "__repr__": lambda self: f"{struct_name}({', '.join([member.name + '=' + str(getattr(self, member.name)) for member in self._members.values()])})"
         }
 
         for field in _fields_:
@@ -420,7 +425,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                     type_qualifiers=type_qualifiers
                 )
                 for i in range(1, len(submember_items)):
-                    member_name:str = self._find_arg_name(submember_items[i]).split(",")
+                    member_name:str = self._find_arg_name(submember_items[i])
                     member_name, member_shape = self._extract_array_shape(member_name)
                     struct_info.members[member_name] = VarInfo(
                         name=member_name,

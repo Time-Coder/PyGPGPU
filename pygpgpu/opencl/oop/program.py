@@ -249,6 +249,10 @@ class Program(CLObject):
         self._fetch_kernels()
         return self._kernels
     
+    @property
+    def structs(self)->Dict[str, type]:
+        return self._kernel_parser._struct_types
+    
     def _fetch_kernels(self):
         if self._kernels:
             return
@@ -266,6 +270,8 @@ class Program(CLObject):
             return self._get_build_attr(name)
         elif name in self.kernel_infos:
             return self.kernels[name]
+        elif name in self.structs:
+            return self.structs[name]
         else:
             return CLObject.__getattr__(self, name)
         

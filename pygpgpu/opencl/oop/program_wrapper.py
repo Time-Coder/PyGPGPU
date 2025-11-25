@@ -81,6 +81,10 @@ class ProgramWrapper:
         self._fetch_kernel_wrappers()
         return self._kernel_wrappers
     
+    @property
+    def structs(self)->Dict[str, type]:
+        return self._kernel_parser._struct_types
+    
     def _fetch_kernel_wrappers(self):
         if self._kernel_wrappers:
             return
@@ -90,7 +94,17 @@ class ProgramWrapper:
             self._kernel_wrappers[kernel.name] = kernel
 
     def __getattr__(self, name:str)->KernelWrapper:
-        return self.kernels_wrappers[name]
+        if name in self.kernels_wrappers:
+            return self.kernels_wrappers[name]
+        elif name in self.structs:
+            return self.structs[name]
+        else:
+            raise AttributeError(f"{self.__class__.__name__} has no attribute {name}")
         
     def __getitem__(self, name:str)->KernelWrapper:
-        return self.kernels_wrappers[name]
+        if name in self.kernels_wrappers:
+            return self.kernels_wrappers[name]
+        elif name in self.structs:
+            return self.structs[name]
+        else:
+            raise KeyError(name)
