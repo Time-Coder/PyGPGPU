@@ -34,8 +34,6 @@ class VarInfo:
         self.address_qualifier = address_qualifier
         self.access_qualifier = access_qualifier
         self.type_qualifiers = type_qualifiers
-        self.value: Any = None
-        self.mem_obj: Optional[MemObject] = None
 
     @property
     def is_ptr(self)->bool:
@@ -123,6 +121,8 @@ class ArgInfo(VarInfo):
     def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
         VarInfo.__init__(self, name, type_str, array_shape, address_qualifier, access_qualifier, type_qualifiers)
         self.parent = parent
+        self.value: Any = None
+        self.mem_obj: Optional[MemObject] = None
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str

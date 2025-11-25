@@ -33,6 +33,7 @@ from .event import Event
 from .image2d import image2d
 from .mem_object import MemObject
 from .pipe import pipe
+from .kernel_parser import KernelParser
 from ...utils import detect_work_size, join_with_and
 
 if TYPE_CHECKING:
@@ -370,6 +371,7 @@ class Kernel(CLObject):
                         if value.dtype != content_type:
                             used_value = value.astype(content_type)
                     else:
+                        KernelParser._apply_structure_pointers(value)
                         used_value = np.array(value, dtype=content_type)
 
                     if not used_value.flags['C_CONTIGUOUS']:

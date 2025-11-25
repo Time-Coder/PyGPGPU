@@ -268,6 +268,16 @@ class Kernel_{kernel_name}(KernelWrapper):
             setattr(self, f"_{self.__class__.__name__}_data_{name}", value)
 
         return setter
+    
+    @staticmethod
+    def _apply_structure_pointers(value, cmd_queue:CommandQueue):
+        if isinstance(value, Structure) and hasattr(value, "apply_pointers"):
+            value.apply_pointers(cmd_queue)
+            return
+        
+        if isinstance(value, (list, tuple)):
+            for sub_value in value:
+                KernelParser._apply_structure_pointers(sub_value, cmd_queue)
 
     def _create_struct_type(self, struct_info:StructInfo)->type:
         struct_name:str = struct_info.name
@@ -327,6 +337,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                         if data.dtype != content_type:
                             used_value = data.astype(content_type)
                     else:
+                        KernelParser._apply_structure_pointers(data)
                         used_value = np.array(data, dtype=content_type)
 
                     if not used_value.flags['C_CONTIGUOUS']:
@@ -334,8 +345,6 @@ class Kernel_{kernel_name}(KernelWrapper):
 
                     buffer, event = var_info.use_buffer(cmd_queue, used_value)
                     setattr(self, f"_{self.__class__.__name__}_ptr_{ori_name}", pointer(buffer.id))
-                    var_info.mem_obj = buffer
-                    var_info.value = data
                     result.append({
                         "event": event,
                         "arg_info": var_info,
