@@ -34,6 +34,8 @@ class VarInfo:
         self.address_qualifier = address_qualifier
         self.access_qualifier = access_qualifier
         self.type_qualifiers = type_qualifiers
+        self.value: Any = None
+        self.mem_obj: Optional[MemObject] = None
 
     @property
     def is_ptr(self)->bool:
@@ -84,14 +86,43 @@ class VarInfo:
             self.type_str in CLInfo.image_types and self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY
         ))
     
+    def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
+        if self.readonly:
+            flags = cl_mem_flags.CL_MEM_READ_ONLY
+        else:
+            flags = cl_mem_flags.CL_MEM_READ_WRITE
+
+        used_buffer = cmd_queue.context.get_buffer(data.nbytes, flags)
+        event = used_buffer.set_data(cmd_queue, data)
+        if event is not None and CL.print_info:
+            print(f"copy data to device for argument '{self.name}'")
+        
+        return used_buffer, event
+    
+    def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
+        if self.readonly:
+            image.flags = cl_mem_flags.CL_MEM_READ_ONLY
+        elif self.writeonly:
+            image.flags = cl_mem_flags.CL_MEM_WRITE_ONLY
+        else:
+            image.flags = cl_mem_flags.CL_MEM_READ_WRITE
+
+        image_data = image.data
+        image.data = None
+        used_image = cmd_queue.context.get_image(image)
+        
+        event = used_image.set_data(cmd_queue, image_data)
+        if event is not None and CL.print_info:
+            print(f"copy data to device for argument '{self.name}'")
+        
+        return used_image, event
+    
 
 class ArgInfo(VarInfo):
 
     def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
         VarInfo.__init__(self, name, type_str, array_shape, address_qualifier, access_qualifier, type_qualifiers)
         self.parent = parent
-        self.value: Any = None
-        self.mem_obj: Optional[MemObject] = None
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str
@@ -129,37 +160,6 @@ class ArgInfo(VarInfo):
             if not same_type:
                 raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be {base_type_str}, got {value.__class__.__name__}.")
 
-    def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
-        if self.readonly:
-            flags = cl_mem_flags.CL_MEM_READ_ONLY
-        else:
-            flags = cl_mem_flags.CL_MEM_READ_WRITE
-
-        used_buffer = cmd_queue.context.get_buffer(data.nbytes, flags)
-        event = used_buffer.set_data(cmd_queue, data)
-        if event is not None and CL.print_info:
-            print(f"copy data to device for argument '{self.name}'")
-        
-        return used_buffer, event
-    
-    def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
-        if self.readonly:
-            image.flags = cl_mem_flags.CL_MEM_READ_ONLY
-        elif self.writeonly:
-            image.flags = cl_mem_flags.CL_MEM_WRITE_ONLY
-        else:
-            image.flags = cl_mem_flags.CL_MEM_READ_WRITE
-
-        image_data = image.data
-        image.data = None
-        used_image = cmd_queue.context.get_image(image)
-        
-        event = used_image.set_data(cmd_queue, image_data)
-        if event is not None and CL.print_info:
-            print(f"copy data to device for argument '{self.name}'")
-        
-        return used_image, event
-
 
 class StructInfo:
 
@@ -168,6 +168,7 @@ class StructInfo:
         self.members: Dict[str, VarInfo] = {}
         self._fields_: List[Tuple[str, type]] = []
         self.dtype: Optional[np.dtype] = None
+        self.pointer_types: Dict[str, type] = {}
 
     def declare(self)->str:
         result = f"""

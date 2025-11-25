@@ -141,12 +141,13 @@ class Kernel(CLObject):
         need_read_back_mem_objs:List[Tuple[ArgInfo, Any, MemObject]] = []
         copy_to_device_events:List[Event] = []
         for key, value in used_kwargs.items():
-            result = self._set_arg(cmd_queue, key, value)
-            if "event" in result and result["event"] is not None:
-                copy_to_device_events.append(result["event"])
+            results = self._set_arg(cmd_queue, key, value)
+            for result in results:
+                if "event" in result and result["event"] is not None:
+                    copy_to_device_events.append(result["event"])
 
-            if "arg_info" in result:
-                need_read_back_mem_objs.append((result["arg_info"], result["value"], result["mem_obj"]))
+                if "arg_info" in result:
+                    need_read_back_mem_objs.append((result["arg_info"], result["value"], result["mem_obj"]))
 
         if global_work_size is None or local_work_size is None:
             global_work_size, local_work_size = self.__detect_work_size(used_device)
@@ -270,7 +271,7 @@ class Kernel(CLObject):
         global_work_size, local_work_size = detect_work_size(total_local_size, max_shape)
         return global_work_size, local_work_size
 
-    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any)->Dict[str, Any]:
+    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any)->List[Dict[str, Any]]:
         if isinstance(index_or_name, int):
             arg_info = self._arg_list[index_or_name]
             index = index_or_name
@@ -280,7 +281,7 @@ class Kernel(CLObject):
 
         arg_type_str = arg_info.type_str
         if not arg_info.is_ptr and arg_info.value is not None and arg_info.value == value:
-            return {}
+            return []
         
         arg_type_str = arg_info.type_str
         type_qualifiers = arg_info.type_qualifiers
@@ -343,7 +344,7 @@ class Kernel(CLObject):
                         raise TypeError(f"type of argument '{arg_info.name}' need {content_type.__name__}, got {value.__class__.__name__}, and cannot convert {value.__class__.__name__} to {content_type.__name__}")
 
                 if is_struct:
-                    used_value.apply_pointers(self.context)
+                    return used_value.apply_pointers(cmd_queue)
 
                 CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
                 arg_info.value = value
@@ -359,7 +360,7 @@ class Kernel(CLObject):
                     bytes_per_group *= sizeof(content_type)
 
                     if arg_info.value is not None and arg_info.value == bytes_per_group:
-                        return {}
+                        return []
                     
                     CL.clSetKernelArg(self.id, index, bytes_per_group, None)
                     arg_info.value = bytes_per_group
@@ -381,16 +382,16 @@ class Kernel(CLObject):
                     arg_info.value = value
                     arg_info.mem_obj = buffer
                     if arg_info.need_read_back:
-                        return {
+                        return [{
                             "arg_info": arg_info,
                             "value": value,
                             "mem_obj": buffer,
                             "event": event
-                        }
+                        }]
                     else:
-                        return {
+                        return [{
                             "event": event
-                        }
+                        }]
         elif arg_type_str in CLInfo.image_types:
             image_type = CLInfo.image_types[arg_type_str]
             if not isinstance(value, (np.ndarray, image_type)):
