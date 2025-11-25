@@ -321,8 +321,10 @@ class Kernel(CLObject):
         elif base_type_str in CLInfo.basic_types or base_type_str in self._program._kernel_parser._struct_types:
             if base_type_str in CLInfo.basic_types:
                 content_type = CLInfo.basic_types[base_type_str]
+                is_struct = False
             else:
                 content_type = self._program._kernel_parser._struct_types[arg_info.base_type_str]
+                is_struct = True
 
             if not arg_info.is_ptr:
                 if isinstance(value, content_type):
@@ -339,6 +341,9 @@ class Kernel(CLObject):
 
                     if not success:
                         raise TypeError(f"type of argument '{arg_info.name}' need {content_type.__name__}, got {value.__class__.__name__}, and cannot convert {value.__class__.__name__} to {content_type.__name__}")
+
+                if is_struct:
+                    used_value.apply_pointers(self.context)
 
                 CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
                 arg_info.value = value

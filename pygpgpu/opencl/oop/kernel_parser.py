@@ -5,7 +5,7 @@ import sys
 import copy
 import json
 from ctypes import c_char_p, Structure, POINTER, _Pointer
-from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple
+from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple, TYPE_CHECKING
 
 from ...kernel_parser import CPreprocessor
 from ..runtime import (
@@ -18,6 +18,9 @@ from ..runtime import (
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
 from .kernel_info import KernelInfo, ArgInfo, StructInfo, VarInfo
+
+if TYPE_CHECKING:
+    from .command_queue import CommandQueue
 
 import numpy as np
 
@@ -252,17 +255,17 @@ class Kernel_{kernel_name}(KernelWrapper):
         self._struct_types.clear()
         self._kernel_infos.clear()
 
-    def _make_getter(self, name:str):
+    @staticmethod
+    def _make_getter(name:str):
         def getter(self):
-            return getattr(self, f"{name}_data")
+            return getattr(self, f"_{self.__class__.__name__}_data_{name}")
         
         return getter
     
-    def _make_setter(self, name:str, dtype:type):
+    @staticmethod
+    def _make_setter(name:str):
         def setter(self, value):
-            if 
-
-            setattr(self, f"{name}_data", value)
+            setattr(self, f"_{self.__class__.__name__}_data_{name}", value)
 
         return setter
 
@@ -274,7 +277,6 @@ class Kernel_{kernel_name}(KernelWrapper):
         if not struct_info._fields_ or not struct_info.dtype:
             _fields_ = []
             dtype = []
-            pointer_types = {}
             for member in struct_info.members.values():
                 if member.base_type_str in CLInfo.basic_types:
                     base_type = CLInfo.basic_types[member.base_type_str]
@@ -286,9 +288,8 @@ class Kernel_{kernel_name}(KernelWrapper):
                     member_type *= n_elements
 
                 if member.is_ptr:
-                    _fields_.append((f"_{struct_info.name}__{member.name}", POINTER(member_type)))
+                    _fields_.append((f"_{struct_info.name}_ptr_{member.name}", POINTER(member_type)))
                     dtype.append((member.name, np.uint64))
-                    pointer_types[member.name] = member_type
                 else:
                     _fields_.append((member.name, member_type))
                     dtype.append((member.name, base_type, member.array_shape))
@@ -296,26 +297,47 @@ class Kernel_{kernel_name}(KernelWrapper):
             dtype = np.dtype(dtype)
             struct_info._fields_ = _fields_
             struct_info.dtype = dtype
-            struct_info.pointer_types = pointer_types
         else:
             _fields_ = struct_info._fields_
             dtype = struct_info.dtype
-            pointer_types = struct_info.pointer_types
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             for field in self._fields_:
-                if isinstance(field[1], _Pointer):
-                    setattr(self, field[0] + "_data", None)
+                if issubclass(field[1], _Pointer):
+                    ori_name:str = field[0].replace(f"_{self.__class__.__name__}_ptr_", "")
+                    setattr(self, f"_{self.__class__.__name__}_data_{ori_name}", None)
+
+        def apply_pointers(self, arg_info:ArgInfo, cmd_queue:CommandQueue):
+            events = []
+            for field in self._fields_:
+                if issubclass(field[1], _Pointer):
+                    ori_name:str = field[0].replace(f"_{self.__class__.__name__}_ptr_", "")
+                    data_name:str = f"_{self.__class__.__name__}_data_{ori_name}"
+                    data = getattr(self, data_name)
+                    buffer, event = arg_info.use_buffer(cmd_queue, data)
+                    events.append(event)
+                    setattr(self, f"_{self.__class__.__name__}_ptr_{ori_name}", buffer.id)
+
+                if issubclass(field[1], Structure) and hasattr(field[1], "apply_pointers"):
+                    events.extend(getattr(self, field[0]).apply_pointers(arg_info, cmd_queue))
+
+            return events
 
         type_body = {
             '__module__': self._module_path,
             "_fields_": _fields_,
             "dtype": dtype,
 
+            "apply_pointers": apply_pointers,
             "__init__": __init__,
             "__repr__": lambda self: f"{struct_name}({', '.join([field[0] + '=' + str(getattr(self, field[0])) for field in self._fields_ if field[0] != '_'])})"
         }
+
+        for field in _fields_:
+            if issubclass(field[1], _Pointer):
+                ori_name:str = field[0].replace(f"_{self.__class__.__name__}_ptr_", "")
+                type_body[ori_name] = property(self._make_getter(ori_name), self._make_setter(ori_name))
 
         struct_type = type(struct_name, (Structure,), type_body)
         self._struct_types[struct_name] = struct_type
