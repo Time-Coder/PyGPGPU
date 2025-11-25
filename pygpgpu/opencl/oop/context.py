@@ -1,5 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
+from collections import defaultdict
 from typing import Tuple, Dict, Optional, Any, List, Union, TYPE_CHECKING, override
 
 import numpy as np
@@ -84,6 +85,8 @@ class Context(CLObject):
 
         self.__pipes:Dict[pipe, Pipe] = {}
         self.__queues:Dict[queue_t, CommandQueue] = {}
+        self.__buffers: Dict[Tuple[int, cl_mem_flags], List[Buffer]] = defaultdict(list)
+        self.__images: Dict[Tuple[str, Tuple[int, ...], type, cl_mem_flags], List[imagend]] = defaultdict(list)
         self.__samplers:Dict[str, sampler] = {}
 
     @staticmethod
@@ -145,24 +148,62 @@ class Context(CLObject):
     def create_image1d_array(self, image:image1d_array_t)->image1d_array:
         return image1d_array(self, image)
     
+    def create_sampler(self, sampler_t_:sampler_t)->sampler:
+        return sampler(self, sampler_t_)
+    
+    def create_pipe(self, pipe_:pipe)->Pipe:
+        return Pipe(self, pipe_)
+    
     def get_sampler(self, sampler_t_:sampler_t)->sampler:
         sampler_key:str = str(sampler_t_)
         if sampler_key not in self.__samplers:
-            self.__samplers[sampler_key] = sampler(self, sampler_t_)
+            self.__samplers[sampler_key] = self.create_sampler(sampler_t_)
 
         return self.__samplers[sampler_key]
 
     def get_pipe(self, pipe_:pipe)->Pipe:
         if pipe_ not in self.__pipes:
-            self.__pipes[pipe_] = Pipe(self, pipe_)
+            self.__pipes[pipe_] = self.create_pipe(pipe_)
 
         return self.__pipes[pipe_]
     
-    def get_queue(self, queue:queue_t)->CommandQueue:
+    def get_queue(self, device:Device, queue:queue_t)->CommandQueue:
         if queue not in self.__queues:
-            self.__queues[queue] = Pipe(self, queue)
+            self.__queues[queue] = self.create_command_queue(device, queue.properties)
 
         return self.__queues[queue]
+    
+    def get_buffer(self, size:int=0, flags:Optional[cl_mem_flags]=None)->Buffer:
+        key = (size, flags)
+
+        available_buffer = None
+        for buffer in self.__buffers[key]:
+            if not buffer.using:
+                available_buffer = buffer
+                break
+
+        if available_buffer is None:
+            available_buffer = self.create_buffer(size=size, flags=flags)
+            self.__buffers[key].append(available_buffer)
+
+        available_buffer.use()
+        return available_buffer
+    
+    def get_image(self, image:imagend_t)->image2d:
+        key = (image.__class__.__name__, image.shape, image.dtype, image.flags)
+        
+        available_image = None
+        for image_ in self.__images[key]:
+            if not image_.using:
+                available_image = image
+                break
+
+        if available_image is None:
+            available_image = self.create_image(image)
+            self.__images[key].append(available_image)
+
+        available_image.use()
+        return available_image
 
     def compile(self,
         file_name:str,

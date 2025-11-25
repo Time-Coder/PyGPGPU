@@ -30,6 +30,7 @@ class MemObject(CLObject):
         self._data:Union[bytes, bytearray, np.ndarray, None] = data
         self._host_ptr:c_void_p = host_ptr
         self._size:int = size
+        self._using:bool = False
         CLObject.__init__(self, mem_id)
 
     @abstractmethod
@@ -63,6 +64,22 @@ class MemObject(CLObject):
     @property
     def size(self)->int:
         return self._size
+    
+    @property
+    def using(self)->bool:
+        return self._using
+    
+    def use(self)->None:
+        if self._using:
+            raise RuntimeError("mem obj is still in using")
+
+        self._using = True
+
+    def unuse(self)->None:
+        if not self._using:
+            raise RuntimeError("mem obj is not in using")
+
+        self._using = False
     
     def __len__(self)->int:
         return self._size

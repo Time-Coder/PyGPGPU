@@ -92,10 +92,6 @@ class ArgInfo(VarInfo):
         self.parent = parent
         self.value: Any = None
         self.mem_obj: Optional[MemObject] = None
-
-        self.__buffers: Dict[Tuple[cl_context, int, cl_mem_flags], List[Buffer]] = defaultdict(list)
-        self.__images: Dict[Tuple[cl_context, Tuple[int, ...], type], List[imagend]] = defaultdict(list)
-        self.__busy_mems: Set[MemObject] = set()
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str
@@ -139,23 +135,10 @@ class ArgInfo(VarInfo):
         else:
             flags = cl_mem_flags.CL_MEM_READ_WRITE
 
-        buffer_key = (cmd_queue.context.id.value, data.nbytes, flags)
-
-        used_buffer = None
-        for buffer in self.__buffers[buffer_key]:
-            if buffer not in self.__busy_mems:
-                used_buffer = buffer
-                break
-
-        if used_buffer is None:
-            used_buffer = cmd_queue.context.create_buffer(size=data.nbytes, flags=flags)
-            self.__buffers[buffer_key].append(used_buffer)
-
+        used_buffer = cmd_queue.context.get_buffer(data.nbytes, flags)
         event = used_buffer.set_data(cmd_queue, data)
         if event is not None and CL.print_info:
             print(f"copy data to device for argument '{self.name}'")
-
-        self.__busy_mems.add(used_buffer)
         
         return used_buffer, event
     
@@ -167,30 +150,15 @@ class ArgInfo(VarInfo):
         else:
             image.flags = cl_mem_flags.CL_MEM_READ_WRITE
 
-        image_key = (cmd_queue.context.id.value, image.__class__.__name__, image.shape, image.dtype, image.flags)
-
-        used_image:Optional[imagend] = None
-        for image in self.__images[image_key]:
-            if image not in self.__busy_mems:
-                used_image:imagend = image
-                break
-
         image_data = image.data
         image.data = None
-        if used_image is None:
-            used_image:imagend = cmd_queue.context.create_image(image)
-            self.__images[image_key].append(used_image)
+        used_image = cmd_queue.context.get_image(image)
         
         event = used_image.set_data(cmd_queue, image_data)
         if event is not None and CL.print_info:
             print(f"copy data to device for argument '{self.name}'")
-            
-        self.__busy_mems.add(used_image)
         
         return used_image, event
-
-    def unuse(self, mem_obj:Union[MemObject])->None:
-        self.__busy_mems.remove(mem_obj)
 
 
 class StructInfo:

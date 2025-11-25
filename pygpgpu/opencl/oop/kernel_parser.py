@@ -4,7 +4,7 @@ import os
 import sys
 import copy
 import json
-from ctypes import c_char_p, Structure, POINTER
+from ctypes import c_char_p, Structure, POINTER, _Pointer
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple
 
 from ...kernel_parser import CPreprocessor
@@ -252,6 +252,20 @@ class Kernel_{kernel_name}(KernelWrapper):
         self._struct_types.clear()
         self._kernel_infos.clear()
 
+    def _make_getter(self, name:str):
+        def getter(self):
+            return getattr(self, f"{name}_data")
+        
+        return getter
+    
+    def _make_setter(self, name:str, dtype:type):
+        def setter(self, value):
+            if 
+
+            setattr(self, f"{name}_data", value)
+
+        return setter
+
     def _create_struct_type(self, struct_info:StructInfo)->type:
         struct_name:str = struct_info.name
         if struct_name in self._struct_types:
@@ -288,13 +302,22 @@ class Kernel_{kernel_name}(KernelWrapper):
             dtype = struct_info.dtype
             pointer_types = struct_info.pointer_types
 
-        struct_type = type(struct_name, (Structure,), {
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            for field in self._fields_:
+                if isinstance(field[1], _Pointer):
+                    setattr(self, field[0] + "_data", None)
+
+        type_body = {
             '__module__': self._module_path,
             "_fields_": _fields_,
             "dtype": dtype,
 
+            "__init__": __init__,
             "__repr__": lambda self: f"{struct_name}({', '.join([field[0] + '=' + str(getattr(self, field[0])) for field in self._fields_ if field[0] != '_'])})"
-        })
+        }
+
+        struct_type = type(struct_name, (Structure,), type_body)
         self._struct_types[struct_name] = struct_type
 
         return struct_type

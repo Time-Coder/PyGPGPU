@@ -176,7 +176,7 @@ class Kernel(CLObject):
                 if CL.print_info:
                     print(f"copy data to host for argument '{arg_info.name}'")
 
-            arg_info.unuse(mem_obj)
+            mem_obj.unuse()
         
         events:List[Event] = []
         for arg_info, arg_value, mem_obj in need_read_back_mem_objs:
