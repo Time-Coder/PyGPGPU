@@ -1,10 +1,25 @@
+from __future__ import annotations
 from ctypes import Structure
-import numpy as np
 
 from .helper import from_import
 
 
 class genVec(Structure):
+
+    _operator_funcs = {
+        "+": (lambda a, b: a + b),
+        "-": (lambda a, b: a - b),
+        "*": (lambda a, b: a * b),
+        "/": (lambda a, b: a / b),
+        "//": (lambda a, b: a // b),
+        "**": (lambda a, b: a ** b),
+        ">": (lambda a, b: a > b),
+        ">=": (lambda a, b: a >= b),
+        "<": (lambda a, b: a < b),
+        "<=": (lambda a, b: a <= b),
+        "==": (lambda a, b: a == b),
+        "!=": (lambda a, b: a != b),
+    }
 
     def __init__(self, *args)->None:
         values = []
@@ -24,13 +39,6 @@ class genVec(Structure):
             raise ValueError(f"{self.__class__.__name__}.__init__ accepts {len(self)} values, got {len(values)}")
 
         Structure.__init__(self, *values)
-
-    def __array__(self, dtype=None)->np.ndarray:
-        result = np.frombuffer(self, dtype=self.dtype)
-        if dtype is not None:
-            result = result.astype(dtype)
-
-        return result
 
     def __getattr__(self, name:str):
         processed_name = name
@@ -107,111 +115,83 @@ class genVec(Structure):
     def __str__(self):
         return self.__repr__()
         
-    def __add__(self, other):
+    def _op(self, operator:str, other)->genVec:
+        func = self._operator_funcs[operator]
         if isinstance(other, genVec):
             result_type = self._get_larger_type(other)
-            result_values = [a + b for a, b in zip(self._get_values(), other._get_values())]
+            result_values = [func(a, b) for a, b in zip(self._get_values(), other._get_values())]
         else:
             result_type = self.__class__
-            result_values = [a + other for a in self._get_values()]
+            result_values = [func(a, other) for a in self._get_values()]
             
         return result_type(*result_values)
+    
+    def _rop(self, operator:str, other)->genVec:
+        func = self._operator_funcs[operator]
+        if isinstance(other, genVec):
+            result_type = self._get_larger_type(other)
+            result_values = [func(b, a) for a, b in zip(self._get_values(), other._get_values())]
+        else:
+            result_type = self.__class__
+            result_values = [func(other, a) for a in self._get_values()]
+            
+        return result_type(*result_values)
+    
+    def _iop(self, operator:str, other)->genVec:
+        func = self._operator_funcs[operator]
+        if isinstance(other, genVec):
+            for i, b in enumerate(other._get_values()):
+                self[i] = func(self[i], b)
+        else:
+            for i in range(len(self)):
+                self[i] = func(self[i], other)
+        return self
+    
+    def _compare_op(self, operator:str, other)->genVec:
+        func = self._operator_funcs[operator]
+        if isinstance(other, genVec):
+            result_values = [int(func(a, b)) for a, b in zip(self._get_values(), other._get_values())]
+        else:
+            result_values = [int(func(a, other)) for a in self._get_values()]
+            
+        int_vec_type = self._get_int_vector_type()
+        return int_vec_type(*result_values)
+
+    def __add__(self, other)->genVec:
+        return self._op("+", other)
         
     def __radd__(self, other):
-        return self.__add__(other)
+        return self._rop("+", other)
         
     def __sub__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_larger_type(other)
-            result_values = [a - b for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self.__class__
-            result_values = [a - other for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._op("-", other)
         
     def __rsub__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_larger_type(other)
-            result_values = [b - a for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self.__class__
-            result_values = [other - a for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._rop("-", other)
         
     def __mul__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_larger_type(other)
-            result_values = [a * b for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self.__class__
-            result_values = [a * other for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._op("*", other)
         
     def __rmul__(self, other):
-        return self.__mul__(other)
+        return self._rop("*", other)
         
     def __truediv__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_division_type(other)
-            result_values = [a / b for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self._get_scalar_division_type(other)
-            result_values = [a / other for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._op("/", other)
         
     def __rtruediv__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_division_type(other)
-            result_values = [b / a for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self._get_scalar_division_type(other)
-            result_values = [other / a for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._rop("/", other)
         
     def __floordiv__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_larger_type(other)
-            result_values = [a // b for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self.__class__
-            result_values = [a // other for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._op("//", other)
         
     def __rfloordiv__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_larger_type(other)
-            result_values = [b // a for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self.__class__
-            result_values = [other // a for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._rop("//", other)
         
     def __pow__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_larger_type(other)
-            result_values = [a ** b for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self.__class__
-            result_values = [a ** other for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._op("**", other)
         
     def __rpow__(self, other):
-        if isinstance(other, genVec):
-            result_type = self._get_larger_type(other)
-            result_values = [b ** a for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_type = self.__class__
-            result_values = [other ** a for a in self._get_values()]
-            
-        return result_type(*result_values)
+        return self._rop("**", other)
         
     def __neg__(self):
         values = [-a for a in self._get_values()]
@@ -225,58 +205,22 @@ class genVec(Structure):
         return self.__class__(*values)
         
     def __eq__(self, other):
-        if isinstance(other, genVec):
-            result_values = [int(a == b) for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_values = [int(a == other) for a in self._get_values()]
-            
-        int_vec_type = self._get_int_vector_type()
-        return int_vec_type(*result_values)
+        return self._compare_op("==", other)
         
     def __ne__(self, other):
-        if isinstance(other, genVec):
-            result_values = [int(a != b) for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_values = [int(a != other) for a in self._get_values()]
-            
-        int_vec_type = self._get_int_vector_type()
-        return int_vec_type(*result_values)
+        return self._compare_op("!=", other)
         
     def __lt__(self, other):
-        if isinstance(other, genVec):
-            result_values = [int(a < b) for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_values = [int(a < other) for a in self._get_values()]
-            
-        int_vec_type = self._get_int_vector_type()
-        return int_vec_type(*result_values)
+        return self._compare_op("<", other)
         
     def __le__(self, other):
-        if isinstance(other, genVec):
-            result_values = [int(a <= b) for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_values = [int(a <= other) for a in self._get_values()]
-            
-        int_vec_type = self._get_int_vector_type()
-        return int_vec_type(*result_values)
+        return self._compare_op("<=", other)
         
     def __gt__(self, other):
-        if isinstance(other, genVec):
-            result_values = [int(a > b) for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_values = [int(a > other) for a in self._get_values()]
-            
-        int_vec_type = self._get_int_vector_type()
-        return int_vec_type(*result_values)
+        return self._compare_op(">", other)
         
     def __ge__(self, other):
-        if isinstance(other, genVec):
-            result_values = [int(a >= b) for a, b in zip(self._get_values(), other._get_values())]
-        else:
-            result_values = [int(a >= other) for a in self._get_values()]
-            
-        int_vec_type = self._get_int_vector_type()
-        return int_vec_type(*result_values)
+        return self._compare_op(">=", other)
         
     def __iadd__(self, other):
         if isinstance(other, genVec):
