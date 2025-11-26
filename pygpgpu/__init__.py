@@ -4,6 +4,8 @@ import copy
 import numpy as np
 
 
+np_array = np.array
+
 def __has_structure(arr)->bool:
     if isinstance(arr, Structure):
         return True
@@ -30,8 +32,6 @@ def __change_element(arr):
             __change_element(ele)
     except:
         pass
-
-np_array = np.array
         
 def array(*args, **kwargs):
     obj = args[0]

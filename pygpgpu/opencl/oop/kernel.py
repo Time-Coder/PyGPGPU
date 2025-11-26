@@ -134,10 +134,7 @@ class Kernel(CLObject):
         if used_device is None:
             used_device = self._program.context.devices[0]
 
-        if used_device.queue_properties & cl_command_queue_properties.CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE:
-            cmd_queue = self.context.create_command_queue(used_device, cl_command_queue_properties.CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)
-        else:
-            cmd_queue = self.context.create_command_queue(used_device)
+        cmd_queue = self.context.create_command_queue(used_device)
 
         need_read_back_mem_objs:List[Tuple[ArgInfo, Any, MemObject]] = []
         copy_to_device_events:List[Event] = []
