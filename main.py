@@ -14,6 +14,5 @@ particle.mass = 1.5
 output = float4()
 
 update_particle(output, particle)
-update_particle(output, particle)
 
 print(output)

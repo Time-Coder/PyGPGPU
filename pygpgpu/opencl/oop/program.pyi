@@ -5,13 +5,13 @@ from .device import Device
 from .context import Context
 from ..runtime import cl_build_status, cl_program_binary_type
 from .build_options import BuildOptions
-from .kernel_parser import KernelParser
+from .program_parser import ProgramParser
 from .kernel import Kernel
 
 
 class Program:
 
-    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, kernel_parser:KernelParser=None): ...
+    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, program_parser:ProgramParser=None): ...
 
     @property
     def file_name(self)->str: ...

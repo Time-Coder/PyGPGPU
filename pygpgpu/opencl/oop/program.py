@@ -19,7 +19,7 @@ from ..runtime import (
     cl_program,
     cl_kernel
 )
-from .kernel_parser import KernelParser
+from .program_parser import ProgramParser
 from .kernel_info import KernelInfo
 from .kernel import Kernel
 from ...exceptions import CompileError, CompileWarning
@@ -31,18 +31,18 @@ if TYPE_CHECKING:
 
 class Program(CLObject):
 
-    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, kernel_parser:KernelParser=None):
+    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, program_parser:ProgramParser=None):
         self._context:Context = context
         self._binaries:Dict[Device, bytes] = {}
         self._kernels:Dict[str, Kernel] = {}
         self._type_checked:bool = type_checked
 
-        if kernel_parser is None:
-            self._kernel_parser:KernelParser = KernelParser()
-            newest_mtime = self._kernel_parser.parse(file_name, includes, defines, options)
+        if program_parser is None:
+            self._program_parser:ProgramParser = ProgramParser()
+            newest_mtime = self._program_parser.parse(file_name, includes, defines, options)
         else:
-            self._kernel_parser = kernel_parser
-            newest_mtime = kernel_parser.newest_mtime
+            self._program_parser = program_parser
+            newest_mtime = program_parser.newest_mtime
 
         old_check_error = CL.check_error
         if not self._load_bin(newest_mtime):
@@ -59,9 +59,9 @@ class Program(CLObject):
                 CL.check_error = old_check_error
 
     def _create_with_source(self)->cl_program:
-        source_len:int = c_size_t(len(self._kernel_parser.clean_code))
+        source_len:int = c_size_t(len(self._program_parser.clean_code))
         error_code = cl_int(0)
-        source = (c_char_p * 1)(self._kernel_parser.clean_code.encode("utf-8"))
+        source = (c_char_p * 1)(self._program_parser.clean_code.encode("utf-8"))
         program_id = CL.clCreateProgramWithSource(self.context.id, cl_uint(1), source, pointer(source_len), pointer(error_code))
         CLObject.__init__(self, program_id)
         self._build(True)
@@ -100,7 +100,7 @@ class Program(CLObject):
                 raise e
             
         if CL.print_info:
-            print(f"load {self._kernel_parser.base_name}'s binary from cache.")
+            print(f"load {self._program_parser.base_name}'s binary from cache.")
 
         CLObject.__init__(self, program_id)
         self._build(False)
@@ -109,9 +109,9 @@ class Program(CLObject):
     def _build(self, save:bool):
         try:
             if CL.print_info:
-                print(f"building {self._kernel_parser.base_name} ... ", end="", flush=True)
+                print(f"building {self._program_parser.base_name} ... ", end="", flush=True)
 
-            error_code = CL.clBuildProgram(self.id, self.n_devices, self.device_ids, self._kernel_parser.options_ptr, None, None)
+            error_code = CL.clBuildProgram(self.id, self.n_devices, self.device_ids, self._program_parser.options_ptr, None, None)
             success = (error_code == ErrorCode.CL_SUCCESS)
 
             if CL.print_info:
@@ -132,7 +132,7 @@ class Program(CLObject):
                 if not message:
                     continue
 
-                error_message = f"{device} reports:\n{self._kernel_parser.format_error(message)}"
+                error_message = f"{device} reports:\n{self._program_parser.format_error(message)}"
                 error_messages.append(error_message)
 
             final_message:str = "\n" + "\n\n".join(error_messages)
@@ -146,7 +146,7 @@ class Program(CLObject):
                     warnings.warn(final_message, CompileWarning)
     
     def _bin_file_name(self, device:Device)->str:
-        return f"{self._kernel_parser.cache_folder}/{device.unique_key}/{self._kernel_parser.base_name}_{self._kernel_parser.md5}.bin"
+        return f"{self._program_parser.cache_folder}/{device.unique_key}/{self._program_parser.base_name}_{self._program_parser.md5}.bin"
 
     def _save_bin(self)->None:
         for device in self.devices:
@@ -198,43 +198,43 @@ class Program(CLObject):
     
     @property
     def file_name(self)->str:
-        return self._kernel_parser.file_name
+        return self._program_parser.file_name
     
     @property
     def base_name(self)->str:
-        return self._kernel_parser.base_name
+        return self._program_parser.base_name
     
     @property
     def includes(self)->List[str]:
-        return self._kernel_parser.includes
+        return self._program_parser.includes
     
     @property
     def defines(self)->Dict[str, Any]:
-        return self._kernel_parser.defines
+        return self._program_parser.defines
     
     @property
     def options(self)->BuildOptions:
-        return self._kernel_parser.options
+        return self._program_parser.options
     
     @property
     def options_ptr(self)->c_char_p:
-        return self._kernel_parser.options_ptr
+        return self._program_parser.options_ptr
     
     @property
     def clean_code(self)->str:
-        return self._kernel_parser.clean_code
+        return self._program_parser.clean_code
 
     @property
     def line_map(self)->Dict[int, str]:
-        return self._kernel_parser.line_map
+        return self._program_parser.line_map
     
     @property
     def related_files(self)->Set[str]:
-        return self._kernel_parser.related_files
+        return self._program_parser.related_files
     
     @property
     def kernel_infos(self)->Dict[str, KernelInfo]:
-        return self._kernel_parser.kernel_infos
+        return self._program_parser.kernel_infos
     
     @property
     def kernel_names(self)->List[str]:
@@ -251,7 +251,7 @@ class Program(CLObject):
     
     @property
     def structs(self)->Dict[str, type]:
-        return self._kernel_parser._struct_types
+        return self._program_parser._struct_types
     
     def _fetch_kernels(self):
         if self._kernels:

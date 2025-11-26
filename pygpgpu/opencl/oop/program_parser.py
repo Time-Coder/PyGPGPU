@@ -7,7 +7,7 @@ import json
 from ctypes import c_char_p, Structure, POINTER, _Pointer, pointer, c_void_p
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple, TYPE_CHECKING
 
-from ...kernel_parser import CPreprocessor
+from ...cparser import CPreprocessor
 from ..runtime import (
     CL,
     cl_kernel_arg_address_qualifier,
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 
-class KernelParser:
+class ProgramParser:
 
     _struct_def_pattern1:re.Pattern = re.compile(r"^\s*struct\s+(?P<struct_name>[a-zA-Z_]\w*)\{(?P<body>.*?)\}\s*;", re.MULTILINE | re.DOTALL)
     _struct_def_pattern2:re.Pattern = re.compile(r"^\s*typedef\s+struct(?P<struct_name>\s+[a-zA-Z_]\w*)?\s*\{(?P<body>.*?)\}\s*(?P<type_name>[a-zA-Z_]\w*)\s*;", re.MULTILINE | re.DOTALL)
@@ -278,7 +278,7 @@ class Kernel_{kernel_name}(KernelWrapper):
         
         if isinstance(value, (list, tuple)):
             for sub_value in value:
-                KernelParser._apply_structure_pointers(sub_value, cmd_queue)
+                ProgramParser._apply_structure_pointers(sub_value, cmd_queue)
 
     def _create_struct_type(self, struct_info:StructInfo)->type:
         struct_name:str = struct_info.name
@@ -342,7 +342,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                         if data.dtype != content_type:
                             used_value = data.astype(content_type)
                     else:
-                        KernelParser._apply_structure_pointers(data, cmd_queue)
+                        ProgramParser._apply_structure_pointers(data, cmd_queue)
                         used_value = np.array(data, dtype=content_type)
 
                     if not used_value.flags['C_CONTIGUOUS']:
@@ -471,7 +471,7 @@ class Kernel_{kernel_name}(KernelWrapper):
     
     @property
     def md5(self)->str:
-        return KernelParser.md5_of(self._includes, self._defines, self._options)
+        return ProgramParser.md5_of(self._includes, self._defines, self._options)
     
     @property
     def cache_folder(self)->str:

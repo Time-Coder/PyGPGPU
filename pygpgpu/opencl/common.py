@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 from .oop.program_wrapper import ProgramWrapper
 from .oop.build_options import BuildOptions
-from .oop.kernel_parser import KernelParser
+from .oop.program_parser import ProgramParser
 
 
 __program_wrappers:Dict[str, ProgramWrapper] = {}
@@ -62,11 +62,11 @@ def compile(
             spir_std
         )
 
-    key:str = KernelParser.md5_of(includes, defines, options, file_name=file_name)
+    key:str = ProgramParser.md5_of(includes, defines, options, file_name=file_name)
     if key not in __program_wrappers:
         program_wrapper = ProgramWrapper(file_name, includes, defines, options, type_checked)
         if generate_pyi:
-            program_wrapper._kernel_parser.generate_pyi()
+            program_wrapper._program_parser.generate_pyi()
             
         __program_wrappers[key] = program_wrapper
 

@@ -33,7 +33,7 @@ from .event import Event
 from .image2d import image2d
 from .mem_object import MemObject
 from .pipe import pipe
-from .kernel_parser import KernelParser
+from .program_parser import ProgramParser
 from ...utils import detect_work_size, join_with_and
 
 if TYPE_CHECKING:
@@ -326,12 +326,12 @@ class Kernel(CLObject):
             if arg_info.value != used_value.id:
                 CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
                 arg_info.value = used_value.id
-        elif base_type_str in CLInfo.basic_types or base_type_str in self._program._kernel_parser._struct_types:
+        elif base_type_str in CLInfo.basic_types or base_type_str in self._program._program_parser._struct_types:
             if base_type_str in CLInfo.basic_types:
                 content_type = CLInfo.basic_types[base_type_str]
                 is_struct = False
             else:
-                content_type = self._program._kernel_parser._struct_types[arg_info.base_type_str]
+                content_type = self._program._program_parser._struct_types[arg_info.base_type_str]
                 is_struct = True
 
             if not arg_info.is_ptr:
@@ -380,7 +380,7 @@ class Kernel(CLObject):
                         if value.dtype != content_type:
                             used_value = value.astype(content_type)
                     else:
-                        KernelParser._apply_structure_pointers(value, cmd_queue)
+                        ProgramParser._apply_structure_pointers(value, cmd_queue)
                         used_value = np.array(value, dtype=content_type)
 
                     if not used_value.flags['C_CONTIGUOUS']:

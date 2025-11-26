@@ -5,7 +5,7 @@ from types import ModuleType
 
 from .device import Device
 from .build_options import BuildOptions
-from .kernel_parser import KernelParser
+from .program_parser import ProgramParser
 from .kernel_info import KernelInfo
 from .kernel_wrapper import KernelWrapper
 from .program import Program
@@ -18,55 +18,55 @@ class ProgramWrapper:
         self._binaries:Dict[Device, bytes] = {}
         self._kernel_wrappers:Dict[str, KernelWrapper] = {}
         self._type_checked:bool = type_checked
-        self._kernel_parser:KernelParser = KernelParser()
-        self._kernel_parser.parse(file_name, includes, defines, options)
+        self._program_parser:ProgramParser = ProgramParser()
+        self._program_parser.parse(file_name, includes, defines, options)
         self._programs:Dict[Platform, Program] = {}
 
     def program(self, device:Device)->Program:
         if device.platform not in self._programs:
-            self._programs[device.platform] = Program(device.platform.default_context, type_checked=self._type_checked, kernel_parser=self._kernel_parser)
+            self._programs[device.platform] = Program(device.platform.default_context, type_checked=self._type_checked, program_parser=self._program_parser)
 
         return self._programs[device.platform]
 
     @property
     def file_name(self)->str:
-        return self._kernel_parser.file_name
+        return self._program_parser.file_name
     
     @property
     def base_name(self)->str:
-        return self._kernel_parser.base_name
+        return self._program_parser.base_name
     
     @property
     def includes(self)->List[str]:
-        return self._kernel_parser.includes
+        return self._program_parser.includes
     
     @property
     def defines(self)->Dict[str, Any]:
-        return self._kernel_parser.defines
+        return self._program_parser.defines
     
     @property
     def options(self)->BuildOptions:
-        return self._kernel_parser.options
+        return self._program_parser.options
     
     @property
     def options_ptr(self)->c_char_p:
-        return self._kernel_parser.options_ptr
+        return self._program_parser.options_ptr
     
     @property
     def clean_code(self)->str:
-        return self._kernel_parser.clean_code
+        return self._program_parser.clean_code
 
     @property
     def line_map(self)->Dict[int, str]:
-        return self._kernel_parser.line_map
+        return self._program_parser.line_map
     
     @property
     def related_files(self)->Set[str]:
-        return self._kernel_parser.related_files
+        return self._program_parser.related_files
     
     @property
     def kernel_infos(self)->Dict[str, KernelInfo]:
-        return self._kernel_parser.kernel_infos
+        return self._program_parser.kernel_infos
     
     @property
     def kernel_names(self)->List[str]:
@@ -83,7 +83,7 @@ class ProgramWrapper:
     
     @property
     def structs(self)->Dict[str, type]:
-        return self._kernel_parser._struct_types
+        return self._program_parser._struct_types
     
     def _fetch_kernel_wrappers(self):
         if self._kernel_wrappers:

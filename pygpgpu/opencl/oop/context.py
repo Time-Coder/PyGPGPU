@@ -32,7 +32,7 @@ from .device import Device
 from .clobject import CLObject
 from .program import Program
 from .build_options import BuildOptions
-from .kernel_parser import KernelParser
+from .program_parser import ProgramParser
 from .buffer import Buffer
 from .command_queue import CommandQueue
 from .event import Event
@@ -257,7 +257,7 @@ class Context(CLObject):
                 x_spir,
                 spir_std
             )
-        key:str = KernelParser.md5_of(includes, defines, options, file_name=file_name)
+        key:str = ProgramParser.md5_of(includes, defines, options, file_name=file_name)
         if key not in self._programs:
             program = Program(self, file_name, includes, defines, options, type_checked)
             self._programs[key] = program
