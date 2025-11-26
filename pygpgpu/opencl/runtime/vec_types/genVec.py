@@ -108,9 +108,7 @@ class genVec(Structure):
         super().__setattr__(self._fields_[index][0], converted_value)
         
     def __repr__(self):
-        values = [getattr(self, field[0]) for field in self._fields_ if field[0] != '_']
-        values_str = ', '.join(str(val) for val in values)
-        return f"{self.__class__.__name__}({values_str})"
+        return f"{self.__class__.__name__}({', '.join(str(val) for val in self)})"
         
     def __str__(self):
         return self.__repr__()
@@ -119,10 +117,10 @@ class genVec(Structure):
         func = self._operator_funcs[operator]
         if isinstance(other, genVec):
             result_type = self._get_larger_type(other)
-            result_values = [func(a, b) for a, b in zip(self._get_values(), other._get_values())]
+            result_values = [func(a, b) for a, b in zip(self, other)]
         else:
             result_type = self.__class__
-            result_values = [func(a, other) for a in self._get_values()]
+            result_values = [func(a, other) for a in self]
             
         return result_type(*result_values)
     
@@ -130,17 +128,17 @@ class genVec(Structure):
         func = self._operator_funcs[operator]
         if isinstance(other, genVec):
             result_type = self._get_larger_type(other)
-            result_values = [func(b, a) for a, b in zip(self._get_values(), other._get_values())]
+            result_values = [func(b, a) for a, b in zip(self, other)]
         else:
             result_type = self.__class__
-            result_values = [func(other, a) for a in self._get_values()]
+            result_values = [func(other, a) for a in self]
             
         return result_type(*result_values)
     
     def _iop(self, operator:str, other)->genVec:
         func = self._operator_funcs[operator]
         if isinstance(other, genVec):
-            for i, b in enumerate(other._get_values()):
+            for i, b in enumerate(other):
                 self[i] = func(self[i], b)
         else:
             for i in range(len(self)):
@@ -150,9 +148,9 @@ class genVec(Structure):
     def _compare_op(self, operator:str, other)->genVec:
         func = self._operator_funcs[operator]
         if isinstance(other, genVec):
-            result_values = [int(func(a, b)) for a, b in zip(self._get_values(), other._get_values())]
+            result_values = [int(func(a, b)) for a, b in zip(self, other)]
         else:
-            result_values = [int(func(a, other)) for a in self._get_values()]
+            result_values = [int(func(a, other)) for a in self]
             
         int_vec_type = self._get_int_vector_type()
         return int_vec_type(*result_values)
@@ -194,14 +192,14 @@ class genVec(Structure):
         return self._rop("**", other)
         
     def __neg__(self):
-        values = [-a for a in self._get_values()]
+        values = [-a for a in self]
         return self.__class__(*values)
         
     def __pos__(self):
-        return self.__class__(*self._get_values())
+        return self.__class__(*self)
         
     def __invert__(self):
-        values = [~a for a in self._get_values()]
+        values = [~a for a in self]
         return self.__class__(*values)
         
     def __eq__(self, other):
@@ -223,61 +221,25 @@ class genVec(Structure):
         return self._compare_op(">=", other)
         
     def __iadd__(self, other):
-        if isinstance(other, genVec):
-            for i, b in enumerate(other._get_values()):
-                self[i] += b
-        else:
-            for i in range(len(self)):
-                self[i] += other
-        return self
+        return self._iop("+", other)
         
     def __isub__(self, other):
-        if isinstance(other, genVec):
-            for i, b in enumerate(other._get_values()):
-                self[i] -= b
-        else:
-            for i in range(len(self)):
-                self[i] -= other
-        return self
+        return self._iop("-", other)
         
     def __imul__(self, other):
-        if isinstance(other, genVec):
-            for i, b in enumerate(other._get_values()):
-                self[i] *= b
-        else:
-            for i in range(len(self)):
-                self[i] *= other
-        return self
+        return self._iop("*", other)
         
     def __itruediv__(self, other):
-        if isinstance(other, genVec):
-            for i, b in enumerate(other._get_values()):
-                self[i] /= b
-        else:
-            for i in range(len(self)):
-                self[i] /= other
-        return self
+        return self._iop("/", other)
         
     def __ifloordiv__(self, other):
-        if isinstance(other, genVec):
-            for i, b in enumerate(other._get_values()):
-                self[i] //= b
-        else:
-            for i in range(len(self)):
-                self[i] //= other
-        return self
+        return self._iop("//", other)
         
     def __ipow__(self, other):
-        if isinstance(other, genVec):
-            for i, b in enumerate(other._get_values()):
-                self[i] **= b
-        else:
-            for i in range(len(self)):
-                self[i] **= other
-        return self
+        return self._iop("**", other)
         
-    def _get_values(self):
-        return [getattr(self, field[0]) for field in self._fields_ if field[0] != '_']
+    def __iter__(self):
+        return (getattr(self, field[0]) for field in self._fields_ if field[0] != '_')
         
     def _convert_value_for_field(self, index, value):
         field_type = self._fields_[index][1]
