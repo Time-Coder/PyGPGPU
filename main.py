@@ -1,7 +1,7 @@
 from pygpgpu.opencl import image2d_t, sampler_t, int2, float4
 from typing import Any
 
-import numpy as np
+import pygpgpu.numpy as np
 from numpy.typing import NDArray
 from test import update_particle, Particle, Point3D
 
@@ -11,8 +11,9 @@ particle.velocity = Point3D(0.1, 0.2, 0.3)
 particle.id = 42
 particle.mass = 1.5
 
-output = float4()
+output = np.array([float4()])
 
+update_particle(output, particle)
 update_particle(output, particle)
 
 print(output)

@@ -18,12 +18,13 @@ from ..runtime import (
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
-from .kernel_info import KernelInfo, ArgInfo, StructInfo, VarInfo
+from .program_info import KernelInfo, ArgInfo, StructInfo, VarInfo
 
 if TYPE_CHECKING:
     from .command_queue import CommandQueue
 
 import numpy as np
+from ...numpy import ndarray
 
 
 class ProgramParser:
@@ -334,28 +335,31 @@ class Kernel_{kernel_name}(KernelWrapper):
                     ori_name:str = field[0].replace(f"_{self.__class__.__name__}_ptr_", "")
                     data_name:str = f"_{self.__class__.__name__}_data_{ori_name}"
                     data = getattr(self, data_name)
-                    var_info = self._members[ori_name]
+                    var_info:VarInfo = self._members[ori_name]
                     content_type = self._pointer_types[ori_name]
 
-                    if isinstance(data, np.ndarray):
-                        used_value = data
-                        if data.dtype != content_type:
-                            used_value = data.astype(content_type)
+                    if isinstance(data, ndarray):
+                        data._copy_to_device("opencl", cmd_queue, var_info.recommended_flags, var_info.name)
                     else:
-                        ProgramParser._apply_structure_pointers(data, cmd_queue)
-                        used_value = np.array(data, dtype=content_type)
+                        if isinstance(data, np.ndarray):
+                            used_value = data
+                            if data.dtype != content_type:
+                                used_value = data.astype(content_type)
+                        else:
+                            ProgramParser._apply_structure_pointers(data, cmd_queue)
+                            used_value = np.array(data, dtype=content_type)
 
-                    if not used_value.flags['C_CONTIGUOUS']:
-                        used_value = np.ascontiguousarray(used_value)
+                        if not used_value.flags['C_CONTIGUOUS']:
+                            used_value = np.ascontiguousarray(used_value)
 
-                    buffer, event = var_info.use_buffer(cmd_queue, used_value)
-                    setattr(self, f"_{self.__class__.__name__}_ptr_{ori_name}", pointer(buffer.id))
-                    result.append({
-                        "event": event,
-                        "arg_info": var_info,
-                        "value": data,
-                        "mem_obj": buffer
-                    })
+                        buffer, event = var_info.use_buffer(cmd_queue, used_value)
+                        setattr(self, f"_{self.__class__.__name__}_ptr_{ori_name}", pointer(buffer.id))
+                        result.append({
+                            "event": event,
+                            "arg_info": var_info,
+                            "value": data,
+                            "mem_obj": buffer
+                        })
 
                 if issubclass(field[1], Structure) and hasattr(field[1], "apply_pointers"):
                     result.extend(getattr(self, field[0]).apply_pointers(cmd_queue))

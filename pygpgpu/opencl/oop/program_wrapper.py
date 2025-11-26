@@ -6,7 +6,7 @@ from types import ModuleType
 from .device import Device
 from .build_options import BuildOptions
 from .program_parser import ProgramParser
-from .kernel_info import KernelInfo
+from .program_info import KernelInfo
 from .kernel_wrapper import KernelWrapper
 from .program import Program
 from .platform import Platform

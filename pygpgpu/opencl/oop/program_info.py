@@ -1,6 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Tuple, Any, Optional, Dict, Set, List, Union
-from collections import defaultdict
+from typing import TYPE_CHECKING, Tuple, Any, Optional, Dict
 
 import numpy as np
 
@@ -9,7 +8,6 @@ from ..runtime import (
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,
     cl_mem_flags,
-    cl_context,
     CLInfo,
     imagend_t,
     CL
@@ -84,13 +82,17 @@ class VarInfo:
             self.type_str in CLInfo.image_types and self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY
         ))
     
-    def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
+    @property
+    def recommended_flags(self)->cl_mem_flags:
         if self.readonly:
-            flags = cl_mem_flags.CL_MEM_READ_ONLY
+            return cl_mem_flags.CL_MEM_READ_ONLY
+        elif self.writeonly:
+            return cl_mem_flags.CL_MEM_WRITE_ONLY
         else:
-            flags = cl_mem_flags.CL_MEM_READ_WRITE
+            return cl_mem_flags.CL_MEM_READ_WRITE
 
-        used_buffer = cmd_queue.context.get_buffer(data.nbytes, flags)
+    def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
+        used_buffer = cmd_queue.context.get_buffer(data.nbytes, self.recommended_flags)
         event = used_buffer.set_data(cmd_queue, data)
         if event is not None and CL.print_info:
             print(f"copy data to device for argument '{self.name}'")
@@ -98,12 +100,7 @@ class VarInfo:
         return used_buffer, event
     
     def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
-        if self.readonly:
-            image.flags = cl_mem_flags.CL_MEM_READ_ONLY
-        elif self.writeonly:
-            image.flags = cl_mem_flags.CL_MEM_WRITE_ONLY
-        else:
-            image.flags = cl_mem_flags.CL_MEM_READ_WRITE
+        image.flags = self.recommended_flags
 
         image_data = image.data
         image.data = None

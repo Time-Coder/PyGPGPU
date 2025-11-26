@@ -3,7 +3,7 @@ from typing import Dict, TYPE_CHECKING, Tuple, overload
 
 from ..runtime import cl_kernel
 from .clobject import CLObject
-from .kernel_info import ArgInfo
+from .program_info import ArgInfo
 import concurrent.futures
 import asyncio
 

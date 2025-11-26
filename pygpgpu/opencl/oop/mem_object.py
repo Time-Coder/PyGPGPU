@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional, List
 from ctypes import c_void_p
 from abc import abstractmethod
+import time
 
 from ..runtime import (
     cl_mem,
@@ -31,7 +32,9 @@ class MemObject(CLObject):
         self._host_ptr:c_void_p = host_ptr
         self._size:int = size
         self._using:bool = False
-        self._dirty:bool = False
+        self._dirty_on_device:bool = False
+        self._dirty_on_host:bool = False
+        self._device_dirty_time:float = 0.0
         CLObject.__init__(self, mem_id)
 
     @abstractmethod
@@ -65,18 +68,31 @@ class MemObject(CLObject):
     @property
     def size(self)->int:
         return self._size
-    
-    @property
-    def dirty(self)->bool:
-        return self._dirty
-    
-    @dirty.setter
-    def dirty(self, dirty:bool):
-        self._dirty = dirty
 
     @property
     def using(self)->bool:
         return self._using
+    
+    @property
+    def dirty_on_device(self)->bool:
+        return self._dirty_on_device
+    
+    @dirty_on_device.setter
+    def dirty_on_device(self, dirty:bool)->None:
+        self._dirty_on_device = dirty
+        self._device_dirty_time = (time.time() if dirty else 0.0)
+    
+    @property
+    def dirty_on_host(self)->bool:
+        return self._dirty_on_host
+    
+    @property
+    def device_dirty_time(self)->float:
+        return self._device_dirty_time
+    
+    @dirty_on_host.setter
+    def dirty_on_host(self, dirty:bool)->None:
+        self._dirty_on_host = dirty
     
     def use(self)->None:
         if self._using:

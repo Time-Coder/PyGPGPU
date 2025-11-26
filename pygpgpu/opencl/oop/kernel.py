@@ -20,14 +20,13 @@ from ..runtime import (
     cl_device_type,
     cl_event,
     ErrorCode,
-    cl_command_queue_properties,
     sampler_t,
     queue_t,
     image2d_t,
     cl_kernel_arg_type_qualifier
 )
 from .clobject import CLObject
-from .kernel_info import ArgInfo
+from .program_info import ArgInfo
 from .command_queue import CommandQueue
 from .event import Event
 from .image2d import image2d
@@ -35,6 +34,7 @@ from .mem_object import MemObject
 from .pipe import pipe
 from .program_parser import ProgramParser
 from ...utils import detect_work_size, join_with_and
+from ...numpy import ndarray
 
 if TYPE_CHECKING:
     from .program import Program
@@ -323,12 +323,12 @@ class Kernel(CLObject):
             if arg_info.value != used_value.id:
                 CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
                 arg_info.value = used_value.id
-        elif base_type_str in CLInfo.basic_types or base_type_str in self._program._program_parser._struct_types:
+        elif base_type_str in CLInfo.basic_types or base_type_str in self._program.structs:
             if base_type_str in CLInfo.basic_types:
                 content_type = CLInfo.basic_types[base_type_str]
                 is_struct = False
             else:
-                content_type = self._program._program_parser._struct_types[arg_info.base_type_str]
+                content_type = self._program.structs[arg_info.base_type_str]
                 is_struct = True
 
             if not arg_info.is_ptr:
@@ -372,34 +372,43 @@ class Kernel(CLObject):
                     CL.clSetKernelArg(self.id, index, bytes_per_group, None)
                     arg_info.value = bytes_per_group
                 else:
-                    if isinstance(value, np.ndarray):
-                        used_value = value
-                        if value.dtype != content_type:
-                            used_value = value.astype(content_type)
+                    if isinstance(value, ndarray):
+                        buffer = value._copy_to_device("opencl", cmd_queue, arg_info.recommended_flags, arg_info.name)
+                        if arg_info.mem_obj != buffer:
+                            CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                            arg_info.mem_obj = buffer
+
+                        arg_info.value = value
+                        return []
                     else:
-                        ProgramParser._apply_structure_pointers(value, cmd_queue)
-                        used_value = np.array(value, dtype=content_type)
+                        if isinstance(value, np.ndarray):
+                            used_value = value
+                            if value.dtype != content_type:
+                                used_value = value.astype(content_type)
+                        else:
+                            ProgramParser._apply_structure_pointers(value, cmd_queue)
+                            used_value = np.array(value, dtype=content_type)
 
-                    if not used_value.flags['C_CONTIGUOUS']:
-                        used_value = np.ascontiguousarray(used_value)
+                        if not used_value.flags['C_CONTIGUOUS']:
+                            used_value = np.ascontiguousarray(used_value)
 
-                    buffer, event = arg_info.use_buffer(cmd_queue, used_value)
-                    if arg_info.mem_obj != buffer:
-                        CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                        buffer, event = arg_info.use_buffer(cmd_queue, used_value)
+                        if arg_info.mem_obj != buffer:
+                            CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                            arg_info.mem_obj = buffer
 
-                    arg_info.value = value
-                    arg_info.mem_obj = buffer
-                    if arg_info.need_read_back:
-                        return [{
-                            "arg_info": arg_info,
-                            "value": value,
-                            "mem_obj": buffer,
-                            "event": event
-                        }]
-                    else:
-                        return [{
-                            "event": event
-                        }]
+                        arg_info.value = value
+                        if arg_info.need_read_back:
+                            return [{
+                                "arg_info": arg_info,
+                                "value": value,
+                                "mem_obj": buffer,
+                                "event": event
+                            }]
+                        else:
+                            return [{
+                                "event": event
+                            }]
         elif arg_type_str in CLInfo.image_types:
             image_type = CLInfo.image_types[arg_type_str]
             if not isinstance(value, (np.ndarray, image_type)):
@@ -412,9 +421,9 @@ class Kernel(CLObject):
             image, event = arg_info.use_image(cmd_queue, used_value)
             if arg_info.mem_obj != image:
                 CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(image.id))
+                arg_info.mem_obj = image
 
             arg_info.value = value
-            arg_info.mem_obj = image
             if arg_info.need_read_back:
                 return [{
                     "arg_info": arg_info,

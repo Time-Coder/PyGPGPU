@@ -1,5 +1,6 @@
+from __future__ import annotations
 import functools
-from typing import Dict, Tuple, TYPE_CHECKING, List
+from typing import Dict, Tuple, TYPE_CHECKING, List, Optional
 
 import numpy as np
 
@@ -12,7 +13,7 @@ class ndarray(np.ndarray):
 
     def __new__(cls, input_array):
         obj = np.asarray(input_array).view(cls)
-        obj._dirty = True
+        obj._parent = None
         obj._buffers = {}
         obj._arg_name = ""
         return obj
@@ -21,180 +22,178 @@ class ndarray(np.ndarray):
         if obj is None:
             return
         
-        self._dirty = getattr(obj, '_dirty', False)
         self._buffers:Dict[Tuple[str, int, cl_mem_flags], List[Buffer, CommandQueue]] = {}
         self._arg_name:str = ""
+        if np.shares_memory(obj, self):
+            self._parent = obj
+        else:
+            self._parent = None
 
-    @property
-    def dirty(self):
-        return self._dirty
+    def _set_host_dirty(self):
+        for buffer, cmd_queue in self._buffers.values():
+            buffer.dirty_on_host = True
 
-    def _mark_dirty(func):
+        if self._parent is not None:
+            self._parent._set_host_dirty()
+
+    def _not_const(func):
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            self = args[0]
-            self._dirty = True
-            func_name = func.__name__
-            super_func = getattr(np.ndarray, func_name)
+            self:ndarray = args[0]
+            self._copy_to_host()
+            self._set_host_dirty()
+            super_func = getattr(np.ndarray, func.__name__)
             return super_func(*args, **kwargs)
         
         return wrapper
 
     def __getitem__(self, key):
         self._copy_to_host()
-        result = super().__getitem__(key)
-        if isinstance(result, ndarray):
-            result = np.array(result, copy=True)
-        else:
-            result = np.array(result, copy=True)
-        result.flags.writeable = False
-        return result
+        return super().__getitem__(key)
 
-    @_mark_dirty
+    @_not_const
     def __setitem__(self, key, value):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __iadd__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __isub__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __imul__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __itruediv__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __ifloordiv__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __imod__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __ipow__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __ilshift__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __irshift__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __iand__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __ixor__(self, other):
         pass
 
-    @_mark_dirty
+    @_not_const
     def __ior__(self, other):
         pass
 
-    def __array_wrap__(self, out_arr, context=None):
-        if out_arr is self:
-            return out_arr
-        
-        if isinstance(out_arr, ndarray):
-            out_arr._dirty = False
+    def _change_to_ndarray(self, value:np.ndarray):
+        if not isinstance(value, ndarray):
+            value = value.view(ndarray)
 
-        return out_arr
+        value._buffers = {}
+        value._arg_name = ""
+        if np.shares_memory(value, self):
+            value._parent = self
+        else:
+            value._parent = None
+
+        return value
+    
+    def _change_result(self, result):
+        if isinstance(result, np.ndarray):
+            result = self._change_to_ndarray(result)
+
+        if isinstance(result, tuple):
+            result = list(result)
+            for i, sub_result in enumerate(result):
+                if isinstance(sub_result, np.ndarray):
+                    result[i] = self._change_to_ndarray(sub_result)
+
+            result = tuple(result)
+
+        return result
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        out = kwargs.get('out', None)
-        if out is not None:
-            if isinstance(out, tuple) and self in out:
-                self._dirty = True
-            elif out is self:
-                self._dirty = True
+        if 'out' in kwargs:
+            out = kwargs["out"]
+            if out is self or (isinstance(out, tuple) and self in out):
+                self._set_host_dirty()
 
         result = super().__array_ufunc__(ufunc, method, *inputs, **kwargs)
-
-        if result is not None and result is not self:
-            if isinstance(result, ndarray):
-                result = np.asarray(result)
-            result.flags.writeable = False
+        result = self._change_result(result)
 
         return result
 
     def __array_function__(self, func, types, args, kwargs):
-        if not all(issubclass(t, ndarray) or issubclass(t, np.ndarray) for t in types):
-            return NotImplemented
-
         result = func._implementation(*args, **kwargs)
-
-        if isinstance(result, np.ndarray):
-            if np.shares_memory(result, self):
-                result = result.view(np.ndarray)
-                result.flags.writeable = False
-            else:
-                result = np.array(result, copy=False)
-                result.flags.writeable = True
+        result = self._change_result(result)
 
         return result
 
     def _copy_to_host(self):
         event = None
-        dirty_buffer = None
+        lastest_dirty_buffer:Optional[Buffer] = None
+        used_cmd_queue:Optional[CommandQueue] = None
         for buffer, cmd_queue in self._buffers.values():
-            if buffer.dirty:
-                dirty_buffer = buffer
-                event = buffer.read(cmd_queue)
+            if buffer.dirty_on_device and (lastest_dirty_buffer is None or buffer.device_dirty_time > lastest_dirty_buffer.device_dirty_time):
+                lastest_dirty_buffer = buffer
+                used_cmd_queue = cmd_queue
                 break
 
-        if event is not None:
+        if lastest_dirty_buffer is not None:
+            event = lastest_dirty_buffer.read(used_cmd_queue)
             event.wait()
-            dirty_buffer.dirty = False
+            lastest_dirty_buffer.dirty_on_device = False
+
+            if lastest_dirty_buffer.data is not self:
+                self[:] = lastest_dirty_buffer.data
+
+            lastest_dirty_buffer.dirty_on_host = False
+
             print(f"copy data to host for argument '{self._arg_name}'")
 
-    def _copy_to_device(self, backend:str, cmd_queue:CommandQueue, flags:cl_mem_flags, arg_name:str):
+        for buffer, cmd_queue in self._buffers.values():
+            buffer.dirty_on_device = False
+
+    def _copy_to_device(self, backend:str, cmd_queue:CommandQueue, flags:cl_mem_flags, arg_name:str)->Buffer:
         self._arg_name = arg_name
         key = (backend, cmd_queue.context.id.value, flags)
-        self_dirty = self._dirty
 
         if key not in self._buffers:
             buffer = cmd_queue.context.create_buffer(size=self.nbytes, flags=flags)
+            buffer.dirty_on_host = True
             self._buffers[key] = [buffer, cmd_queue]
-            self_dirty = True
+        else:
+            self._buffers[key][1] = cmd_queue
 
-        self._buffers[key][1] = cmd_queue
-
-        if self_dirty:
-            buffer = self._buffers[key][0]
+        buffer = self._buffers[key][0]
+        if buffer.dirty_on_host:
             event = buffer.set_data(cmd_queue, self)
-            if not (buffer.flags & cl_mem_flags.CL_MEM_READ_ONLY):
-                buffer.dirty = True
+            CL_MEM_READ_ONLY = (1 << 2)
+            if not (buffer.flags & CL_MEM_READ_ONLY):
+                buffer.dirty_on_device = True
+
+            buffer.dirty_on_host = False
 
             event.wait()
             print(f"copy data to device for argument '{arg_name}'")
 
-    def __deepcopy__(self, memo):
-        return ndarray(np.array(self, copy=True))
-
-    def copy(self, order='C'):
-        new_arr = np.array(self, copy=True, order=order).view(ndarray)
-        new_arr._dirty = self._dirty
-        return new_arr
-
-    def view(self, dtype=None, type=None):
-        v = super().view(dtype=dtype, type=np.ndarray)
-        v.flags.writeable = False
-        return v
-
-    def __setattr__(self, name, value):
-        if name == 'flags' and hasattr(self, 'flags'):
-            if hasattr(value, 'writeable') and value.writeable and self.flags.owndata is False:
-                raise ValueError("Cannot make a view of ndarray writeable.")
-        super().__setattr__(name, value)
+        return buffer
