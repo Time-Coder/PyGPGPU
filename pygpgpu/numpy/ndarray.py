@@ -1,6 +1,6 @@
 from __future__ import annotations
 import functools
-from typing import Dict, Tuple, TYPE_CHECKING, List, Optional
+from typing import Dict, Tuple, TYPE_CHECKING, List, Optional, Any
 
 import numpy as np
 
@@ -41,16 +41,23 @@ class ndarray(np.ndarray):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             self:ndarray = args[0]
-            self._copy_to_host()
+            self.to_host()
             self._set_host_dirty()
             super_func = getattr(np.ndarray, func.__name__)
             return super_func(*args, **kwargs)
         
         return wrapper
+    
+    def _const(func):
 
-    def __getitem__(self, key):
-        self._copy_to_host()
-        return super().__getitem__(key)
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            self:ndarray = args[0]
+            self.to_host()
+            super_func = getattr(np.ndarray, func.__name__)
+            return super_func(*args, **kwargs)
+        
+        return wrapper
 
     @_not_const
     def __setitem__(self, key, value):
@@ -148,7 +155,7 @@ class ndarray(np.ndarray):
 
         return result
 
-    def _copy_to_host(self):
+    def to_host(self):
         event = None
         lastest_dirty_buffer:Optional[Buffer] = None
         used_cmd_queue:Optional[CommandQueue] = None
@@ -197,3 +204,36 @@ class ndarray(np.ndarray):
             print(f"copy data to device for argument '{arg_name}'")
 
         return buffer
+
+    @_const
+    def __getitem__(self, key):
+        pass
+
+    @_const
+    def copy(self, order):
+        pass
+
+    @_const
+    def dump(self, file) -> None:
+        pass
+    
+    @_const
+    def dumps(self) -> bytes:
+        pass
+    
+    @_const
+    def tobytes(self, order) -> bytes:
+        pass
+    
+    @_const
+    def tofile(self, fid, sep: str = ..., format: str = ...) -> None:
+        pass
+    
+    @_const
+    def tolist(self) -> Any:
+        pass
+
+    @_const
+    @property
+    def ctypes(self):
+        pass

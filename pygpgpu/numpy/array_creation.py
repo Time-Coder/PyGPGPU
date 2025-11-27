@@ -124,7 +124,7 @@ def vander(x, N=None, increasing=False) -> ndarray:
 
 # 6. Miscellaneous
 def copy(a, order='K', subok=False) -> ndarray:
-    return ndarray(np.copy(a, order=order, subok=False))
+    return ndarray(np.copy(a, order=order, subok=subok))
 
 def frombuffer(buffer, dtype=float, count=-1, offset=0) -> ndarray:
     return ndarray(np.frombuffer(buffer, dtype=dtype, count=count, offset=offset))
@@ -190,3 +190,52 @@ def genfromtxt(fname, dtype=float, comments='#', delimiter=None, skip_header=0,
 def meshgrid(*xi, indexing='xy', sparse=False, copy=True) -> Tuple[ndarray, ...]:
     arrays = np.meshgrid(*xi, indexing=indexing, sparse=sparse, copy=copy)
     return tuple(ndarray(arr) for arr in arrays)
+
+# 7. save
+def save(file, arr, allow_pickle:bool=True):
+    if isinstance(arr, ndarray):
+        arr.to_host()
+        
+    np.save(file, arr, allow_pickle)
+
+def savez(file, *args, allow_pickle:bool=True, **kwds):
+    for arg in args:
+        if isinstance(arg, ndarray):
+            arg.to_host()
+
+    for value in kwds.values():
+        if isinstance(value, ndarray):
+            value.to_host()
+
+    np.savez(file, *args, allow_pickle, **kwds)
+
+def savez_compressed(file, *args, allow_pickle=True, **kwds):
+    for arg in args:
+        if isinstance(arg, ndarray):
+            arg.to_host()
+
+    for value in kwds.values():
+        if isinstance(value, ndarray):
+            value.to_host()
+
+    np.savez_compressed(file, *args, allow_pickle, **kwds)
+
+def savetxt(fname, X, fmt='%.18e', delimiter=' ', newline='\n', header='', footer='', comments='# ', encoding=None):
+    if isinstance(X, ndarray):
+        X.to_host()
+
+    np.savetxt(fname, X, fmt, delimiter, newline, header, footer, comments, encoding)
+
+def load(file, mmap_mode=None, allow_pickle=False, fix_imports=True, encoding='ASCII', *, max_header_size=10000):
+    result = np.load(file, mmap_mode, allow_pickle, fix_imports, encoding, max_header_size=max_header_size)
+    if isinstance(result, np.ndarray) and not isinstance(result, ndarray):
+        result = ndarray(result)
+
+    if isinstance(result, dict):
+        keys = list(result.keys())
+        for key in keys:
+            value = result[key]
+            if isinstance(value, np.ndarray) and not isinstance(value, ndarray):
+                result[key] = ndarray(value)
+
+    return result

@@ -2,3 +2,4 @@ __pycache__
 __clcache__
 result.json
 .VSCodeCounter
+*.npy
