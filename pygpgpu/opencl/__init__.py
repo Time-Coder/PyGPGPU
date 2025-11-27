@@ -15,10 +15,13 @@ from .driver import (
     long2, long3, long4, long8, long16,
     ulong2, ulong3, ulong4, ulong8, ulong16,
     float2, float3, float4, float8, float16,
-    double2, double3, double4, double8, double16
+    double2, double3, double4, double8, double16,
+    CL
 )
 from .oop import KernelWrapper
 
 from .common import compile
 from .climport import climport
+
+CL.init()
 climport.install()

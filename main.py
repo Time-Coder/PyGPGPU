@@ -14,5 +14,3 @@ particle.mass = 1.5
 output = np.array([float4()])
 
 update_particle(output, particle)
-result = output[0] + np.array([float4(1)])
-# np.save("output.npy", output)

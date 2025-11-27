@@ -3,7 +3,7 @@ import ctypes
 import os
 import platform
 from typing import Dict, Callable
-from ctypes import c_int, c_void_p
+from ctypes import c_int, c_void_p, c_uint, pointer
 
 from .clinfo import CLInfo
 from .cltypes import ErrorCode
@@ -176,3 +176,19 @@ class CL(metaclass=MetaCL):
                 return "NULL"
 
             return str(arg)
+        
+    @staticmethod
+    def init():
+        for func_name, func_info in CLInfo.func_signatures.items():
+            if "dll_func" in func_info:
+                continue
+
+            func = getattr(MetaCL.dll(), func_name)
+            func.argtypes = list(func_info["args"].values())
+            func.restype = func_info["restype"]
+            func_info["dll_func"] = func
+
+        # preheat
+        n_platforms = c_uint()
+        ptr_n_platforms = pointer(n_platforms)
+        CL.clGetPlatformIDs(0, None, ptr_n_platforms)

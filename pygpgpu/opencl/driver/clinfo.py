@@ -887,7 +887,7 @@ class CLInfo:
         "clGetMemObjectInfo": {
             "args": {
                 "memobj": cl_mem,
-                "param_name": cl_mem_info,
+                "param_name": cl_uint,
                 "param_value_size": c_size_t,
                 "param_value": c_void_p,
                 "param_value_size_ret": ptr_size_t
@@ -1562,6 +1562,7 @@ class CLInfo:
                 "properties": ptr_int64,
                 "errcode_ret": ptr_cl_int
             },
+            "restype": cl_mem,
             "errors": {
                 ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
                 ErrorCode.CL_INVALID_OPERATION: "no devices in context support pipes.",
