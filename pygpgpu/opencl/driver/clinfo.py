@@ -18,7 +18,6 @@ from .vec_types import (
     float2, float3, float4, float8, float16,
     double2, double3, double4, double8, double16
 )
-import numpy as np
 from typing import List
 
 from .cltypes import (

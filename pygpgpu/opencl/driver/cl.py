@@ -2,7 +2,6 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
-import traceback
 from typing import Dict, Callable
 from ctypes import c_int, c_void_p
 
