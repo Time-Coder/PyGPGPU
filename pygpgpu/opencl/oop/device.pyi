@@ -1,7 +1,7 @@
 from ctypes import c_size_t
 from typing import List, TYPE_CHECKING
 
-from ..runtime import (
+from ..driver import (
     cl_version,
     cl_version_khr,
     cl_name_version,

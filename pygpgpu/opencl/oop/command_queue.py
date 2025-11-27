@@ -6,7 +6,7 @@ if TYPE_CHECKING:
     from .context import Context
     from .device import Device
 
-from ..runtime import (
+from ..driver import (
     CL,
     cl_command_queue,
     cl_int,

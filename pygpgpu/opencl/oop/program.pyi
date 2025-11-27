@@ -3,7 +3,7 @@ from typing import Dict, List, Any, Set, Optional
 
 from .device import Device
 from .context import Context
-from ..runtime import cl_build_status, cl_program_binary_type
+from ..driver import cl_build_status, cl_program_binary_type
 from .build_options import BuildOptions
 from .program_parser import ProgramParser
 from .kernel import Kernel

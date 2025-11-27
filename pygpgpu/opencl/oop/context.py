@@ -5,7 +5,7 @@ from typing import Tuple, Dict, Optional, Any, List, Union, TYPE_CHECKING, overr
 
 import numpy as np
 
-from ..runtime import (
+from ..driver import (
     cl_device_id,
     cl_int,
     CL,

@@ -1,7 +1,7 @@
 from ctypes import pointer
 from typing import List, Dict, Tuple, Optional, Any, override
 
-from ..runtime import (
+from ..driver import (
     CL, CLInfo, IntEnum,
     cl_platform_id,
     cl_device_type,

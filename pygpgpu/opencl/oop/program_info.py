@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Tuple, Any, Optional, Dict
 
 import numpy as np
 
-from ..runtime import (
+from ..driver import (
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,

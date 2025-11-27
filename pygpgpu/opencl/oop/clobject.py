@@ -5,7 +5,7 @@ from typing import Dict, Any, get_args
 from abc import ABC, abstractmethod
 import weakref
 
-from ..runtime import CL, IntEnum, IntFlag, cl_bool, cl_uint, CLInfo
+from ..driver import CL, IntEnum, IntFlag, cl_bool, cl_uint, CLInfo
 
 
 class CLObject(ABC):

@@ -1,6 +1,6 @@
 from typing import List
 
-from ..runtime import (
+from ..driver import (
     cl_addressing_mode,
     cl_filter_mode,
     cl_sampler_properties,

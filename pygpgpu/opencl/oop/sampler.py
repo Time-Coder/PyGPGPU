@@ -2,7 +2,7 @@ from __future__ import annotations
 from ctypes import pointer
 from typing import override, Dict, TYPE_CHECKING
 
-from ..runtime import (
+from ..driver import (
     cl_addressing_mode,
     cl_filter_mode,
     cl_sampler,

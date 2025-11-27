@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Union, Optional, List, override
 
 import numpy as np
 
-from ..runtime import (
+from ..driver import (
     cl_mem_flags,
     cl_mem,
     CL,

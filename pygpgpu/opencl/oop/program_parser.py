@@ -8,7 +8,7 @@ from ctypes import c_char_p, Structure, POINTER, _Pointer, pointer, c_void_p
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple, TYPE_CHECKING
 
 from ...cparser import CPreprocessor
-from ..runtime import (
+from ..driver import (
     CL,
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from .command_queue import CommandQueue
 
 import numpy as np
-from ...numpy import ndarray
+from ... import numpy as gnp
 
 
 class ProgramParser:
@@ -338,8 +338,11 @@ class Kernel_{kernel_name}(KernelWrapper):
                     var_info:VarInfo = self._members[ori_name]
                     content_type = self._pointer_types[ori_name]
 
-                    if isinstance(data, ndarray):
-                        data._copy_to_device("opencl", cmd_queue, var_info.recommended_flags, var_info.name)
+                    if isinstance(data, gnp.ndarray):
+                        buffer, event = data._to_device("opencl", cmd_queue, var_info.recommended_flags, var_info.name)
+                        result.append({
+                            "event": event
+                        })
                     else:
                         if isinstance(data, np.ndarray):
                             used_value = data
@@ -353,13 +356,20 @@ class Kernel_{kernel_name}(KernelWrapper):
                             used_value = np.ascontiguousarray(used_value)
 
                         buffer, event = var_info.use_buffer(cmd_queue, used_value)
-                        setattr(self, f"_{self.__class__.__name__}_ptr_{ori_name}", pointer(buffer.id))
-                        result.append({
-                            "event": event,
-                            "arg_info": var_info,
-                            "value": data,
-                            "mem_obj": buffer
-                        })
+                        if var_info.need_read_back:
+                            result.append({
+                                "event": event,
+                                "arg_info": var_info,
+                                "value": data,
+                                "mem_obj": buffer
+                            })
+                        else:
+                            result.append({
+                                "event": event
+                            })
+
+                    setattr(self, f"_{self.__class__.__name__}_ptr_{ori_name}", pointer(buffer.id))
+                    
 
                 if issubclass(field[1], Structure) and hasattr(field[1], "apply_pointers"):
                     result.extend(getattr(self, field[0]).apply_pointers(cmd_queue))

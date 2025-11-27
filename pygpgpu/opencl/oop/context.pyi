@@ -2,7 +2,7 @@ from typing import Tuple, List, Optional, Dict, Any, Union
 
 import numpy as np
 
-from ..runtime import (
+from ..driver import (
     cl_context_properties,
     cl_mem_flags,
     cl_command_queue_properties,

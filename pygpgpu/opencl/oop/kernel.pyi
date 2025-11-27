@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict, TYPE_CHECKING, Tuple, overload
 
-from ..runtime import cl_kernel
+from ..driver import cl_kernel
 from .clobject import CLObject
 from .program_info import ArgInfo
 import concurrent.futures

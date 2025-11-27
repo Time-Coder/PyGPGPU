@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List, Union, Tuple, Optional
 if TYPE_CHECKING:
     from .context import Context
 
-from ..runtime import (
+from ..driver import (
     cl_mem_flags,
     cl_mem,
     cl_mem_object_type,

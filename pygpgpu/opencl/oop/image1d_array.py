@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, List, Tuple, Optional, override
 
 import numpy as np
 
-from ..runtime import (
+from ..driver import (
     CL,
     cl_event,
     cl_mem_flags,

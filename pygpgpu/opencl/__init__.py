@@ -1,5 +1,5 @@
 
-from .runtime import (
+from .driver import (
     image1d_t,
     image2d_t,
     image3d_t,

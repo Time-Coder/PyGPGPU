@@ -1,7 +1,7 @@
 from ctypes import c_uint, pointer
 from typing import List, Dict, Iterator, Optional
 
-from ..runtime import CL, cl_platform_id
+from ..driver import CL, cl_platform_id
 from .platform import Platform
 from .device import Device
     

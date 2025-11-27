@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union, Set, overrid
 from .clobject import CLObject
 from .device import Device
 from .build_options import BuildOptions
-from ..runtime import (
+from ..driver import (
     CL,
     IntEnum,
     CLInfo,

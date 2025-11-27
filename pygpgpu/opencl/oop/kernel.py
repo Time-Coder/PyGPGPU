@@ -8,7 +8,7 @@ from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional, overr
 
 import numpy as np
 
-from ..runtime import (
+from ..driver import (
     cl_kernel,
     CL,
     IntEnum,
@@ -34,7 +34,7 @@ from .mem_object import MemObject
 from .pipe import pipe
 from .program_parser import ProgramParser
 from ...utils import detect_work_size, join_with_and
-from ...numpy import ndarray
+from ... import numpy as gnp
 
 if TYPE_CHECKING:
     from .program import Program
@@ -372,14 +372,14 @@ class Kernel(CLObject):
                     CL.clSetKernelArg(self.id, index, bytes_per_group, None)
                     arg_info.value = bytes_per_group
                 else:
-                    if isinstance(value, ndarray):
-                        buffer = value._copy_to_device("opencl", cmd_queue, arg_info.recommended_flags, arg_info.name)
+                    if isinstance(value, gnp.ndarray):
+                        buffer, event = value._to_device("opencl", cmd_queue, arg_info.recommended_flags, arg_info.name)
                         if arg_info.mem_obj != buffer:
                             CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
                             arg_info.mem_obj = buffer
 
                         arg_info.value = value
-                        return []
+                        return [{"event": event}]
                     else:
                         if isinstance(value, np.ndarray):
                             used_value = value

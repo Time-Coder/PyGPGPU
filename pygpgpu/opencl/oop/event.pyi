@@ -5,7 +5,7 @@ import concurrent.futures
 import asyncio
 from typing import Optional, List, TYPE_CHECKING, Callable, Union, overload
 
-from ..runtime import (
+from ..driver import (
     cl_event,
     cl_command_execution_status,
     cl_command_type,

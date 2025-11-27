@@ -5,6 +5,8 @@ import numpy as np
 from .ndarray import ndarray
 
 
+
+
 # 1. From shape or value
 def empty(shape, dtype=float, order='C') -> ndarray:
     return ndarray(np.empty(shape, dtype=dtype, order=order))

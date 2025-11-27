@@ -3,7 +3,7 @@ from __future__ import annotations
 from ctypes import c_void_p
 from typing import List, TYPE_CHECKING, Iterator, Tuple, Optional, Dict, Any
 
-from ..runtime import (
+from ..driver import (
     cl_version,
     cl_version_khr,
     cl_name_version,

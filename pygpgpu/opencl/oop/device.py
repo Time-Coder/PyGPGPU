@@ -5,7 +5,7 @@ if TYPE_CHECKING:
     from .platform import Platform
     from .context import Context
 
-from ..runtime import CL, CLInfo, IntEnum, cl_device_id, cl_device_info
+from ..driver import CL, CLInfo, IntEnum, cl_device_id, cl_device_info
 from .clobject import CLObject
 from ...utils import sanitize_filename
 

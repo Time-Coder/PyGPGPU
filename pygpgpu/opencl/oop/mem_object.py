@@ -5,7 +5,7 @@ from ctypes import c_void_p
 from abc import abstractmethod
 import time
 
-from ..runtime import (
+from ..driver import (
     cl_mem,
     CL,
     CLInfo,

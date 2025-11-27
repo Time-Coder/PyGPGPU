@@ -7,7 +7,7 @@ import asyncio
 import traceback
 from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, override, Set
 
-from ..runtime import (
+from ..driver import (
     CL,
     cl_event,
     IntEnum,
