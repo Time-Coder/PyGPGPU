@@ -1,5 +1,5 @@
 from .cl import CL
-from .clconstantes import (
+from ...constants import (
     Constant,
     IntConstant,
     FloatConstant,
