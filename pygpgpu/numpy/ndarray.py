@@ -57,6 +57,7 @@ class ndarray(np.ndarray):
     def __new__(cls, input_array):
         obj = np.asarray(input_array).view(cls)
         obj._parent = None
+        obj._children = []
         obj._mem_objs = {}
         obj._arg_name = ""
         obj._should_copy = True
@@ -69,17 +70,32 @@ class ndarray(np.ndarray):
         self._mem_objs:Dict[Tuple[str, int, cl_mem_flags], List[MemObject, CommandQueue]] = {}
         self._arg_name:str = ""
         self._should_copy:bool = True
+        self._children:List[ndarray] = []
         if np.shares_memory(obj, self):
             self._parent:Optional[ndarray] = obj
+            if hasattr(obj, "_children"):
+                obj._children.append(self)
         else:
             self._parent:Optional[ndarray] = None
 
-    def _set_host_dirty(self):
-        for mem_obj, cmd_queue in self._mem_objs.values():
+    @staticmethod
+    def _set_tree_host_dirty(node:ndarray):
+        for mem_obj, cmd_queue in node._mem_objs.values():
             mem_obj.dirty_on_host = True
 
-        if self._parent is not None:
-            self._parent._set_host_dirty()
+        for child in node._children:
+            ndarray._set_tree_host_dirty(child)
+
+    def _set_host_dirty(self):
+        ndarray._set_tree_host_dirty(self._root)
+
+    @property
+    def _root(self)->ndarray:
+        current = self
+        while current._parent is not None:
+            current = current._parent
+
+        return current
 
     __setitem__ = _not_const(np.ndarray.__setitem__)
     __iadd__ = _not_const(np.ndarray.__iadd__)
@@ -106,6 +122,7 @@ class ndarray(np.ndarray):
         value._arg_name = ""
         if np.shares_memory(value, self):
             value._parent = self
+            self._children.append(value)
         else:
             value._parent = None
 
@@ -162,13 +179,12 @@ class ndarray(np.ndarray):
         return result
 
     def to_host(self):
+        from ..opencl.driver import CL
+
         if not self._should_copy or not hasattr(self, "_parent") or not hasattr(self, "_mem_objs"):
             return
         
         self._should_copy = False
-
-        if self._parent is not None:
-            self._parent.to_host()
 
         event = None
         lastest_dirty_mem_obj:Optional[MemObject] = None
@@ -189,7 +205,8 @@ class ndarray(np.ndarray):
 
             lastest_dirty_mem_obj.dirty_on_host = False
 
-            print(f"copy data to host for argument '{self._arg_name}'")
+            if CL.print_info:
+                print(f"copy data to host for argument '{self._arg_name}'")
 
         for mem_obj, cmd_queue in self._mem_objs.values():
             mem_obj.dirty_on_device = False
@@ -251,4 +268,4 @@ class ndarray(np.ndarray):
     def base(self) -> Optional[ndarray]:
         return self._parent
 
-
+    
