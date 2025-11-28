@@ -28,6 +28,7 @@ class MemObject(CLObject):
     def __init__(self, context:Context, mem_id:cl_mem, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:c_void_p, size:int, flags:cl_mem_flags):
         self._context:Context = context
         self._flags:cl_mem_flags = flags
+        self._kernel_flags:cl_mem_flags = cl_mem_flags.CL_MEM_READ_WRITE
         self._data:Union[bytes, bytearray, np.ndarray, None] = data
         self._host_ptr:c_void_p = host_ptr
         self._size:int = size
@@ -60,6 +61,14 @@ class MemObject(CLObject):
     @property
     def flags(self)->cl_mem_flags:
         return self._flags
+    
+    @property
+    def kernel_flags(self)->cl_mem_flags:
+        return self._kernel_flags
+    
+    @kernel_flags.setter
+    def kernel_flags(self, flags:cl_mem_flags)->None:
+        self._kernel_flags = flags
     
     @property
     def host_ptr(self)->c_void_p:

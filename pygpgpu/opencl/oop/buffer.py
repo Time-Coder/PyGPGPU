@@ -24,7 +24,7 @@ from .mem_object import MemObject
 
 class Buffer(MemObject):
 
-    def __init__(self, context:Context, data:Union[bytes, bytearray, np.ndarray, None]=None, size:int=0, flags:Optional[cl_mem_flags]=None):
+    def __init__(self, context:Context, data:Union[bytes, bytearray, np.ndarray, None]=None, size:int=0, flags:cl_mem_flags=cl_mem_flags.CL_MEM_READ_WRITE):
         data_is_valid = (data is not None)
         if data_is_valid:
             if isinstance(data, bytes):
@@ -41,9 +41,6 @@ class Buffer(MemObject):
                 size = data.nbytes
         else:
             host_ptr = None
-
-        if flags is None:
-            flags = cl_mem_flags.CL_MEM_READ_WRITE
 
         if (
             data_is_valid and 
@@ -118,7 +115,11 @@ class Buffer(MemObject):
         if size != self._size:
             raise ValueError("data size is not equal to buffer size")
 
-        event = self.write(cmd_queue, 0, size, host_ptr, after_events)
         self._host_ptr = host_ptr
         self._data = data
+
+        event = None
+        if not (self.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) and not (self.kernel_flags & cl_mem_flags.CL_MEM_WRITE_ONLY):
+            event = self.write(cmd_queue, 0, size, host_ptr, after_events)
+        
         return event

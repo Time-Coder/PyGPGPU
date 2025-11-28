@@ -10,6 +10,48 @@ if TYPE_CHECKING:
     from ..opencl.driver import cl_mem_flags, imagend_t
 
 
+def _not_const(func):
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        self:ndarray = args[0]
+        self.to_host()
+        self._set_host_dirty()
+        result = func(*args, **kwargs)
+        return self._change_result(result)
+    
+    return wrapper
+
+
+def _const(func):
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        self:ndarray = args[0]
+        self.to_host()
+        result = func(*args, **kwargs)
+        return self._change_result(result)
+    
+    return wrapper
+
+
+class Descriptor:
+
+    def __init__(self, old_descriptor):
+        self.old_descriptor = old_descriptor
+        self.getter = _const(self.old_descriptor.__get__)
+        self.setter = _not_const(self.old_descriptor.__set__)
+
+    def __get__(self, obj, objtype=None):
+        return self.getter(obj, objtype)
+
+    def __set__(self, obj, value):
+        return self.setter(obj, value)
+
+    def __delete__(self, obj):
+        return self.old_descriptor.__delete__(obj)
+
+
 class ndarray(np.ndarray):
 
     def __new__(cls, input_array):
@@ -39,88 +81,19 @@ class ndarray(np.ndarray):
         if self._parent is not None:
             self._parent._set_host_dirty()
 
-    def _change_value(func):
-
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            self:ndarray = args[0]
-            self.to_host()
-            self._set_host_dirty()
-            super_func = getattr(np.ndarray, func.__name__)
-            if callable(super_func):
-                result = super_func(*args, **kwargs)
-            else:
-                result = super_func.__set__(*args, **kwargs)
-            return self._change_result(result)
-        
-        return wrapper
-    
-    def _access_value(func):
-
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            self:ndarray = args[0]
-            self.to_host()
-            super_func = getattr(np.ndarray, func.__name__)
-            if callable(super_func):
-                result = super_func(*args, **kwargs)
-            else:
-                result = super_func.__get__(*args, **kwargs)
-            return self._change_result(result)
-        
-        return wrapper
-
-    @_change_value
-    def __setitem__(self, key, value):
-        pass
-
-    @_change_value
-    def __iadd__(self, other):
-        pass
-
-    @_change_value
-    def __isub__(self, other):
-        pass
-
-    @_change_value
-    def __imul__(self, other):
-        pass
-
-    @_change_value
-    def __itruediv__(self, other):
-        pass
-
-    @_change_value
-    def __ifloordiv__(self, other):
-        pass
-
-    @_change_value
-    def __imod__(self, other):
-        pass
-
-    @_change_value
-    def __ipow__(self, other):
-        pass
-
-    @_change_value
-    def __ilshift__(self, other):
-        pass
-
-    @_change_value
-    def __irshift__(self, other):
-        pass
-
-    @_change_value
-    def __iand__(self, other):
-        pass
-
-    @_change_value
-    def __ixor__(self, other):
-        pass
-
-    @_change_value
-    def __ior__(self, other):
-        pass
+    __setitem__ = _not_const(np.ndarray.__setitem__)
+    __iadd__ = _not_const(np.ndarray.__iadd__)
+    __isub__ = _not_const(np.ndarray.__isub__)
+    __imul__ = _not_const(np.ndarray.__imul__)
+    __itruediv__ = _not_const(np.ndarray.__itruediv__)
+    __ifloordiv__ = _not_const(np.ndarray.__ifloordiv__)
+    __imod__ = _not_const(np.ndarray.__imod__)
+    __ipow__ = _not_const(np.ndarray.__ipow__)
+    __ilshift__ = _not_const(np.ndarray.__ilshift__)
+    __irshift__ = _not_const(np.ndarray.__irshift__)
+    __iand__ = _not_const(np.ndarray.__iand__)
+    __ixor__ = _not_const(np.ndarray.__ixor__)
+    __ior__ = _not_const(np.ndarray.__ior__)
 
     def _change_to_ndarray(self, value:np.ndarray):
         if value is self:
@@ -223,7 +196,7 @@ class ndarray(np.ndarray):
 
         self._should_copy = True
 
-    def _to_device(self, cmd_queue:CommandQueue, arg_name:str, flags:cl_mem_flags=None, image_info:imagend_t=None)->Tuple[MemObject, Event]:
+    def _to_device(self, cmd_queue:CommandQueue, arg_name:str, flags:cl_mem_flags=(1 << 0), kernel_flags:cl_mem_flags=(1 << 0), image_info:imagend_t=None)->Tuple[MemObject, Event]:
         old_shoule_copy = self._should_copy
         self._should_copy = False
 
@@ -239,7 +212,8 @@ class ndarray(np.ndarray):
                 mem_obj = cmd_queue.context.create_buffer(size=self.nbytes, flags=flags)
             else:
                 mem_obj = cmd_queue.context.create_image(image_info)
-
+                
+            mem_obj.kernel_flags = kernel_flags
             mem_obj.dirty_on_host = True
             self._mem_objs[key] = [mem_obj, cmd_queue]
         else:
@@ -258,74 +232,23 @@ class ndarray(np.ndarray):
         self._should_copy = old_shoule_copy
         return mem_obj, event
 
-    @_access_value
-    def __getitem__(self, key):
-        pass
+    __getitem__ = _const(np.ndarray.__getitem__)
+    copy = _const(np.ndarray.copy)
+    dump = _const(np.ndarray.dump)
+    dumps = _const(np.ndarray.dumps)
+    tobytes = _const(np.ndarray.tobytes)
+    tofile = _const(np.ndarray.tofile)
+    tolist = _const(np.ndarray.tolist)
 
-    @_access_value
-    def copy(self, order):
-        pass
-
-    @_access_value
-    def dump(self, file) -> None:
-        pass
-    
-    @_access_value
-    def dumps(self) -> bytes:
-        pass
-    
-    @_access_value
-    def tobytes(self, order) -> bytes:
-        pass
-    
-    @_access_value
-    def tofile(self, fid, sep: str = ..., format: str = ...) -> None:
-        pass
-    
-    @_access_value
-    def tolist(self) -> Any:
-        pass
-
-    @property
-    @_access_value
-    def data(self)->memoryview:
-        pass
-
-    @property
-    @_access_value
-    def ctypes(self):
-        pass
+    data = Descriptor(np.ndarray.data)
+    ctypes = Descriptor(np.ndarray.ctypes)
+    real = Descriptor(np.ndarray.real)
+    imag = Descriptor(np.ndarray.imag)
+    flat = Descriptor(np.ndarray.flat)
+    T = Descriptor(np.ndarray.T)
 
     @property
     def base(self) -> Optional[ndarray]:
         return self._parent
 
-    @property
-    @_access_value
-    def real(self) -> ndarray:
-        pass
 
-    @real.setter
-    @_change_value
-    def real(self, value: ArrayLike) -> None:
-        pass
-
-    @property
-    @_access_value
-    def imag(self) -> ndarray:
-        pass
-
-    @imag.setter
-    @_change_value
-    def imag(self, value: ArrayLike) -> None:
-        pass
-
-    @property
-    @_access_value
-    def flat(self) -> ndarray:
-        pass
-
-    @property
-    @_access_value
-    def T(self) -> ndarray:
-        pass

@@ -337,40 +337,33 @@ class Kernel_{kernel_name}(KernelWrapper):
                     data = getattr(self, data_name)
                     var_info:VarInfo = self._members[ori_name]
                     content_type = self._pointer_types[ori_name]
+                    
+                    if isinstance(data, np.ndarray):
+                        used_value = data
+                        if data.dtype != content_type:
+                            used_value = data.astype(content_type)
+                    else:
+                        ProgramParser._apply_structure_pointers(data, cmd_queue)
+                        used_value = np.array(data, dtype=content_type)
 
-                    if isinstance(data, gnp.ndarray):
-                        buffer, event = data._to_device("opencl", cmd_queue, var_info.recommended_flags, var_info.name)
+                    if not used_value.flags['C_CONTIGUOUS']:
+                        used_value = np.ascontiguousarray(used_value)
+
+                    buffer, event = var_info.use_buffer(cmd_queue, used_value)
+                    if var_info.need_read_back and not isinstance(data, gnp.ndarray):
+                        result.append({
+                            "event": event,
+                            "arg_info": var_info,
+                            "value": data,
+                            "mem_obj": buffer
+                        })
+                    else:
                         result.append({
                             "event": event
                         })
-                    else:
-                        if isinstance(data, np.ndarray):
-                            used_value = data
-                            if data.dtype != content_type:
-                                used_value = data.astype(content_type)
-                        else:
-                            ProgramParser._apply_structure_pointers(data, cmd_queue)
-                            used_value = np.array(data, dtype=content_type)
-
-                        if not used_value.flags['C_CONTIGUOUS']:
-                            used_value = np.ascontiguousarray(used_value)
-
-                        buffer, event = var_info.use_buffer(cmd_queue, used_value)
-                        if var_info.need_read_back:
-                            result.append({
-                                "event": event,
-                                "arg_info": var_info,
-                                "value": data,
-                                "mem_obj": buffer
-                            })
-                        else:
-                            result.append({
-                                "event": event
-                            })
 
                     setattr(self, f"_{self.__class__.__name__}_ptr_{ori_name}", pointer(buffer.id))
                     
-
                 if issubclass(field[1], Structure) and hasattr(field[1], "apply_pointers"):
                     result.extend(getattr(self, field[0]).apply_pointers(cmd_queue))
 

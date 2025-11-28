@@ -84,7 +84,7 @@ class VarInfo:
         ))
     
     @property
-    def recommended_flags(self)->cl_mem_flags:
+    def kernel_flags(self)->cl_mem_flags:
         if self.readonly:
             return cl_mem_flags.CL_MEM_READ_ONLY
         elif self.writeonly:
@@ -94,23 +94,23 @@ class VarInfo:
 
     def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
         if isinstance(data, gnp.ndarray):
-            used_buffer, event = data._to_device(cmd_queue, self.name, self.recommended_flags)
+            used_buffer, event = data._to_device(cmd_queue, self.name, kernel_flags=self.kernel_flags)
         else:
-            used_buffer = cmd_queue.context.get_buffer(data.nbytes, self.recommended_flags)
+            used_buffer = cmd_queue.context.get_buffer(data.nbytes)
+            used_buffer.kernel_flags = self.kernel_flags
             event = used_buffer.set_data(cmd_queue, data)
-            
+
         if event is not None and CL.print_info:
             print(f"copy data to device for argument '{self.name}'")
         
         return used_buffer, event
     
     def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
-        image.flags = self.recommended_flags
-
         if isinstance(image.data, gnp.ndarray):
-            used_image, event = image.data._to_device(cmd_queue, self.name, image_info=image.plain)
+            used_image, event = image.data._to_device(cmd_queue, self.name, image_info=image.plain, kernel_flags=self.kernel_flags)
         else:
             used_image = cmd_queue.context.get_image(image.plain)
+            used_image.kernel_flags = self.kernel_flags
             event = used_image.set_data(cmd_queue, image.data)
 
         if event is not None and CL.print_info:

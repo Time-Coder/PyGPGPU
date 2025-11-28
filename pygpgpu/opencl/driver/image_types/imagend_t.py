@@ -20,7 +20,7 @@ from .... import numpy as gnp
 
 class imagend_t(ABC):
 
-    def __init__(self, data:Union[str, np.ndarray, None]=None, shape:Optional[Tuple[int,...]]=None, dtype:Optional[type]=None, flags:Optional[cl_mem_flags]=None, delay_copy:bool=True):
+    def __init__(self, data:Union[str, np.ndarray, None]=None, shape:Optional[Tuple[int,...]]=None, dtype:Optional[type]=None, flags:cl_mem_flags=cl_mem_flags.CL_MEM_READ_WRITE, delay_copy:bool=True):
         self._format:Optional[cl_image_format] = None
         self._desc:Optional[cl_image_desc] = None
         self._channel_order:Optional[cl_channel_order] = None
@@ -36,9 +36,6 @@ class imagend_t(ABC):
             self._dtype = dtype
             self._size = math.prod(shape) * self._dtype.itemsize
             self._update_format()
-
-        if flags is None:
-            flags = cl_mem_flags.CL_MEM_READ_WRITE
 
         self.flags = flags
     

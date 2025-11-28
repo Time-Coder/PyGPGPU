@@ -173,7 +173,7 @@ class Context(CLObject):
 
         return self.__queues[queue]
     
-    def get_buffer(self, size:int=0, flags:Optional[cl_mem_flags]=None)->Buffer:
+    def get_buffer(self, size:int=0, flags:cl_mem_flags=cl_mem_flags.CL_MEM_READ_WRITE)->Buffer:
         key = (size, flags)
 
         available_buffer = None
