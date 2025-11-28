@@ -15,3 +15,4 @@ from .image1d_array import image1d_array
 from .sampler import sampler
 from .pipe import Pipe
 from .event import Event
+from .mem_object import MemObject

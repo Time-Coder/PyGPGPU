@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from ctypes import c_void_p
 from typing import Optional, Tuple, Union
 from abc import ABC, abstractmethod
@@ -14,15 +15,17 @@ from ..cltypes import (
     cl_channel_order,
     cl_channel_type
 )
+from .... import numpy as gnp
 
 
 class imagend_t(ABC):
 
-    def __init__(self, data:Union[str, np.ndarray, None]=None, shape:Optional[Tuple[int,...]]=None, dtype:Optional[type]=None, flags:Optional[cl_mem_flags]=None):
+    def __init__(self, data:Union[str, np.ndarray, None]=None, shape:Optional[Tuple[int,...]]=None, dtype:Optional[type]=None, flags:Optional[cl_mem_flags]=None, delay_copy:bool=True):
         self._format:Optional[cl_image_format] = None
         self._desc:Optional[cl_image_desc] = None
         self._channel_order:Optional[cl_channel_order] = None
         self._channel_type:Optional[cl_channel_type] = None
+        self._delay_copy:bool = (delay_copy or isinstance(data, gnp.ndarray))
         
         if isinstance(data, str):
             data = iio.imread(data)
@@ -31,6 +34,7 @@ class imagend_t(ABC):
         if data is None:
             self._shape = shape
             self._dtype = dtype
+            self._size = math.prod(shape) * self._dtype.itemsize
             self._update_format()
 
         if flags is None:
@@ -44,9 +48,14 @@ class imagend_t(ABC):
     
     @data.setter
     def data(self, data:Optional[np.ndarray]):
+        if self._delay_copy and isinstance(data, np.ndarray) and not isinstance(data, gnp.ndarray):
+            data = gnp.ndarray(data)
+
         if data is not None:
             if not data.flags['C_CONTIGUOUS']:
                 data = np.ascontiguousarray(data)
+                if self._delay_copy and not isinstance(data, gnp.ndarray):
+                    data = gnp.ndarray(data)
 
             self._data = data
             self._host_ptr = data.ctypes.data_as(c_void_p)
@@ -92,6 +101,7 @@ class imagend_t(ABC):
             self._shape = shape
             self._data = None
             self._host_ptr = None
+            self._size = math.prod(shape) * self._dtype.itemsize
             self._update_format()
     
     @property
@@ -104,6 +114,7 @@ class imagend_t(ABC):
             self._dtype = dtype
             self._data = None
             self._host_ptr = None
+            self._size = math.prod(self._shape) * self._dtype.itemsize
             self._update_format()
     
     @property
@@ -114,11 +125,22 @@ class imagend_t(ABC):
     def flags(self, flags:cl_mem_flags)->None:
         self._flags = flags
 
+    @property
+    def delay_copy(self)->bool:
+        return self._delay_copy
+
     def load(self, file_name:str)->None:
         self.data = iio.imread(file_name)
 
     def save(self, file_name:str)->None:
+        if isinstance(self.data, gnp.ndarray):
+            self.data.to_host()
+
         iio.imwrite(file_name, self.data)
+
+    @property
+    def plain(self)->imagend_t:
+        return self.__class__(shape=self.shape, dtype=self.dtype, flags=self.flags, delay_copy=self.delay_copy)
 
     @staticmethod
     def _get_channel_type(dtype)->cl_channel_type:

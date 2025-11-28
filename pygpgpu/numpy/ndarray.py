@@ -3,11 +3,11 @@ import functools
 from typing import Dict, Tuple, TYPE_CHECKING, List, Optional, Any
 
 import numpy as np
-from numpy.typing import NDArray, ArrayLike
+from numpy.typing import ArrayLike
 
 if TYPE_CHECKING:
-    from ..opencl.oop import Buffer, CommandQueue, Event
-    from ..opencl.driver import cl_mem_flags
+    from ..opencl.oop import CommandQueue, Event, MemObject
+    from ..opencl.driver import cl_mem_flags, imagend_t
 
 
 class ndarray(np.ndarray):
@@ -15,7 +15,7 @@ class ndarray(np.ndarray):
     def __new__(cls, input_array):
         obj = np.asarray(input_array).view(cls)
         obj._parent = None
-        obj._buffers = {}
+        obj._mem_objs = {}
         obj._arg_name = ""
         obj._should_copy = True
         return obj
@@ -24,7 +24,7 @@ class ndarray(np.ndarray):
         if obj is None:
             return
         
-        self._buffers:Dict[Tuple[str, int, cl_mem_flags], List[Buffer, CommandQueue]] = {}
+        self._mem_objs:Dict[Tuple[str, int, cl_mem_flags], List[MemObject, CommandQueue]] = {}
         self._arg_name:str = ""
         self._should_copy:bool = True
         if np.shares_memory(obj, self):
@@ -33,8 +33,8 @@ class ndarray(np.ndarray):
             self._parent:Optional[ndarray] = None
 
     def _set_host_dirty(self):
-        for buffer, cmd_queue in self._buffers.values():
-            buffer.dirty_on_host = True
+        for mem_obj, cmd_queue in self._mem_objs.values():
+            mem_obj.dirty_on_host = True
 
         if self._parent is not None:
             self._parent._set_host_dirty()
@@ -129,7 +129,7 @@ class ndarray(np.ndarray):
         if not isinstance(value, ndarray):
             value = value.view(ndarray)
 
-        value._buffers = {}
+        value._mem_objs = {}
         value._arg_name = ""
         if np.shares_memory(value, self):
             value._parent = self
@@ -189,7 +189,7 @@ class ndarray(np.ndarray):
         return result
 
     def to_host(self):
-        if not self._should_copy or not hasattr(self, "_parent") or not hasattr(self, "_buffers"):
+        if not self._should_copy or not hasattr(self, "_parent") or not hasattr(self, "_mem_objs"):
             return
         
         self._should_copy = False
@@ -198,59 +198,65 @@ class ndarray(np.ndarray):
             self._parent.to_host()
 
         event = None
-        lastest_dirty_buffer:Optional[Buffer] = None
+        lastest_dirty_mem_obj:Optional[MemObject] = None
         used_cmd_queue:Optional[CommandQueue] = None
-        for buffer, cmd_queue in self._buffers.values():
-            if buffer.dirty_on_device and (lastest_dirty_buffer is None or buffer.device_dirty_time > lastest_dirty_buffer.device_dirty_time):
-                lastest_dirty_buffer = buffer
+        for mem_obj, cmd_queue in self._mem_objs.values():
+            if mem_obj.dirty_on_device and (lastest_dirty_mem_obj is None or mem_obj.device_dirty_time > lastest_dirty_mem_obj.device_dirty_time):
+                lastest_dirty_mem_obj = mem_obj
                 used_cmd_queue = cmd_queue
                 break
 
-        if lastest_dirty_buffer is not None:
-            event = lastest_dirty_buffer.read(used_cmd_queue)
+        if lastest_dirty_mem_obj is not None:
+            event = lastest_dirty_mem_obj.read(used_cmd_queue)
             event.wait()
-            lastest_dirty_buffer.dirty_on_device = False
+            lastest_dirty_mem_obj.dirty_on_device = False
 
-            if lastest_dirty_buffer.data is not self:
-                self[:] = lastest_dirty_buffer.data
+            if lastest_dirty_mem_obj.data is not self:
+                self[:] = lastest_dirty_mem_obj.data
 
-            lastest_dirty_buffer.dirty_on_host = False
+            lastest_dirty_mem_obj.dirty_on_host = False
 
             print(f"copy data to host for argument '{self._arg_name}'")
 
-        for buffer, cmd_queue in self._buffers.values():
-            buffer.dirty_on_device = False
+        for mem_obj, cmd_queue in self._mem_objs.values():
+            mem_obj.dirty_on_device = False
 
         self._should_copy = True
 
-    def _to_device(self, backend:str, cmd_queue:CommandQueue, flags:cl_mem_flags, arg_name:str)->Tuple[Buffer, Event]:
+    def _to_device(self, cmd_queue:CommandQueue, arg_name:str, flags:cl_mem_flags=None, image_info:imagend_t=None)->Tuple[MemObject, Event]:
         old_shoule_copy = self._should_copy
         self._should_copy = False
 
         self._arg_name = arg_name
-        key = (backend, cmd_queue.context.id.value, flags)
 
-        if key not in self._buffers:
-            buffer = cmd_queue.context.create_buffer(size=self.nbytes, flags=flags)
-            buffer.dirty_on_host = True
-            self._buffers[key] = [buffer, cmd_queue]
+        if image_info is None:
+            key = (cmd_queue.context.id.value, flags)
         else:
-            self._buffers[key][1] = cmd_queue
+            key = (cmd_queue.context.id.value, image_info.__class__.__name__, image_info.shape, image_info.dtype, image_info.flags)
+
+        if key not in self._mem_objs:
+            if image_info is None:
+                mem_obj = cmd_queue.context.create_buffer(size=self.nbytes, flags=flags)
+            else:
+                mem_obj = cmd_queue.context.create_image(image_info)
+
+            mem_obj.dirty_on_host = True
+            self._mem_objs[key] = [mem_obj, cmd_queue]
+        else:
+            self._mem_objs[key][1] = cmd_queue
 
         event = None
-        buffer = self._buffers[key][0]
-        if buffer.dirty_on_host:
-            event = buffer.set_data(cmd_queue, self)
+        mem_obj = self._mem_objs[key][0]
+        if mem_obj.dirty_on_host:
+            event = mem_obj.set_data(cmd_queue, self)
             CL_MEM_READ_ONLY = (1 << 2)
-            if not (buffer.flags & CL_MEM_READ_ONLY):
-                buffer.dirty_on_device = True
+            if not (mem_obj.flags & CL_MEM_READ_ONLY):
+                mem_obj.dirty_on_device = True
 
-            buffer.dirty_on_host = False
-            print(f"copy data to device for argument '{arg_name}'")
+            mem_obj.dirty_on_host = False
 
         self._should_copy = old_shoule_copy
-
-        return buffer, event
+        return mem_obj, event
 
     @_access_value
     def __getitem__(self, key):

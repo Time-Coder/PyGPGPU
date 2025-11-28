@@ -372,43 +372,34 @@ class Kernel(CLObject):
                     CL.clSetKernelArg(self.id, index, bytes_per_group, None)
                     arg_info.value = bytes_per_group
                 else:
-                    if isinstance(value, gnp.ndarray):
-                        buffer, event = value._to_device("opencl", cmd_queue, arg_info.recommended_flags, arg_info.name)
-                        if arg_info.mem_obj != buffer:
-                            CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
-                            arg_info.mem_obj = buffer
-
-                        arg_info.value = value
-                        return [{"event": event}]
+                    if isinstance(value, np.ndarray):
+                        used_value = value
+                        if value.dtype != content_type:
+                            used_value = value.astype(content_type)
                     else:
-                        if isinstance(value, np.ndarray):
-                            used_value = value
-                            if value.dtype != content_type:
-                                used_value = value.astype(content_type)
-                        else:
-                            ProgramParser._apply_structure_pointers(value, cmd_queue)
-                            used_value = np.array(value, dtype=content_type)
+                        ProgramParser._apply_structure_pointers(value, cmd_queue)
+                        used_value = np.array(value, dtype=content_type)
 
-                        if not used_value.flags['C_CONTIGUOUS']:
-                            used_value = np.ascontiguousarray(used_value)
+                    if not used_value.flags['C_CONTIGUOUS']:
+                        used_value = np.ascontiguousarray(used_value)
 
-                        buffer, event = arg_info.use_buffer(cmd_queue, used_value)
-                        if arg_info.mem_obj != buffer:
-                            CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
-                            arg_info.mem_obj = buffer
+                    buffer, event = arg_info.use_buffer(cmd_queue, used_value)
+                    if arg_info.mem_obj != buffer:
+                        CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                        arg_info.mem_obj = buffer
 
-                        arg_info.value = value
-                        if arg_info.need_read_back:
-                            return [{
-                                "arg_info": arg_info,
-                                "value": value,
-                                "mem_obj": buffer,
-                                "event": event
-                            }]
-                        else:
-                            return [{
-                                "event": event
-                            }]
+                    arg_info.value = value
+                    if arg_info.need_read_back and not isinstance(value, gnp.ndarray):
+                        return [{
+                            "arg_info": arg_info,
+                            "value": value,
+                            "mem_obj": buffer,
+                            "event": event
+                        }]
+                    else:
+                        return [{
+                            "event": event
+                        }]
         elif arg_type_str in CLInfo.image_types:
             image_type = CLInfo.image_types[arg_type_str]
             if not isinstance(value, (np.ndarray, image_type)):
@@ -417,14 +408,15 @@ class Kernel(CLObject):
             used_value = value
             if isinstance(value, np.ndarray):
                 used_value = image_type(value)
-
+            
             image, event = arg_info.use_image(cmd_queue, used_value)
+
             if arg_info.mem_obj != image:
                 CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(image.id))
                 arg_info.mem_obj = image
 
             arg_info.value = value
-            if arg_info.need_read_back:
+            if arg_info.need_read_back and not isinstance(used_value.data, gnp.ndarray):
                 return [{
                     "arg_info": arg_info,
                     "value": value,

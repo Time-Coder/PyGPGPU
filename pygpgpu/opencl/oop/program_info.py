@@ -21,6 +21,7 @@ from .mem_object import MemObject
 from .event import Event
 from .imagend import imagend
 from .pipe import pipe
+from ... import numpy as gnp
 
 
 class VarInfo:
@@ -92,8 +93,12 @@ class VarInfo:
             return cl_mem_flags.CL_MEM_READ_WRITE
 
     def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
-        used_buffer = cmd_queue.context.get_buffer(data.nbytes, self.recommended_flags)
-        event = used_buffer.set_data(cmd_queue, data)
+        if isinstance(data, gnp.ndarray):
+            used_buffer, event = data._to_device(cmd_queue, self.name, self.recommended_flags)
+        else:
+            used_buffer = cmd_queue.context.get_buffer(data.nbytes, self.recommended_flags)
+            event = used_buffer.set_data(cmd_queue, data)
+            
         if event is not None and CL.print_info:
             print(f"copy data to device for argument '{self.name}'")
         
@@ -102,11 +107,12 @@ class VarInfo:
     def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
         image.flags = self.recommended_flags
 
-        image_data = image.data
-        image.data = None
-        used_image = cmd_queue.context.get_image(image)
-        
-        event = used_image.set_data(cmd_queue, image_data)
+        if isinstance(image.data, gnp.ndarray):
+            used_image, event = image.data._to_device(cmd_queue, self.name, image_info=image.plain)
+        else:
+            used_image = cmd_queue.context.get_image(image.plain)
+            event = used_image.set_data(cmd_queue, image.data)
+
         if event is not None and CL.print_info:
             print(f"copy data to device for argument '{self.name}'")
         

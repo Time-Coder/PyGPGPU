@@ -66,7 +66,7 @@ class Event(CLObject):
         CL.clWaitForEvents(len(events), Event.events_ptr(events))
         error_messages:List[str] = []
         for event in events:
-            if event.status != cl_command_execution_status.CL_COMPLETE:
+            if event.status not in [cl_command_execution_status.CL_COMPLETE, ErrorCode.CL_SUCCESS]:
                 error_messages.append(event.error_message)
 
         if error_messages:
