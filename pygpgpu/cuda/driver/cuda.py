@@ -17,26 +17,16 @@ class MetaCUDA(type):
     @staticmethod
     def cuda_lib_path():
         system = platform.system()
-        
         if system == "Windows":
-            return "OpenCL.dll"
-        
-        elif system == "Darwin":
-            return "/System/Library/Frameworks/OpenCL.framework/OpenCL"
-        
+            lib_name = "nvcuda.dll"
         elif system == "Linux":
-            possible_paths = [
-                "libOpenCL.so",
-                "/usr/lib/x86_64-linux-gnu/libOpenCL.so",
-                "/usr/lib64/libOpenCL.so",
-                "/usr/lib/libOpenCL.so",
-                "/opt/ocl/lib/libOpenCL.so",
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    return path
-                
-            return "libOpenCL.so"
+            lib_name = "libcuda.so"
+        elif system == "Darwin":  # macOS
+            lib_name = "libcuda.dylib"
+        else:
+            raise RuntimeError(f"unsupported operating system: {system}")
+        
+        return lib_name
     
     @staticmethod
     def dll():
@@ -109,8 +99,8 @@ class CUDA(metaclass=MetaCUDA):
                     error_code = CUresult(args[idx].contents.value)
 
                 if error_code != CUresult.CUDA_SUCCESS:
-                    if error_code in func_info["errors"]:
-                        raise RuntimeError(f"{error_code}: {func_info['errors'][error_code]}")
+                    if error_code in CUInfo.error_codes:
+                        raise RuntimeError(f"{error_code}: {CUInfo.error_codes[error_code]}")
                     else:
                         raise RuntimeError(f"{error_code}: unknown error.")
 
@@ -189,6 +179,4 @@ class CUDA(metaclass=MetaCUDA):
             func_info["dll_func"] = func
 
         # preheat
-        n_platforms = c_uint()
-        ptr_n_platforms = pointer(n_platforms)
-        CUDA.clGetPlatformIDs(0, None, ptr_n_platforms)
+        CUDA.cuInit(0)

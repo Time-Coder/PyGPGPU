@@ -1,12 +1,7 @@
-from pygpgpu.opencl import image2d_t, sampler_t, int2, float4
-from typing import Any
+from pygpgpu.cuda import CUDA
+from pygpgpu.cuda.oop import Device, Devices
 
-import pygpgpu.numpy as np
-from test import flipY
+CUDA.print_call = True
 
-
-src_image = image2d_t("test.png")
-dest_image = image2d_t(np.zeros_like(src_image.data))
-s = sampler_t()
-flipY["amd"](src_image, dest_image, s)
-dest_image.save("dest.png")
+for device in Devices:
+    print(device.default_context.api_version)

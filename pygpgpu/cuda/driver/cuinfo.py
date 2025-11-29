@@ -1,5 +1,6 @@
-from ctypes import c_uint, c_int
-from .cutypes import CUresult
+from ctypes import c_uint, c_int, c_size_t, c_char_p, POINTER
+
+from .cutypes import CUresult, CUdevice, CUuuid, CUcontext
 
 
 class CUInfo:
@@ -10,13 +11,161 @@ class CUInfo:
             "args": {
                 "Flags": c_uint,
             },
-            "restype": c_int,
-            "errors": {
-                CUresult.CUDA_ERROR_INVALID_VALUE,
-                CUresult.CUDA_ERROR_INVALID_DEVICE,
-                CUresult.CUDA_ERROR_SYSTEM_DRIVER_MISMATCH,
-                CUresult.CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE
-            }
+            "restype": c_int
+        },
+
+        # CUresult cuDeviceGetCount(int *count)
+        "cuDeviceGetCount": {
+            "args": {
+                "count": POINTER(c_int)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuDeviceGet(CUdevice *device, int ordinal)
+        "cuDeviceGet": {
+            "args": {
+                "device": POINTER(CUdevice),
+                "ordinal": c_int
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuDeviceGetName(char* name, int len, CUdevice dev)
+        "cuDeviceGetName": {
+            "args": {
+                "name": c_char_p,
+                "len": c_int,
+                "dev": CUdevice
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev)
+        "cuDeviceGetAttribute": {
+            "args": {
+                "pi": POINTER(c_int),
+                "attrib": c_int,
+                "dev": CUdevice
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuDeviceTotalMem(size_t* bytes, CUdevice dev)
+        "cuDeviceTotalMem": {
+            "args": {
+                "bytes": POINTER(c_size_t),
+                "dev": CUdevice
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuDeviceGetUuid(CUuuid *uuid, CUdevice dev)
+        "cuDeviceGetUuid": {
+            "args": {
+                "uuid": POINTER(CUuuid),
+                "dev": CUdevice
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxCreate(CUcontext* pctx, unsigned int flags, CUdevice dev)
+        "cuCtxCreate": {
+            "args": {
+                "pctx": POINTER(CUcontext),
+                "flags": c_uint,
+                "dev": CUdevice
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxDestroy(CUcontext ctx)
+        "cuCtxDestroy": {
+            "args": {
+                "ctx": CUcontext
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxGetApiVersion(CUcontext ctx, unsigned int *version)
+        "cuCtxGetApiVersion": {
+            "args": {
+                "ctx": CUcontext,
+                "version": POINTER(c_uint)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxGetCacheConfig(CUfunc_cache* pconfig)
+        "cuCtxGetCacheConfig": {
+            "args": {
+                "pconfig": POINTER(c_int)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxGetLimit(size_t* pvalue, CUlimit limit)
+        "cuCtxGetLimit": {
+            "args": {
+                "pvalue": POINTER(c_size_t),
+                "limit": c_int
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxPopCurrent(CUcontext* pctx)
+        "cuCtxPopCurrent": {
+            "args": {
+                "pctx": POINTER(CUcontext)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxPushCurrent(CUcontext ctx)
+        "cuCtxPushCurrent": {
+            "args": {
+                "ctx": CUcontext
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxSetCacheConfig(CUfunc_cache config)
+        "cuCtxSetCacheConfig": {
+            "args": {
+                "config": c_int
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxSetLimit(CUlimit limit, size_t value)
+        "cuCtxSetLimit": {
+            "args": {
+                "limit": c_int,
+                "value": c_size_t
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxSynchronize(void)
+        "cuCtxSynchronize": {
+            "args": {},
+            "restype": c_int
+        },
+
+        # CUresult cuCtxGetCurrent(CUcontext* pctx)
+        "cuCtxGetCurrent": {
+            "args": {
+                "pctx": POINTER(CUcontext)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuCtxSetCurrent(CUcontext ctx)
+        "cuCtxSetCurrent": {
+            "args": {
+                "ctx": CUcontext
+            },
+            "restype": c_int
         }
     }
 
@@ -183,3 +332,7 @@ To continue using CUDA, the process must be terminated and relaunched.""",
         CUresult.CUDA_ERROR_INVALID_RESOURCE_CONFIGURATION: "one or more resources are insufficient or non-applicable for the operation.",
         CUresult.CUDA_ERROR_UNKNOWN: "an unknown internal error has occurred.",
     }
+
+    no_cached_info = set()
+
+    
