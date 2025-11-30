@@ -1,7 +1,7 @@
 from ctypes import c_int64
 import numpy as np
 
-from .genVec8 import genVec8
+from ....vec_types import genVec8
 
 
 class long8(genVec8):

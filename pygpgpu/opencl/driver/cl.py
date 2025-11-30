@@ -1,9 +1,8 @@
 from __future__ import annotations
-import ctypes
 import os
 import platform
 from typing import Dict, Callable
-from ctypes import c_int, c_void_p, c_uint, pointer
+from ctypes import c_int, c_void_p, c_uint, pointer, addressof, _Pointer, Array, CDLL
 
 from .clinfo import CLInfo
 from .cltypes import ErrorCode
@@ -41,7 +40,7 @@ class MetaCL(type):
     @staticmethod
     def dll():
         if MetaCL.__dll is None:
-            MetaCL.__dll = ctypes.CDLL(MetaCL.opencl_lib_path())
+            MetaCL.__dll = CDLL(MetaCL.opencl_lib_path())
 
         return MetaCL.__dll
 
@@ -153,20 +152,20 @@ class CL(metaclass=MetaCL):
             if type(arg).__name__ == 'CArgObject':
                 obj = arg._obj
                 type_name = CL.Func.__get_ctypes_type_name(obj)
-                addr = ctypes.addressof(obj)
+                addr = addressof(obj)
                 return f"({type_name}*)(0x{addr:x})"
 
-            if isinstance(arg, ctypes._Pointer):
+            if isinstance(arg, _Pointer):
                 pointed_type = arg._type_
                 type_name = CL.Func.__get_ctypes_type_name(pointed_type)
-                addr = ctypes.addressof(arg.contents) if arg else 0
+                addr = addressof(arg.contents) if arg else 0
                 return f"({type_name}*)(0x{addr:x})"
 
-            if isinstance(arg, ctypes.Array):
+            if isinstance(arg, Array):
                 elem_type = arg._type_
                 elem_type_name = CL.Func.__get_ctypes_type_name(elem_type)
                 length = len(arg)
-                addr = ctypes.addressof(arg)
+                addr = addressof(arg)
                 return f"({elem_type_name}[{length}])(0x{addr:x})"
 
             if hasattr(arg, 'value'):
@@ -179,16 +178,19 @@ class CL(metaclass=MetaCL):
         
     @staticmethod
     def init():
-        for func_name, func_info in CLInfo.func_signatures.items():
-            if "dll_func" in func_info:
-                continue
+        try:
+            for func_name, func_info in CLInfo.func_signatures.items():
+                if "dll_func" in func_info:
+                    continue
 
-            func = getattr(MetaCL.dll(), func_name)
-            func.argtypes = list(func_info["args"].values())
-            func.restype = func_info["restype"]
-            func_info["dll_func"] = func
+                func = getattr(MetaCL.dll(), func_name)
+                func.argtypes = list(func_info["args"].values())
+                func.restype = func_info["restype"]
+                func_info["dll_func"] = func
 
-        # preheat
-        n_platforms = c_uint()
-        ptr_n_platforms = pointer(n_platforms)
-        CL.clGetPlatformIDs(0, None, ptr_n_platforms)
+            # preheat
+            n_platforms = c_uint()
+            ptr_n_platforms = pointer(n_platforms)
+            CL.clGetPlatformIDs(0, None, ptr_n_platforms)
+        except:
+            pass

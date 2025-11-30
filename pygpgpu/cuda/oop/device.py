@@ -12,6 +12,7 @@ from ..driver import (
     ptr_CUcontext,
     CUctx_flags
 )
+from ...utils import sanitize_filename
 
 
 class Device(CUObject):
@@ -50,6 +51,10 @@ class Device(CUObject):
             self._uuid = UUID(bytes=bytes(result))
 
         return self._uuid
+    
+    @property
+    def unique_key(self)->str:
+        return sanitize_filename(f"{self.name} {self.compute_capability_major}.{self.compute_capability_minor}")
     
     def create_context(self, flags:CUctx_flags=CUctx_flags.CU_CTX_SCHED_AUTO)->Context:
         return Context(self, flags)

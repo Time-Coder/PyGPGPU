@@ -1,6 +1,6 @@
 from typing import Union
 
-from .genVec16 import genVec16
+from ....vec_types import genVec16
 
 
 class ulong16(genVec16):

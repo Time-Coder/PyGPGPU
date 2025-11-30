@@ -1,7 +1,7 @@
 from ctypes import c_int64
 import numpy as np
 
-from .genVec4 import genVec4
+from ....vec_types import genVec4
 
 
 class long4(genVec4):

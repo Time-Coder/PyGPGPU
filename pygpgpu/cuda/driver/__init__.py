@@ -14,7 +14,28 @@ from .cutypes import (
     CUctx_flags,
     CUfunc_cache,
     CUlimit,
-    ptr_uint
+    ptr_uint,
+    CUmodule,
+    ptr_CUmodule,
+    CUfunction,
+    ptr_CUfunction,
+    CUdeviceptr,
+    ptr_CUdeviceptr,
+    CUstream,
+    ptr_CUstream,
+    CUsharedconfig,
+    CUfunction_attribute
+)
+from .nvrtc import NVRTC
+from .nvrtcinfo import NVRTCInfo
+from .nvrtctypes import (
+    nvrtcProgram,
+    nvrtcResult,
+    ptr_nvrtcProgram,
+    ptr_ptr_char,
+    GPUArch,
+    CppStd,
+    OptInfoKind
 )
 
 from ...constants import IntEnum, IntFlag

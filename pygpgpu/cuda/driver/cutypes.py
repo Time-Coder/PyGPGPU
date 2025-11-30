@@ -1,4 +1,4 @@
-from ctypes import c_int, c_uint, POINTER, c_size_t, Structure, c_char, c_void_p
+from ctypes import c_int, c_uint, POINTER, c_size_t, Structure, c_char, c_void_p, c_uint64
 from typing import TypeAlias
 
 from ...constants import IntEnum, IntFlag
@@ -7,14 +7,20 @@ from ...constants import IntEnum, IntFlag
 CUdevice_v1 = c_int
 CUdevice = CUdevice_v1
 CUcontext = c_void_p
+CUmodule = c_void_p
+CUfunction = c_void_p
+CUdeviceptr = c_uint64
+CUstream = c_void_p
 
 ptr_uint: TypeAlias = POINTER(c_uint)
 ptr_int: TypeAlias = POINTER(c_int)
 ptr_CUdevice: TypeAlias = POINTER(CUdevice)
 ptr_size_t: TypeAlias = POINTER(c_size_t)
 ptr_CUcontext: TypeAlias = POINTER(CUcontext)
-
-
+ptr_CUmodule: TypeAlias = POINTER(CUmodule)
+ptr_CUfunction: TypeAlias = POINTER(CUfunction)
+ptr_CUdeviceptr: TypeAlias = POINTER(CUdeviceptr)
+ptr_CUstream: TypeAlias = POINTER(CUstream)
 
 class CUresult(IntEnum):
     CUDA_SUCCESS                              = 0
@@ -294,6 +300,30 @@ class CUlimit(IntEnum):
     CU_LIMIT_SHMEM_SIZE                       = 0x07  # A maximum size in bytes of shared memory available to CUDA kernels on a CIG context. Can only be queried, cannot be set
     CU_LIMIT_CIG_ENABLED                      = 0x08  # A non-zero value indicates this CUDA context is a CIG-enabled context. Can only be queried, cannot be set
     CU_LIMIT_CIG_SHMEM_FALLBACK_ENABLED       = 0x09  # When set to a non-zero value, CUDA will fail to launch a kernel on a CIG context, instead of using the fallback path, if the kernel uses more shared memory than available
+
+class CUfunction_attribute(IntEnum):
+    CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK = 0
+    CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES = 1
+    CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES = 2
+    CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES = 3
+    CU_FUNC_ATTRIBUTE_NUM_REGS = 4
+    CU_FUNC_ATTRIBUTE_PTX_VERSION = 5
+    CU_FUNC_ATTRIBUTE_BINARY_VERSION = 6
+    CU_FUNC_ATTRIBUTE_CACHE_MODE_CA = 7
+    CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8
+    CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT = 9
+    CU_FUNC_ATTRIBUTE_CLUSTER_SIZE_MUST_BE_SET = 10
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_WIDTH = 11
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_HEIGHT = 12
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_DEPTH = 13
+    CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED = 14
+    CU_FUNC_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE = 15
+
+
+class CUsharedconfig(IntEnum):
+    CU_SHARED_MEM_CONFIG_DEFAULT_BANK_SIZE    = 0x00 # set default shared memory bank size
+    CU_SHARED_MEM_CONFIG_FOUR_BYTE_BANK_SIZE  = 0x01 # set shared memory bank width to four bytes
+    CU_SHARED_MEM_CONFIG_EIGHT_BYTE_BANK_SIZE = 0x02  # set shared memory bank width to eight bytes
 
 
 class CUuuid(Structure):

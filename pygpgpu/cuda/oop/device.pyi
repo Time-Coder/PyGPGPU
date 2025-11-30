@@ -12,6 +12,9 @@ class Device(CUObject):
     def create_context(self, flags:CUctx_flags=CUctx_flags.CU_CTX_SCHED_AUTO)->Context: ...
 
     @property
+    def unique_key(self)->str: ...
+
+    @property
     def default_context(self)->Context: ...
 
     @property

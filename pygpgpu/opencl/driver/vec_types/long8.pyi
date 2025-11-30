@@ -1,6 +1,6 @@
 from typing import Union
 
-from .genVec8 import genVec8
+from ....vec_types import genVec8
 
 
 class long8(genVec8):

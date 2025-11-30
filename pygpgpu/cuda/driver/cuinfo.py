@@ -1,9 +1,153 @@
-from ctypes import c_uint, c_int, c_size_t, c_char_p, POINTER
+from ctypes import (
+    c_int8, c_uint8, c_int16, c_uint16,
+    c_int32, c_uint32, c_int64, c_uint64,
+    c_float, c_double, c_uint, c_int,
+    c_size_t, c_char_p, POINTER, c_void_p
+)
 
-from .cutypes import CUresult, CUdevice, CUuuid, CUcontext
+from .cutypes import (
+    CUresult, CUdevice, CUuuid, CUcontext,
+    ptr_CUmodule, CUmodule, ptr_CUfunction,
+    ptr_CUdeviceptr, CUdeviceptr,
+    ptr_CUstream, CUstream,
+    CUfunction, CUfunction_attribute
+)
+
+from .vec_types import (
+    char2, char3, char4,
+    uchar2, uchar3, uchar4,
+    short2, short3, short4,
+    ushort2, ushort3, ushort4,
+    int2, int3, int4,
+    uint2, uint3, uint4,
+    long2, long3, long4,
+    ulong2, ulong3, ulong4,
+    float2, float3, float4,
+    double2, double3, double4
+)
 
 
 class CUInfo:
+
+    basic_types = {
+        'char': c_int8,
+        'char2': char2,
+        'char3': char3,
+        'char4': char4,
+
+        'uchar': c_uint8,
+        'uchar2': uchar2,
+        'uchar3': uchar3,
+        'uchar4': uchar4,
+
+        'short': c_int16,
+        'short2': short2,
+        'short3': short3,
+        'short4': short4,
+
+        'ushort': c_uint16,
+        'ushort2': ushort2,
+        'ushort3': ushort3,
+        'ushort4': ushort4,
+
+        'int': c_int32,
+        'int2': int2,
+        'int3': int3,
+        'int4': int4,
+
+        'uint': c_uint32,
+        'uint2': uint2,
+        'uint3': uint3,
+        'uint4': uint4,
+
+        'long': c_int64,
+        'long2': long2,
+        'long3': long3,
+        'long4': long4,
+
+        'ulong': c_uint64,
+        'ulong2': ulong2,
+        'ulong3': ulong3,
+        'ulong4': ulong4,
+
+        'float': c_float,
+        'float2': float2,
+        'float3': float3,
+        'float4': float4,
+
+        'double': c_double,
+        'double2': double2,
+        'double3': double3,
+        'double4': double4,
+    }
+
+    scalar_types = {
+        'char': c_int8,
+        'uchar': c_uint8,
+        'short': c_int16,
+        'ushort': c_uint16,
+        'int': c_int32,
+        'uint': c_uint32,
+        'long': c_int64,
+        'ulong': c_uint64,
+        'float': c_float,
+        'double': c_double
+    }
+
+    vec_types = {
+        'char2': char2,
+        'char3': char3,
+        'char4': char4,
+
+        'uchar2': uchar2,
+        'uchar3': uchar3,
+        'uchar4': uchar4,
+
+        'short2': short2,
+        'short3': short3,
+        'short4': short4,
+
+        'ushort2': ushort2,
+        'ushort3': ushort3,
+        'ushort4': ushort4,
+
+        'int2': int2,
+        'int3': int3,
+        'int4': int4,
+
+        'uint2': uint2,
+        'uint3': uint3,
+        'uint4': uint4,
+
+        'long2': long2,
+        'long3': long3,
+        'long4': long4,
+
+        'ulong2': ulong2,
+        'ulong3': ulong3,
+        'ulong4': ulong4,
+
+        'float2': float2,
+        'float3': float3,
+        'float4': float4,
+
+        'double2': double2,
+        'double3': double3,
+        'double4': double4
+    }
+
+    alter_types = {
+        'char': (c_int8, int),
+        'uchar': (c_uint8, int),
+        'short': (c_int16, int),
+        'ushort': (c_uint16, int),
+        'int': (c_int32, int),
+        'uint': (c_uint32, int),
+        'long': (c_int64, int),
+        'ulong': (c_uint64, int),
+        'float': (c_float, float),
+        'double': (c_double, float)
+    }
 
     func_signatures = {
         # CUresult cuInit(unsigned int Flags)
@@ -164,6 +308,135 @@ class CUInfo:
         "cuCtxSetCurrent": {
             "args": {
                 "ctx": CUcontext
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuModuleLoadData(CUmodule* module, const void* image)
+        "cuModuleLoadData": {
+            "args": {
+                "module": ptr_CUmodule,
+                "image": c_void_p
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuModuleGetFunction(CUfunction* hfunc, CUmodule hmod, const char* name)
+        "cuModuleGetFunction": {
+            "args": {
+                "hfunc": ptr_CUfunction,
+                "hmod": CUmodule,
+                "name": c_char_p
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuModuleUnload(CUmodule hmod)
+        "cuModuleUnload": {
+            "args": {
+                "hmod": CUmodule
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuFuncGetAttribute(int* pi, CUfunction_attribute attrib, CUfunction hfunc)
+        "cuFuncGetAttribute": {
+            "args": {
+                "pi": POINTER(c_int),
+                "attrib": CUfunction_attribute,
+                "hfunc": CUfunction
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunction_attribute attrib, int value)
+        "cuFuncSetAttribute": {
+            "args": {
+                "hfunc": CUfunction,
+                "attrib": CUfunction_attribute,
+                "value": c_int
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemAlloc(CUdeviceptr* dptr, size_t bytesize)
+        "cuMemAlloc": {
+            "args": {
+                "dptr": ptr_CUdeviceptr,
+                "bytesize": c_size_t
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemcpyHtoD(CUdeviceptr dstDevice, const void* srcHost, size_t ByteCount)
+        "cuMemcpyHtoD": {
+            "args": {
+                "dstDevice": CUdeviceptr,
+                "srcHost": c_void_p,
+                "ByteCount": c_size_t
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemcpyDtoH(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount)
+        "cuMemcpyDtoH": {
+            "args": {
+                "dstHost": c_void_p,
+                "srcDevice": CUdeviceptr,
+                "ByteCount": c_size_t
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void* srcHost, size_t ByteCount, CUstream hStream)
+        "cuMemcpyHtoDAsync": {
+            "args": {
+                "dstDevice": CUdeviceptr,
+                "srcHost": c_void_p,
+                "ByteCount": c_size_t,
+                "hStream": CUstream
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemcpyDtoHAsync(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream)
+        "cuMemcpyDtoHAsync": {
+            "args": {
+                "dstHost": c_void_p,
+                "srcDevice": CUdeviceptr,
+                "ByteCount": c_size_t,
+                "hStream": CUstream
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemFree(CUdeviceptr dptr)
+        "cuMemFree": {
+            "args": {
+                "dptr": CUdeviceptr
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuLaunchKernel(
+        #     CUfunction f,
+        #     unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ,
+        #     unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ,
+        #     unsigned int sharedMemBytes, CUstream hStream, void** kernelParams, void** extra
+        # )
+        "cuLaunchKernel": {
+            "args": {
+                "f": CUfunction,
+                "gridDimX": c_uint,
+                "gridDimY": c_uint,
+                "gridDimZ": c_uint,
+                "blockDimX": c_uint,
+                "blockDimY": c_uint,
+                "blockDimZ": c_uint,
+                "sharedMemBytes": c_uint,
+                "hStream": CUstream,
+                "kernelParams": POINTER(c_void_p),
+                "extra": POINTER(c_void_p)
             },
             "restype": c_int
         }

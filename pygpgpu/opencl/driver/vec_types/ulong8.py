@@ -1,7 +1,7 @@
 from ctypes import c_uint64
 import numpy as np
 
-from .genVec8 import genVec8
+from ....vec_types import genVec8
 
 
 class ulong8(genVec8):

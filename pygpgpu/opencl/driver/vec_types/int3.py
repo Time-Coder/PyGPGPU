@@ -1,7 +1,7 @@
 from ctypes import c_int32
 import numpy as np
 
-from .genVec3 import genVec3
+from ....vec_types import genVec3
 
 
 class int3(genVec3):

@@ -1,9 +1,7 @@
 from __future__ import annotations
-import ctypes
-import os
 import platform
 from typing import Dict, Callable
-from ctypes import c_int, c_void_p, c_uint, pointer
+from ctypes import c_int, c_void_p, CDLL, _Pointer, Array, addressof
 
 from .cuinfo import CUInfo
 from .cutypes import CUresult
@@ -31,7 +29,7 @@ class MetaCUDA(type):
     @staticmethod
     def dll():
         if MetaCUDA.__dll is None:
-            MetaCUDA.__dll = ctypes.CDLL(MetaCUDA.cuda_lib_path())
+            MetaCUDA.__dll = CDLL(MetaCUDA.cuda_lib_path())
 
         return MetaCUDA.__dll
 
@@ -143,20 +141,20 @@ class CUDA(metaclass=MetaCUDA):
             if type(arg).__name__ == 'CArgObject':
                 obj = arg._obj
                 type_name = CUDA.Func.__get_ctypes_type_name(obj)
-                addr = ctypes.addressof(obj)
+                addr = addressof(obj)
                 return f"({type_name}*)(0x{addr:x})"
 
-            if isinstance(arg, ctypes._Pointer):
+            if isinstance(arg, _Pointer):
                 pointed_type = arg._type_
                 type_name = CUDA.Func.__get_ctypes_type_name(pointed_type)
-                addr = ctypes.addressof(arg.contents) if arg else 0
+                addr = addressof(arg.contents) if arg else 0
                 return f"({type_name}*)(0x{addr:x})"
 
-            if isinstance(arg, ctypes.Array):
+            if isinstance(arg, Array):
                 elem_type = arg._type_
                 elem_type_name = CUDA.Func.__get_ctypes_type_name(elem_type)
                 length = len(arg)
-                addr = ctypes.addressof(arg)
+                addr = addressof(arg)
                 return f"({elem_type_name}[{length}])(0x{addr:x})"
 
             if hasattr(arg, 'value'):
@@ -169,14 +167,17 @@ class CUDA(metaclass=MetaCUDA):
         
     @staticmethod
     def init():
-        for func_name, func_info in CUInfo.func_signatures.items():
-            if "dll_func" in func_info:
-                continue
+        try:
+            for func_name, func_info in CUInfo.func_signatures.items():
+                if "dll_func" in func_info:
+                    continue
 
-            func = getattr(MetaCUDA.dll(), func_name)
-            func.argtypes = list(func_info["args"].values())
-            func.restype = func_info["restype"]
-            func_info["dll_func"] = func
+                func = getattr(MetaCUDA.dll(), func_name)
+                func.argtypes = list(func_info["args"].values())
+                func.restype = func_info["restype"]
+                func_info["dll_func"] = func
 
-        # preheat
-        CUDA.cuInit(0)
+            # preheat
+            CUDA.cuInit(0)
+        except:
+            pass
