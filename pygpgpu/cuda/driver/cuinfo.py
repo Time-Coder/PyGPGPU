@@ -313,6 +313,15 @@ class CUInfo:
             "restype": c_int
         },
 
+        # CUresult cuCtxWaitEvent(CUcontext hCtx, CUevent hEvent)
+        "cuCtxWaitEvent": {
+            "args": {
+                "hCtx": CUcontext,
+                "hEvent": CUevent
+            },
+            "restype": c_int
+        },
+
         # CUresult cuModuleLoadData(CUmodule* module, const void* image)
         "cuModuleLoadData": {
             "args": {

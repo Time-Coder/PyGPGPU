@@ -105,6 +105,9 @@ class CUDA:
     def cuCtxSynchronize()->CUresult: ...
 
     @staticmethod
+    def cuCtxWaitEvent(hCtx:CUcontext, hEvent:CUevent)->CUresult: ...
+
+    @staticmethod
     def cuModuleLoadData(module:ptr_CUmodule, image:c_void_p)->CUresult: ...
 
     @staticmethod

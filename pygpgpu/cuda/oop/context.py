@@ -3,6 +3,7 @@ from ctypes import pointer, c_uint, c_size_t
 from typing import override, TYPE_CHECKING
 
 from .cuobject import CUObject
+from .event import Event
 from ..driver import CUDA, CUctx_flags, CUcontext, CUfunc_cache, CUlimit
 
 if TYPE_CHECKING:
@@ -44,9 +45,12 @@ class Context(CUObject):
         CUDA.cuCtxPopCurrent(ptr_context_id)
         return Context.instance(context_id)
 
-    def sync(self):
+    def sync(self)->None:
         self.make_current()
         CUDA.cuCtxSynchronize()
+
+    def wait_event(self, event:Event)->None:
+        CUDA.cuCtxWaitEvent(self.id, event.id)
 
     @property
     def device(self)->Device:
