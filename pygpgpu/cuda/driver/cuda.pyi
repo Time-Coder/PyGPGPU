@@ -1,4 +1,4 @@
-from ctypes import c_char_p, c_uint, c_size_t
+from ctypes import c_char_p, c_uint, c_size_t, c_void_p
 from typing import Any
 
 from .cutypes import (
@@ -14,7 +14,23 @@ from .cutypes import (
     CUcontext,
     ptr_uint,
     CUlimit,
-    CUfunc_cache
+    CUfunc_cache,
+    ptr_CUmodule,
+    ptr_CUfunction,
+    CUmodule,
+    CUfunction_attribute,
+    CUfunction,
+    ptr_CUdeviceptr,
+    CUdeviceptr,
+    CUstream,
+    ptr_ptr_void,
+    ptr_CUevent,
+    CUevent_flags,
+    CUevent,
+    ptr_CUstream,
+    CUstream_flags,
+    CUevent_wait_flags,
+    ptr_float
 )
 
 
@@ -87,3 +103,68 @@ class CUDA:
     
     @staticmethod
     def cuCtxSynchronize()->CUresult: ...
+
+    @staticmethod
+    def cuModuleLoadData(module:ptr_CUmodule, image:c_void_p)->CUresult: ...
+
+    @staticmethod
+    def cuModuleGetFunction(hfunc:ptr_CUfunction, hmod:CUmodule, name:c_char_p)->CUresult: ...
+
+    @staticmethod
+    def cuModuleUnload(hmod:CUmodule)->CUresult: ...
+
+    @staticmethod
+    def cuFuncGetAttribute(pi:ptr_int, attrib:CUfunction_attribute, hfunc:CUfunction)->CUresult: ...
+
+    @staticmethod
+    def cuFuncSetAttribute(hfunc:CUfunction, attrib:CUfunction_attribute, value:int)->CUresult: ...
+
+    @staticmethod
+    def cuMemAlloc(dptr:ptr_CUdeviceptr, bytesize:int)->CUresult: ...
+
+    @staticmethod
+    def cuMemcpyHtoD(dstDevice:CUdeviceptr, srcHost:c_void_p, ByteCount:int)->CUresult: ...
+
+    @staticmethod
+    def cuMemcpyDtoH(dstHost:c_void_p, srcDevice:CUdeviceptr, ByteCount:int)->CUresult: ...
+
+    @staticmethod
+    def cuMemcpyHtoDAsync(dstDevice:CUdeviceptr, srcHost:c_void_p, ByteCount:int, hStream:CUstream)->CUresult: ...
+
+    @staticmethod
+    def cuMemcpyDtoHAsync(dstHost:c_void_p, srcDevice:CUdeviceptr, ByteCount:int, hStream:CUstream)->CUresult: ...
+
+    @staticmethod
+    def cuMemFree(dptr:CUdeviceptr)->CUresult: ...
+
+    @staticmethod
+    def cuLaunchKernel(
+        f: CUfunction,
+        gridDimX: int, gridDimY: int, gridDimZ: int,
+        blockDimX: int, blockDimY: int, blockDimZ: int,
+        sharedMemBytes: int, hStream: CUstream, kernelParams: ptr_ptr_void, extra: ptr_ptr_void
+    )->CUresult: ...
+
+    @staticmethod
+    def cuEventCreate(phEvent:ptr_CUevent, Flags:CUevent_flags)->CUresult: ...
+
+    @staticmethod
+    def cuEventRecord(hEvent:CUevent, hStream:CUstream)->CUresult: ...
+
+    @staticmethod
+    def cuEventSynchronize(hEvent:CUevent)->CUresult: ...
+
+    @staticmethod
+    def cuStreamCreate(phStream:ptr_CUstream, Flags:CUstream_flags)->CUresult: ...
+
+    @staticmethod
+    def cuStreamWaitEvent(hStream:CUstream, hEvent:CUevent, Flags:CUevent_wait_flags)->CUresult: ...
+
+    @staticmethod
+    def cuEventElapsedTime(pMilliseconds:ptr_float, hStart:CUevent, hEnd:CUevent)->CUresult: ...
+
+    @staticmethod
+    def cuEventDestroy(hEvent:CUevent)->CUresult: ...
+
+    @staticmethod
+    def cuStreamDestroy(hStream:CUstream)->CUresult: ...

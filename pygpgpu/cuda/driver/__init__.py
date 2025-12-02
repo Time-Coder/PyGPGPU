@@ -24,7 +24,13 @@ from .cutypes import (
     CUstream,
     ptr_CUstream,
     CUsharedconfig,
-    CUfunction_attribute
+    CUfunction_attribute,
+    ptr_ptr_void,
+    CUevent_flags,
+    CUstream_flags,
+    CUevent_wait_flags,
+    ptr_float,
+    CUevent
 )
 from .nvrtc import NVRTC
 from .nvrtcinfo import NVRTCInfo

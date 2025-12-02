@@ -1,4 +1,4 @@
-from ctypes import c_int, c_uint, POINTER, c_size_t, Structure, c_char, c_void_p, c_uint64
+from ctypes import c_int, c_uint, c_float, POINTER, c_size_t, Structure, c_char, c_void_p, c_uint64
 from typing import TypeAlias
 
 from ...constants import IntEnum, IntFlag
@@ -11,7 +11,10 @@ CUmodule = c_void_p
 CUfunction = c_void_p
 CUdeviceptr = c_uint64
 CUstream = c_void_p
+CUevent = c_void_p
 
+ptr_float: TypeAlias = POINTER(c_float)
+ptr_ptr_void: TypeAlias = POINTER(c_void_p)
 ptr_uint: TypeAlias = POINTER(c_uint)
 ptr_int: TypeAlias = POINTER(c_int)
 ptr_CUdevice: TypeAlias = POINTER(CUdevice)
@@ -21,6 +24,7 @@ ptr_CUmodule: TypeAlias = POINTER(CUmodule)
 ptr_CUfunction: TypeAlias = POINTER(CUfunction)
 ptr_CUdeviceptr: TypeAlias = POINTER(CUdeviceptr)
 ptr_CUstream: TypeAlias = POINTER(CUstream)
+ptr_CUevent: TypeAlias = POINTER(CUevent)
 
 class CUresult(IntEnum):
     CUDA_SUCCESS                              = 0
@@ -321,9 +325,28 @@ class CUfunction_attribute(IntEnum):
 
 
 class CUsharedconfig(IntEnum):
-    CU_SHARED_MEM_CONFIG_DEFAULT_BANK_SIZE    = 0x00 # set default shared memory bank size
-    CU_SHARED_MEM_CONFIG_FOUR_BYTE_BANK_SIZE  = 0x01 # set shared memory bank width to four bytes
+    CU_SHARED_MEM_CONFIG_DEFAULT_BANK_SIZE    = 0x00  # set default shared memory bank size
+    CU_SHARED_MEM_CONFIG_FOUR_BYTE_BANK_SIZE  = 0x01  # set shared memory bank width to four bytes
     CU_SHARED_MEM_CONFIG_EIGHT_BYTE_BANK_SIZE = 0x02  # set shared memory bank width to eight bytes
+
+
+class CUevent_flags(IntFlag):
+    CU_EVENT_DEFAULT        = 0x0  # Default event flag
+    CU_EVENT_BLOCKING_SYNC  = 0x1  # Event uses blocking synchronization
+    CU_EVENT_DISABLE_TIMING = 0x2  # Event will not record timing data
+    CU_EVENT_INTERPROCESS   = 0x4  # Event is suitable for interprocess use. CU_EVENT_DISABLE_TIMING must be set
+
+
+class CUstream_flags(IntFlag):
+    CU_STREAM_DEFAULT             = 0x0  # Default stream flag
+    CU_STREAM_NON_BLOCKING        = 0x1  # Stream does not synchronize with stream 0 (the NULL stream)
+    
+
+class CUevent_wait_flags(IntFlag):
+    CU_EVENT_WAIT_DEFAULT  = 0x0  # Default event wait flag
+    CU_EVENT_WAIT_EXTERNAL = 0x1  # When using stream capture, create an event wait node
+                                  # instead of the default behavior.  This flag is invalid
+                                  # when used outside of capture.
 
 
 class CUuuid(Structure):

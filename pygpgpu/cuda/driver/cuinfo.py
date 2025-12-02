@@ -10,7 +10,8 @@ from .cutypes import (
     ptr_CUmodule, CUmodule, ptr_CUfunction,
     ptr_CUdeviceptr, CUdeviceptr,
     ptr_CUstream, CUstream,
-    CUfunction, CUfunction_attribute
+    CUfunction, CUfunction_attribute,
+    CUevent
 )
 
 from .vec_types import (
@@ -439,7 +440,78 @@ class CUInfo:
                 "extra": POINTER(c_void_p)
             },
             "restype": c_int
-        }
+        },
+
+        # CUresult cuEventCreate(CUevent* phEvent, unsigned int Flags)
+        "cuEventCreate": {
+            "args": {
+                "phEvent": POINTER(CUevent),
+                "Flags": c_uint
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuEventRecord(CUevent hEvent, CUstream hStream)
+        "cuEventRecord": {
+            "args": {
+                "hEvent": CUevent,
+                "hStream": CUstream
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuEventSynchronize(CUevent hEvent)
+        "cuEventSynchronize": {
+            "args": {
+                "hEvent": CUevent
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuStreamCreate(CUstream* phStream, unsigned int Flags)
+        "cuStreamCreate": {
+            "args": {
+                "phStream": POINTER(CUstream),
+                "Flags": c_uint
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent, unsigned int Flags)
+        "cuStreamWaitEvent": {
+            "args": {
+                "hStream": CUstream,
+                "hEvent": CUevent,
+                "Flags": c_uint
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd)
+        "cuEventElapsedTime": {
+            "args": {
+                "pMilliseconds": POINTER(c_float),
+                "hStart": CUevent,
+                "hEnd": CUevent
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuEventDestroy(CUevent hEvent)
+        "cuEventDestroy": {
+            "args": {
+                "hEvent": CUevent
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuStreamDestroy(CUstream hStream)
+        "cuStreamDestroy": {
+            "args": {
+                "hStream": CUstream
+            },
+            "restype": c_int
+        },
     }
 
     error_codes = {
