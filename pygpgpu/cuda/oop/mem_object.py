@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional, List
+from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional
 from ctypes import c_void_p
 from abc import abstractmethod
 import time
@@ -32,15 +32,15 @@ class MemObject(CUObject):
         CUObject.__init__(self, mem_id)
 
     @abstractmethod
-    def write(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def write(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None)->Event:
         pass
 
     @abstractmethod
-    def read(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def read(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None)->Event:
         pass
 
     @abstractmethod
-    def set_data(self, stream:Stream, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event:
+    def set_data(self, stream:Stream, data:Union[bytes, bytearray, np.ndarray])->Event:
         pass
     
     @property

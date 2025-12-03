@@ -275,7 +275,12 @@ class Program(CLObject):
             return CLObject.__getattr__(self, name)
         
     def __getitem__(self, name:str)->Kernel:
-        return self.kernels[name]
+        if name in self.kernel_infos:
+            return self.kernels[name]
+        elif name in self.structs:
+            return self.structs[name]
+        else:
+            raise KeyError(name)
 
     def _get_build_attr(self, name:str)->Any:
         if name in self._info:
