@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from ctypes import c_int, c_void_p, pointer
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, TYPE_CHECKING
 from abc import ABC, abstractmethod
 import weakref
 
 from ..driver import CUDA, CUInfo
+
+if TYPE_CHECKING:
+    from .context import Context
+    from .device import Device
 
 
 class CUObject(ABC):
@@ -18,9 +22,31 @@ class CUObject(ABC):
         self._finalizer = weakref.finalize(self, self._release, self._id)
         CUObject._instances[self.__hash__()] = self
 
+        self._context = None
+        if self.__class__.__name__ not in ["Context", "Device", "NVRTCProgram"]:
+            from .context import Context
+            self._context = Context.current()
+
     @property
     def id(self)->Union[int, c_void_p]:
         return self._id
+    
+    @property
+    def context(self)->Context:
+        if self.__class__.__name__ == "Context":
+            return self
+        else:
+            return self._context
+    
+    @property
+    def device(self)->Device:
+        if self.__class__.__name__ == "Device":
+            return self
+        else:
+            try:
+                return self._context.device
+            except:
+                return None
     
     @staticmethod
     def instance(id:Union[int, c_void_p])->CUObject:

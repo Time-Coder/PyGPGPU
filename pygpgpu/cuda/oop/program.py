@@ -1,29 +1,24 @@
 from __future__ import annotations
-from ctypes import c_char_p, pointer, c_size_t, c_char, POINTER, c_ubyte, string_at
-import warnings
-from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union, Set, override
+from ctypes import c_char_p, pointer
+from typing import Dict, List, Any, Optional, TYPE_CHECKING, Set, override
 
 from .cuobject import CUObject
 from .device import Device
 from .build_options import BuildOptions
 from ..driver import (
     CUDA,
-    IntEnum,
     CUmodule
 )
 from .program_info import KernelInfo
 from .nvrtc_program import NVRTCProgram
 from .kernel import Kernel
+from .context import Context
 from .device import Device
-
-if TYPE_CHECKING:
-    from .context import Context
 
 
 class Program(CUObject):
 
-    def __init__(self, device:Device, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, nvrtc_program:NVRTCProgram=None):
-        self._device:Device = device
+    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, nvrtc_program:NVRTCProgram=None):
         self._kernels:Dict[str, Kernel] = {}
         self._type_checked:bool = type_checked
         if nvrtc_program is None:
@@ -33,7 +28,7 @@ class Program(CUObject):
 
         program_id = CUmodule()
         ptr_program_id = pointer(program_id)
-        CUDA.cuModuleLoadData(ptr_program_id, self._nvrtc_program.cubin(self._device))
+        CUDA.cuModuleLoadData(ptr_program_id, self._nvrtc_program.cubin(Context.current().device))
         CUObject.__init__(self, program_id)
 
     @property
@@ -91,7 +86,7 @@ class Program(CUObject):
     
     @property
     def structs(self)->Dict[str, type]:
-        return self._nvrtc_program._struct_types
+        return self._nvrtc_program.structs
     
     def _fetch_kernels(self):
         if self._kernels:
@@ -120,10 +115,6 @@ class Program(CUObject):
             return self.structs[name]
         else:
             raise KeyError(name)
-    
-    @property
-    def device(self)->List[Device]:
-        return self._device
 
     @override    
     @staticmethod

@@ -1,4 +1,4 @@
-from ctypes import c_char_p, c_uint, c_size_t, c_void_p
+from ctypes import c_char_p, c_size_t, c_void_p
 from typing import Any
 
 from .cutypes import (
@@ -162,6 +162,9 @@ class CUDA:
 
     @staticmethod
     def cuStreamWaitEvent(hStream:CUstream, hEvent:CUevent, Flags:CUevent_wait_flags)->CUresult: ...
+
+    @staticmethod
+    def cuStreamSynchronize(hStream:CUstream)->CUresult: ...
 
     @staticmethod
     def cuEventElapsedTime(pMilliseconds:ptr_float, hStart:CUevent, hEnd:CUevent)->CUresult: ...

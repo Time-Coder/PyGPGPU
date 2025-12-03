@@ -8,6 +8,7 @@ import time
 from ..driver import (
     CUdeviceptr,
     IntEnum,
+    IntFlag,
     CUDA
 )
 from .cuobject import CUObject
@@ -17,6 +18,11 @@ if TYPE_CHECKING:
     from .event import Event
 
 import numpy as np
+
+
+class DetectFlags(IntFlag):
+    Readable = (1 << 0)
+    Writable = (1 << 1)
 
 
 class MemObject(CUObject):
@@ -29,6 +35,7 @@ class MemObject(CUObject):
         self._dirty_on_device:bool = False
         self._dirty_on_host:bool = False
         self._device_dirty_time:float = 0.0
+        self._kernel_flags:DetectFlags = (DetectFlags.Readable | DetectFlags.Writable)
         CUObject.__init__(self, mem_id)
 
     @abstractmethod
@@ -79,6 +86,14 @@ class MemObject(CUObject):
     @dirty_on_host.setter
     def dirty_on_host(self, dirty:bool)->None:
         self._dirty_on_host = dirty
+
+    @property
+    def kernel_flags(self)->DetectFlags:
+        return self._kernel_flags
+    
+    @kernel_flags.setter
+    def kernel_flags(self, flags:DetectFlags)->None:
+        self._kernel_flags = flags
     
     def use(self)->None:
         if self._using:

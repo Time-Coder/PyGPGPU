@@ -28,6 +28,9 @@ class Stream(CUObject):
     def wait_event(self, event:Event, flags:CUevent_wait_flags=CUevent_wait_flags.CU_EVENT_WAIT_DEFAULT):
         CUDA.cuStreamWaitEvent(self.id, event.id, flags)
 
+    def sync(self)->None:
+        CUDA.cuStreamSynchronize(self.id)
+
     @staticmethod
     @override
     def _prefix()->str:

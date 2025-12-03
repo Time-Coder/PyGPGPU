@@ -107,18 +107,14 @@ class Kernel(CLObject):
         return Event.create_future(all_events, asyncio.Future)
 
     def _call(self, args, kwargs)->List[Event]:
-        cmd_queue, global_work_size, local_work_size, need_read_back_mem_objs, copy_to_device_events = self.__before_call(args, kwargs)
+        cmd_queue, global_work_size, local_work_size = self.__before_call(args, kwargs)
         work_dim = len(global_work_size)
 
-        event_id = cl_event()
-        CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, len(copy_to_device_events), Event.events_ptr(copy_to_device_events), pointer(event_id))
+        CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, None)
         if CL.print_info:
             print(f"launch {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
 
-        call_event = Event(self.context, event_id, CL.clEnqueueNDRangeKernel)
-        copy_to_host_events = self.__after_call(cmd_queue, need_read_back_mem_objs, [call_event])
-
-        return [*copy_to_device_events, call_event, *copy_to_host_events]
+        return self.__after_call(cmd_queue)
 
     def __before_call(self, args, kwargs):
         used_device = self._used_device
@@ -135,17 +131,8 @@ class Kernel(CLObject):
             used_device = self._program.context.devices[0]
 
         cmd_queue = self.context.create_command_queue(used_device)
-
-        need_read_back_mem_objs:List[Tuple[ArgInfo, Any, MemObject]] = []
-        copy_to_device_events:List[Event] = []
         for key, value in used_kwargs.items():
-            results = self._set_arg(cmd_queue, key, value)
-            for result in results:
-                if "event" in result and result["event"] is not None:
-                    copy_to_device_events.append(result["event"])
-
-                if "arg_info" in result:
-                    need_read_back_mem_objs.append((result["arg_info"], result["value"], result["mem_obj"]))
+            self._set_arg(cmd_queue, key, value)
 
         if global_work_size is None or local_work_size is None:
             global_work_size, local_work_size = self.__detect_work_size(used_device)
@@ -153,7 +140,7 @@ class Kernel(CLObject):
         work_dim = len(global_work_size)
         global_work_size = (c_size_t * work_dim)(*global_work_size)
         local_work_size = (c_size_t * work_dim)(*local_work_size)
-        return cmd_queue, global_work_size, local_work_size, need_read_back_mem_objs, copy_to_device_events
+        return cmd_queue, global_work_size, local_work_size
 
     @staticmethod
     def __copy_to_host(arg_value:Union[np.ndarray, image2d_t, List[Any]], buffer:MemObject):
@@ -169,7 +156,7 @@ class Kernel(CLObject):
             elif isinstance(host_data, Structure):
                 memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
-    def __after_call(self, cmd_queue:CommandQueue, need_read_back_mem_objs:List[Tuple[ArgInfo, Any, MemObject]], after_events:List[Event])->List[Event]:
+    def __after_call(self, cmd_queue:CommandQueue)->List[Event]:
         
         def on_completed(arg_value:Union[np.ndarray, List[Any]], mem_obj:MemObject, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
             if error_code == ErrorCode.CL_SUCCESS:
@@ -180,9 +167,12 @@ class Kernel(CLObject):
             mem_obj.unuse()
         
         events:List[Event] = []
-        for arg_info, arg_value, mem_obj in need_read_back_mem_objs:
-            event:Event = mem_obj.read(cmd_queue, after_events=after_events)
-            call_back = partial(on_completed, arg_value, mem_obj, arg_info)
+        for arg_info in self._args.values():
+            if not arg_info.need_read_back:
+                continue
+
+            event:Event = arg_info.mem_obj.read(cmd_queue)
+            call_back = partial(on_completed, arg_info.value, arg_info.mem_obj, arg_info)
             if event.finished:
                 call_back(event, event.status)
             else:
@@ -233,7 +223,7 @@ class Kernel(CLObject):
     def __detect_work_size(self, device:Device):
         max_shape = None
         for arg in self._arg_list:
-            if arg.mem_obj is not None and ((arg.mem_obj.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) or (arg.mem_obj.flags & cl_mem_flags.CL_MEM_READ_WRITE)) and not (arg.mem_obj.flags & cl_mem_flags.CL_MEM_READ_ONLY):
+            if arg.need_read_back:
                 arg_shape = (arg.mem_obj.data.shape if arg.mem_obj.data is not None else arg.mem_obj.shape)
                 if ((
                         arg.base_type_str in CLInfo.vec_types and
@@ -275,7 +265,7 @@ class Kernel(CLObject):
         global_work_size, local_work_size = detect_work_size(total_local_size, max_shape)
         return global_work_size, local_work_size
 
-    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any)->List[Dict[str, Any]]:
+    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any):
         if isinstance(index_or_name, int):
             arg_info = self._arg_list[index_or_name]
             index = index_or_name
@@ -283,10 +273,7 @@ class Kernel(CLObject):
             arg_info = self._args[index_or_name]
             index = self._arg_names.index(index_or_name)
 
-        arg_type_str = arg_info.type_str
-        if not arg_info.is_ptr and arg_info.value is not None and arg_info.value == value:
-            return []
-        
+        arg_type_str = arg_info.type_str        
         arg_type_str = arg_info.type_str
         type_qualifiers = arg_info.type_qualifiers
         base_type_str = arg_info.base_type_str
@@ -304,25 +291,19 @@ class Kernel(CLObject):
                 value.packet_type = arg_type
 
             used_value = self.context.get_pipe(value)
-            if arg_info.value != used_value.id:
-                CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
-                arg_info.value = used_value.id
+            CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
         elif arg_type_str == "queue_t":
             if not isinstance(value, queue_t):
                 raise TypeError(f"type of argument '{arg_info.name}' must be queue_t, got {value.__class__.__name__}.")
             
             used_value = self.context.get_queue(value)
-            if arg_info.value != used_value.id:
-                CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
-                arg_info.value = used_value.id
+            CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
         elif arg_type_str == "sampler_t":
             if not isinstance(value, sampler_t):
                 raise TypeError(f"type of argument '{arg_info.name}' must be sampler_t, got {value.__class__.__name__}.")
             
             used_value = self.context.get_sampler(value)
-            if arg_info.value != used_value.id:
-                CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
-                arg_info.value = used_value.id
+            CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
         elif base_type_str in CLInfo.basic_types or base_type_str in self._program.structs:
             if base_type_str in CLInfo.basic_types:
                 content_type = CLInfo.basic_types[base_type_str]
@@ -348,13 +329,9 @@ class Kernel(CLObject):
                         raise TypeError(f"type of argument '{arg_info.name}' need {content_type.__name__}, got {value.__class__.__name__}, and cannot convert {value.__class__.__name__} to {content_type.__name__}")
 
                 if is_struct:
-                    result = used_value.apply_pointers(cmd_queue)
+                    used_value.apply_pointers(cmd_queue)
 
                 CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
-                arg_info.value = value
-
-                if is_struct:
-                    return result
             else:
                 if arg_info.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_LOCAL:
                     if isinstance(value, int):
@@ -364,13 +341,9 @@ class Kernel(CLObject):
                     elif isinstance(value, (list, tuple)):
                         bytes_per_group = np.array(value).size
 
-                    bytes_per_group *= sizeof(content_type)
-
-                    if arg_info.value is not None and arg_info.value == bytes_per_group:
-                        return []
-                    
+                    bytes_per_group *= sizeof(content_type)                    
                     CL.clSetKernelArg(self.id, index, bytes_per_group, None)
-                    arg_info.value = bytes_per_group
+                    arg_info.value = value
                 else:
                     if isinstance(value, np.ndarray):
                         used_value = value
@@ -384,22 +357,8 @@ class Kernel(CLObject):
                         used_value = np.ascontiguousarray(used_value)
 
                     buffer, event = arg_info.use_buffer(cmd_queue, used_value)
-                    if arg_info.mem_obj != buffer:
-                        CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
-                        arg_info.mem_obj = buffer
-
-                    arg_info.value = value
-                    if arg_info.need_read_back and not isinstance(value, gnp.ndarray):
-                        return [{
-                            "arg_info": arg_info,
-                            "value": value,
-                            "mem_obj": buffer,
-                            "event": event
-                        }]
-                    else:
-                        return [{
-                            "event": event
-                        }]
+                    CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                    arg_info.mem_obj = buffer
         elif arg_type_str in CLInfo.image_types:
             image_type = CLInfo.image_types[arg_type_str]
             if not isinstance(value, (np.ndarray, image_type)):
@@ -410,27 +369,12 @@ class Kernel(CLObject):
                 used_value = image_type(value)
             
             image, event = arg_info.use_image(cmd_queue, used_value)
-
-            if arg_info.mem_obj != image:
-                CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(image.id))
-                arg_info.mem_obj = image
-
-            arg_info.value = value
-            if arg_info.need_read_back and not isinstance(used_value.data, gnp.ndarray):
-                return [{
-                    "arg_info": arg_info,
-                    "value": value,
-                    "mem_obj": image,
-                    "event": event
-                }]
-            else:
-                return [{
-                    "event": event
-                }]
+            CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(image.id))
+            arg_info.mem_obj = image
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
-
-        return []
+        
+        arg_info.value = value
 
     @property
     def _func_head(self)->str:

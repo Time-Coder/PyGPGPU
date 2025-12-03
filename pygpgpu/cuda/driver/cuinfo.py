@@ -496,6 +496,14 @@ class CUInfo:
             "restype": c_int
         },
 
+        # CUresult cuStreamSynchronize(CUstream hStream);
+        "cuStreamSynchronize": {
+            "args": {
+                "hStream": CUstream
+            },
+            "restype": c_int
+        },
+
         # CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd)
         "cuEventElapsedTime": {
             "args": {

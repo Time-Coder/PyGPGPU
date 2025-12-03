@@ -9,7 +9,7 @@ import numpy as np
 from ..driver import CUDA, CUdeviceptr
 from .stream import Stream
 from .event import Event
-from .mem_object import MemObject
+from .mem_object import MemObject, DetectFlags
 
 
 class Buffer(MemObject):
@@ -43,7 +43,7 @@ class Buffer(MemObject):
         return stream.record_event()
 
     @override
-    def set_data(self, stream:Stream, data:Union[bytes, bytearray, np.ndarray])->Event:        
+    def set_data(self, stream:Stream, data:Union[bytes, bytearray, np.ndarray])->Optional[Event]:        
         if isinstance(data, bytes):
             size = len(data)
             host_ptr = (ctypes.c_ubyte * size).from_buffer_copy(data)
@@ -63,5 +63,9 @@ class Buffer(MemObject):
         self._host_ptr = host_ptr
         self._data = data
 
-        return self.write(stream, 0, size, host_ptr)
+        event = None
+        if self.kernel_flags != DetectFlags.Writable:
+            event = self.write(stream, 0, size, host_ptr)
+
+        return event
         
