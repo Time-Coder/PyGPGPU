@@ -1,9 +1,10 @@
 from __future__ import annotations
-from typing import Tuple, Any, Dict, List
+from typing import Tuple, Any, Dict, List, Optional
 
 import numpy as np
 
 from ..driver import CUInfo
+from .mem_object import MemObject
 
 
 class VarInfo:
@@ -13,6 +14,8 @@ class VarInfo:
         self.type_str = type_str
         self.array_shape = array_shape
         self.type_qualifiers = type_qualifiers
+        self.value: Any = None
+        self.mem_obj: Optional[MemObject] = None
 
     @property
     def is_ptr(self)->bool:
@@ -56,7 +59,6 @@ class ArgInfo(VarInfo):
     def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], type_qualifiers: List[str]):
         VarInfo.__init__(self, name, type_str, array_shape, type_qualifiers)
         self.parent = parent
-        self.value: Any = None
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str

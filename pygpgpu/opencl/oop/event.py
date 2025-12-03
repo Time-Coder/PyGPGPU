@@ -148,7 +148,7 @@ class Event(CLObject):
             return ""
 
     @CL_EVENT_NOTIFY_CALLBACK
-    def _pfn_notify(event:cl_event, event_command_status:cl_int, user_data:c_void_p):
+    def _pfn_notify(event_id:cl_event, event_command_status:cl_int, user_data:c_void_p):
         if event_command_status > 0:
             status = cl_command_execution_status(event_command_status)
         else:
@@ -157,7 +157,7 @@ class Event(CLObject):
         try:
             self:Event = cast(user_data, POINTER(py_object)).contents.value
         except:
-            print("Event", event, "error", user_data)
+            print("Event", event_id, "error", user_data)
 
         if not isinstance(self, Event):
             raise RuntimeError("invalid event")

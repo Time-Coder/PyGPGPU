@@ -11,7 +11,7 @@ from .cutypes import (
     ptr_CUdeviceptr, CUdeviceptr,
     ptr_CUstream, CUstream,
     CUfunction, CUfunction_attribute,
-    CUevent
+    CUevent, CUstreamCallback
 )
 
 from .vec_types import (
@@ -504,6 +504,28 @@ class CUInfo:
             "restype": c_int
         },
 
+        # CUresult cuStreamAddCallback(
+        #     CUstream hStream, CUstreamCallback callback,
+        #     void* userData, unsigned int flags
+        # )
+        "cuStreamAddCallback": {
+            "args": {
+                "hStream": CUstream,
+                "callback": CUstreamCallback,
+                "userData": c_void_p,
+                "flags": c_uint
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuStreamQuery(CUstream hStream);
+        "cuStreamQuery": {
+            "args": {
+                "hStream": CUstream
+            },
+            "restype": c_int
+        },
+
         # CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd)
         "cuEventElapsedTime": {
             "args": {
@@ -529,6 +551,10 @@ class CUInfo:
             },
             "restype": c_int
         },
+    }
+
+    no_need_check_error_funcs = {
+        "cuStreamQuery"
     }
 
     error_codes = {

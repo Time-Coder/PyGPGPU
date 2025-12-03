@@ -88,7 +88,7 @@ class CUDA(metaclass=MetaCUDA):
             if CUDA.print_call:
                 print(f"->{return_value}", flush=True)
 
-            if CUDA.check_error:
+            if CUDA.check_error and self.name not in CUInfo.no_need_check_error_funcs:
                 if "errcode_ret" in func_info["args"]:
                     if args_names is None:
                         args_names = list(func_info["args"].keys())

@@ -30,7 +30,8 @@ from .cutypes import (
     ptr_CUstream,
     CUstream_flags,
     CUevent_wait_flags,
-    ptr_float
+    ptr_float,
+    CUstreamCallback
 )
 
 
@@ -165,6 +166,12 @@ class CUDA:
 
     @staticmethod
     def cuStreamSynchronize(hStream:CUstream)->CUresult: ...
+
+    @staticmethod
+    def cuStreamAddCallback(hStream:CUstream, callback:CUstreamCallback, userData:c_void_p, flags:int)->CUresult: ...
+
+    @staticmethod
+    def cuStreamQuery(hStream:CUstream)->CUresult: ...
 
     @staticmethod
     def cuEventElapsedTime(pMilliseconds:ptr_float, hStart:CUevent, hEnd:CUevent)->CUresult: ...

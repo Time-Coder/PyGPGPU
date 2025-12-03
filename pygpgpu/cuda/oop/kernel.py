@@ -17,7 +17,6 @@ from ..driver import (
 from .cuobject import CUObject
 from .program_info import ArgInfo
 from .stream import Stream
-from .event import Event
 from .mem_object import MemObject
 from .program_parser import ProgramParser
 from ...utils import detect_work_size, join_with_and
@@ -26,7 +25,6 @@ from ... import numpy as gnp
 if TYPE_CHECKING:
     from .program import Program
     from .context import Context
-    from .device import Device
 
 
 class Kernel(CUObject):
@@ -143,27 +141,23 @@ class Kernel(CUObject):
             elif isinstance(host_data, Structure):
                 memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
-    def __after_call(self, stream:Stream)->List[Event]:
+    def __after_call(self, stream:Stream):
         
-        def on_completed(arg_value:Union[np.ndarray, List[Any]], mem_obj:MemObject, arg_info:ArgInfo, event:Event, error_code:CUresult):
+        def on_completed(arg_info:ArgInfo, stream:Stream, error_code:CUresult):
             if error_code == CUresult.CUDA_SUCCESS:
-                self.__copy_to_host(arg_value, mem_obj)
+                self.__copy_to_host(arg_info.value, arg_info.mem_obj)
                 if CUDA.print_info:
                     print(f"copy data to host for argument '{arg_info.name}'")
 
-            mem_obj.unuse()
+            arg_info.mem_obj.unuse()
         
-        events:List[Event] = []
-        for arg_info in need_read_back_mem_objs:
-            event:Event = mem_obj.read(stream)
-            call_back = partial(on_completed, arg_value, mem_obj, arg_info)
-            if event.finished:
-                call_back(event, event.status)
-            else:
-                event.on_completed_callbacks.append(call_back)
-                events.append(event)
-
-        return events
+        for arg_info in self._args.values():
+            if not arg_info.need_read_back:
+                continue
+            
+            arg_info.mem_obj.read(stream)
+            callback = partial(on_completed, arg_info)
+            stream.add_completed_callback(callback)
 
     def __check_args(self, args, kwargs)->Dict[str, Any]:
         for key in kwargs:
@@ -241,7 +235,7 @@ class Kernel(CUObject):
 
         return grid_dims, block_dims
 
-    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any)->List[Dict[str, Any]]:
+    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any)->c_void_p:
         arg_type_str = arg_info.type_str        
         arg_type_str = arg_info.type_str
         base_type_str = arg_info.base_type_str
@@ -271,14 +265,9 @@ class Kernel(CUObject):
                         raise TypeError(f"type of argument '{arg_info.name}' need {content_type.__name__}, got {value.__class__.__name__}, and cannot convert {value.__class__.__name__} to {content_type.__name__}")
 
                 if is_struct:
-                    result = used_value.apply_pointers(stream)
+                    used_value.apply_pointers(stream)
 
-                ptr_value = pointer(used_value)
-
-                if is_struct:
-                    return ptr_value, result
-                else:
-                    return ptr_value, []
+                return pointer(used_value)
             else:
                 if isinstance(value, np.ndarray):
                     used_value = value
@@ -291,22 +280,10 @@ class Kernel(CUObject):
                 if not used_value.flags['C_CONTIGUOUS']:
                     used_value = np.ascontiguousarray(used_value)
 
-                buffer, event = arg_info.use_buffer(stream, used_value)
-                ptr_value = pointer(buffer.id)
+                buffer = arg_info.use_buffer(stream, used_value)
                 arg_info.mem_obj = buffer
-
                 arg_info.value = value
-                if arg_info.need_read_back and not isinstance(value, gnp.ndarray):
-                    return ptr_value, [{
-                        "arg_info": arg_info,
-                        "value": value,
-                        "mem_obj": buffer,
-                        "event": event
-                    }]
-                else:
-                    return ptr_value, [{
-                        "event": event
-                    }]
+                return pointer(buffer.id)
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
 

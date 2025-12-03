@@ -30,7 +30,8 @@ from .cutypes import (
     CUstream_flags,
     CUevent_wait_flags,
     ptr_float,
-    CUevent
+    CUevent,
+    CUstreamCallback
 )
 from .nvrtc import NVRTC
 from .nvrtcinfo import NVRTCInfo
