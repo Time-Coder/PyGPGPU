@@ -1,3 +1,43 @@
+typedef struct
+{
+    float x;
+    float y;
+} Point;
+
+typedef struct
+{
+    Point center;
+    float radius;
+} Circle;
+
+struct Test
+{
+    int a;
+    int b;
+};
+
+bool isInside(const Point p, const Circle c)
+{
+    float dx = p.x - c.center.x;
+    float dy = p.y - c.center.y;
+    float dist_sq = dx * dx + dy * dy;
+    return dist_sq <= c.radius * c.radius;
+}
+
+__kernel void check_points_in_circle(
+    __global const Point* points,
+    __global int* results,
+    const Circle circle,
+    const int num_points
+)
+{
+    int gid = get_global_id(0);
+    if (gid >= num_points) return;
+
+    Point p = points[gid];
+    results[gid] = isInside(p, circle) ? 1 : 0;
+}
+
 __kernel void flipY(__read_only image2d_t src_image, __write_only image2d_t dest_image, sampler_t s)
 {
     int x = get_global_id(1);

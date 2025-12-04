@@ -22,17 +22,19 @@ from .event import Event
 from .imagend import imagend
 from .pipe import pipe
 from ... import numpy as gnp
+from ...constants import KernelFlags
 
 
 class VarInfo:
 
-    def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
+    def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier, kernel_flags:KernelFlags):
         self.name = name
         self.type_str = type_str
         self.array_shape = array_shape
         self.address_qualifier = address_qualifier
         self.access_qualifier = access_qualifier
         self.type_qualifiers = type_qualifiers
+        self.kernel_flags = kernel_flags
 
     @property
     def is_ptr(self)->bool:
@@ -82,15 +84,6 @@ class VarInfo:
         ) or (
             self.type_str in CLInfo.image_types and self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY
         ))
-    
-    @property
-    def kernel_flags(self)->cl_mem_flags:
-        if self.readonly:
-            return cl_mem_flags.CL_MEM_READ_ONLY
-        elif self.writeonly:
-            return cl_mem_flags.CL_MEM_WRITE_ONLY
-        else:
-            return cl_mem_flags.CL_MEM_READ_WRITE
 
     def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
         if isinstance(data, gnp.ndarray):
@@ -121,8 +114,8 @@ class VarInfo:
 
 class ArgInfo(VarInfo):
 
-    def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier):
-        VarInfo.__init__(self, name, type_str, array_shape, address_qualifier, access_qualifier, type_qualifiers)
+    def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier, kernel_flags:KernelFlags):
+        VarInfo.__init__(self, name, type_str, array_shape, address_qualifier, access_qualifier, type_qualifiers, kernel_flags)
         self.parent = parent
         self.value: Any = None
         self.mem_obj: Optional[MemObject] = None

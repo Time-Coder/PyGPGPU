@@ -20,11 +20,6 @@ if TYPE_CHECKING:
 import numpy as np
 
 
-class DetectFlags(IntFlag):
-    Readable = (1 << 0)
-    Writable = (1 << 1)
-
-
 class MemObject(CUObject):
 
     def __init__(self, mem_id:CUdeviceptr, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:c_void_p, size:int):

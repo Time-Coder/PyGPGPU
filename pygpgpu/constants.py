@@ -91,3 +91,7 @@ class IntFlag(enum.IntFlag):
     def size(cls):
         return sizeof(cls.dtype())
     
+
+class KernelFlags(IntFlag):
+    Readed = (1 << 0)
+    Writed = (1 << 1)

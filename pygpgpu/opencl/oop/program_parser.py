@@ -4,7 +4,7 @@ import os
 import sys
 import copy
 import json
-from ctypes import c_char_p, Structure, POINTER, _Pointer, pointer, c_void_p
+from ctypes import c_char_p, Structure, _Pointer, pointer
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple, TYPE_CHECKING
 
 from ...cparser import CPreprocessor
@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 import numpy as np
 from ... import numpy as gnp
 
+import tree_sitter_opencl as tscl
+from tree_sitter import Language, Parser, Node
+
 
 class ProgramParser:
 
@@ -37,6 +40,8 @@ class ProgramParser:
     _type_qualifier_pattern:re.Pattern = re.compile(r"\b(const|restrict|volatile|pipe)\b")
     _arg_name_pattern:re.Pattern = re.compile(r"\b([a-zA-Z_]\w*(\[[^\]]*\])*)(?=\W*$)")
     _array_shape_pattern:re.Pattern = re.compile(r'\[\s*(\d+)\s*\]')
+
+    _parser = Parser(Language(tscl.language()))
 
     def __init__(self):
         self._file_name:str = ""
@@ -391,7 +396,19 @@ class Kernel_{kernel_name}(KernelWrapper):
 
         return struct_type
 
+    def _parse_struct(self, node:Node, alias_name:str="")->StructInfo:
+        pass
+
     def _parse(self):
+        ast = self._parser.parse(self._clean_code.encode())
+        for child in ast.root_node.children:
+            if child.type == "type_definition":
+                self._parse_struct(child.children[1], child.children[2].text.decode())
+            elif child.type == "struct_specifier":
+                self._parse_struct(child)
+            elif child.type == "function_definition":
+                self._parse_function(child)
+        
         struct_matches:List[re.Match] = self._find_struct_defs(self._clean_code)
         for struct_match in struct_matches:
             key_names = []
