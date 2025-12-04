@@ -63,7 +63,7 @@ class Stream(CUObject):
 
         return future
 
-    def add_completed_callback(self, callback:Callable[[Stream, CUresult], None])->None:
+    def add_callback(self, callback:Callable[[Stream, CUresult], None])->None:
         self._on_completed_callbacks.add(callback)
         CUDA.cuStreamAddCallback(self.id, Stream._callback, self._user_data)
 

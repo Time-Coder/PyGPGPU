@@ -2,9 +2,12 @@ from __future__ import annotations
 from typing import Tuple, Any, Dict, List, Optional
 
 import numpy as np
+from ... import numpy as gnp
 
-from ..driver import CUInfo
+from ..driver import CUInfo, CUDA
 from .mem_object import MemObject
+from .stream import Stream
+from .buffer import Buffer
 
 
 class VarInfo:
@@ -52,6 +55,19 @@ class VarInfo:
     @property
     def need_read_back(self)->bool:
         return (self.is_ptr and "const" not in self.type_qualifiers)
+    
+    def use_buffer(self, stream:Stream, data:np.ndarray)->Buffer:
+        if isinstance(data, gnp.ndarray):
+            used_buffer, event = data._to_device(stream, self.name, kernel_flags=self.kernel_flags)
+        else:
+            used_buffer:Buffer = stream.context.get_buffer(data.nbytes)
+            used_buffer.kernel_flags = self.kernel_flags
+            event = used_buffer.set_data(stream, data)
+
+        if event is not None and CUDA.print_info:
+            print(f"copy data to device for argument '{self.name}'")
+        
+        return used_buffer, event
     
 
 class ArgInfo(VarInfo):

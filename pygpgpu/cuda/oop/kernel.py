@@ -157,7 +157,7 @@ class Kernel(CUObject):
             
             arg_info.mem_obj.read(stream)
             callback = partial(on_completed, arg_info)
-            stream.add_completed_callback(callback)
+            stream.add_callback(callback)
 
     def __check_args(self, args, kwargs)->Dict[str, Any]:
         for key in kwargs:
