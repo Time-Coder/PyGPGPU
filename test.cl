@@ -12,8 +12,13 @@ typedef struct
 
 struct Test
 {
-    int a;
-    int b;
+    int a, b;
+    int c[2];
+    int *d, *e;
+    int f[2][3];
+    const int g;
+    const int* h;
+    __global const volatile int* i;
 };
 
 bool isInside(const Point p, const Circle c)

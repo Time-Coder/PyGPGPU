@@ -397,7 +397,41 @@ class Kernel_{kernel_name}(KernelWrapper):
         return struct_type
 
     def _parse_struct(self, node:Node, alias_name:str="")->StructInfo:
-        pass
+        if node.children[1].type == "type_identifier":
+            struct_name:str = node.children[1].text.decode()
+            field_declaration_list = node.children[2]
+        elif node.children[1].type == "field_declaration_list":
+            struct_name:str = ""
+            field_declaration_list = node.children[1]
+
+        used_name:str = (alias_name if alias_name else struct_name)
+        struct_info:StructInfo = StructInfo(name=used_name)
+
+        for field_declaration in field_declaration_list.children:
+            if field_declaration.type != "field_declaration":
+                continue
+
+            type_str:str = ""
+            member_names:List[str] = []
+            type_qualifiers:List[str] = []
+            address_qualifier:cl_kernel_arg_address_qualifier = cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_PRIVATE
+            for child in field_declaration.children:
+                if child.type in ["scalar_type"]:
+                    type_str:str = child.text.decode()
+
+                if child.type in ["field_identifier", "array_declarator", "pointer_declarator"]:
+                    member_names.append(child.text.decode())
+
+                if child.type == "type_qualifier":
+                    type_qualifiers.append(child.text.decode())
+
+                if child.type == "address_space_qualifier":
+                    address_qualifier:str = child.text.decode()
+
+
+
+
+
 
     def _parse(self):
         ast = self._parser.parse(self._clean_code.encode())
