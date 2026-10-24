@@ -57,13 +57,21 @@ class ProgramParser(TSParserMixin):
         self._n_options:int = len(options_list)
         self._options_ptr:ptr_ptr_char = (c_char_p * self._n_options)(*[option.encode("utf-8") + b"\0" for option in options_list])
 
+        module_path:str = ""
         for path in sys.path:
+            if not path:
+                continue
+
             module_file_path:str = self._file_name
             pos_point:int = module_file_path.rfind(".")
             if pos_point != -1:
                 module_file_path = module_file_path[:pos_point]
 
-            module_path:str = os.path.relpath(module_file_path, path).replace("\\", "/")
+            try:
+                module_path:str = os.path.relpath(module_file_path, path).replace("\\", "/")
+            except ValueError:
+                continue
+
             if module_path.startswith("./"):
                 module_path = module_path[2:]
 
