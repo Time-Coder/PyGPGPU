@@ -86,6 +86,7 @@ class Context(CLObject):
         self.__pipes:Dict[pipe, Pipe] = {}
         self.__queues:Dict[queue_t, CommandQueue] = {}
         self.__buffers: Dict[Tuple[int, cl_mem_flags], List[Buffer]] = defaultdict(list)
+        self.__svm_buffers: Dict[int, List["SVMBuffer"]] = defaultdict(list)
         self.__images: Dict[Tuple[str, Tuple[int, ...], type, cl_mem_flags], List[imagend]] = defaultdict(list)
         self.__samplers:Dict[str, sampler] = {}
 
@@ -188,6 +189,21 @@ class Context(CLObject):
 
         available_buffer.use()
         return available_buffer
+
+    def get_svm_buffer(self, size:int=0)->"SVMBuffer":
+        available_buffer = None
+        for buffer in self.__svm_buffers[size]:
+            if not buffer.using:
+                available_buffer = buffer
+                break
+
+        if available_buffer is None:
+            from .svm_buffer import SVMBuffer
+            available_buffer = SVMBuffer(self, size)
+            self.__svm_buffers[size].append(available_buffer)
+
+        available_buffer.use()
+        return available_buffer
     
     def get_image(self, image:imagend_t)->image2d:
         key = (image.__class__.__name__, image.shape, image.dtype, image.flags)
@@ -195,7 +211,7 @@ class Context(CLObject):
         available_image = None
         for image_ in self.__images[key]:
             if not image_.using:
-                available_image = image
+                available_image = image_
                 break
 
         if available_image is None:

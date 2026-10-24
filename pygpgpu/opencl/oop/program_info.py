@@ -117,6 +117,7 @@ class ArgInfo(VarInfo):
         self.parent = parent
         self.value: Any = None
         self.mem_obj: Optional[MemObject] = None
+        self.member_infos: Dict[str, "VarInfo"] = {}
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
@@ -267,9 +268,48 @@ class TSParserMixin:
             self._analyze_kernel(kernel_info, body)
 
     def _analyze_kernel(self, kernel_info:Any, body:Node)->None:
-        reads, writes, escapes = self._analyze_body(kernel_info, body)
+        reads, writes, escapes, member_reads, member_writes = self._analyze_body(kernel_info, body)
         for name, flags in self._param_flags(kernel_info, reads, writes, escapes).items():
             kernel_info.args[name].kernel_flags = flags
+        self._apply_member_flags(kernel_info, escapes, member_reads, member_writes)
+
+    def _pointer_members(self, arg:Any)->Dict[str, Any]:
+        """Pointer members of a struct-typed argument (empty for non-struct args)."""
+        return {}
+
+    def _apply_member_flags(self, kernel_info:Any, escapes:Set[str], member_reads:Dict[str, Set[str]], member_writes:Dict[str, Set[str]])->None:
+        """Derives per-member KernelFlags for pointer members of by-value struct args.
+
+        Flags are stored per-arg (arg.member_infos) so each kernel keeps its own
+        copy policy; members never touched fall back to Readed|Writed.
+        """
+        for name, arg in kernel_info.args.items():
+            members:Dict[str, Any] = self._pointer_members(arg)
+            if not members:
+                continue
+
+            member_infos:Dict[str, Any] = {}
+            escaped:bool = (name in escapes)
+            for member_name, member in members.items():
+                if escaped:
+                    flags:KernelFlags = (KernelFlags.Readed | KernelFlags.Writed)
+                else:
+                    flags = ((KernelFlags.Readed if member_name in member_reads.get(name, set()) else KernelFlags(0)) |
+                             (KernelFlags.Writed if member_name in member_writes.get(name, set()) else KernelFlags(0)))
+
+                if not flags:
+                    flags = (KernelFlags.Readed | KernelFlags.Writed)
+
+                if member.readonly:
+                    flags = KernelFlags.Readed
+                elif member.writeonly:
+                    flags = KernelFlags.Writed
+
+                member_copy:Any = copy.copy(member)
+                member_copy.kernel_flags = flags
+                member_infos[member_name] = member_copy
+
+            arg.member_infos = member_infos
 
     def _call_flags(self, func_name:str)->Optional[Dict[str, KernelFlags]]:
         """Per-parameter KernelFlags of a helper function, analyzed on demand."""
@@ -286,7 +326,7 @@ class TSParserMixin:
 
         self._analyzing_funcs.add(func_name)
         try:
-            reads, writes, escapes = self._analyze_body(func_info, body)
+            reads, writes, escapes, _, _ = self._analyze_body(func_info, body)
         finally:
             self._analyzing_funcs.discard(func_name)
 
@@ -322,17 +362,21 @@ class TSParserMixin:
             return None
         return next((c for c in node.named_children if c.type == "compound_statement"), None)
 
-    def _analyze_body(self, info:Any, body:Node)->Tuple[Set[str], Set[str], Set[str]]:
-        ctx:Dict[str, Set[str]] = {"reads": set(), "writes": set(), "escapes": set()}
+    def _analyze_body(self, info:Any, body:Node)->Tuple[Set[str], Set[str], Set[str], Dict[str, Set[str]], Dict[str, Set[str]]]:
+        ctx:Dict[str, Any] = {
+            "reads": set(), "writes": set(), "escapes": set(),
+            "member_reads": {}, "member_writes": {}
+        }
         roots:Dict[str, Tuple[Optional[str], bool]] = {}
         for name, arg in info.args.items():
             roots[name] = (name, self._is_mem_arg(arg))
+        ctx["struct_args"] = {name for name, arg in info.args.items() if self._pointer_members(arg)}
 
         scopes:List[Dict[str, Tuple[Optional[str], bool]]] = [roots]
         for child in body.named_children:
             self._visit_statement(child, scopes, ctx)
 
-        return ctx["reads"], ctx["writes"], ctx["escapes"]
+        return ctx["reads"], ctx["writes"], ctx["escapes"], ctx["member_reads"], ctx["member_writes"]
 
     def _resolve(self, name:str, scopes:List[Dict[str, Tuple[Optional[str], bool]]])->Tuple[Optional[str], bool]:
         for scope in reversed(scopes):
@@ -486,6 +530,12 @@ class TSParserMixin:
             root, is_ptr = self._resolve_expr_root(base, scopes)
             if root is not None:
                 (ctx["writes"] if is_write else ctx["reads"]).add(root)
+
+                field:Node = node.named_children[-1]
+                if field.type in ("field_identifier", "identifier"):
+                    member_bucket:Dict[str, Set[str]] = (ctx["member_writes"] if is_write else ctx["member_reads"])
+                    member_bucket.setdefault(root, set()).add(field.text.decode())
+
                 if base.type != "identifier":
                     self._visit_expression(base, scopes, ctx, False)
             else:
@@ -574,6 +624,6 @@ class TSParserMixin:
                         ctx["writes"].add(target)
             else:
                 self._visit_expression(actual, scopes, ctx, False)
-                target = (root if (root is not None and is_mem) else self._alias_source(actual, scopes))
+                target = (root if (root is not None and (is_mem or root in ctx["struct_args"])) else self._alias_source(actual, scopes))
                 if target is not None:
                     ctx["escapes"].add(target)

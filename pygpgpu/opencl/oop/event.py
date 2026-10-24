@@ -132,8 +132,9 @@ class Event(CLObject):
 
     @property
     def finished(self)->bool:
-        event_status = self.status
-        return (event_status == cl_command_execution_status.CL_COMPLETE or isinstance(event_status, ErrorCode))
+        # 只有 CL_COMPLETE 才算完成;状态查询失败(ErrorCode)不代表事件已结束,
+        # 否则会误走同步回调路径,在事件真正完成前拷贝脏数据
+        return (self.status == cl_command_execution_status.CL_COMPLETE)
 
     @property
     def func(self)->CL.Func:

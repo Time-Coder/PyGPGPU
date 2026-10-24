@@ -4,7 +4,7 @@ import os
 import sys
 import copy
 import json
-from ctypes import c_char_p, Structure, _Pointer, pointer
+from ctypes import c_char_p, c_uint64, Structure, _Pointer, pointer
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple, TYPE_CHECKING
 
 from ...cparser import CPreprocessor
@@ -315,7 +315,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                 member_type *= n_elements
 
             if member.is_ptr:
-                _fields_.append((f"_{struct_info.name}_ptr_{member.name}", ptr_cl_mem))
+                _fields_.append((f"_{struct_info.name}_ptr_{member.name}", c_uint64))
                 dtype.append((member.name, np.uint64))
                 pointer_types[member.name] = member_type
             else:
@@ -323,11 +323,13 @@ class Kernel_{kernel_name}(KernelWrapper):
                 dtype.append((member.name, base_type, member.array_shape))
 
         dtype = np.dtype(dtype)
+        ptr_field_prefix:str = f"_{struct_info.name}_ptr_"
 
         def __init__(self, *args, **kwargs):
+            self._svm_buffers = {}
             for field in self._fields_:
-                if issubclass(field[1], _Pointer):
-                    ori_name:str = field[0].replace(f"_{self.__class__.__name__}_ptr_", "")
+                if field[0].startswith(ptr_field_prefix):
+                    ori_name:str = field[0].replace(ptr_field_prefix, "")
                     setattr(self, f"_{self.__class__.__name__}_data_{ori_name}", None)
 
             used_kwargs = {}
@@ -343,16 +345,16 @@ class Kernel_{kernel_name}(KernelWrapper):
 
             Structure.__init__(self, **used_kwargs)
 
-        def apply_pointers(self, cmd_queue:CommandQueue)->List[Dict[str, Any]]:
+        def apply_pointers(self, cmd_queue:CommandQueue, member_infos:Optional[Dict[str, Any]]=None)->List[Dict[str, Any]]:
             result = []
             for field in self._fields_:
-                if issubclass(field[1], _Pointer):
-                    ori_name:str = field[0].replace(f"_{self.__class__.__name__}_ptr_", "")
+                if field[0].startswith(ptr_field_prefix):
+                    ori_name:str = field[0].replace(ptr_field_prefix, "")
                     data_name:str = f"_{self.__class__.__name__}_data_{ori_name}"
                     data = getattr(self, data_name)
-                    var_info:VarInfo = self._members[ori_name]
+                    var_info:VarInfo = ((member_infos or {}).get(ori_name) if member_infos else None) or self._members[ori_name]
                     content_type = self._pointer_types[ori_name]
-                    
+
                     if isinstance(data, np.ndarray):
                         used_value = data
                         if data.dtype != content_type:
@@ -364,21 +366,33 @@ class Kernel_{kernel_name}(KernelWrapper):
                     if not used_value.flags['C_CONTIGUOUS']:
                         used_value = np.ascontiguousarray(used_value)
 
-                    buffer, event = var_info.use_buffer(cmd_queue, used_value)
-                    if var_info.need_read_back and not isinstance(data, gnp.ndarray):
+                    svm_buffer = self._svm_buffers.get(ori_name)
+                    if svm_buffer is None or svm_buffer.size != used_value.nbytes:
+                        svm_buffer = cmd_queue.context.get_svm_buffer(used_value.nbytes)
+                        self._svm_buffers[ori_name] = svm_buffer
+
+                    svm_buffer.kernel_flags = var_info.kernel_flags
+                    event = svm_buffer.set_data(cmd_queue, used_value)
+
+                    # SVM 指针既是主机地址也是设备地址,可直接嵌入 struct
+                    setattr(self, ptr_field_prefix + ori_name, svm_buffer.id.value)
+
+                    need_read_back:bool = (var_info.need_read_back and not isinstance(data, gnp.ndarray))
+                    if need_read_back:
                         result.append({
                             "event": event,
                             "arg_info": var_info,
                             "value": data,
-                            "mem_obj": buffer
+                            "mem_obj": svm_buffer,
+                            "need_read_back": True
                         })
                     else:
                         result.append({
-                            "event": event
+                            "event": event,
+                            "mem_obj": svm_buffer,
+                            "need_read_back": False
                         })
 
-                    setattr(self, f"_{self.__class__.__name__}_ptr_{ori_name}", pointer(buffer.id))
-                    
                 if issubclass(field[1], Structure) and hasattr(field[1], "apply_pointers"):
                     result.extend(getattr(self, field[0]).apply_pointers(cmd_queue))
 
@@ -397,8 +411,8 @@ class Kernel_{kernel_name}(KernelWrapper):
         }
 
         for field in _fields_:
-            if issubclass(field[1], _Pointer):
-                ori_name:str = field[0].replace(f"_{self.__class__.__name__}_ptr_", "")
+            if field[0].startswith(ptr_field_prefix):
+                ori_name:str = field[0].replace(ptr_field_prefix, "")
                 type_body[ori_name] = property(self._make_getter(ori_name), self._make_setter(ori_name))
 
         struct_type = type(struct_name, (Structure,), type_body)
@@ -449,6 +463,12 @@ class Kernel_{kernel_name}(KernelWrapper):
 
     def _is_mem_arg(self, arg:Any)->bool:
         return arg.is_ptr or (arg.type_str in CLInfo.image_types)
+
+    def _pointer_members(self, arg:Any)->Dict[str, Any]:
+        struct_info:Optional[StructInfo] = self._struct_infos.get(arg.base_type_str)
+        if struct_info is None:
+            return {}
+        return {member.name: member for member in struct_info.members.values() if member.is_ptr}
 
 
     @property

@@ -50,6 +50,7 @@ class Kernel(CLObject):
         self._args:Dict[str, ArgInfo] = {}
         self._arg_list:List[ArgInfo] = []
         self._arg_names:List[str] = []
+        self._member_readbacks:List[Dict[str, Any]] = []
 
         self.type_checked:bool = False
         self._used_device:Optional[Device] = None
@@ -110,11 +111,13 @@ class Kernel(CLObject):
         cmd_queue, global_work_size, local_work_size = self.__before_call(args, kwargs)
         work_dim = len(global_work_size)
 
-        CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, None)
+        event_id = cl_event(0)
+        CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, pointer(event_id))
+        launch_event = Event(self.context, event_id, CL.clEnqueueNDRangeKernel)
         if CL.print_info:
             print(f"launch {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
 
-        return self.__after_call(cmd_queue)
+        return self.__after_call(cmd_queue, launch_event)
 
     def __before_call(self, args, kwargs):
         used_device = self._used_device
@@ -124,6 +127,7 @@ class Kernel(CLObject):
         self._used_device = None
         self._global_work_size = None
         self._local_work_size = None
+        self._member_readbacks = []
 
         used_kwargs = self.__check_args(args, kwargs)
 
@@ -156,8 +160,8 @@ class Kernel(CLObject):
             elif isinstance(host_data, Structure):
                 memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
-    def __after_call(self, cmd_queue:CommandQueue)->List[Event]:
-        
+    def __after_call(self, cmd_queue:CommandQueue, launch_event:Event)->List[Event]:
+
         def on_completed(arg_value:Union[np.ndarray, List[Any]], mem_obj:MemObject, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
             if error_code == ErrorCode.CL_SUCCESS:
                 self.__copy_to_host(arg_value, mem_obj)
@@ -165,10 +169,20 @@ class Kernel(CLObject):
                     print(f"copy data to host for argument '{arg_info.name}'")
 
             mem_obj.unuse()
-        
+
+        def on_release(mem_obj:MemObject, event:Event, error_code:ErrorCode):
+            mem_obj.unuse()
+
         events:List[Event] = []
         for arg_info in self._args.values():
             if not arg_info.need_read_back:
+                # 只读/只写参数也要在 kernel 完成后归还缓冲池,否则每次调用泄漏一个池对象
+                if arg_info.mem_obj is not None:
+                    release_call = partial(on_release, arg_info.mem_obj)
+                    if launch_event.finished:
+                        release_call(launch_event, launch_event.status)
+                    else:
+                        launch_event.on_completed_callbacks.append(release_call)
                 continue
 
             event:Event = arg_info.mem_obj.read(cmd_queue)
@@ -178,6 +192,23 @@ class Kernel(CLObject):
             else:
                 event.on_completed_callbacks.append(call_back)
                 events.append(event)
+
+        for entry in self._member_readbacks:
+            mem_obj:MemObject = entry["mem_obj"]
+            if entry["need_read_back"]:
+                event:Event = mem_obj.read(cmd_queue)
+                call_back = partial(on_completed, entry["value"], mem_obj, entry["arg_info"])
+                if event.finished:
+                    call_back(event, event.status)
+                else:
+                    event.on_completed_callbacks.append(call_back)
+                    events.append(event)
+            else:
+                release_call = partial(on_release, mem_obj)
+                if launch_event.finished:
+                    release_call(launch_event, launch_event.status)
+                else:
+                    launch_event.on_completed_callbacks.append(release_call)
 
         return events
 
@@ -329,7 +360,7 @@ class Kernel(CLObject):
                         raise TypeError(f"type of argument '{arg_info.name}' need {content_type.__name__}, got {value.__class__.__name__}, and cannot convert {value.__class__.__name__} to {content_type.__name__}")
 
                 if is_struct:
-                    used_value.apply_pointers(cmd_queue)
+                    self._member_readbacks.extend(used_value.apply_pointers(cmd_queue, arg_info.member_infos or None))
 
                 CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
             else:

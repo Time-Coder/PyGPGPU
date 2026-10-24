@@ -229,15 +229,17 @@ class ndarray(np.ndarray):
                 mem_obj = cmd_queue.context.create_buffer(size=self.nbytes, flags=flags)
             else:
                 mem_obj = cmd_queue.context.create_image(image_info)
-                
+
             mem_obj.kernel_flags = kernel_flags
             mem_obj.dirty_on_host = True
             self._mem_objs[key] = [mem_obj, cmd_queue]
         else:
             self._mem_objs[key][1] = cmd_queue
 
+        # kernel 回调统一 unuse(),这里必须配对 use(),否则回调时 unuse 会失败
         event = None
         mem_obj = self._mem_objs[key][0]
+        mem_obj.use()
         if mem_obj.dirty_on_host:
             event = mem_obj.set_data(cmd_queue, self)
             CL_MEM_READ_ONLY = (1 << 2)

@@ -998,6 +998,69 @@ class CLInfo:
             }
         },
 
+        # void* clSVMAlloc(
+        #     cl_context context,
+        #     cl_mem_flags flags,
+        #     size_t size,
+        #     unsigned int alignment
+        # );
+        "clSVMAlloc": {
+            "args": {
+                "context": cl_context,
+                "flags": cl_uint,
+                "size": c_size_t,
+                "alignment": cl_uint
+            },
+            "restype": c_void_p,
+            "errors": {}
+        },
+
+        # void clSVMFree(
+        #     cl_context context,
+        #     void* svm_pointer
+        # );
+        "clSVMFree": {
+            "args": {
+                "context": cl_context,
+                "svm_pointer": c_void_p
+            },
+            "restype": None,
+            "errors": {}
+        },
+
+        # cl_int clEnqueueSVMMemcpy(
+        #     cl_command_queue command_queue,
+        #     cl_bool blocking_copy,
+        #     void* dst_ptr,
+        #     const void* src_ptr,
+        #     size_t size,
+        #     cl_uint num_events_in_wait_list,
+        #     const cl_event* event_wait_list,
+        #     cl_event* event
+        # );
+        "clEnqueueSVMMemcpy": {
+            "args": {
+                "command_queue": cl_command_queue,
+                "blocking_copy": cl_uint,
+                "dst_ptr": c_void_p,
+                "src_ptr": c_void_p,
+                "size": c_size_t,
+                "num_events_in_wait_list": cl_uint,
+                "event_wait_list": ptr_cl_event,
+                "event": ptr_cl_event
+            },
+            "restype": cl_int,
+            "errors": {
+                ErrorCode.CL_INVALID_COMMAND_QUEUE: "command_queue is not a valid host command-queue.",
+                ErrorCode.CL_INVALID_CONTEXT: "the context associated with command_queue is not the same as the context associated with events in event_wait_list.",
+                ErrorCode.CL_INVALID_VALUE: "dst_ptr or src_ptr is NULL, or size is 0.",
+                ErrorCode.CL_INVALID_EVENT_WAIT_LIST: "event_wait_list is NULL and num_events_in_wait_list > 0, or event_wait_list is not NULL and num_events_in_wait_list is 0.",
+                ErrorCode.CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST: "the copy is blocking and the execution status of any of the events in event_wait_list is a negative integer value.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+            }
+        },
+
         # cl_int clSetKernelArg(
         #     cl_kernel kernel,
         #     cl_uint arg_index,
