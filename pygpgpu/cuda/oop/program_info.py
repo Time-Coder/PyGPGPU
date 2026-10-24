@@ -3,6 +3,7 @@ from typing import Tuple, Any, Dict, List, Optional
 
 import numpy as np
 from ... import numpy as gnp
+from ...constants import KernelFlags
 
 from ..driver import CUInfo, CUDA
 from .mem_object import MemObject
@@ -12,11 +13,12 @@ from .buffer import Buffer
 
 class VarInfo:
 
-    def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], type_qualifiers: List[str]):
+    def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], type_qualifiers: List[str], kernel_flags:Optional[KernelFlags]=None):
         self.name = name
         self.type_str = type_str
         self.array_shape = array_shape
         self.type_qualifiers = type_qualifiers
+        self.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed) if kernel_flags is None else kernel_flags
         self.value: Any = None
         self.mem_obj: Optional[MemObject] = None
 
@@ -54,7 +56,7 @@ class VarInfo:
     
     @property
     def need_read_back(self)->bool:
-        return (self.is_ptr and "const" not in self.type_qualifiers)
+        return (self.is_ptr and bool(self.kernel_flags & KernelFlags.Writed))
     
     def use_buffer(self, stream:Stream, data:np.ndarray)->Buffer:
         if isinstance(data, gnp.ndarray):
@@ -72,8 +74,8 @@ class VarInfo:
 
 class ArgInfo(VarInfo):
 
-    def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], type_qualifiers: List[str]):
-        VarInfo.__init__(self, name, type_str, array_shape, type_qualifiers)
+    def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], type_qualifiers: List[str], kernel_flags:Optional[KernelFlags]=None):
+        VarInfo.__init__(self, name, type_str, array_shape, type_qualifiers, kernel_flags)
         self.parent = parent
     
     def check_type(self, value:Any)->None:

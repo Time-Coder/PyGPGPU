@@ -167,17 +167,21 @@ class CUDA(metaclass=MetaCUDA):
         
     @staticmethod
     def init():
-        try:
-            for func_name, func_info in CUInfo.func_signatures.items():
-                if "dll_func" in func_info:
-                    continue
+        for func_name, func_info in CUInfo.func_signatures.items():
+            if "dll_func" in func_info:
+                continue
 
+            try:
                 func = getattr(MetaCUDA.dll(), func_name)
                 func.argtypes = list(func_info["args"].values())
                 func.restype = func_info["restype"]
                 func_info["dll_func"] = func
+            except TypeError:
+                if CUDA.print_info:
+                    print(f"warning: failed to load {func_name} from cuda driver, skipped.")
 
-            # preheat
+        # preheat
+        try:
             CUDA.cuInit(0)
         except:
             pass

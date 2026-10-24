@@ -65,7 +65,8 @@ class MetaDevices(type):
         return device
     
     def __getitem__(self, index:int)->Device:
-        return self.device(index)
+        self.__fetch_devices()
+        return self.__devices_list[index]
     
     def __iter__(self)->Iterator[Device]:
         self.__fetch_devices()

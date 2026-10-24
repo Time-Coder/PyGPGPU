@@ -1,6 +1,6 @@
 from __future__ import annotations
 import math
-from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_p
+from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_p, cast
 from functools import partial
 import concurrent.futures
 import asyncio
@@ -98,18 +98,18 @@ class Kernel(CUObject):
             0, stream.id, value_ptrs, None
         )
         if CUDA.print_info:
-            print(f"launch {self} on {stream.device} with grid_dim={grid_dims}, block_dim={block_dims}", flush=True)
+            print(f"launch {self} on {stream.device} with grid_dim={tuple(grid_dims)}, block_dim={tuple(block_dims)}", flush=True)
 
         self.__after_call(stream)
 
         return stream
 
     def __before_call(self, args, kwargs):
-        global_work_size = self._global_work_size
-        local_work_size = self._local_work_size
+        global_work_size = self._grid_dims
+        local_work_size = self._block_dims
 
-        self._global_work_size = None
-        self._local_work_size = None
+        self._grid_dims = None
+        self._block_dims = None
 
         used_kwargs = self.__check_args(args, kwargs)
 
@@ -119,15 +119,17 @@ class Kernel(CUObject):
         i = 0
         for key, arg_info in self._args.items():
             value = used_kwargs[key]
-            value_ptrs[i] = self._process_arg(stream, arg_info, value)
+            value_ptrs[i] = cast(self._process_arg(stream, arg_info, value), c_void_p)
             i += 1
 
         if global_work_size is None or local_work_size is None:
             global_work_size, local_work_size = self.__detect_work_size()
 
-        work_dim = len(global_work_size)
-        global_work_size = (c_size_t * work_dim)(*global_work_size)
-        local_work_size = (c_size_t * work_dim)(*local_work_size)
+        # cuLaunchKernel 固定按 3 维传参
+        global_work_size = tuple(global_work_size) + (1,) * (3 - len(global_work_size))
+        local_work_size = tuple(local_work_size) + (1,) * (3 - len(local_work_size))
+        global_work_size = (c_size_t * 3)(*global_work_size)
+        local_work_size = (c_size_t * 3)(*local_work_size)
         return stream, global_work_size, local_work_size, value_ptrs
 
     @staticmethod
@@ -280,10 +282,10 @@ class Kernel(CUObject):
                 if not used_value.flags['C_CONTIGUOUS']:
                     used_value = np.ascontiguousarray(used_value)
 
-                buffer = arg_info.use_buffer(stream, used_value)
+                buffer, event = arg_info.use_buffer(stream, used_value)
                 arg_info.mem_obj = buffer
                 arg_info.value = value
-                return pointer(buffer.id)
+                return pointer(c_void_p(buffer.id.value))
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
 

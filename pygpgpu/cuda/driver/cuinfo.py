@@ -353,7 +353,7 @@ class CUInfo:
         "cuFuncGetAttribute": {
             "args": {
                 "pi": POINTER(c_int),
-                "attrib": CUfunction_attribute,
+                "attrib": c_int,
                 "hfunc": CUfunction
             },
             "restype": c_int
@@ -363,7 +363,7 @@ class CUInfo:
         "cuFuncSetAttribute": {
             "args": {
                 "hfunc": CUfunction,
-                "attrib": CUfunction_attribute,
+                "attrib": c_int,
                 "value": c_int
             },
             "restype": c_int

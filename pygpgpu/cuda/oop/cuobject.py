@@ -61,6 +61,8 @@ class CUObject(ABC):
     def __hash__(self)->int:
         if isinstance(self._id, c_void_p):
             return self._id.value
+        elif hasattr(self._id, "value"):
+            return self._id.value
         else:
             return self._id
 

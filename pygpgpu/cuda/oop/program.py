@@ -7,7 +7,9 @@ from .device import Device
 from .build_options import BuildOptions
 from ..driver import (
     CUDA,
-    CUmodule
+    CUfunction,
+    CUmodule,
+    ptr_CUfunction
 )
 from .program_info import KernelInfo
 from .nvrtc_program import NVRTCProgram
@@ -91,14 +93,12 @@ class Program(CUObject):
     def _fetch_kernels(self):
         if self._kernels:
             return
-        
-        kernel_ids = (cl_kernel * self.n_kernels)()
-        CL.clCreateKernelsInProgram(self.id, self.n_kernels, kernel_ids, None)
-        for kernel_id in kernel_ids:
-            kernel = Kernel(self, kernel_id)
-            kernel.args = self.kernel_infos[kernel.name].args
+
+        for kernel_name, kernel_info in self.kernel_infos.items():
+            kernel = Kernel(self, kernel_name)
+            kernel.args = kernel_info.args
             kernel.type_checked = self._type_checked
-            self._kernels[kernel.name] = kernel
+            self._kernels[kernel_name] = kernel
 
     def __getattr__(self, name:str):
         if name in self.kernel_infos:

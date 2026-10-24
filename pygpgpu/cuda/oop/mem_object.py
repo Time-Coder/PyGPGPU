@@ -11,6 +11,7 @@ from ..driver import (
     IntFlag,
     CUDA
 )
+from ...constants import KernelFlags
 from .cuobject import CUObject
 
 if TYPE_CHECKING:
@@ -30,7 +31,7 @@ class MemObject(CUObject):
         self._dirty_on_device:bool = False
         self._dirty_on_host:bool = False
         self._device_dirty_time:float = 0.0
-        self._kernel_flags:DetectFlags = (DetectFlags.Readable | DetectFlags.Writable)
+        self._kernel_flags:KernelFlags = (KernelFlags.Readed | KernelFlags.Writed)
         CUObject.__init__(self, mem_id)
 
     @abstractmethod
@@ -83,11 +84,11 @@ class MemObject(CUObject):
         self._dirty_on_host = dirty
 
     @property
-    def kernel_flags(self)->DetectFlags:
+    def kernel_flags(self)->KernelFlags:
         return self._kernel_flags
-    
+
     @kernel_flags.setter
-    def kernel_flags(self, flags:DetectFlags)->None:
+    def kernel_flags(self, flags:KernelFlags)->None:
         self._kernel_flags = flags
     
     def use(self)->None:

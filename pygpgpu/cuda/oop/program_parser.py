@@ -8,6 +8,7 @@ from ctypes import c_char_p, Structure, _Pointer, pointer
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple
 
 from ...cparser import CPreprocessor
+from ...cparser.ts_parser import TSParserMixin
 from ..driver import (
     NVRTC,
     CUInfo,
@@ -20,15 +21,13 @@ from .program_info import KernelInfo, ArgInfo, StructInfo, VarInfo
 import numpy as np
 from ... import numpy as gnp
 
+import tree_sitter_cuda as tscuda
+from tree_sitter import Language, Parser, Node
 
-class ProgramParser:
 
-    _struct_def_pattern1:re.Pattern = re.compile(r"^\s*struct\s+(?P<struct_name>[a-zA-Z_]\w*)\{(?P<body>.*?)\}\s*;", re.MULTILINE | re.DOTALL)
-    _struct_def_pattern2:re.Pattern = re.compile(r"^\s*typedef\s+struct(?P<struct_name>\s+[a-zA-Z_]\w*)?\s*\{(?P<body>.*?)\}\s*(?P<type_name>[a-zA-Z_]\w*)\s*;", re.MULTILINE | re.DOTALL)
-    _kernel_def_pattern:re.Pattern = re.compile(r"^\s*__global__\s+void\s+(?P<name>[a-zA-Z_]\w*)\s*\((?P<body>.*?)\)", re.MULTILINE | re.DOTALL)
-    _type_qualifier_pattern:re.Pattern = re.compile(r"\b(const|__restrict__|volatile)\b")
-    _arg_name_pattern:re.Pattern = re.compile(r"\b([a-zA-Z_]\w*(\[[^\]]*\])*)(?=\W*$)")
-    _array_shape_pattern:re.Pattern = re.compile(r'\[\s*(\d+)\s*\]')
+class ProgramParser(TSParserMixin):
+
+    _parser = Parser(Language(tscuda.language()))
 
     def __init__(self):
         self._file_name:str = ""
@@ -95,7 +94,10 @@ class ProgramParser:
         
         return newest_mtime
 
-    def format_error(self, error_message:str)->str:
+    def format_error(self, error_message:Union[str, bytes])->str:
+        if isinstance(error_message, bytes):
+            error_message = error_message.decode("utf-8", errors="replace")
+
         def replace_handler(match:re.Match):
             old_line_number = int(match.group(1))
             file_name, new_line_number = self._line_map[old_line_number]
@@ -126,7 +128,7 @@ import asyncio
 import numpy as np
 from numpy.typing import NDArray
 
-from pygpgpu.opencl import *
+from pygpgpu.cuda.oop.kernel import Kernel
 
 """
 
@@ -136,18 +138,16 @@ from pygpgpu.opencl import *
         for kernel_name, kernel_info in self._kernel_infos.items():
             args_declare = kernel_info.args_declare(True)
             content += f"""
-class Kernel_{kernel_name}(KernelWrapper):
+class Kernel_{kernel_name}(Kernel):
 
     @override
     def __call__(self, {args_declare})->None: ...
 
     @override
     def submit(self, {args_declare})->concurrent.futures.Future: ...
-    
+
     @override
     def async_call(self, {args_declare})->asyncio.Future: ...
-
-    def __getitem__(self, work_sizes:Tuple[int, int])->Kernel_{kernel_name}: ...
 
     @overload
     def __getitem__(self, work_sizes:Tuple[Tuple[int], Tuple[int]])->Kernel_{kernel_name}: ...
@@ -158,11 +158,8 @@ class Kernel_{kernel_name}(KernelWrapper):
     @overload
     def __getitem__(self, work_sizes:Tuple[Tuple[int, int, int], Tuple[int, int, int]])->Kernel_{kernel_name}: ...
 
-    @overload
-    def __getitem__(self, device:str)->Kernel_{kernel_name}: ...
-
 """
-        
+
         content += "\n"
 
         for kernel_name in self._kernel_infos:
@@ -229,7 +226,7 @@ class Kernel_{kernel_name}(KernelWrapper):
     
     @property
     def n_options(self)->int:
-        return self.n_options
+        return self._n_options
 
     @property
     def clean_code(self)->str:
@@ -392,79 +389,42 @@ class Kernel_{kernel_name}(KernelWrapper):
         return struct_type
 
     def _parse(self):
-        struct_matches:List[re.Match] = self._find_struct_defs(self._clean_code)
-        for struct_match in struct_matches:
-            key_names = []
-
-            if "struct_name" in struct_match.groupdict() and struct_match["struct_name"] is not None:
-                struct_name:str = struct_match["struct_name"]
-                key_names.append("struct " + struct_name)
-
-            if "type_name" in struct_match.groupdict() and struct_match["type_name"] is not None:
-                struct_name:str = struct_match["type_name"]
-                key_names.append(struct_name)
-
-            struct_info = StructInfo(name=struct_name)
-            for key_name in key_names:
-                self._struct_infos[key_name] = struct_info
-
-            members_str:str = struct_match["body"]
-            members_items:List[str] = members_str.split(";")
-            for member_item in members_items:
-                member_item = member_item.strip("\r\n\t ")
-                if not member_item:
-                    continue
-
-                submember_items = member_item.split(",")
-                first_member_item = submember_items[0]
-                type_qualifiers = self._find_type_qualifiers(first_member_item)
-                member_name:str = self._find_arg_name(first_member_item)
-                member_type:str = self._find_arg_type(first_member_item)
-                member_name, member_shape = self._extract_array_shape(member_name)
-                struct_info.members[member_name] = VarInfo(
-                    name=member_name,
-                    type_str=member_type,
-                    array_shape=member_shape,
-                    type_qualifiers=type_qualifiers
-                )
-                for i in range(1, len(submember_items)):
-                    member_name:str = self._find_arg_name(submember_items[i])
-                    member_name, member_shape = self._extract_array_shape(member_name)
-                    struct_info.members[member_name] = VarInfo(
-                        name=member_name,
-                        type_str=member_type,
-                        array_shape=member_shape,
-                        type_qualifiers=type_qualifiers
-                    )
-
+        self._ts_parse()
         for struct_info in self._struct_infos.values():
             self._create_struct_type(struct_info)
+        self._analyze_kernels()
 
-        kernel_matches:Iterator[re.Match] = self._find_kernel_defs(self._clean_code)
-        for kernel_match in kernel_matches:
-            kernel_name:str = kernel_match["name"]
-            kernel_info = KernelInfo(name=kernel_name)
-            self._kernel_infos[kernel_name] = kernel_info
+    def _new_struct_info(self, name:str)->StructInfo:
+        return StructInfo(name=name)
 
-            args_str:str = kernel_match["body"]
-            args_items:List[str] = args_str.split(",")
-            for arg_item in args_items:
-                arg_item = arg_item.strip("\r\n\t ")
-                type_qualifiers = self._find_type_qualifiers(arg_item)
-                arg_name:str = self._find_arg_name(arg_item)
-                arg_type:str = self._find_arg_type(arg_item)
-                arg_name, arg_shape = self._extract_array_shape(arg_name)
-                kernel_info.args[arg_name] = ArgInfo(
-                    parent=kernel_info,
-                    name=arg_name,
-                    type_str=arg_type,
-                    array_shape=arg_shape,
-                    type_qualifiers=type_qualifiers
-                )
-    
+    def _new_kernel_info(self, name:str)->KernelInfo:
+        return KernelInfo(name=name)
+
+    def _new_var_info(self, desc:Dict[str, Any])->VarInfo:
+        return VarInfo(
+            name=desc["name"],
+            type_str=desc["type_str"],
+            array_shape=desc["array_shape"],
+            type_qualifiers=desc["type_qualifiers"],
+            kernel_flags=desc["kernel_flags"]
+        )
+
+    def _new_arg_info(self, parent:KernelInfo, desc:Dict[str, Any])->ArgInfo:
+        return ArgInfo(
+            parent=parent,
+            name=desc["name"],
+            type_str=desc["type_str"],
+            array_shape=desc["array_shape"],
+            type_qualifiers=desc["type_qualifiers"],
+            kernel_flags=desc["kernel_flags"]
+        )
+
+    def _is_mem_arg(self, arg:Any)->bool:
+        return arg.is_ptr
+
     @property
     def _meta_file_name(self)->str:
-        return f"{self._cache_folder}/{self._base_name}_{self.md5}.meta"
+        return f"{self._cache_folder}/{self._base_name}_{self.md5}_ts.meta"
     
     @property
     def md5(self)->str:
@@ -500,53 +460,3 @@ class Kernel_{kernel_name}(KernelWrapper):
             content["file_name"] = os.path.abspath(file_name).replace("\\", "/")
 
         return md5sums(json.dumps(content, separators=(',', ':'), indent=None))
-
-    def _find_struct_defs(self, code:str)->List[re.Match]:
-        structs = list(self._struct_def_pattern1.finditer(code))
-        structs.extend(list(self._struct_def_pattern2.finditer(code)))
-        return structs
-
-    def _find_kernel_defs(self, code:str)->Iterator[re.Match]:
-        return self._kernel_def_pattern.finditer(code)
-    
-    def _find_type_qualifiers(self, arg_code:str)->List[str]:
-        type_qualifiers:List[str] = []
-        matches:Iterator[re.Match] = self._type_qualifier_pattern.finditer(arg_code)
-        for match in matches:
-            match_str:str = match.group(1)
-            type_qualifiers.append(match_str.upper())
-
-        return type_qualifiers
-    
-    def _find_arg_name(self, arg_code:str)->str:
-        arg_name:str = ""
-        match:re.Match = self._arg_name_pattern.search(arg_code)
-        if match:
-            arg_name:str = match.group(1)
-
-        return arg_name
-    
-    def _find_arg_type(self, arg_code:str)->str:
-        arg_code = self._type_qualifier_pattern.sub("", arg_code)
-        arg_code = self._arg_name_pattern.sub("", arg_code)
-        arg_code = re.sub(r"\s{2,}", " ", arg_code)
-        arg_code = re.sub(r"\s+\*", "*", arg_code)
-        arg_code = arg_code.strip("\r\t\n ")
-        return arg_code
-    
-    def _extract_array_shape(self, content: str)->Tuple[str, Tuple[int, ...]]:
-        end_pos = content.find("[")
-        if end_pos == -1:
-            name = content
-        else:
-            name = content[:end_pos].strip()
-
-        matches = re.findall(self._array_shape_pattern, content)
-        
-        if not matches:
-            shape = ()
-        else:
-            shape = tuple(int(x) for x in matches)
-
-        return name, shape
-        

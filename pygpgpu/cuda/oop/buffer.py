@@ -7,9 +7,10 @@ from typing import Union, Optional, override
 import numpy as np
 
 from ..driver import CUDA, CUdeviceptr
+from ...constants import KernelFlags
 from .stream import Stream
 from .event import Event
-from .mem_object import MemObject, DetectFlags
+from .mem_object import MemObject
 
 
 class Buffer(MemObject):
@@ -28,7 +29,7 @@ class Buffer(MemObject):
         if host_ptr is None:
             host_ptr = self._host_ptr
 
-        CUDA.cuMemcpyHtoDAsync(self.id + origin, host_ptr, region, stream.id)
+        CUDA.cuMemcpyHtoDAsync(CUdeviceptr(self.id.value + origin), host_ptr, region, stream.id)
         return stream.record_event()
 
     @override
@@ -39,7 +40,7 @@ class Buffer(MemObject):
         if host_ptr is None:
             host_ptr = self._host_ptr
 
-        CUDA.cuMemcpyDtoHAsync(host_ptr, self.id + origin, region, stream.id)
+        CUDA.cuMemcpyDtoHAsync(host_ptr, CUdeviceptr(self.id.value + origin), region, stream.id)
         return stream.record_event()
 
     @override
@@ -64,7 +65,7 @@ class Buffer(MemObject):
         self._data = data
 
         event = None
-        if self.kernel_flags != DetectFlags.Writable:
+        if self.kernel_flags & KernelFlags.Readed:
             event = self.write(stream, 0, size, host_ptr)
 
         return event

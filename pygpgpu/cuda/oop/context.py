@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer, c_uint, c_size_t
-from typing import override, TYPE_CHECKING
+from typing import override, Dict, List, Tuple, TYPE_CHECKING
 
 from .cuobject import CUObject
 from .event import Event
@@ -8,6 +8,7 @@ from ..driver import CUDA, CUctx_flags, CUcontext, CUfunc_cache, CUlimit
 
 if TYPE_CHECKING:
     from .device import Device
+    from .buffer import Buffer
 
 
 class Context(CUObject):
@@ -16,6 +17,7 @@ class Context(CUObject):
         self._device:Device = device
         self._flags:CUctx_flags = flags
         self._api_version:int = 0
+        self._buffers:Dict[int, List[Buffer]] = {}
 
         context_id = CUcontext()
         ptr_context_id = pointer(context_id)
@@ -28,6 +30,21 @@ class Context(CUObject):
         ptr_context_id = pointer(context_id)
         CUDA.cuCtxGetCurrent(ptr_context_id)
         return Context.instance(context_id)
+
+    def get_buffer(self, size:int=0)->Buffer:
+        available_buffer:Optional[Buffer] = None
+        for buffer in self._buffers.get(size, []):
+            if not buffer.using:
+                available_buffer = buffer
+                break
+
+        if available_buffer is None:
+            from .buffer import Buffer
+            available_buffer = Buffer(size)
+            self._buffers.setdefault(size, []).append(available_buffer)
+
+        available_buffer.use()
+        return available_buffer
     
     def make_current(self):
         if Context.current() == self:

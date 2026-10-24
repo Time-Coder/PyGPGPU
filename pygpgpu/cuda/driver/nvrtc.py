@@ -109,10 +109,7 @@ class NVRTC(metaclass=MetaNVRTC):
                     error_code = nvrtcResult(args[idx].contents.value)
 
                 if error_code != nvrtcResult.NVRTC_SUCCESS:
-                    if error_code in NVRTCInfo.error_codes:
-                        raise RuntimeError(f"{error_code}: {NVRTCInfo.error_codes[error_code]}")
-                    else:
-                        raise RuntimeError(f"{error_code}: unknown error.")
+                    raise RuntimeError(f"{error_code}")
 
             return return_value
 
@@ -179,17 +176,21 @@ class NVRTC(metaclass=MetaNVRTC):
         
     @staticmethod
     def init():
-        try:
-            for func_name, func_info in NVRTCInfo.func_signatures.items():
-                if "dll_func" in func_info:
-                    continue
+        for func_name, func_info in NVRTCInfo.func_signatures.items():
+            if "dll_func" in func_info:
+                continue
 
+            try:
                 func = getattr(MetaNVRTC.dll(), func_name)
                 func.argtypes = list(func_info["args"].values())
                 func.restype = func_info["restype"]
                 func_info["dll_func"] = func
+            except TypeError:
+                if NVRTC.print_info:
+                    print(f"warning: failed to load {func_name} from nvrtc, skipped.")
 
-            # preheat
+        # preheat
+        try:
             major = c_int(0)
             minor = c_int(0)
             ptr_major = pointer(major)

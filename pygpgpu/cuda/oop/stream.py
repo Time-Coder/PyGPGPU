@@ -59,21 +59,21 @@ class Stream(CUObject):
         if self.finished:
             on_completed(self, self.status)
         else:
-            self.on_completed_callbacks.append(on_completed)
+            self._on_completed_callbacks.add(on_completed)
 
         return future
 
     def add_callback(self, callback:Callable[[Stream, CUresult], None])->None:
         self._on_completed_callbacks.add(callback)
-        CUDA.cuStreamAddCallback(self.id, Stream._callback, self._user_data)
+        CUDA.cuStreamAddCallback(self.id, Stream._callback, self._user_data, 0)
 
     @CUstreamCallback
     def _callback(stream_id:CUstream, error_code:c_uint, user_data:c_void_p):
         error_code = CUresult(error_code)
-        self:Stream = Stream.instance(stream_id)
-        on_completed = cast(user_data, POINTER(py_object)).contents.value
-        on_completed(self, error_code)
-        self._on_completed_callbacks.remove(on_completed)
+        self:Stream = cast(user_data, POINTER(py_object)).contents.value
+        for on_completed in list(self._on_completed_callbacks):
+            on_completed(self, error_code)
+            self._on_completed_callbacks.remove(on_completed)
 
     @staticmethod
     @override

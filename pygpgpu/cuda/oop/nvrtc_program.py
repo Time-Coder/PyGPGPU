@@ -29,10 +29,14 @@ class NVRTCProgram(CUObject):
         else:
             self._program_parser:ProgramParser = program_parser
 
+        CUObject.__init__(self, nvrtcProgram(0))
+
     def _create_with_source(self)->nvrtcProgram:
         program_id = nvrtcProgram(0)
         ptr_program_id = pointer(program_id)
-        source = c_char_p(self._program_parser.clean_code.encode("utf-8") + b"\0")
+        # NVRTC 按 C++ 编译,extern "C" 防止 kernel 名被 mangle;#line 1 保持错误行号映射
+        source_text:str = 'extern "C" {\n#line 1\n' + self._program_parser.clean_code + "\n}"
+        source = c_char_p(source_text.encode("utf-8") + b"\0")
         name = c_char_p(b"<kernel>")
         NVRTC.nvrtcCreateProgram(ptr_program_id, source, name, 0, None, None)
         CUObject.__init__(self, program_id)
@@ -43,7 +47,10 @@ class NVRTCProgram(CUObject):
             if NVRTC.print_info:
                 print(f"building {self._program_parser.base_name} ... ", end="", flush=True)
 
-            error_code = NVRTC.nvrtcCompileProgram(self.id, self._program_parser.n_options, self._program_parser.options_ptr)
+            n_options:int = self._program_parser.n_options
+            arch_option:str = f"--gpu-architecture=sm_{device.compute_capability_major}{device.compute_capability_minor}".encode("utf-8")
+            options_array:(c_char_p) = (c_char_p * (n_options + 1))(*([arch_option] + [self._program_parser.options_ptr[i] for i in range(n_options)]))
+            error_code = NVRTC.nvrtcCompileProgram(self.id, n_options + 1, options_array)
             success = (error_code == nvrtcResult.NVRTC_SUCCESS)
 
             if NVRTC.print_info:
@@ -141,6 +148,9 @@ class NVRTCProgram(CUObject):
                 if not self.id:
                     self._create_with_source()
                     self._build(device, True)
+
+        if not self._cubin[device]:
+            self._cubin[device] = self._ptx[device]
 
         return self._cubin[device]
     
