@@ -350,9 +350,12 @@ class Kernel(CLObject):
             
             used_value = self.context.get_sampler(value)
             CL.clSetKernelArg(self.id, index, sizeof(used_value.id), pointer(used_value.id))
-        elif base_type_str in CLInfo.basic_types or base_type_str in self._program.structs:
+        elif base_type_str in CLInfo.basic_types or base_type_str in self._program.structs or base_type_str in CLInfo.vec_types:
             if base_type_str in CLInfo.basic_types:
                 content_type = CLInfo.basic_types[base_type_str]
+                is_struct = False
+            elif base_type_str in CLInfo.vec_types:
+                content_type = CLInfo.vec_types[base_type_str]
                 is_struct = False
             else:
                 content_type = self._program.structs[arg_info.base_type_str]

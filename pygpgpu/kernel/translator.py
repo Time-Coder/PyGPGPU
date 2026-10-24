@@ -34,6 +34,33 @@ DTYPE_MAP:Dict[str, str] = {
 
 PTR = "*"  # 类型记法: ("*", base) 表示数组参数,字符串表示标量
 
+_C_FIELD_TYPES:Dict[Any, str] = {}
+
+def _vec_registry()->Dict[str, Any]:
+    """vec 类型名 -> ctypes 类(如 float4),惰性构建。"""
+    global _VEC_REGISTRY
+    try:
+        return _VEC_REGISTRY
+    except NameError:
+        pass
+    from ..opencl.driver import CLInfo
+    _VEC_REGISTRY = dict(CLInfo.vec_types)
+    for name, cls in _VEC_REGISTRY.items():
+        for field_name, field_type in cls._fields_:
+            _C_FIELD_TYPES[(name, field_name)] = _c_scalar_name(field_type)
+    return _VEC_REGISTRY
+
+def _c_scalar_name(ctypes_type:Any)->str:
+    import ctypes as _ctypes
+    sizes = {_ctypes.c_float: "float", _ctypes.c_double: "double",
+             _ctypes.c_int8: "char", _ctypes.c_int16: "short", _ctypes.c_int32: "int",
+             _ctypes.c_int64: "long", _ctypes.c_uint8: "uchar", _ctypes.c_uint16: "ushort",
+             _ctypes.c_uint32: "uint", _ctypes.c_uint64: "ulong"}
+    return sizes.get(ctypes_type, "float")
+
+def is_vec(t:Any)->bool:
+    return isinstance(t, str) and t in _vec_registry()
+
 _MATH_FUNCS:Dict[str, Optional[str]] = {
     "sqrt": None, "exp": None, "log": None, "log2": None, "log10": None,
     "sin": None, "cos": None, "tan": None, "asin": None, "acos": None,
@@ -62,6 +89,8 @@ def is_ptr(t:Any)->bool:
 def promote(t1:Any, t2:Any)->Any:
     if is_ptr(t1) or is_ptr(t2):
         raise PyKernelSyntaxError("cannot mix arrays with scalars in arithmetic")
+    if is_vec(t1) or is_vec(t2):
+        raise PyKernelSyntaxError("vector arithmetic is handled separately")
     if "double" in (t1, t2):
         return "double"
     if is_float(t1) or is_float(t2):
@@ -73,7 +102,25 @@ def promote(t1:Any, t2:Any)->Any:
 
 def infer_ctype(value:Any)->Any:
     """调用时实参 -> C 类型。"""
+    registry:Dict[str, Any] = _vec_registry()
+    dtype_to_vec:Dict[Any, str] = {cls.dtype: name for name, cls in registry.items()}
+
+    if isinstance(value, np.void):
+        vec_name:str = dtype_to_vec.get(value.dtype)
+        if vec_name is None:
+            raise PyKernelSyntaxError(f"unsupported numpy structured scalar: {value.dtype}")
+        return vec_name
+
+    for vec_name, cls in registry.items():
+        if isinstance(value, cls):
+            return vec_name
+
     if isinstance(value, np.ndarray):
+        if value.dtype.fields is not None:
+            vec_name = dtype_to_vec.get(value.dtype)
+            if vec_name is not None:
+                return (PTR, vec_name)
+            raise PyKernelSyntaxError(f"unsupported numpy structured dtype: {value.dtype}")
         if value.dtype.name not in DTYPE_MAP:
             raise PyKernelSyntaxError(f"unsupported numpy dtype: {value.dtype.name}")
         return (PTR, DTYPE_MAP[value.dtype.name])
@@ -563,10 +610,51 @@ class FunctionTranslator:
             return self._visit_constant(ast.Constant(value=value))
         self._error(f"unknown name '{node.id}' (only parameters, local variables and int/float/bool global constants are supported)", node)
 
+    def _vec_componentwise(self, op:str, left:str, vec:str, right:str="", scalar:str="")->str:
+        """CUDA 没有向量算术/数学重载,展开为逐分量。
+
+        op 为中缀符号(+ - * /)时生成 `l.c op r.c`;为函数名(sqrt 等)时生成 `op(l.c, r.c)`。
+        right 为向量操作数,scalar 为广播标量操作数。
+        """
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [field_name for field_name, _ in cls._fields_]
+        maker:str = f"make_{vec}"
+        infix:bool = (op in ("+", "-", "*", "/"))
+        terms:List[str] = []
+        for c in components:
+            if scalar:
+                terms.append(f"({left}.{c} {op} {scalar})" if infix else f"{op}({left}.{c}, {scalar})")
+            elif right:
+                terms.append(f"({left}.{c} {op} {right}.{c})" if infix else f"{op}({left}.{c}, {right}.{c})")
+            else:
+                terms.append(f"({op}{left}.{c})" if infix else f"{op}({left}.{c})")
+        return f"{maker}({', '.join(terms)})"
+
     def _visit_binop(self, node:ast.BinOp)->Tuple[str, Any]:
         left, lt = self._visit_expression(node.left)
         right, rt = self._visit_expression(node.right)
         name:str = node.op.__class__.__name__
+
+        if is_vec(lt) or is_vec(rt):
+            symbol:str = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/"}.get(name)
+            if symbol is None:
+                self._error(f"operator {name} is not supported on vector types; operate per-component (v.x + v.y)", node)
+
+            if is_vec(lt) and is_vec(rt):
+                if lt != rt:
+                    self._error(f"vector operands must have the same type, got {lt} and {rt}", node)
+                if self.backend == "opencl":
+                    return f"({left} {symbol} {right})", lt
+                return self._vec_componentwise(symbol, left, lt, right), lt
+
+            # 向量与标量: 广播逐分量
+            vec, vec_side_left = (lt, True) if is_vec(lt) else (rt, False)
+            if self.backend == "opencl":
+                code:str = f"({left} {symbol} {right})" if vec_side_left else f"({right} {symbol} {left})"
+                return code, vec
+            if vec_side_left:
+                return self._vec_componentwise(symbol, left, vec, scalar=right), vec
+            return self._vec_componentwise(symbol, right, vec, scalar=left), vec
 
         if name == "Div":
             t:Any = promote(lt, rt) if not (is_int(lt) and is_int(rt)) else "float"
@@ -657,6 +745,15 @@ class FunctionTranslator:
                 if node.attr in _MATH_CONSTS:
                     return _MATH_CONSTS[node.attr], "float"
                 self._error(f"{node.value.id}.{node.attr} is not supported", node)
+
+        base_code, base_t = self._visit_expression(node.value)
+        if is_vec(base_t):
+            field_key:(str, str) = (base_t, node.attr)
+            if field_key not in _C_FIELD_TYPES:
+                self._error(
+                    f"vector type {base_t} has no component '.{node.attr}' "
+                    f"(only single components like .x/.y/.z/.w; swizzles are not supported)", node)
+            return f"({base_code}.{node.attr})", _C_FIELD_TYPES[field_key]
         self._error(f"unsupported attribute access: .{node.attr}", node)
 
     # ---------- 调用 ----------
@@ -679,6 +776,9 @@ class FunctionTranslator:
 
             if name in ("abs", "min", "max", "round"):
                 return self._emit_builtin(name, args, node)
+
+            if name in _vec_registry():
+                return self._emit_vec_constructor(name, args, node)
 
             target:Any = self.resolve_global(name)
             if callable(target):
@@ -730,6 +830,7 @@ class FunctionTranslator:
         ret_override:Optional[str] = _MATH_FUNCS[attr]
         arg_codes:List[str] = []
         ret:Any = (ret_override or "float")
+        vec_arg:Optional[str] = None
         for i, (code, t) in enumerate(args):
             if is_ptr(t):
                 # python 语义: math.* 只接受标量; np.*(arr) 是宿主端逐元素运算,
@@ -740,12 +841,44 @@ class FunctionTranslator:
                     f"in python, {module_name}.{attr}(arr) would be an element-wise host operation "
                     f"returning a new array, which a per-work-item kernel cannot represent. "
                     f"Index the element first, e.g. {module_name}.{attr}(arr[i]).", node)
+            if is_vec(t):
+                vec_arg = (vec_arg or t)
             if ret_override is None and t == "double":
                 ret = "double"
+
+        if vec_arg is not None:
+            # python 语义: math/np 函数不接受向量结构体(np.sqrt(float4_value) 会 TypeError)。
+            # OpenCL 原生支持逐分量向量数学; CUDA 通过逐分量展开实现。
+            if ret_override is not None:
+                self._error(
+                    f"{module_name}.{attr}() on vector type {vec_arg} is not supported "
+                    f"(it returns {ret_override} for scalars; apply it per-component, e.g. "
+                    f"{attr}(v.x))", node)
+            if len(args) != 1:
+                self._error(f"{module_name}.{attr}() on vectors takes exactly 1 vector argument", node)
+            if self.backend == "opencl":
+                return f"{attr}({args[0][0]})", vec_arg
+            return self._vec_componentwise(attr, args[0][0], vec_arg), vec_arg
+
         for (code, t) in args:
             arg_codes.append(code if (t == ret or (is_float(t) and is_float(ret))) else f"(({ret})({code}))")
         c_func:str = attr
         return f"{c_func}({', '.join(arg_codes)})", ret
+
+    def _emit_vec_constructor(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+        cls:Any = _vec_registry()[name]
+        expected:int = len(cls._fields_)
+        if len(args) != expected:
+            self._error(f"{name}() takes exactly {expected} component arguments ({expected} were required, {len(args)} given)", node)
+        codes:List[str] = []
+        for i, (code, t) in enumerate(args):
+            if is_ptr(t) or is_vec(t):
+                self._error(f"{name}() components must be scalars", node)
+            field_type:str = _C_FIELD_TYPES[(name, cls._fields_[i][0])]
+            codes.append(code if t == field_type else f"(({field_type})({code}))")
+        if self.backend == "opencl":
+            return f"({name})({', '.join(codes)})", name
+        return f"make_{name}({', '.join(codes)})", name
 
     def _emit_device_call(self, name:str, target:Any, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)

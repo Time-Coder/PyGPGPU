@@ -263,9 +263,12 @@ class Kernel(CUObject):
         arg_type_str = arg_info.type_str
         base_type_str = arg_info.base_type_str
 
-        if base_type_str in CUInfo.basic_types or base_type_str in self._program.structs:
+        if base_type_str in CUInfo.basic_types or base_type_str in self._program.structs or base_type_str in CUInfo.vec_types:
             if base_type_str in CUInfo.basic_types:
                 content_type = CUInfo.basic_types[base_type_str]
+                is_struct = False
+            elif base_type_str in CUInfo.vec_types:
+                content_type = CUInfo.vec_types[base_type_str]
                 is_struct = False
             else:
                 content_type = self._program.structs[arg_info.base_type_str]
