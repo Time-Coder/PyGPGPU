@@ -653,10 +653,10 @@ class FunctionTranslator:
     def _visit_attribute(self, node:ast.Attribute)->Tuple[str, Any]:
         if isinstance(node.value, ast.Name):
             module:Any = self.resolve_global(node.value.id)
-            if module is math:
+            if module is math or module is np:
                 if node.attr in _MATH_CONSTS:
                     return _MATH_CONSTS[node.attr], "float"
-                self._error(f"math.{node.attr} is not supported", node)
+                self._error(f"{node.value.id}.{node.attr} is not supported", node)
         self._error(f"unsupported attribute access: .{node.attr}", node)
 
     # ---------- 调用 ----------
@@ -687,9 +687,9 @@ class FunctionTranslator:
 
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             module:Any = self.resolve_global(func.value.id)
-            if module is math:
+            if module is math or module is np:
                 args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
-                return self._emit_math_call(func.attr, args, node)
+                return self._emit_math_call(func.attr, args, node, module_name=func.value.id)
             self._error(f"unsupported method call: .{func.attr}", node)
 
         self._error("unsupported call expression", node)
@@ -724,15 +724,22 @@ class FunctionTranslator:
 
         self._error(f"unsupported builtin: {name}", node)
 
-    def _emit_math_call(self, attr:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+    def _emit_math_call(self, attr:str, args:List[Tuple[str, Any]], node:ast.Call, module_name:str="math")->Tuple[str, Any]:
         if attr not in _MATH_FUNCS:
-            self._error(f"math.{attr} is not supported", node)
+            self._error(f"{module_name}.{attr} is not supported", node)
         ret_override:Optional[str] = _MATH_FUNCS[attr]
         arg_codes:List[str] = []
         ret:Any = (ret_override or "float")
-        for code, t in args:
+        for i, (code, t) in enumerate(args):
             if is_ptr(t):
-                self._error(f"math.{attr}() requires scalar arguments", node)
+                # python 语义: math.* 只接受标量; np.*(arr) 是宿主端逐元素运算,
+                # 返回新数组, 无法在 work-item 内核中表示 -> 要求索引到元素
+                arr_desc:str = (node.args[i].id if isinstance(node.args[i], ast.Name) else "the argument")
+                self._error(
+                    f"{module_name}.{attr}() cannot be applied to the array '{arr_desc}': "
+                    f"in python, {module_name}.{attr}(arr) would be an element-wise host operation "
+                    f"returning a new array, which a per-work-item kernel cannot represent. "
+                    f"Index the element first, e.g. {module_name}.{attr}(arr[i]).", node)
             if ret_override is None and t == "double":
                 ret = "double"
         for (code, t) in args:
