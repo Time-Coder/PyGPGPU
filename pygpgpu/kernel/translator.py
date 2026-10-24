@@ -311,17 +311,6 @@ class FunctionTranslator:
     def _is_shape0_range(self, iter_node:ast.expr)->bool:
         return (self._shape0_range_param(iter_node) is not None)
 
-    def _shape1_range_param(self, iter_node:ast.expr, outer_param:str)->Optional[str]:
-        """`for x in range(<同一数组>.shape[1])` 的内层循环检测, 返回参数名。"""
-        if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
-                and iter_node.func.id == "range" and len(iter_node.args) == 1 and not iter_node.keywords):
-            return None
-        arg:ast.expr = iter_node.args[0]
-        if not (isinstance(arg, ast.Subscript) and isinstance(arg.slice, ast.Constant) and arg.slice.value == 1):
-            return None
-        param:Optional[str] = self._shape_holder_param(arg.value)
-        return param if param == outer_param else None
-
     def _enumerate_magic_target(self, iter_node:ast.expr)->Optional[Tuple[str, Any]]:
         """`for i, x in enumerate(arr)` 的数组参数解析, 返回 (参数名, 指针类型)。"""
         if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
@@ -351,9 +340,72 @@ class FunctionTranslator:
             self._emit(f"const int {index_name} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
         self._emit(f"if ({index_name} >= {gid_bound}) return;")
 
+    def _nd_magic_target(self, iter_node:ast.expr)->Optional[Tuple[str, str, str]]:
+        """np.ndindex(arr.shape) / np.ndenumerate(arr) 魔法循环解析。
+
+        返回 (形式, 数组参数名, 模块名); ndenumerate 的元素类型由调用方查 scope。
+        """
+        if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Attribute)
+                and isinstance(iter_node.func.value, ast.Name) and len(iter_node.args) == 1
+                and not iter_node.keywords):
+            return None
+        module:Any = self.resolve_global(iter_node.func.value.id)
+        if module is not np:
+            return None
+        form:str = iter_node.func.attr
+        if form not in ("ndindex", "ndenumerate"):
+            return None
+
+        arg:ast.expr = iter_node.args[0]
+        param:str = ""
+        if form == "ndindex":
+            # np.ndindex(<数组>.shape)
+            if isinstance(arg, ast.Attribute) and arg.attr == "shape":
+                param = (self._shape_holder_param(arg) or "")
+        else:
+            # np.ndenumerate(<数组>)
+            if isinstance(arg, ast.Name):
+                param = arg.id
+            elif (self.self_param and isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
+                    and arg.value.id == self.self_param):
+                param = f"_self_{arg.attr}"
+        if not param or not is_ptr(self._lookup(param)):
+            return None
+        return form, param, iter_node.func.value.id
+
+    def _emit_nd_head(self, names:List[str], param:str)->None:
+        """多维 work-item 头: names[0] 对应第 0 维(最慢), 最后一维对应 gid0(最快)。"""
+        ndim:int = len(names)
+        for d, name in enumerate(names):
+            self._define(name, "int", None)
+            self._shape_var(param, d)
+        checks:List[str] = []
+        for d, name in enumerate(names):
+            component:int = ndim - 1 - d
+            bound:str = self._shape_var(param, d)
+            if self.backend == "opencl":
+                self._emit(f"const int {name} = get_global_id({component});")
+            else:
+                c:str = (".x" if component == 0 else ".y" if component == 1 else ".z")
+                self._emit(f"const int {name} = (int)(blockIdx{c} * blockDim{c} + threadIdx{c});")
+            checks.append(f"{name} >= {bound}")
+        self._emit(f"if ({' || '.join(checks)}) return;")
+
+    def _nd_flat_index(self, names:List[str], param:str)->str:
+        """行主序扁平下标表达式: n0*s1*s2 + n1*s2 + n2。"""
+        terms:List[str] = []
+        ndim:int = len(names)
+        for d, name in enumerate(names):
+            term:str = name
+            for inner in range(d + 1, ndim):
+                term = f"{term} * {self._shape_var(param, inner)}"
+            terms.append(term)
+        return " + ".join(terms)
+
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
         magic_index:Optional[int] = None
         enumerate_form:Optional[Tuple[str, Any]] = None
+        nd_form:Optional[Tuple[str, str, str]] = None
         for idx, stmt in enumerate(body):
             if not isinstance(stmt, ast.For):
                 continue
@@ -364,6 +416,11 @@ class FunctionTranslator:
             if enum_info is not None:
                 magic_index = idx
                 enumerate_form = enum_info
+                break
+            nd_info:Optional[Tuple[str, str, str]] = self._nd_magic_target(stmt.iter)
+            if nd_info is not None:
+                magic_index = idx
+                nd_form = nd_info
                 break
 
         if magic_index is None:
@@ -403,6 +460,50 @@ class FunctionTranslator:
             self.work_size_dims = [(param, 0)]
             return
 
+        if nd_form is not None:
+            form, param, module_name = nd_form
+            loop:ast.For = body[magic_index]
+            target = loop.target
+
+            # 目标解包: ndindex -> (y, x); ndenumerate -> ((y, x), v)
+            value_name:str = ""
+            names_node:ast.expr = target
+            if form == "ndenumerate":
+                if not (isinstance(target, ast.Tuple) and len(target.elts) == 2
+                        and isinstance(target.elts[1], ast.Name)):
+                    self._error(
+                        f"{module_name}.ndenumerate must unpack like "
+                        f"`for (y, x), v in {module_name}.ndenumerate(array)`", target)
+                names_node = target.elts[0]
+                value_name = target.elts[1].id
+            if not (isinstance(names_node, ast.Tuple) and all(isinstance(e, ast.Name) for e in names_node.elts)):
+                self._error(
+                    f"{module_name}.{form} indices must be unpacked into plain names, "
+                    f"e.g. `for y, x in {module_name}.ndindex(array.shape)`", target)
+            names:List[str] = [e.id for e in names_node.elts]
+            ndim:int = len(names)
+            if ndim == 1:
+                self._error(
+                    f"for 1-D iteration use `range(array.shape[0])` or `enumerate(array)`; "
+                    f"{module_name}.{form} is for 2-D/3-D", target)
+            if ndim > 3:
+                self._error(f"{module_name}.{form} supports at most 3 dimensions, got {ndim}", target)
+
+            self.gid_param = param
+            self._emit_nd_head(names, param)
+            if form == "ndenumerate":
+                arr_t:Any = self._lookup(param)
+                elem_t:Any = arr_t[1]
+                self._define(value_name, elem_t, None)
+                self._emit(f"{elem_t} {value_name} = {param}[{self._nd_flat_index(names, param)}];")
+
+            for stmt in loop.body:
+                self._visit_statement(stmt)
+            for stmt in body[magic_index + 1:]:
+                self._visit_statement(stmt)
+            self.work_size_dims = [(param, d) for d in range(ndim - 1, -1, -1)]
+            return
+
         loop:ast.For = body[magic_index]
         range_call:ast.Call = loop.iter
         bound:ast.expr = range_call.args[0]
@@ -413,49 +514,21 @@ class FunctionTranslator:
 
         self.gid_param = array_name
 
-        # 2D 模式: 外层 range(arr.shape[0]) 内嵌 range(arr.shape[1]) -> 二维 NDRange
-        inner_loop:Optional[ast.For] = None
-        if len(loop.body) == 1 and isinstance(loop.body[0], ast.For):
-            inner_param:Optional[str] = self._shape1_range_param(loop.body[0].iter, array_name)
-            if inner_param is not None:
-                inner_loop = loop.body[0]
-
-        def _emit_gid(var:str, dim:int, component:int)->None:
-            self._shape_var(array_name, dim)
-            if self.backend == "opencl":
-                self._emit(f"const int {var} = get_global_id({component});")
-            else:
-                component_expr:str = (".x" if component == 0 else ".y" if component == 1 else ".z")
-                self._emit(f"const int {var} = (int)(blockIdx{component_expr} * blockDim{component_expr} + threadIdx{component_expr});")
-
-        if inner_loop is None:
-            gid_bound:str = self._shape_var(array_name, 0)
-            target:str = loop.target.id
-            self._define(target, "int", loop.target)
-            _emit_gid(target, 0, 0)
-            self._emit(f"if ({target} >= {gid_bound}) return;")
-
-            # 循环体即 work-item 主体
-            for stmt in loop.body:
-                self._visit_statement(stmt)
+        gid_bound:str = self._shape_var(array_name, 0)
+        target:str = loop.target.id
+        self._define(target, "int", loop.target)
+        if self.backend == "opencl":
+            self._emit(f"const int {target} = get_global_id(0);")
         else:
-            outer_target:str = loop.target.id
-            inner_target:str = inner_loop.target.id
-            outer_bound:str = self._shape_var(array_name, 0)
-            inner_bound:str = self._shape_var(array_name, 1)
-            self._define(outer_target, "int", loop.target)
-            self._define(inner_target, "int", inner_loop.target)
-            # gid0 对应最内层(行主序的 x), gid1 对应外层(y)
-            _emit_gid(inner_target, 1, 0)
-            _emit_gid(outer_target, 0, 1)
-            self._emit(f"if ({outer_target} >= {outer_bound} || {inner_target} >= {inner_bound}) return;")
+            self._emit(f"const int {target} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
+        self._emit(f"if ({target} >= {gid_bound}) return;")
 
-            for stmt in inner_loop.body:
-                self._visit_statement(stmt)
-
-        # work size 来源: 1D -> (shape0); 2D -> (shape1, shape0)
-        self.work_size_dims:List[Tuple[str, int]] = (
-            [(array_name, 1), (array_name, 0)] if inner_loop is not None else [(array_name, 0)])
+        # 循环体即 work-item 主体; 嵌套的 range 循环按真实串行循环翻译
+        for stmt in loop.body:
+            self._visit_statement(stmt)
+        for stmt in body[magic_index + 1:]:
+            self._visit_statement(stmt)
+        self.work_size_dims = [(array_name, 0)]
 
     # ---------- 语句 ----------
 
@@ -514,6 +587,13 @@ class FunctionTranslator:
             self._error(
                 "enumerate() is only supported as the outermost magic loop "
                 "(`for i, x in enumerate(array)`), not as a real inner loop", node.iter)
+        if (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Attribute)
+                and node.iter.func.attr in ("ndindex", "ndenumerate")
+                and isinstance(node.iter.func.value, ast.Name)
+                and self.resolve_global(node.iter.func.value.id) is np):
+            self._error(
+                f"np.{node.iter.func.attr} is only supported as the outermost magic loop, "
+                f"not as a real inner loop", node.iter)
         if not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name) and node.iter.func.id == "range"):
             self._error("only `for ... in range(...)` loops are supported", node.iter)
         args:List[ast.expr] = node.iter.args
