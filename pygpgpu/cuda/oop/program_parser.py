@@ -166,6 +166,9 @@ class Kernel_{kernel_name}(Kernel):
     @overload
     def __getitem__(self, work_sizes:Tuple[Tuple[int, int, int], Tuple[int, int, int]])->Kernel_{kernel_name}: ...
 
+    @overload
+    def __getitem__(self, device:str)->Kernel_{kernel_name}: ...
+
 """
 
         content += "\n"

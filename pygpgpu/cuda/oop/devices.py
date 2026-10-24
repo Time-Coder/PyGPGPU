@@ -38,30 +38,42 @@ class MetaDevices(type):
             self.__devices_set.add(device_id.value)
     
     def device(self, keyword:str)->Device:
-        keyword:str = keyword.lower()
-        device:Optional[Device] = None
+        """按 编号 / 名称或厂商子串 / "名字:序号" 查找设备。"""
+        keyword_lower:str = keyword.lower()
 
-        if keyword in self.__devices_map:
-            device:Device = self.__devices_map[keyword]
-        else:
-            if ":" in keyword:
-                items = keyword.split(":")
-                name = items[0]
-                index = int(items[1])
-            else:
-                name = keyword
-                index = 0
-                
-            for device_ in self:
-                if name in device_.name.lower() or name in device_.vendor.lower():
-                    device = device_
-                    break
+        if keyword_lower in self.__devices_map:
+            device:Optional[Device] = self.__devices_map[keyword_lower]
+            if device is None:
+                raise ValueError(f"Device {keyword} not found")
+            return device
 
-            self.__devices_map[keyword] = device
+        name:str = keyword_lower
+        index:int = 0
+        if ":" in keyword_lower:
+            name, idx_part = keyword_lower.rsplit(":", 1)
+            if not idx_part.strip().isdigit():
+                raise ValueError(f"invalid device selector '{keyword}' (expected 'name[:index]')")
+            index = int(idx_part)
+
+        if name.isdigit():
+            i:int = int(name)
+            self.__fetch_devices()
+            if not (0 <= i < len(self.__devices_list)):
+                raise ValueError(f"device index {i} out of range (0..{len(self.__devices_list) - 1})")
+            device = self.__devices_list[i]
+            self.__devices_map[keyword_lower] = device
+            return device
+
+        matches:List[Device] = [
+            d for d in self
+            if name in d.name.lower() or name in getattr(d, "vendor", "").lower()]
+        device = (matches[index] if 0 <= index < len(matches) else None)
+        self.__devices_map[keyword_lower] = device
 
         if device is None:
-            raise ValueError(f"Device {keyword} not found")
-        
+            available:str = ", ".join(d.name for d in self)
+            raise ValueError(f"Device {keyword} not found; available: {available}")
+
         return device
     
     def __getitem__(self, index:int)->Device:
