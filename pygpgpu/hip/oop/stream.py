@@ -1,0 +1,97 @@
+from __future__ import annotations
+from ctypes import pointer, c_uint, c_void_p, cast, POINTER, py_object
+from typing import override, Union, List, Callable, Set
+import asyncio
+from concurrent import futures
+
+from .hipobject import HIPObject
+from .event import Event
+from ..driver import CUstream, CUstreamCallback
+from ..driver import HIP, HIPInfo, hipError
+
+
+class Stream(HIPObject):
+
+    def __init__(self, flags:int=0):
+        self._py_obj = py_object(self)
+        self._ptr_py_obj = pointer(self._py_obj)
+        self._user_data = cast(self._ptr_py_obj, c_void_p)
+
+        self._flags:int = flags
+        self._on_completed_callbacks:Set[Callable[[Stream, int], None]] = set()
+
+        stream_id = CUstream()
+        ptr_stream_id = pointer(stream_id)
+        HIP.hipStreamCreate(ptr_stream_id, flags)
+        HIPObject.__init__(self, stream_id)
+
+    @property
+    def flags(self)->int:
+        return self._flags
+
+    def record_event(self)->Event:
+        event = Event()
+        HIP.hipEventRecord(event.id, self.id)
+        return event
+    
+    def wait_event(self, event:Event, flags:int=0):
+        HIP.hipStreamWaitEvent(self.id, event.id, flags)
+
+    def sync(self)->None:
+        HIP.hipStreamSynchronize(self.id)
+
+    @property
+    def finished(self)->bool:
+        return (self.status == hipError.SUCCESS)
+    
+    @property
+    def status(self)->int:
+        return int(HIP.hipStreamQuery(self.id))
+
+    def create_future(self, future_type:type)->Union[asyncio.Future, futures.Future]:
+        future:Union[asyncio.Future, futures.Future] = future_type()
+
+        def on_completed(stream:Stream, error_code:int):
+            if error_code != hipError.SUCCESS:
+                future.set_exception(RuntimeError(str(error_code) + ": " + HIPInfo.error_codes[error_code]))
+            else:
+                future.set_result(None)
+        
+        if self.finished:
+            on_completed(self, self.status)
+        else:
+            self._on_completed_callbacks.add(on_completed)
+
+        return future
+
+    def add_callback(self, callback:Callable[[Stream, int], None])->None:
+        self._on_completed_callbacks.add(callback)
+        HIP.hipStreamAddCallback(self.id, Stream._callback, self._user_data, 0)
+
+    @CUstreamCallback
+    def _callback(stream_id:CUstream, error_code:c_uint, user_data:c_void_p):
+        error_code = int(error_code)
+        self:Stream = cast(user_data, POINTER(py_object)).contents.value
+        for on_completed in list(self._on_completed_callbacks):
+            on_completed(self, error_code)
+            self._on_completed_callbacks.remove(on_completed)
+
+    @staticmethod
+    @override
+    def _prefix()->str:
+        return ""
+
+    @staticmethod
+    @override
+    def _get_info_func()->HIP.Func:
+        return None
+
+    @staticmethod
+    @override
+    def _info_enum()->type:
+        return None
+
+    @staticmethod
+    @override
+    def _release_func()->HIP.Func:
+        return HIP.hipStreamDestroy

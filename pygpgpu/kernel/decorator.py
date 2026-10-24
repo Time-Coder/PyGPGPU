@@ -23,6 +23,7 @@ from .translator import (
 _BACKEND_ALIASES:Dict[str, str] = {
     "opencl": "opencl", "ocl": "opencl", "cl": "opencl",
     "cuda": "cuda", "cu": "cuda",
+    "hip": "hip", "rocm": "hip", "amd": "hip",
 }
 
 
@@ -78,6 +79,9 @@ def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
     if backend == "opencl":
         from ..opencl.oop.platforms import Platforms
         devices:List[Any] = [d for pf in Platforms for d in pf.devices]
+    elif backend == "hip":
+        from ..hip.oop.devices import Devices
+        devices = list(Devices)
     else:
         from ..cuda.oop.devices import Devices
         devices = list(Devices)
@@ -103,7 +107,9 @@ def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
         return devices[i], devices[i].name
 
     low:str = sel.lower()
-    matches:List[Any] = [d for d in devices if low in d.name.lower() or low in getattr(d, "vendor", "").lower()]
+    matches:List[Any] = [d for d in devices
+                         if low in d.name.lower() or low in getattr(d, "vendor", "").lower()
+                         or low in getattr(d, "arch", "").lower()]
     if not matches:
         raise ValueError(
             f"no {backend} device matches '{device_sel}'; available: " + ", ".join(d.name for d in devices))
@@ -286,7 +292,8 @@ class PyKernel:
                     raise ValueError(
                         f"global work size {global_size} must be divisible by local {local_size}; "
                         f"use None for an automatically derived local size")
-            if backend == "cuda":
+            if backend in ("cuda", "hip"):
+                # cuda/hip 的 gridDim 是块数, 由 总数/local 换算
                 grid = tuple(g // l for g, l in zip(global_size, local_size))
                 kernel_obj = kernel_obj[(grid, local_size)]
             else:
@@ -311,7 +318,7 @@ class PyKernel:
 
     def _compile(self, args:List[Any], arg_types:List[Any], self_types:List[Any], sig:str,
                  backend:str, device_obj:Any)->Tuple[Any, List[str]]:
-        if backend == "cuda":
+        if backend in ("cuda", "hip"):
             for t in list(arg_types) + list(self_types):
                 base:str = (t[1] if isinstance(t, tuple) else t)
                 if base == "half":
@@ -323,8 +330,10 @@ class PyKernel:
         device_cache:Dict[Any, Any] = {}
         self_attr_types:Dict[str, Any] = dict(zip(self._self_attrs, self_types))
 
+        # hip 接受 CUDA 语法(threadIdx/atomicAdd/make_float4 等), 代码生成按 cuda 走
+        codegen_backend:str = ("cuda" if backend == "hip" else backend)
         translator:FunctionTranslator = FunctionTranslator(
-            self.raw_func, list(arg_types) + list(self_types), backend,
+            self.raw_func, list(arg_types) + list(self_types), codegen_backend,
             self._resolve_global, device_cache, is_kernel=True,
             self_param=self._self_param, self_attr_types=self_attr_types)
         translator.translate()
@@ -358,13 +367,13 @@ class PyKernel:
     def _cache_dir(self, backend:str)->str:
         source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
         base_dir:str = (os.path.dirname(os.path.abspath(source_file)) if source_file else os.getcwd())
-        folder:str = ("__clcache__" if backend == "opencl" else "__cucache__")
+        folder:str = {"opencl": "__clcache__", "cuda": "__cucache__", "hip": "__hipcache__"}[backend]
         return os.path.join(base_dir, folder, "pykernels")
 
     def _write_source(self, sig:str, source:str, backend:str)->str:
         cache_dir:str = self._cache_dir(backend)
         os.makedirs(cache_dir, exist_ok=True)
-        extension:str = ("cl" if backend == "opencl" else "cu")
+        extension:str = {"opencl": "cl", "cuda": "cu", "hip": "hip"}[backend]
         path:str = os.path.join(cache_dir, f"pyk_{self.__name__}_{sig}_{self._source_sig}.{extension}")
 
         existing:Optional[str] = None
@@ -380,6 +389,14 @@ class PyKernel:
         if backend == "opencl":
             from ..opencl.oop.program import Program
             program:Any = Program(device_obj.platform.default_context, file_name=source_path)
+            return program.kernels[c_name]
+
+        if backend == "hip":
+            from ..hip.oop.program import Program as HIPProgram
+            from ..hip.oop.hip_compiler import HipCompiler
+            device_obj.default_context.make_current()
+            compiler = HipCompiler(source_path)
+            program:Any = HIPProgram(source_path, compiler=compiler)
             return program.kernels[c_name]
 
         from ..cuda.oop.program import Program as CUProgram
