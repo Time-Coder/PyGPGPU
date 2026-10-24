@@ -14,6 +14,9 @@ from .genVec import genVec
 __all__ = [
     "dot", "cross", "normalize", "length", "distance",
     "clamp", "mix", "mad", "saturate", "step", "rsqrt", "exp2",
+    "select", "any", "all",
+    "isequal", "isnotequal", "isgreater", "isgreaterequal", "isless", "islessequal",
+    "isordered", "isunordered", "abs_diff", "hadd", "rhadd", "mad24", "mul24",
 ]
 
 
@@ -161,3 +164,138 @@ def exp2(x:Any)->Any:
     if components is None:
         return math.pow(2.0, x)
     return type(x)(*[math.pow(2.0, c) for c in components])
+
+
+def select(a:Any, b:Any, cond:Any)->Any:
+    """逐分量选择: cond 分量非零取 b, 否则取 a。"""
+    a_components, b_components, cond_components = _components(a), _components(b), _components(cond)
+
+    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
+        return values[i] if components is not None else values
+
+    result_type:Any = (type(a) if isinstance(a, genVec) else type(b) if isinstance(b, genVec) else float)
+    if a_components is None:
+        return b if cond else a
+
+    result:List[Any] = []
+    for i in range(len(a_components)):
+        result.append(value_at(b, b_components, i) if value_at(cond, cond_components, i) else value_at(a, a_components, i))
+    return result_type(*result)
+
+
+def any(cond:Any)->int:
+    components = _components(cond)
+    if components is None:
+        return int(cond != 0)
+    return int(any(c != 0 for c in components))
+
+
+def all(cond:Any)->int:
+    components = _components(cond)
+    if components is None:
+        return int(cond != 0)
+    return int(all(c != 0 for c in components))
+
+
+def _relation(name:str, op:Callable, a:Any, b:Any)->Any:
+    _check_same_shape(a, b)
+    a_components, b_components = _components(a), _components(b)
+    result_type:Any = (type(a) if isinstance(a, genVec) else type(b) if isinstance(b, genVec) else float)
+
+    def int_result_type()->Any:
+        if isinstance(result_type, type) and issubclass(result_type, genVec):
+            dim:str = "".join(c for c in result_type.__name__ if c.isdigit())
+            from . import int2, int4
+            return {"2": int2}.get(dim, int4)
+        return int
+
+    if a_components is None:
+        return int(op(a, b))
+
+    int_vec:Any = int_result_type()
+    return int_vec(*[int(op(x, y)) for x, y in zip(a_components, b_components)])
+
+
+def isequal(a:Any, b:Any)->Any:
+    return _relation("isequal", lambda x, y: x == y, a, b)
+
+
+def isnotequal(a:Any, b:Any)->Any:
+    return _relation("isnotequal", lambda x, y: x != y, a, b)
+
+
+def isgreater(a:Any, b:Any)->Any:
+    return _relation("isgreater", lambda x, y: x > y, a, b)
+
+
+def isgreaterequal(a:Any, b:Any)->Any:
+    return _relation("isgreaterequal", lambda x, y: x >= y, a, b)
+
+
+def isless(a:Any, b:Any)->Any:
+    return _relation("isless", lambda x, y: x < y, a, b)
+
+
+def islessequal(a:Any, b:Any)->Any:
+    return _relation("islessequal", lambda x, y: x <= y, a, b)
+
+
+def isordered(a:Any, b:Any)->Any:
+    return _relation("isordered", lambda x, y: not (math.isnan(x) or math.isnan(y)), a, b)
+
+
+def isunordered(a:Any, b:Any)->Any:
+    return _relation("isunordered", lambda x, y: math.isnan(x) or math.isnan(y), a, b)
+
+
+def abs_diff(a:Any, b:Any)->Any:
+    _check_same_shape(a, b)
+    a_components, b_components = _components(a), _components(b)
+    if a_components is None:
+        return abs(a - b)
+    return type(a)(*[_relation_abs(x, y) for x, y in zip(a_components, b_components)])
+
+
+def _relation_abs(x:Any, y:Any)->Any:
+    return abs(x - y)
+
+
+def hadd(a:Any, b:Any)->Any:
+    _check_same_shape(a, b)
+    a_components, b_components = _components(a), _components(b)
+    if a_components is None:
+        return (a & b) + ((a ^ b) >> 1)
+    return type(a)(*[(x & y) + ((x ^ y) >> 1) for x, y in zip(a_components, b_components)])
+
+
+def rhadd(a:Any, b:Any)->Any:
+    _check_same_shape(a, b)
+    a_components, b_components = _components(a), _components(b)
+    if a_components is None:
+        return (a | b) - ((a ^ b) >> 1)
+    return type(a)(*[(x | y) - ((x ^ y) >> 1) for x, y in zip(a_components, b_components)])
+
+
+def mul24(a:Any, b:Any)->Any:
+    _check_same_shape(a, b)
+    a_components, b_components = _components(a), _components(b)
+    if a_components is None:
+        return a * b
+    return type(a)(*[(x * y) for x, y in zip(a_components, b_components)])
+
+
+def mad24(a:Any, b:Any, c:Any)->Any:
+    _check_same_shape(a, b)
+    a_components, b_components, c_components = _components(a), _components(b), _components(c)
+
+    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
+        return values[i] if components is not None else values
+
+    if a_components is None:
+        return a * b + c
+
+    result:List[Any] = []
+    for i in range(len(a_components)):
+        result.append(value_at(a, a_components, i) * value_at(b, b_components, i)
+                      + value_at(c, c_components, i))
+    return type(a)(*result)

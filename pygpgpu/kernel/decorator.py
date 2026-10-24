@@ -25,7 +25,7 @@ class PyKernel:
         self.is_pykernel:bool = True
         self.__name__:str = func.__name__
         self.__doc__:str = func.__doc__ or ""
-        self._cache:Dict[str, Tuple[Any, List[Tuple[int, int]], List[Tuple[int, int]]]] = {}
+        self._cache:Dict[str, Tuple[Any, List[Tuple[int, int]], List[Tuple[int, int]], List[int]]] = {}
         self._source_sig:str = self._source_signature()
 
     def __call__(self, *args:Any, global_size:Optional[int]=None)->Any:
@@ -36,9 +36,13 @@ class PyKernel:
         if entry is None:
             entry = self._compile(args, arg_types, sig)
             self._cache[sig] = entry
-        kernel_obj, shape_sources, work_size_dims = entry
+        kernel_obj, shape_sources, work_size_dims, local_sizes = entry
 
         launch_args:List[Any] = self._build_launch_args(args, arg_types, shape_sources)
+        if self.backend == "opencl":
+            # cuda 的 local memory 是 __shared__ 静态声明,opencl 才需要传字节数
+            for local_bytes in local_sizes:
+                launch_args.append(local_bytes)
         if global_size is not None:
             gs:Tuple[int, ...] = ((global_size,) if isinstance(global_size, int) else tuple(int(d) for d in global_size))
             kernel_obj = kernel_obj[(gs, None)]
@@ -64,6 +68,14 @@ class PyKernel:
         return f"pyk_{self.__name__}_{short_hash(sig + '_' + self.backend)}"
 
     def _compile(self, args:List[Any], arg_types:List[Any], sig:str)->Tuple[Any, List[str]]:
+        if self.backend == "cuda":
+            for t in arg_types:
+                base:str = (t[1] if isinstance(t, tuple) else t)
+                if base == "half":
+                    raise PyKernelSyntaxError(
+                        "fp16 (np.float16) arguments are not supported on the cuda backend: "
+                        "NVRTC on this machine cannot resolve cuda_fp16.h; use np.float32 instead")
+
         c_name:str = self._c_kernel_name(sig)
         device_cache:Dict[Any, Any] = {}
 
@@ -90,7 +102,12 @@ class PyKernel:
         param_index:Dict[str, int] = {name: i for i, (name, _) in enumerate(translator.params)}
         shape_sources:List[Tuple[int, int]] = [(param_index[array_name], dim) for array_name, dim in translator.shapes_used]
         work_size_dims:List[Tuple[str, int]] = [(param_index[name], dim) for name, dim in translator.work_size_dims]
-        return kernel, shape_sources, work_size_dims
+        # local memory: opencl 启动时按参数位置传字节数; cuda 是 __shared__ 声明无需传
+        ctype_sizes:Dict[str, int] = {"bool": 1, "char": 1, "uchar": 1, "short": 2, "ushort": 2,
+                                      "int": 4, "uint": 4, "long": 8, "ulong": 8,
+                                      "float": 4, "double": 8}
+        local_sizes:List[int] = [ctype_sizes.get(ctype, 4) * count for _, ctype, count in translator.local_buffers]
+        return kernel, shape_sources, work_size_dims, local_sizes
 
     def _cache_dir(self)->str:
         source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""

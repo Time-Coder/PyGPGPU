@@ -20,6 +20,7 @@ from .builtins import (
 )
 from .builtins import gpu as GPU_BUILTINS
 from ..vec_types import funcs as VEC_FUNCS
+from ..vec_types import funcs as VEC_FUNCS
 
 
 class PyKernelSyntaxError(SyntaxError):
@@ -184,6 +185,7 @@ class FunctionTranslator:
         self.work_size_dims:List[Tuple[str, int]] = []
         self.atomic_targets:Set[str] = set()
         self._tmp_counter:int = 0
+        self.local_buffers:List[Tuple[str, str, int]] = []
         self.return_type:Optional[Any] = None
         self.lines:List[str] = []
         self._indent:int = 1
@@ -451,6 +453,14 @@ class FunctionTranslator:
             self._error("chained assignment is not supported", node)
         target:ast.expr = node.targets[0]
 
+        # local memory 声明: buf = gpu.local(np.float32, 64)
+        if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "local"
+                and isinstance(node.value.func.value, ast.Name)
+                and self.resolve_global(node.value.func.value.id) is GPU_BUILTINS):
+            self._handle_local_declaration(node)
+            return
+
         # 元组解包/交换: a, b = b, a
         if isinstance(target, ast.Tuple):
             if not isinstance(node.value, ast.Tuple) or len(target.elts) != len(node.value.elts):
@@ -499,6 +509,48 @@ class FunctionTranslator:
             self._emit(f"{base_code}[{index_code}] = {code};")
         else:
             self._error(f"unsupported assignment target: {target.__class__.__name__}", node)
+
+    def _handle_local_declaration(self, node:ast.Assign)->None:
+        """buf = gpu.local(np.float32, 64) -> local memory 数组。
+
+        opencl: kernel 签名追加 __local 参数, 启动时传字节数;
+        cuda: 函数体开头声明 __shared__ 数组。
+        """
+        call:ast.Call = node.value
+        if len(call.args) != 2 or call.keywords:
+            self._error("gpu.local(dtype, count) takes exactly 2 arguments", call)
+
+        dtype_node:ast.expr = call.args[0]
+        dtype_name:str = ""
+        if isinstance(dtype_node, ast.Attribute) and isinstance(dtype_node.value, ast.Name):
+            module:Any = self.resolve_global(dtype_node.value.id)
+            if module is np:
+                dtype_name = dtype_node.attr
+            else:
+                self._error("gpu.local() dtype must be a numpy dtype like np.float32", dtype_node)
+        elif isinstance(dtype_node, ast.Constant) and isinstance(dtype_node.value, str):
+            dtype_name = dtype_node.value
+        else:
+            self._error("gpu.local() dtype must be a numpy dtype like np.float32", dtype_node)
+
+        if dtype_name not in DTYPE_MAP:
+            self._error(f"gpu.local() unsupported dtype: {dtype_name}", dtype_node)
+
+        ctype:str = DTYPE_MAP[dtype_name]
+        if ctype == "half":
+            self._error("gpu.local() does not support half (fp16)", dtype_node)
+
+        count_node:ast.expr = call.args[1]
+        if not (isinstance(count_node, ast.Constant) and isinstance(count_node.value, int) and count_node.value > 0):
+            self._error("gpu.local() count must be a constant positive integer", count_node)
+
+        c_name:str = f"_local{len(self.local_buffers)}"
+        self.local_buffers.append((c_name, ctype, count_node.value))
+
+        target:ast.expr = node.targets[0]
+        if not isinstance(target, ast.Name):
+            self._error("gpu.local() result must be assigned to a plain variable", node)
+        self._define(target.id, ("lptr", ctype, c_name, count_node.value), node)
 
     def _visit_augassign(self, node:ast.AugAssign)->None:
         target_code, target_t = self._visit_target(node.target)
@@ -625,6 +677,8 @@ class FunctionTranslator:
     def _visit_name(self, node:ast.Name)->Tuple[str, Any]:
         t:Any = self._lookup(node.id)
         if t is not None:
+            if isinstance(t, tuple) and len(t) == 4 and t[0] == "lptr":
+                return t[2], (PTR, t[1])
             return node.id, t
         value:Any = self.resolve_global(node.id)
         if isinstance(value, bool):
@@ -641,7 +695,6 @@ class FunctionTranslator:
         """
         cls:Any = _vec_registry()[vec]
         components:List[str] = [field_name for field_name, _ in cls._fields_]
-        maker:str = f"make_{vec}"
         infix:bool = (op in ("+", "-", "*", "/"))
         terms:List[str] = []
         for c in components:
@@ -651,7 +704,7 @@ class FunctionTranslator:
                 terms.append(f"({left}.{c} {op} {right}.{c})" if infix else f"{op}({left}.{c}, {right}.{c})")
             else:
                 terms.append(f"({op}{left}.{c})" if infix else f"{op}({left}.{c})")
-        return f"{maker}({', '.join(terms)})"
+        return self._vec_maker(vec, ", ".join(terms))
 
     def _visit_binop(self, node:ast.BinOp)->Tuple[str, Any]:
         left, lt = self._visit_expression(node.left)
@@ -826,6 +879,9 @@ class FunctionTranslator:
 
             target:Any = self.resolve_global(name)
             if callable(target):
+                # pygpgpu.vec_types.funcs 的向量数学函数与 gpu.* 内建同名同语义
+                if getattr(target, "__module__", "") == VEC_FUNCS.__name__:
+                    return self._emit_gpu_builtin(name, args, node)
                 return self._emit_device_call(name, target, args, node)
             self._error(f"unknown function '{name}'", node)
 
@@ -1056,6 +1112,90 @@ class FunctionTranslator:
         if name in ("cross", "normalize", "length", "distance"):
             return self._emit_vec_builtin(name, args, node)
 
+        if name == "select":
+            if len(args) != 3:
+                self._error("gpu.select(a, b, cond) takes exactly 3 arguments", node)
+            (a_code, a_t), (b_code, b_t), (c_code, c_t) = args
+            if a_t != b_t:
+                self._error(f"gpu.select() operands must have the same type, got {a_t} and {b_t}", node)
+            if is_vec(a_t):
+                if not is_vec(c_t):
+                    self._error("gpu.select() on vectors requires a vector condition", node)
+                # opencl 原生 select 对 int 条件的判断实现相关(NVIDIA 按 MSB):
+                # 用 (cond == 0) 生成 0/-1 掩码(MSB 明确), select(b, a, mask) 即
+                # cond 非 0 -> b, cond == 0 -> a
+                if self.backend == "opencl":
+                    int_vec:str = self._get_int_vec_type(a_t)
+                    return f"select({b_code}, {a_code}, ({c_code} == ({int_vec})(0)))", a_t
+                return self._emit_vec_select(a_code, b_code, c_code, a_t), a_t
+            if self.backend == "opencl":
+                return f"select({b_code}, {a_code}, ({c_code} == 0))", a_t
+            return f"(({c_code}) ? ({b_code}) : ({a_code}))", a_t
+
+        if name in ("isequal", "isnotequal", "isgreater", "isgreaterequal", "isless", "islessequal", "isordered", "isunordered"):
+            if len(args) != 2:
+                self._error(f"gpu.{name}(a, b) takes exactly 2 arguments", node)
+            (lcode, lt), (rcode, rt) = args
+            if is_vec(lt) or is_vec(rt):
+                if not (is_vec(lt) and is_vec(rt)) or lt != rt:
+                    self._error(f"gpu.{name}() vector operands must have the same type", node)
+                if self.backend == "opencl":
+                    # opencl 向量关系函数的 true 是 -1(全 1 位), & 1 归一化为 1
+                    return f"({name}({lcode}, {rcode}) & 1)", self._get_int_vec_type(lt)
+                return self._emit_vec_relation(name, lcode, rcode, lt), self._get_int_vec_type(lt)
+            if self.backend == "opencl":
+                return f"{name}({lcode}, {rcode})", "int"
+            return self._emit_scalar_relation(name, lcode, rcode), "int"
+
+        if name in ("any", "all"):
+            if len(args) != 1 or not is_vec(args[0][1]):
+                self._error(f"gpu.{name}(cond_vec) takes exactly 1 vector argument", node)
+            code, t = args[0]
+            if self.backend == "opencl":
+                return f"{name}({code})", "int"
+            cls:Any = _vec_registry()[t]
+            components:List[str] = [f_name for f_name, _ in cls._fields_]
+            joiner:str = ("|" if name == "any" else "&")
+            expr:str = f"({joiner.join(f'({code}.{c})' for c in components)})"
+            return f"(({expr}) != 0)", "int"
+
+        if name in ("abs_diff", "hadd", "rhadd", "mad24", "mul24"):
+            expected:int = (3 if name == "mad24" else 2)
+            if len(args) != expected:
+                self._error(f"gpu.{name}() invalid argument count", node)
+            if any(is_vec(t) for _, t in args):
+                if not all(is_vec(t) for _, t in args) or len({t for _, t in args}) != 1:
+                    self._error(f"gpu.{name}() vector operands must all be the same vector type", node)
+                # 整数函数族统一逐分量生成: NVIDIA 的 opencl 实现会把返回类型无符号化
+                # (abs_diff/hadd/rhadd/mul24/mad24),直接调用 int 向量会编译失败或
+                # 结果类型漂移;逐分量展开则与 cuda 路径和宿主语义完全一致
+                if name == "abs_diff":
+                    return self._emit_vec_absdiff(arg_codes[0], arg_codes[1], vec_t), vec_t
+                if name == "hadd":
+                    return self._emit_vec_hadd(arg_codes[0], arg_codes[1], vec_t), vec_t
+                if name == "rhadd":
+                    return self._emit_vec_rhadd(arg_codes[0], arg_codes[1], vec_t), vec_t
+                if name == "mul24":
+                    return self._vec_componentwise("*", arg_codes[0], vec_t, right=arg_codes[1]), vec_t
+                return self._emit_vec_mad(arg_codes, arg_types, vec_t), vec_t
+            if not all(is_int(t) for _, t in args):
+                self._error(f"gpu.{name}() requires integer arguments", node)
+            codes:List[str] = arg_codes
+            if self.backend == "opencl":
+                return f"{name}({', '.join(codes)})", args[0][1]
+            if name == "abs_diff":
+                return f"abs(({codes[0]}) - ({codes[1]}))", args[0][1]
+            if name == "hadd":
+                a, b = codes
+                return f"((({a}) & ({b})) + ((({a}) ^ ({b})) >> 1))", args[0][1]
+            if name == "rhadd":
+                a, b = codes
+                return f"((({a}) | ({b})) - ((({a}) ^ ({b})) >> 1))", args[0][1]
+            if name == "mul24":
+                return f"(({codes[0]}) * ({codes[1]}))", args[0][1]
+            a, b, c = codes
+            return f"((({a}) * ({b})) + ({c}))", args[0][1]
+
         self._error(f"unknown gpu builtin: gpu.{name}", node)
 
     def _is_scalar(self, t:Any)->bool:
@@ -1136,6 +1276,64 @@ class FunctionTranslator:
             f"(({self._component(codes[0], types[0], c)}) * ({self._component(codes[1], types[1], c)})) + ({self._component(codes[2], types[2], c)})"
             for c in components)
         return f"{maker}({inner})"
+
+    def _emit_vec_select(self, a_code:str, b_code:str, c_code:str, vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        maker:str = f"make_{vec}"
+        inner:str = ", ".join(
+            f"(({c_code}.{c}) ? ({b_code}.{c}) : ({a_code}.{c}))" for c in components)
+        return f"{maker}({inner})"
+
+    def _emit_vec_relation(self, name:str, lcode:str, rcode:str, vec:str)->str:
+        op:str = {"isequal": "==", "isnotequal": "!=", "isgreater": ">",
+                  "isgreaterequal": ">=", "isless": "<", "islessequal": "<="}[name]
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        int_vec:str = self._get_int_vec_type(vec)
+        maker:str = f"make_{int_vec}"
+        if name == "isordered":
+            inner:str = ", ".join(f"((int)((!isnan({lcode}.{c})) && (!isnan({rcode}.{c}))))" for c in components)
+        elif name == "isunordered":
+            inner:str = ", ".join(f"((int)(isnan({lcode}.{c}) || isnan({rcode}.{c})))" for c in components)
+        else:
+            inner:str = ", ".join(f"((int)(({lcode}.{c}) {op} ({rcode}.{c})))" for c in components)
+        return f"{maker}({inner})"
+
+    def _emit_scalar_relation(self, name:str, lcode:str, rcode:str)->str:
+        op:str = {"isequal": "==", "isnotequal": "!=", "isgreater": ">",
+                  "isgreaterequal": ">=", "isless": "<", "islessequal": "<="}[name]
+        if name == "isordered":
+            return f"((int)((!isnan({lcode})) && (!isnan({rcode}))))"
+        if name == "isunordered":
+            return f"((int)(isnan({lcode}) || isnan({rcode})))"
+        return f"((int)(({lcode}) {op} ({rcode})))"
+
+    def _vec_maker(self, vec:str, inner:str)->str:
+        """按后端组装向量: opencl (vec)(...) / cuda make_vec(...)。"""
+        if self.backend == "opencl":
+            return f"({vec})({inner})"
+        return f"make_{vec}({inner})"
+
+    def _emit_vec_absdiff(self, lcode:str, rcode:str, vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        inner:str = ", ".join(f"abs(({lcode}.{c}) - ({rcode}.{c}))" for c in components)
+        return self._vec_maker(vec, inner)
+
+    def _emit_vec_hadd(self, lcode:str, rcode:str, vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        inner:str = ", ".join(
+            f"((({lcode}.{c}) & ({rcode}.{c})) + ((({lcode}.{c}) ^ ({rcode}.{c})) >> 1))" for c in components)
+        return self._vec_maker(vec, inner)
+
+    def _emit_vec_rhadd(self, lcode:str, rcode:str, vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        inner:str = ", ".join(
+            f"((({lcode}.{c}) | ({rcode}.{c})) - ((({lcode}.{c}) ^ ({rcode}.{c})) >> 1))" for c in components)
+        return self._vec_maker(vec, inner)
 
     def _emit_vec_dot(self, lcode:str, rcode:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
@@ -1254,8 +1452,16 @@ class FunctionTranslator:
                 params.append(f"{t} {name}")
         for array_name, dim in self.shapes_used:
             params.append(f"const int {self._shape_var(array_name, dim)}")
+        for lc_name, lc_type, _ in self.local_buffers:
+            if self.backend == "opencl":
+                params.append(f"__local {lc_type}* {lc_name}")
 
         prefix:str = ("__kernel " if self.backend == "opencl" else "__global__ ")
         header:str = f"{prefix}void {c_name}({', '.join(params)})"
-        body:str = "\n".join(self.lines)
+        body_lines:List[str] = []
+        if self.backend == "cuda":
+            for lc_name, lc_type, lc_count in self.local_buffers:
+                body_lines.append(f"__shared__ {lc_type} {lc_name}[{lc_count}];")
+        body_lines.extend(self.lines)
+        body:str = "\n".join(body_lines)
         return f"{header} {{\n{body}\n}}"

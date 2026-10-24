@@ -76,6 +76,22 @@ GENERIC_BUILTINS:Dict[str, Tuple[str, str]] = {
     "mad": ("mad", ""),          # cuda (a*b+c)
     "saturate": ("clamp", ""),   # cuda 需特殊生成 (clamp 到 0..1)
     "step": ("step", ""),        # cuda 需特殊生成 (x < edge ? 0 : 1)
+    "select": ("select", ""),    # cuda 需特殊生成 (逐分量 cond ? b : a)
+    "any": ("any", ""),          # 向量归约, cuda 需特殊生成
+    "all": ("all", ""),          # 向量归约, cuda 需特殊生成
+    "isequal": ("isequal", ""),  # 关系函数家族: opencl 原生返回 int 向量,
+    "isnotequal": ("isnotequal", ""),  # cuda 逐分量生成 (int)(l op r)
+    "isgreater": ("isgreater", ""),
+    "isgreaterequal": ("isgreaterequal", ""),
+    "isless": ("isless", ""),
+    "islessequal": ("islessequal", ""),
+    "isordered": ("isordered", ""),
+    "isunordered": ("isunordered", ""),
+    "abs_diff": ("abs_diff", ""),  # 整数: cuda 逐分量 abs(l-r)
+    "hadd": ("hadd", ""),          # 整数: cuda (a&b) + ((a^b)>>1)
+    "rhadd": ("rhadd", ""),        # 整数: cuda (a|b) - ((a^b)>>1)
+    "mad24": ("mad24", ""),        # 整数: cuda 普通乘加
+    "mul24": ("mul24", ""),        # 整数: cuda 普通乘法
     "dot": ("dot", ""),          # 向量: opencl 原生, cuda 逐分量求和
     "cross": ("cross", ""),
     "normalize": ("normalize", ""),

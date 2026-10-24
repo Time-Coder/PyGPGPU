@@ -142,6 +142,15 @@ class Kernel(CUObject):
     def __copy_to_host(arg_value:Union[np.ndarray, List[Any]], buffer:MemObject):
         host_data = arg_value
         if host_data is not buffer.data:
+            if isinstance(host_data, np.ndarray) and getattr(host_data.dtype, "fields", None) is not None:
+                # 3 分量向量: 设备端是紧凑布局,解包回结构化字段
+                fields:List[str] = list(host_data.dtype.fields.keys())[:3]
+                packed:Any = buffer.data
+                flat:Any = (packed.reshape(-1, 3) if packed.ndim > 1 else packed)
+                count:int = int(np.prod(host_data.shape)) if host_data.ndim > 0 else 1
+                for i, f in enumerate(fields):
+                    host_data.reshape(-1)[f] = flat[:count, i]
+                return
             if isinstance(host_data, list):
                 host_data[:] = buffer.data.tolist()
             elif isinstance(host_data, np.ndarray):
@@ -168,8 +177,9 @@ class Kernel(CUObject):
                     stream.add_callback(on_release)
                 continue
 
-            if isinstance(arg_info.value, gnp.ndarray):
-                # gnp 数组走延迟回读:数据留在设备上,宿主访问(写操作前)由 to_host() 拉取
+            if isinstance(arg_info.value, gnp.ndarray) and not self._is_vec3_arg(arg_info):
+                # gnp 数组走延迟回读:数据留在设备上,宿主访问(写操作前)由 to_host() 拉取。
+                # 3 分量向量例外: 设备是紧凑布局,延迟回读无法直接解包,走立即回读
                 arg_info.mem_obj.dirty_on_device = True
                 arg_info.mem_obj.unuse()
                 continue
@@ -274,7 +284,14 @@ class Kernel(CUObject):
                 content_type = self._program.structs[arg_info.base_type_str]
                 is_struct = True
 
+            is_vec3:bool = (len(getattr(content_type, "_fields_", ())) == 3 and base_type_str in CUInfo.vec_types)
+
             if not arg_info.is_ptr:
+                if is_vec3:
+                    # CUDA 的 3 分量向量按紧凑布局传参(无第 4 分量 padding)
+                    packed:Any = self._pack_vec3(value, content_type)
+                    return pointer(packed)
+
                 if isinstance(value, content_type):
                     used_value = value
                 else:
@@ -295,7 +312,11 @@ class Kernel(CUObject):
 
                 return pointer(used_value)
             else:
-                if isinstance(value, np.ndarray):
+                if is_vec3:
+                    # CUDA 的 float3* 等是紧凑布局(元素 12B 等),宿主结构化数组是
+                    # 16B(含 padding 字段) -> 打包/解包转换
+                    used_value:Any = self._pack_vec3(value, content_type)
+                elif isinstance(value, np.ndarray):
                     used_value = value
                     if value.dtype != content_type:
                         used_value = value.astype(content_type)
@@ -312,6 +333,39 @@ class Kernel(CUObject):
                 return pointer(c_void_p(buffer.id.value))
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
+
+    def _is_vec3_arg(self, arg_info:ArgInfo)->bool:
+        base:str = arg_info.base_type_str
+        cls:Any = CUInfo.vec_types.get(base)
+        return (cls is not None and len(cls._fields_) == 3)
+
+    @staticmethod
+    def _pack_vec3(value:Any, content_type:Any)->Any:
+        """把 float3/int3 等 3 分量数据打包为 CUDA 紧凑布局(去掉 padding 分量)。"""
+        fields:List[str] = [f for f, _ in content_type._fields_][:3]
+        elem_dtype:Any = content_type.dtype.fields[fields[0]][0]
+
+        if isinstance(value, np.ndarray) and value.dtype.fields is not None:
+            count:int = int(np.prod(value.shape)) if value.ndim > 0 else 1
+            flat:Any = value.reshape(-1)
+            packed:Any = np.empty((count, 3), dtype=elem_dtype)
+            for i, f in enumerate(fields):
+                packed[:, i] = flat[f]
+            return packed.reshape(value.shape + (3,)) if value.ndim > 1 else packed
+
+        if isinstance(value, np.void):
+            packed = np.empty(3, dtype=elem_dtype)
+            for i, f in enumerate(fields):
+                packed[i] = value[f]
+            return packed
+
+        if hasattr(value, "x"):
+            packed = np.empty(3, dtype=elem_dtype)
+            for i, f in enumerate(fields):
+                packed[i] = getattr(value, f)
+            return packed
+
+        raise TypeError(f"cannot pack {type(value).__name__} as 3-component vector")
 
     @property
     def _func_head(self)->str:
