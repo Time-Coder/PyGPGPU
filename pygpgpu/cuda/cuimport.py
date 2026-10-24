@@ -4,6 +4,7 @@ import importlib.util
 from types import ModuleType
 from typing import Optional
 
+from ..utils import local_size_for_global
 from .oop.program import Program
 from .oop.build_options import BuildOptions
 from .oop.devices import Devices
@@ -25,8 +26,9 @@ class CUKernelWrapper:
         self._type_checked:bool = type_checked
         self._options:BuildOptions = options
         self._kernels = {Devices[0]: kernel}
-        self._grid = None
-        self._block = None
+        self._device = None
+        self._total = None
+        self._local = None
 
     def _kernel_for(self, device):
         kernel = self._kernels.get(device)
@@ -38,25 +40,47 @@ class CUKernelWrapper:
             self._kernels[device] = kernel
         return kernel
 
-    def __getitem__(self, item):
-        if isinstance(item, str):
-            kernel = self._kernel_for(Devices.device(item))
-            if self._grid is not None:
-                kernel = kernel[self._grid, self._block]
-                self._grid = self._block = None
+    def _apply_sizes(self, kernel):
+        """总数语义(与 opencl/@kernel 统一): total=总线程数, local=每组大小,
+        cuda 的 gridDim(块数) 由 total/local 换算。"""
+        if self._total is None:
             return kernel
 
-        if isinstance(item, tuple) and len(item) == 2:
-            self._grid, self._block = item
+        def norm(v):
+            if v is None:
+                return None
+            return (v,) if isinstance(v, int) else tuple(int(x) for x in v)
+
+        total = norm(self._total)
+        local = norm(self._local)
+        if local is None:
+            local = local_size_for_global(total)
+        if len(local) != len(total):
+            raise ValueError(
+                f"global {total} and local {local} work sizes must have the same dimension")
+        for g, l in zip(total, local):
+            if g % l != 0:
+                raise ValueError(
+                    f"global work size {total} must be divisible by local {local}; "
+                    f"use None for an automatically derived local size")
+        grid = tuple(g // l for g, l in zip(total, local))
+        self._total = self._local = None
+        return kernel[grid, local]
+
+    def __getitem__(self, item):
+        # 设备与尺寸都记在包装内, 调用时统一换算(保证链式任意顺序都是总数语义)
+        if isinstance(item, str):
+            self._device = Devices.device(item)
+        elif isinstance(item, tuple) and len(item) == 2:
+            self._total, self._local = item
         else:
-            self._grid, self._block = item, None
+            self._total, self._local = item, None
         return self
 
     def __call__(self, *args, **kwargs):
-        kernel = self._kernel_for(Devices[0])
-        if self._grid is not None:
-            kernel = kernel[self._grid, self._block]
-            self._grid = self._block = None
+        device = (self._device if self._device is not None else Devices[0])
+        kernel = self._apply_sizes(self._kernel_for(device))
+        self._device = None
         return kernel(*args, **kwargs)
 
     def __getattr__(self, name:str):

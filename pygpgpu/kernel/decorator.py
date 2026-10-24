@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from ..utils import local_size_for_global
 from .translator import (
     FunctionTranslator,
     PyKernelSyntaxError,
@@ -272,8 +273,24 @@ class PyKernel:
             raise ValueError(
                 "local work size requires a global size: specify both in the bracket "
                 "k[(global, local)] or rely on a magic loop to derive the global size")
-        if global_size is not None or local_size is not None:
-            kernel_obj = kernel_obj[(global_size, local_size)]
+        if global_size is not None:
+            # 统一总数语义(OpenCL/SYCL): global = 总 work-item 数, 须被 local 整除;
+            # cuda 的 gridDim 是块数, 由 total/local 换算, 对用户透明
+            if local_size is None:
+                local_size = local_size_for_global(global_size)
+            if len(local_size) != len(global_size):
+                raise ValueError(
+                    f"global {global_size} and local {local_size} work sizes must have the same dimension")
+            for g, l in zip(global_size, local_size):
+                if g % l != 0:
+                    raise ValueError(
+                        f"global work size {global_size} must be divisible by local {local_size}; "
+                        f"use None for an automatically derived local size")
+            if backend == "cuda":
+                grid = tuple(g // l for g, l in zip(global_size, local_size))
+                kernel_obj = kernel_obj[(grid, local_size)]
+            else:
+                kernel_obj = kernel_obj[(global_size, local_size)]
         return kernel_obj(*launch_args)
 
     # ---------- 源码生成 ----------

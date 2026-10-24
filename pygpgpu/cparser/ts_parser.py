@@ -473,6 +473,22 @@ class TSParserMixin:
 
         return None
 
+    def _collect_addr_taken_roots(self, node:Node, scopes, found:Set[str])->None:
+        """收集实参表达式内通过取地址暴露的数组根(仅 '&' 形式; 按值传元素不算)。"""
+        if node.type == "pointer_expression" and node.text and node.text.decode().lstrip().startswith("&"):
+            operand:Optional[Node] = (node.named_children[0] if node.named_children else None)
+            if operand is not None:
+                root, is_mem = self._resolve_expr_root(operand, scopes)
+                if root is None and operand.type == "subscript_expression":
+                    base:Optional[Node] = (operand.named_children[0] if operand.named_children else None)
+                    if base is not None:
+                        root, is_mem = self._resolve_expr_root(base, scopes)
+                if root is not None and is_mem:
+                    found.add(root)
+                    return
+        for child in node.named_children:
+            self._collect_addr_taken_roots(child, scopes, found)
+
     def _collect_root_refs(self, node:Node, scopes, found:Set[str])->None:
         """Collects every mem-arg root referenced inside an expression (for conservative escapes)."""
         root, is_mem = self._resolve_expr_root(node, scopes)
@@ -517,6 +533,11 @@ class TSParserMixin:
                     ctx["escapes"].add(root)
                 else:
                     self._visit_expression(operand, scopes, ctx, False)
+                    # &arr[i] 经下标取元素地址: 解析不到裸数组名,递归收集底层
+                    # 数组根并标记逃逸(地址暴露 = 可能被写,如 atomicAdd(&arr[i]))
+                    found:Set[str] = set()
+                    self._collect_root_refs(operand, scopes, found)
+                    ctx["escapes"].update(found)
             else:
                 root, is_ptr = self._resolve_expr_root(operand, scopes)
                 if root is not None and is_ptr:
@@ -627,3 +648,8 @@ class TSParserMixin:
                 target = (root if (root is not None and (is_mem or root in ctx["struct_args"])) else self._alias_source(actual, scopes))
                 if target is not None:
                     ctx["escapes"].add(target)
+                else:
+                    # &arr[i] 传入未知函数(地址暴露),如 atomicAdd(&arr[i], 1)
+                    addr_taken:Set[str] = set()
+                    self._collect_addr_taken_roots(actual, scopes, addr_taken)
+                    ctx["escapes"].update(addr_taken)
