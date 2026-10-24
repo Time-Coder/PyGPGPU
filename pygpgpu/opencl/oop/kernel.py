@@ -185,6 +185,12 @@ class Kernel(CLObject):
                         launch_event.on_completed_callbacks.append(release_call)
                 continue
 
+            if isinstance(arg_info.value, gnp.ndarray):
+                # gnp 数组走延迟回读:数据留在设备上,宿主访问(写操作前)由 to_host() 拉取
+                arg_info.mem_obj.dirty_on_device = True
+                arg_info.mem_obj.unuse()
+                continue
+
             event:Event = arg_info.mem_obj.read(cmd_queue)
             call_back = partial(on_completed, arg_info.value, arg_info.mem_obj, arg_info)
             if event.finished:

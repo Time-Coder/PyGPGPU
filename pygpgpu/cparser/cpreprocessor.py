@@ -11,7 +11,11 @@ class CPreprocessor:
     @staticmethod
     def __short_file_name(file_name:str):
         abs_file_name = os.path.abspath(file_name).replace("\\", "/")
-        rel_file_name = os.path.relpath(abs_file_name).replace("\\", "/")
+        try:
+            rel_file_name = os.path.relpath(abs_file_name).replace("\\", "/")
+        except ValueError:
+            # 跨盘符无法计算相对路径(如临时文件在 C:, 工程在 E:)
+            return abs_file_name
         if len(rel_file_name) > len(abs_file_name):
             return abs_file_name
         else:
