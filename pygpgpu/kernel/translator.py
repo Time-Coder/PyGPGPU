@@ -182,6 +182,7 @@ class FunctionTranslator:
         self.gid_param:Optional[str] = None
         self.work_size_dims:List[Tuple[str, int]] = []
         self.atomic_targets:Set[str] = set()
+        self._tmp_counter:int = 0
         self.return_type:Optional[Any] = None
         self.lines:List[str] = []
         self._indent:int = 1
@@ -461,7 +462,8 @@ class FunctionTranslator:
             for i, (code, t) in enumerate(values):
                 if is_ptr(t):
                     self._error("cannot swap array parameters", node)
-                tmp:str = f"_swap{i}"
+                self._tmp_counter += 1
+                tmp:str = f"_swap{self._tmp_counter}"
                 self._define(tmp, t, node)
                 self._emit(f"{t} {tmp} = {code};")
                 temps.append((tmp, t))
@@ -471,8 +473,10 @@ class FunctionTranslator:
                 existing:Any = self._lookup(name)
                 if existing is not None and is_ptr(existing):
                     self._error(f"cannot assign to array parameter '{name}'", node)
+                is_new:bool = (existing is None)
                 self._define(name, t, node)
-                self._emit(f"{name} = {tmp};")
+                decl:str = (f"{t} " if is_new else "")
+                self._emit(f"{decl}{name} = {tmp};")
             return
         code, t = self._visit_expression(node.value)
         if is_ptr(t):
@@ -654,16 +658,21 @@ class FunctionTranslator:
         name:str = node.op.__class__.__name__
 
         if is_vec(lt) or is_vec(rt):
-            symbol:str = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/"}.get(name)
+            symbol:str = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/",
+                          "Lt": "<", "LtE": "<=", "Gt": ">", "GtE": ">=",
+                          "Eq": "==", "NotEq": "!="}.get(name)
             if symbol is None:
-                self._error(f"operator {name} is not supported on vector types; operate per-component (v.x + v.y)", node)
+                self._error(f"operator {name} is not supported on vector types; operate per-component", node)
 
             if is_vec(lt) and is_vec(rt):
                 if lt != rt:
                     self._error(f"vector operands must have the same type, got {lt} and {rt}", node)
                 if self.backend == "opencl":
-                    return f"({left} {symbol} {right})", lt
-                return self._vec_componentwise(symbol, left, lt, right), lt
+                    result_t:Any = (lt if name in ("Add", "Sub", "Mult", "Div") else self._get_int_vec_type(lt))
+                    return f"({left} {symbol} {right})", result_t
+                if name in ("Add", "Sub", "Mult", "Div"):
+                    return self._vec_componentwise(symbol, left, lt, right=right), lt
+                return self._vec_componentwise_compare(symbol, left, lt, right), self._get_int_vec_type(lt)
 
             # 向量与标量: 广播逐分量
             vec, vec_side_left = (lt, True) if is_vec(lt) else (rt, False)
@@ -728,8 +737,23 @@ class FunctionTranslator:
 
     def _visit_compare(self, node:ast.Compare)->Tuple[str, Any]:
         symbols:Dict[str, str] = {"Lt": "<", "LtE": "<=", "Gt": ">", "GtE": ">=", "Eq": "==", "NotEq": "!="}
+
+        left, lt = self._visit_expression(node.left)
+        if is_vec(lt):
+            # 向量比较(opencl 原生返回 int 向量; cuda 逐分量生成), 与 genVec._compare_op 语义一致
+            if len(node.ops) != 1:
+                self._error("chained comparison is not supported on vector types", node)
+            name:str = node.ops[0].__class__.__name__
+            if name not in symbols:
+                self._error(f"unsupported comparison: {name}", node)
+            right, rt = self._visit_expression(node.comparators[0])
+            if is_vec(rt):
+                if rt != lt:
+                    self._error(f"vector operands must have the same type, got {lt} and {rt}", node)
+                return self._vec_componentwise_compare(symbols[name], left, lt, right), self._get_int_vec_type(lt)
+            self._error("vector comparison requires vector operands on both sides", node)
+
         parts:List[str] = []
-        left, _ = self._visit_expression(node.left)
         for op, comparator in zip(node.ops, node.comparators):
             name:str = op.__class__.__name__
             if name not in symbols:
@@ -766,11 +790,12 @@ class FunctionTranslator:
 
         base_code, base_t = self._visit_expression(node.value)
         if is_vec(base_t):
+            if len(node.attr) > 1:
+                return self._emit_vec_swizzle(base_code, base_t, node.attr, node)
             field_key:(str, str) = (base_t, node.attr)
             if field_key not in _C_FIELD_TYPES:
                 self._error(
-                    f"vector type {base_t} has no component '.{node.attr}' "
-                    f"(only single components like .x/.y/.z/.w; swizzles are not supported)", node)
+                    f"vector type {base_t} has no component '.{node.attr}'", node)
             return f"({base_code}.{node.attr})", _C_FIELD_TYPES[field_key]
         self._error(f"unsupported attribute access: .{node.attr}", node)
 
@@ -957,7 +982,7 @@ class FunctionTranslator:
             if vec_t is not None:
                 if self.backend == "opencl":
                     return f"clamp({', '.join(arg_codes)})", vec_t
-                return self._emit_vec_clamp(arg_codes, vec_t), vec_t
+                return self._emit_vec_clamp(arg_codes, arg_types, vec_t), vec_t
             if self.backend == "opencl":
                 return f"clamp({', '.join(arg_codes)})", args[0][1]
             return f"fminf(fmaxf({arg_codes[0]}, {arg_codes[1]}), {arg_codes[2]})", args[0][1]
@@ -968,7 +993,7 @@ class FunctionTranslator:
             if vec_t is not None:
                 if self.backend == "opencl":
                     return f"mix({', '.join(arg_codes)})", vec_t
-                return self._emit_vec_mix(arg_codes, vec_t), vec_t
+                return self._emit_vec_mix(arg_codes, arg_types, vec_t), vec_t
             a, b, t = arg_codes
             return f"(({a}) * (1.0f - ({t})) + ({b}) * ({t}))", args[0][1]
 
@@ -1002,22 +1027,72 @@ class FunctionTranslator:
     def _is_scalar(self, t:Any)->bool:
         return isinstance(t, str) and not is_vec(t)
 
-    def _emit_vec_clamp(self, codes:List[str], vec:str)->str:
-        cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
-        maker:str = f"make_{vec}"
-        inner:str = ", ".join(
-            f"fminf(fmaxf({codes[0]}.{c}, {codes[1]}.{c}), {codes[2]}.{c})" for c in components)
-        return f"{maker}({inner})"
+    def _component(self, code:str, t:Any, c:str)->str:
+        return f"{code}.{c}" if is_vec(t) else code
 
-    def _emit_vec_mix(self, codes:List[str], vec:str)->str:
+    def _emit_vec_clamp(self, codes:List[str], types:List[Any], vec:str)->str:
         cls:Any = _vec_registry()[vec]
         components:List[str] = [f_name for f_name, _ in cls._fields_]
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
-            f"(({codes[0]}.{c}) * (1.0f - ({codes[2]}.{c})) + ({codes[1]}.{c}) * ({codes[2]}.{c}))"
+            f"fminf(fmaxf({self._component(codes[0], types[0], c)}, {self._component(codes[1], types[1], c)}), {self._component(codes[2], types[2], c)})"
             for c in components)
         return f"{maker}({inner})"
+
+    def _emit_vec_mix(self, codes:List[str], types:List[Any], vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        maker:str = f"make_{vec}"
+        inner:str = ", ".join(
+            f"(({self._component(codes[0], types[0], c)}) * (1.0f - ({self._component(codes[2], types[2], c)})) + ({self._component(codes[1], types[1], c)}) * ({self._component(codes[2], types[2], c)}))"
+            for c in components)
+        return f"{maker}({inner})"
+
+    def _emit_vec_swizzle(self, code:str, vec:str, swizzle:str, node:ast.Attribute)->Tuple[str, Any]:
+        """读 swizzle: opencl 原生 v.xy; cuda 逐分量 make_float2(v.x, v.y)。"""
+        cls:Any = _vec_registry()[vec]
+        valid:Set[str] = {f_name for f_name, _ in cls._fields_}
+        chars:Set[str] = set(swizzle)
+        if not chars <= valid:
+            self._error(f"vector type {vec} has no components '{swizzle}' "
+                        f"(available: {''.join(sorted(valid))})", node)
+
+        # 结果类型 = 同元素类型的分量数向量(float4 的 .zyx -> float3, .xy -> float2)
+        result_vec:str = vec
+        if len(swizzle) != len(cls._fields_):
+            elem_ctype:str = _C_FIELD_TYPES[(vec, cls._fields_[0][0])]
+            candidate:str = f"{elem_ctype}{len(swizzle)}"
+            if candidate in _vec_registry():
+                result_vec = candidate
+            else:
+                self._error(f"no vector type '{candidate}' for swizzle '.{swizzle}'", node)
+
+        if self.backend == "opencl":
+            return f"({code}.{swizzle})", result_vec
+        if len(swizzle) == len(cls._fields_):
+            # 全分量重排
+            maker:str = f"make_{result_vec}"
+            inner:str = ", ".join(f"({code}.{c})" for c in swizzle)
+            return f"{maker}({inner})", result_vec
+        maker:str = f"make_{result_vec}"
+        inner:str = ", ".join(f"({code}.{c})" for c in swizzle)
+        return f"{maker}({inner})", result_vec
+
+    def _get_int_vec_type(self, vec:str)->str:
+        """向量比较的结果类型(同形整型向量, 与 genVec._compare_op 语义一致)。"""
+        return "int" + (vec[len(prefix):] if (prefix := "".join(c for c in vec if not c.isdigit())) else "") if vec[-1].isdigit() else ("int" + vec)
+
+    def _vec_componentwise_compare(self, op:str, left:str, vec:str, right:str)->str:
+        """向量比较: 结果归一化为逐分量 0/1(设备比较的 true 是 -1 全 1 位,
+        与 genVec._compare_op 的 int(True)=1 语义不同, 这里统一为 0/1)。"""
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        int_vec:str = self._get_int_vec_type(vec)
+        terms:List[str] = [f"(({left}.{c} {op} {right}.{c}) ? 1 : 0)" for c in components]
+        inner:str = ", ".join(terms)
+        if self.backend == "opencl":
+            return f"({int_vec})({inner})"
+        return f"make_{int_vec}({inner})"
 
     def _emit_vec_dot(self, lcode:str, rcode:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
