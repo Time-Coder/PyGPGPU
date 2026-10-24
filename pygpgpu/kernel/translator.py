@@ -19,6 +19,7 @@ from .builtins import (
     emit_index,
 )
 from .builtins import gpu as GPU_BUILTINS
+from ..vec_types import funcs as VEC_FUNCS
 
 
 class PyKernelSyntaxError(SyntaxError):
@@ -833,6 +834,9 @@ class FunctionTranslator:
             if module is GPU_BUILTINS:
                 args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
                 return self._emit_gpu_builtin(func.attr, args, node)
+            if module is VEC_FUNCS:
+                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                return self._emit_gpu_builtin(func.attr, args, node)
             if module is math or module is np:
                 args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
                 return self._emit_math_call(func.attr, args, node, module_name=func.value.id)
@@ -1000,10 +1004,40 @@ class FunctionTranslator:
         if name == "mad":
             if len(args) != 3:
                 self._error("gpu.mad(a, b, c) takes exactly 3 arguments", node)
-            if vec_t is not None and self.backend == "opencl":
-                return f"mad({', '.join(arg_codes)})", vec_t
+            if vec_t is not None:
+                if self.backend == "opencl":
+                    return f"mad({', '.join(arg_codes)})", vec_t
+                return self._emit_vec_mad(arg_codes, arg_types, vec_t), vec_t
             a, b, c = arg_codes
             return f"((({a}) * ({b})) + ({c}))", args[0][1]
+
+        if name == "saturate":
+            if len(args) != 1:
+                self._error("gpu.saturate(x) takes exactly 1 argument", node)
+            code, t = args[0]
+            if vec_t is not None:
+                if self.backend == "opencl":
+                    return f"clamp({code}, 0.0f, 1.0f)", vec_t
+                return self._emit_vec_clamp([code], [t], vec_t), vec_t
+            if self.backend == "opencl":
+                return f"clamp({code}, 0.0f, 1.0f)", t
+            return f"fminf(fmaxf({code}, 0.0f), 1.0f)", t
+
+        if name == "step":
+            if len(args) != 2:
+                self._error("gpu.step(edge, x) takes exactly 2 arguments", node)
+            (edge_code, edge_t), (x_code, x_t) = args
+            if vec_t is not None and self.backend == "opencl":
+                return f"step({edge_code}, {x_code})", vec_t
+            if vec_t is not None:
+                cls:Any = _vec_registry()[vec_t]
+                components:List[str] = [f_name for f_name, _ in cls._fields_]
+                maker:str = f"make_{vec_t}"
+                inner:str = ", ".join(
+                    f"(({self._component(x_code, x_t, c)}) < ({self._component(edge_code, edge_t, c)})) ? 0.0f : 1.0f"
+                    for c in components)
+                return f"{maker}({inner})", vec_t
+            return f"((({x_code}) < ({edge_code})) ? 0.0f : 1.0f)", "float"
 
         if name == "dot":
             if len(args) != 2:
@@ -1093,6 +1127,15 @@ class FunctionTranslator:
         if self.backend == "opencl":
             return f"({int_vec})({inner})"
         return f"make_{int_vec}({inner})"
+
+    def _emit_vec_mad(self, codes:List[str], types:List[Any], vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        maker:str = f"make_{vec}"
+        inner:str = ", ".join(
+            f"(({self._component(codes[0], types[0], c)}) * ({self._component(codes[1], types[1], c)})) + ({self._component(codes[2], types[2], c)})"
+            for c in components)
+        return f"{maker}({inner})"
 
     def _emit_vec_dot(self, lcode:str, rcode:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]

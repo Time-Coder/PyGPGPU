@@ -74,6 +74,8 @@ GENERIC_BUILTINS:Dict[str, Tuple[str, str]] = {
     "clamp": ("clamp", ""),      # cuda 需特殊生成
     "mix": ("mix", ""),          # cuda 需特殊生成 (a*(1-t)+b*t)
     "mad": ("mad", ""),          # cuda (a*b+c)
+    "saturate": ("clamp", ""),   # cuda 需特殊生成 (clamp 到 0..1)
+    "step": ("step", ""),        # cuda 需特殊生成 (x < edge ? 0 : 1)
     "dot": ("dot", ""),          # 向量: opencl 原生, cuda 逐分量求和
     "cross": ("cross", ""),
     "normalize": ("normalize", ""),
