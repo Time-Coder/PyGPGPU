@@ -63,11 +63,14 @@ def compile(
         )
 
     key:str = ProgramParser.md5_of(includes, defines, options, file_name=file_name)
-    if key not in __program_wrappers:
-        program_wrapper = ProgramWrapper(file_name, includes, defines, options, type_checked)
-        if generate_pyi:
-            program_wrapper._program_parser.generate_pyi()
-            
-        __program_wrappers[key] = program_wrapper
+    program_wrapper:Optional[ProgramWrapper] = __program_wrappers.get(key)
+    if program_wrapper is not None and program_wrapper._program_parser.is_up_to_date():
+        return program_wrapper
 
-    return __program_wrappers[key]
+    program_wrapper = ProgramWrapper(file_name, includes, defines, options, type_checked)
+    if generate_pyi:
+        program_wrapper._program_parser.generate_pyi()
+
+    __program_wrappers[key] = program_wrapper
+
+    return program_wrapper

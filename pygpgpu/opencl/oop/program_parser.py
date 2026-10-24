@@ -222,6 +222,21 @@ class Kernel_{kernel_name}(KernelWrapper):
     def newest_mtime(self)->Union[float, bool]:
         return self._newest_mtime
 
+    def is_up_to_date(self)->bool:
+        """进程内缓存复用前的新鲜度校验,判定逻辑与 _load 一致。"""
+        if not self._file_name:
+            return False
+
+        meta_mtime = modify_time(self._meta_file_name)
+        if not meta_mtime or modify_time(self._file_name) > meta_mtime:
+            return False
+
+        for related_file in self._related_files:
+            if not os.path.isfile(related_file) or modify_time(related_file) > meta_mtime:
+                return False
+
+        return True
+
     @property
     def file_name(self)->str:
         return self._file_name
@@ -473,7 +488,7 @@ class Kernel_{kernel_name}(KernelWrapper):
 
     @property
     def _meta_file_name(self)->str:
-        return f"{self._cache_folder}/{self._base_name}_{self.md5}_ts.meta"
+        return f"{self._cache_folder}/{self._base_name}_{self.md5}_ts2.meta"
 
     @property
     def md5(self)->str:

@@ -424,7 +424,7 @@ class Kernel_{kernel_name}(Kernel):
 
     @property
     def _meta_file_name(self)->str:
-        return f"{self._cache_folder}/{self._base_name}_{self.md5}_ts.meta"
+        return f"{self._cache_folder}/{self._base_name}_{self.md5}_ts2.meta"
     
     @property
     def md5(self)->str:
