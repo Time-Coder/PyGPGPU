@@ -11,34 +11,98 @@ from .translator import (
     PyKernelSyntaxError,
     infer_ctype,
     is_ptr,
+    scan_self_attrs,
     short_hash,
     type_sig,
 )
 
 
+class _BoundKernelMethod:
+    """实例方法绑定形态: instance.kernel_method(...)"""
+
+    def __init__(self, kernel:"PyKernel", instance:Any):
+        self._kernel:"PyKernel" = kernel
+        self._instance:Any = instance
+
+    def __call__(self, *args:Any, global_size:Optional[Any]=None)->Any:
+        return self._kernel._invoke(self._instance, args, global_size)
+
+
 class PyKernel:
-    """`@kernel` 装饰器的实现:调用时把 python 函数翻译为后端源码并编译执行。"""
+    """`@kernel` 装饰器的实现:调用时把 python 函数翻译为后端源码并编译执行。
+
+    支持装饰类方法: self 在翻译时剔除, 方法体里的 self.xxx 属性引用被转化为
+    附加参数 _self_xxx, 调用时从实例取值传入; 也支持 staticmethod(两种装饰顺序)。
+    """
 
     def __init__(self, func:Callable, backend:str):
+        if isinstance(func, classmethod):
+            raise PyKernelSyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)")
+        if isinstance(func, staticmethod):
+            func = func.__func__
+
         self.raw_func:Callable = func
         self.backend:str = backend
         self.is_pykernel:bool = True
         self.__name__:str = func.__name__
         self.__doc__:str = func.__doc__ or ""
+
+        arg_names:List[str] = list(func.__code__.co_varnames[:func.__code__.co_argcount])
+        self._is_method:bool = bool(arg_names and arg_names[0] == "self")
+        self._self_param:str = (arg_names[0] if self._is_method else "")
+        self._self_attrs:List[str] = (scan_self_attrs(func, self._self_param) if self._is_method else [])
+
         self._cache:Dict[str, Tuple[Any, List[Tuple[int, int]], List[Tuple[int, int]], List[int]]] = {}
         self._source_sig:str = self._source_signature()
 
-    def __call__(self, *args:Any, global_size:Optional[int]=None)->Any:
-        arg_types:List[Any] = [infer_ctype(a) for a in args]
-        sig:str = type_sig(arg_types)
-        entry:Optional[Tuple[Any, List[str]]] = self._cache.get(sig)
+    def __get__(self, obj:Any, objtype:Optional[type]=None)->Any:
+        # 描述符协议: 实例访问返回绑定形态, 类访问/静态方法返回自身
+        if obj is None or not self._is_method:
+            return self
+        return _BoundKernelMethod(self, obj)
 
+    def __call__(self, *args:Any, global_size:Optional[Any]=None)->Any:
+        if self._is_method:
+            if not args:
+                raise TypeError(
+                    f"{self.__name__}() is an instance method; call it on an instance "
+                    f"or pass the instance as the first argument")
+            return self._invoke(args[0], args[1:], global_size)
+        return self._invoke(None, args, global_size)
+
+    def _invoke(self, instance:Any, args:Tuple[Any, ...], global_size:Optional[Any])->Any:
+        self_values:List[Any] = []
+        if self._is_method:
+            if instance is None:
+                raise TypeError(f"{self.__name__}() requires an instance")
+            for name in self._self_attrs:
+                if not hasattr(instance, name):
+                    raise PyKernelSyntaxError(
+                        f"instance of {type(instance).__name__} has no attribute '{name}' "
+                        f"required by kernel {self.__name__}")
+                value:Any = getattr(instance, name)
+                if callable(value) and not isinstance(value, np.ndarray):
+                    raise PyKernelSyntaxError(
+                        f"self.{name} is a method; calling self.{name}() inside a kernel is not supported")
+                self_values.append(value)
+
+        arg_types:List[Any] = [infer_ctype(a) for a in args]
+        self_types:List[Any] = []
+        for name, value in zip(self._self_attrs, self_values):
+            try:
+                self_types.append(infer_ctype(value))
+            except PyKernelSyntaxError as e:
+                raise PyKernelSyntaxError(f"self.{name}: {e}") from None
+
+        sig:str = type_sig(arg_types + self_types)
+        entry = self._cache.get(sig)
         if entry is None:
-            entry = self._compile(args, arg_types, sig)
+            entry = self._compile(args, arg_types, self_types, sig)
             self._cache[sig] = entry
         kernel_obj, shape_sources, work_size_dims, local_sizes = entry
 
-        launch_args:List[Any] = self._build_launch_args(args, arg_types, shape_sources)
+        full:List[Any] = list(args) + list(self_values)
+        launch_args:List[Any] = self._build_launch_args(full, arg_types + self_types, shape_sources)
         if self.backend == "opencl":
             # cuda 的 local memory 是 __shared__ 静态声明,opencl 才需要传字节数
             for local_bytes in local_sizes:
@@ -47,7 +111,7 @@ class PyKernel:
             gs:Tuple[int, ...] = ((global_size,) if isinstance(global_size, int) else tuple(int(d) for d in global_size))
             kernel_obj = kernel_obj[(gs, None)]
         elif work_size_dims:
-            gs = tuple(int(args[pi].shape[dim]) for pi, dim in work_size_dims)
+            gs = tuple(int(full[pi].shape[dim]) for pi, dim in work_size_dims)
             kernel_obj = kernel_obj[(gs, None)]
         return kernel_obj(*launch_args)
 
@@ -67,9 +131,9 @@ class PyKernel:
     def _c_kernel_name(self, sig:str)->str:
         return f"pyk_{self.__name__}_{short_hash(sig + '_' + self.backend)}"
 
-    def _compile(self, args:List[Any], arg_types:List[Any], sig:str)->Tuple[Any, List[str]]:
+    def _compile(self, args:List[Any], arg_types:List[Any], self_types:List[Any], sig:str)->Tuple[Any, List[str]]:
         if self.backend == "cuda":
-            for t in arg_types:
+            for t in list(arg_types) + list(self_types):
                 base:str = (t[1] if isinstance(t, tuple) else t)
                 if base == "half":
                     raise PyKernelSyntaxError(
@@ -78,9 +142,12 @@ class PyKernel:
 
         c_name:str = self._c_kernel_name(sig)
         device_cache:Dict[Any, Any] = {}
+        self_attr_types:Dict[str, Any] = dict(zip(self._self_attrs, self_types))
 
         translator:FunctionTranslator = FunctionTranslator(
-            self.raw_func, arg_types, self.backend, self._resolve_global, device_cache, is_kernel=True)
+            self.raw_func, list(arg_types) + list(self_types), self.backend,
+            self._resolve_global, device_cache, is_kernel=True,
+            self_param=self._self_param, self_attr_types=self_attr_types)
         translator.translate()
         kernel_code:str = translator.render_kernel(c_name)
 

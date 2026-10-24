@@ -6,6 +6,7 @@ import inspect
 import math
 import os
 import re
+import textwrap
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -21,6 +22,31 @@ from .builtins import (
 from .builtins import gpu as GPU_BUILTINS
 from ..vec_types import funcs as VEC_FUNCS
 from ..vec_types import funcs as VEC_FUNCS
+
+
+def get_dedented_source(func:Callable)->str:
+    """读取函数源码, 去掉装饰器行并 dedent(类方法源码带缩进, ast.parse 需要顶层 def)。"""
+    try:
+        source:str = inspect.getsource(func)
+    except OSError as e:
+        raise PyKernelSyntaxError(f"cannot read source of {getattr(func, '__name__', '<function>')}: {e}") from e
+    lines:List[str] = source.split("\n")
+    start:int = next((i for i, line in enumerate(lines) if line.lstrip().startswith("def ")), 0)
+    return textwrap.dedent("\n".join(lines[start:]))
+
+
+def scan_self_attrs(func:Callable, self_param:str)->List[str]:
+    """收集方法体里引用的 self.xxx 属性名(按首次出现顺序)。"""
+    if not self_param:
+        return []
+    tree:ast.Module = ast.parse(get_dedented_source(func), mode="exec")
+    func_def:ast.FunctionDef = tree.body[0]
+    attrs:List[str] = []
+    for node in ast.walk(func_def):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == self_param and node.attr not in attrs):
+            attrs.append(node.attr)
+    return attrs
 
 
 class PyKernelSyntaxError(SyntaxError):
@@ -163,13 +189,16 @@ class FunctionTranslator:
 
     def __init__(self, func:Callable, param_types:List[Any], backend:str,
                  resolve_global:Callable[[str], Any], device_cache:Dict[Any, Any],
-                 is_kernel:bool=False):
+                 is_kernel:bool=False, self_param:str="",
+                 self_attr_types:Optional[Dict[str, Any]]=None):
         self.func:Callable = func
         self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
         self.backend:str = backend
         self.resolve_global:Callable[[str], Any] = resolve_global
         self.device_cache:Dict[Any, Any] = device_cache
         self.is_kernel:bool = is_kernel
+        self.self_param:str = self_param
+        self.self_attr_types:Dict[str, Any] = dict(self_attr_types or {})
 
         try:
             tree:ast.Module = ast.parse(self._trim_source(), mode="exec")
@@ -194,8 +223,11 @@ class FunctionTranslator:
         args:List[ast.arg] = self.tree.args.args
         if self.tree.args.vararg or self.tree.args.kwarg or self.tree.args.kwonlyargs or self.tree.args.defaults:
             raise PyKernelSyntaxError("*args/**kwargs/keyword-only args/defaults are not supported", self.tree.args)
-        if len(args) != len(param_types):
-            raise PyKernelSyntaxError(f"{func.__name__}() takes {len(args)} arguments but {len(param_types)} were given")
+        if self_param and args and args[0].arg == self_param:
+            args = args[1:]
+        expected:int = len(args) + len(self.self_attr_types)
+        if expected != len(param_types):
+            raise PyKernelSyntaxError(f"{func.__name__}() takes {expected} device arguments but {len(param_types)} types were given")
 
         scope:Dict[str, Any] = {}
         for arg, t in zip(args, param_types):
@@ -203,6 +235,11 @@ class FunctionTranslator:
                 raise PyKernelSyntaxError("type annotations are not needed, remove them", arg)
             scope[arg.arg] = t
             self.params.append((arg.arg, t))
+        # self.xxx 属性 -> 附加设备参数 _self_xxx,调用时由实例取值传入
+        for attr, t in self.self_attr_types.items():
+            pname:str = f"_self_{attr}"
+            scope[pname] = t
+            self.params.append((pname, t))
         self.scopes.append(scope)
 
     # ---------- 基础工具 ----------
@@ -236,13 +273,7 @@ class FunctionTranslator:
         return f"_{array_name}_shape{dim}"
 
     def _trim_source(self)->str:
-        try:
-            source:str = inspect.getsource(self.func)
-        except OSError as e:
-            raise PyKernelSyntaxError(f"cannot read source of {self.func.__name__}: {e}") from e
-        lines:List[str] = source.split("\n")
-        start:int = next((i for i, line in enumerate(lines) if line.lstrip().startswith("def ")), 0)
-        return "\n".join(lines[start:])
+        return get_dedented_source(self.func)
 
     # ---------- 翻译入口 ----------
 
@@ -256,16 +287,40 @@ class FunctionTranslator:
             if self.return_type is None:
                 self.return_type = "void"
 
-    @staticmethod
-    def _is_shape0_range(iter_node:ast.expr)->bool:
-        return (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
-                and iter_node.func.id == "range" and len(iter_node.args) == 1 and not iter_node.keywords
-                and isinstance(iter_node.args[0], ast.Subscript)
-                and isinstance(iter_node.args[0].value, ast.Attribute)
-                and iter_node.args[0].value.attr == "shape"
-                and isinstance(iter_node.args[0].value.value, ast.Name)
-                and isinstance(iter_node.args[0].slice, ast.Constant)
-                and iter_node.args[0].slice.value == 0)
+    def _shape_holder_param(self, attr_node:ast.expr)->Optional[str]:
+        """`X.shape` 的 X 是数组参数时返回参数名(普通参数名或 _self_ 属性参数名)。"""
+        if not (isinstance(attr_node, ast.Attribute) and attr_node.attr == "shape"):
+            return None
+        base:ast.expr = attr_node.value
+        if isinstance(base, ast.Name):
+            return base.id
+        if (self.self_param and isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                and base.value.id == self.self_param):
+            return f"_self_{base.attr}"
+        return None
+
+    def _shape0_range_param(self, iter_node:ast.expr)->Optional[str]:
+        if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
+                and iter_node.func.id == "range" and len(iter_node.args) == 1 and not iter_node.keywords):
+            return None
+        arg:ast.expr = iter_node.args[0]
+        if not (isinstance(arg, ast.Subscript) and isinstance(arg.slice, ast.Constant) and arg.slice.value == 0):
+            return None
+        return self._shape_holder_param(arg.value)
+
+    def _is_shape0_range(self, iter_node:ast.expr)->bool:
+        return (self._shape0_range_param(iter_node) is not None)
+
+    def _shape1_range_param(self, iter_node:ast.expr, outer_param:str)->Optional[str]:
+        """`for x in range(<同一数组>.shape[1])` 的内层循环检测, 返回参数名。"""
+        if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
+                and iter_node.func.id == "range" and len(iter_node.args) == 1 and not iter_node.keywords):
+            return None
+        arg:ast.expr = iter_node.args[0]
+        if not (isinstance(arg, ast.Subscript) and isinstance(arg.slice, ast.Constant) and arg.slice.value == 1):
+            return None
+        param:Optional[str] = self._shape_holder_param(arg.value)
+        return param if param == outer_param else None
 
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
         magic_index:Optional[int] = None
@@ -289,7 +344,7 @@ class FunctionTranslator:
         range_call:ast.Call = loop.iter
         bound:ast.expr = range_call.args[0]
 
-        array_name:str = bound.value.value.id
+        array_name:str = (self._shape_holder_param(bound.value) or "")
         if array_name not in {n for n, _ in self.params} or not is_ptr(self._lookup(array_name)):
             self._error(f"'{array_name}' is not an array parameter of this kernel", bound)
 
@@ -297,18 +352,10 @@ class FunctionTranslator:
 
         # 2D 模式: 外层 range(arr.shape[0]) 内嵌 range(arr.shape[1]) -> 二维 NDRange
         inner_loop:Optional[ast.For] = None
-        if (len(loop.body) == 1 and isinstance(loop.body[0], ast.For)
-                and isinstance(loop.body[0].iter, ast.Call)
-                and isinstance(loop.body[0].iter.func, ast.Name) and loop.body[0].iter.func.id == "range"
-                and len(loop.body[0].iter.args) == 1
-                and isinstance(loop.body[0].iter.args[0], ast.Subscript)
-                and isinstance(loop.body[0].iter.args[0].value, ast.Attribute)
-                and loop.body[0].iter.args[0].value.attr == "shape"
-                and isinstance(loop.body[0].iter.args[0].value.value, ast.Name)
-                and loop.body[0].iter.args[0].value.value.id == array_name
-                and isinstance(loop.body[0].iter.args[0].slice, ast.Constant)
-                and loop.body[0].iter.args[0].slice.value == 1):
-            inner_loop = loop.body[0]
+        if len(loop.body) == 1 and isinstance(loop.body[0], ast.For):
+            inner_param:Optional[str] = self._shape1_range_param(loop.body[0].iter, array_name)
+            if inner_param is not None:
+                inner_loop = loop.body[0]
 
         def _emit_gid(var:str, dim:int, component:int)->None:
             self._shape_var(array_name, dim)
@@ -452,6 +499,13 @@ class FunctionTranslator:
         if len(node.targets) != 1:
             self._error("chained assignment is not supported", node)
         target:ast.expr = node.targets[0]
+
+        # self.xxx = ... : 宿主属性无法从设备端写回
+        if (self.self_param and isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                and target.value.id == self.self_param):
+            self._error(
+                f"cannot assign to self.{target.attr}: host attributes cannot be written by device code; "
+                f"write into an array element (self.{target.attr}[i] = ...) or use a local variable", node)
 
         # local memory 声明: buf = gpu.local(np.float32, 64)
         if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
@@ -624,6 +678,9 @@ class FunctionTranslator:
             return node.id
         if isinstance(node, ast.Subscript):
             return self._array_name(node.value)
+        if (self.self_param and isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == self.self_param):
+            return f"_self_{node.attr}"
         self._error("unsupported array expression", node)
 
     # ---------- 表达式 ----------
@@ -835,6 +892,14 @@ class FunctionTranslator:
         return f"{base_code}[{index_code}]", base_t
 
     def _visit_attribute(self, node:ast.Attribute)->Tuple[str, Any]:
+        # self.xxx -> 附加参数 _self_xxx
+        if (self.self_param and isinstance(node.value, ast.Name) and node.value.id == self.self_param):
+            if node.attr not in self.self_attr_types:
+                self._error(
+                    f"self.{node.attr} was not discovered on this kernel "
+                    f"(discovered attributes: {', '.join(self.self_attr_types) or 'none'})", node)
+            return f"_self_{node.attr}", self.self_attr_types[node.attr]
+
         if isinstance(node.value, ast.Name):
             module:Any = self.resolve_global(node.value.id)
             if module is math or module is np:
@@ -886,6 +951,10 @@ class FunctionTranslator:
             self._error(f"unknown function '{name}'", node)
 
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            if self.self_param and func.value.id == self.self_param:
+                self._error(
+                    f"calling self.{func.attr}() inside a kernel is not supported; "
+                    f"extract the logic into a plain function and call it by name", node)
             module:Any = self.resolve_global(func.value.id)
             if module is GPU_BUILTINS:
                 args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
