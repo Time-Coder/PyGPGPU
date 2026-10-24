@@ -42,4 +42,5 @@ from .genVec import genVec
 from .genVec2 import genVec2
 from .genVec3 import genVec3
 from .genVec4 import genVec4
+from .genVec8 import genVec8
 from .genVec16 import genVec16

@@ -1,3 +1,6 @@
 cuda-python
+imageio
 tree-sitter
 tree-sitter-c
+tree-sitter-cuda
+tree-sitter-opencl

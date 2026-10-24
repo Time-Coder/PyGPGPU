@@ -13,6 +13,7 @@ from ..driver import (
     cl_int,
     cl_event
 )
+from ...constants import KernelFlags
 from .command_queue import CommandQueue
 from .event import Event
 
@@ -119,7 +120,7 @@ class Buffer(MemObject):
         self._data = data
 
         event = None
-        if not (self.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) and not (self.kernel_flags & cl_mem_flags.CL_MEM_WRITE_ONLY):
+        if not (self.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) and (self.kernel_flags & KernelFlags.Readed):
             event = self.write(cmd_queue, 0, size, host_ptr, after_events)
         
         return event

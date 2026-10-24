@@ -27,14 +27,14 @@ from ...constants import KernelFlags
 
 class VarInfo:
 
-    def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier, kernel_flags:KernelFlags):
+    def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier, kernel_flags:Optional[KernelFlags]=None):
         self.name = name
         self.type_str = type_str
         self.array_shape = array_shape
         self.address_qualifier = address_qualifier
         self.access_qualifier = access_qualifier
         self.type_qualifiers = type_qualifiers
-        self.kernel_flags = kernel_flags
+        self.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed) if kernel_flags is None else kernel_flags
 
     @property
     def is_ptr(self)->bool:
@@ -76,14 +76,12 @@ class VarInfo:
     
     @property
     def need_read_back(self)->bool:
-        return ((
-            self.is_ptr and
-            self.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL and
-            self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY and
-            not (self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST)
-        ) or (
-            self.type_str in CLInfo.image_types and self.access_qualifier != cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY
-        ))
+        is_global_ptr:bool = (self.is_ptr and self.address_qualifier == cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL)
+        is_image:bool = (self.type_str in CLInfo.image_types)
+        if not (is_global_ptr or is_image):
+            return False
+
+        return bool(self.kernel_flags & KernelFlags.Writed)
 
     def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
         if isinstance(data, gnp.ndarray):
@@ -114,7 +112,7 @@ class VarInfo:
 
 class ArgInfo(VarInfo):
 
-    def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier, kernel_flags:KernelFlags):
+    def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier, kernel_flags:Optional[KernelFlags]=None):
         VarInfo.__init__(self, name, type_str, array_shape, address_qualifier, access_qualifier, type_qualifiers, kernel_flags)
         self.parent = parent
         self.value: Any = None

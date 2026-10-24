@@ -8,6 +8,7 @@ from ctypes import c_char_p, Structure, _Pointer, pointer
 from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple, TYPE_CHECKING
 
 from ...cparser import CPreprocessor
+from ...cparser.ts_parser import TSParserMixin
 from ..driver import (
     CL,
     cl_kernel_arg_address_qualifier,
@@ -30,16 +31,25 @@ import tree_sitter_opencl as tscl
 from tree_sitter import Language, Parser, Node
 
 
-class ProgramParser:
+class ProgramParser(TSParserMixin):
 
-    _struct_def_pattern1:re.Pattern = re.compile(r"^\s*struct\s+(?P<struct_name>[a-zA-Z_]\w*)\{(?P<body>.*?)\}\s*;", re.MULTILINE | re.DOTALL)
-    _struct_def_pattern2:re.Pattern = re.compile(r"^\s*typedef\s+struct(?P<struct_name>\s+[a-zA-Z_]\w*)?\s*\{(?P<body>.*?)\}\s*(?P<type_name>[a-zA-Z_]\w*)\s*;", re.MULTILINE | re.DOTALL)
-    _kernel_def_pattern:re.Pattern = re.compile(r"^\s*(__kernel|kernel)\s+void\s+(?P<name>[a-zA-Z_]\w*)\s*\((?P<body>.*?)\)", re.MULTILINE | re.DOTALL)
-    _address_qualifier_pattern:re.Pattern = re.compile(r"\b(__global|__local|__private|__constant|global|local|private|constant)\b")
-    _access_qualifier_pattern:re.Pattern = re.compile(r"\b(__read_only|__write_only|__read_write|read_only|write_only|read_write)\b")
-    _type_qualifier_pattern:re.Pattern = re.compile(r"\b(const|restrict|volatile|pipe)\b")
-    _arg_name_pattern:re.Pattern = re.compile(r"\b([a-zA-Z_]\w*(\[[^\]]*\])*)(?=\W*$)")
-    _array_shape_pattern:re.Pattern = re.compile(r'\[\s*(\d+)\s*\]')
+    _address_qualifiers:Dict[str, cl_kernel_arg_address_qualifier] = {
+        "global": cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_GLOBAL,
+        "local": cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_LOCAL,
+        "constant": cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_CONSTANT,
+        "private": cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_PRIVATE
+    }
+    _access_qualifiers:Dict[str, cl_kernel_arg_access_qualifier] = {
+        "read_only": cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_ONLY,
+        "write_only": cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_WRITE_ONLY,
+        "read_write": cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_READ_WRITE
+    }
+    _type_qualifier_flags:Dict[str, cl_kernel_arg_type_qualifier] = {
+        "const": cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_CONST,
+        "restrict": cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_RESTRICT,
+        "volatile": cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_VOLATILE,
+        "pipe": cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE
+    }
 
     _parser = Parser(Language(tscl.language()))
 
@@ -396,141 +406,59 @@ class Kernel_{kernel_name}(KernelWrapper):
 
         return struct_type
 
-    def _parse_struct(self, node:Node, alias_name:str="")->StructInfo:
-        if node.children[1].type == "type_identifier":
-            struct_name:str = node.children[1].text.decode()
-            field_declaration_list = node.children[2]
-        elif node.children[1].type == "field_declaration_list":
-            struct_name:str = ""
-            field_declaration_list = node.children[1]
-
-        used_name:str = (alias_name if alias_name else struct_name)
-        struct_info:StructInfo = StructInfo(name=used_name)
-
-        for field_declaration in field_declaration_list.children:
-            if field_declaration.type != "field_declaration":
-                continue
-
-            type_str:str = ""
-            member_names:List[str] = []
-            type_qualifiers:List[str] = []
-            address_qualifier:cl_kernel_arg_address_qualifier = cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_PRIVATE
-            for child in field_declaration.children:
-                if child.type in ["scalar_type"]:
-                    type_str:str = child.text.decode()
-
-                if child.type in ["field_identifier", "array_declarator", "pointer_declarator"]:
-                    member_names.append(child.text.decode())
-
-                if child.type == "type_qualifier":
-                    type_qualifiers.append(child.text.decode())
-
-                if child.type == "address_space_qualifier":
-                    address_qualifier:str = child.text.decode()
-
-
-
-
-
-
     def _parse(self):
-        ast = self._parser.parse(self._clean_code.encode())
-        for child in ast.root_node.children:
-            if child.type == "type_definition":
-                self._parse_struct(child.children[1], child.children[2].text.decode())
-            elif child.type == "struct_specifier":
-                self._parse_struct(child)
-            elif child.type == "function_definition":
-                self._parse_function(child)
-        
-        struct_matches:List[re.Match] = self._find_struct_defs(self._clean_code)
-        for struct_match in struct_matches:
-            key_names = []
-
-            if "struct_name" in struct_match.groupdict() and struct_match["struct_name"] is not None:
-                struct_name:str = struct_match["struct_name"]
-                key_names.append("struct " + struct_name)
-
-            if "type_name" in struct_match.groupdict() and struct_match["type_name"] is not None:
-                struct_name:str = struct_match["type_name"]
-                key_names.append(struct_name)
-
-            struct_info = StructInfo(name=struct_name)
-            for key_name in key_names:
-                self._struct_infos[key_name] = struct_info
-
-            members_str:str = struct_match["body"]
-            members_items:List[str] = members_str.split(";")
-            for member_item in members_items:
-                member_item = member_item.strip("\r\n\t ")
-                if not member_item:
-                    continue
-
-                submember_items = member_item.split(",")
-                first_member_item = submember_items[0]
-                address_qualifier = self._find_address_qualifier(first_member_item)
-                access_qualifier = self._find_access_qualifier(first_member_item)
-                type_qualifiers = self._find_type_qualifiers(first_member_item)
-                member_name:str = self._find_arg_name(first_member_item)
-                member_type:str = self._find_arg_type(first_member_item)
-                member_name, member_shape = self._extract_array_shape(member_name)
-                struct_info.members[member_name] = VarInfo(
-                    name=member_name,
-                    type_str=member_type,
-                    array_shape=member_shape,
-                    address_qualifier=address_qualifier,
-                    access_qualifier=access_qualifier,
-                    type_qualifiers=type_qualifiers
-                )
-                for i in range(1, len(submember_items)):
-                    member_name:str = self._find_arg_name(submember_items[i])
-                    member_name, member_shape = self._extract_array_shape(member_name)
-                    struct_info.members[member_name] = VarInfo(
-                        name=member_name,
-                        type_str=member_type,
-                        array_shape=member_shape,
-                        address_qualifier=address_qualifier,
-                        access_qualifier=access_qualifier,
-                        type_qualifiers=type_qualifiers
-                    )
-
+        self._ts_parse()
         for struct_info in self._struct_infos.values():
             self._create_struct_type(struct_info)
+        self._analyze_kernels()
 
-        kernel_matches:Iterator[re.Match] = self._find_kernel_defs(self._clean_code)
-        for kernel_match in kernel_matches:
-            kernel_name:str = kernel_match["name"]
-            kernel_info = KernelInfo(name=kernel_name)
-            self._kernel_infos[kernel_name] = kernel_info
+    def _new_struct_info(self, name:str)->StructInfo:
+        return StructInfo(name=name)
 
-            args_str:str = kernel_match["body"]
-            args_items:List[str] = args_str.split(",")
-            for arg_item in args_items:
-                arg_item = arg_item.strip("\r\n\t ")
-                address_qualifier = self._find_address_qualifier(arg_item)
-                access_qualifier = self._find_access_qualifier(arg_item)
-                type_qualifiers = self._find_type_qualifiers(arg_item)
-                arg_name:str = self._find_arg_name(arg_item)
-                arg_type:str = self._find_arg_type(arg_item)
-                arg_name, arg_shape = self._extract_array_shape(arg_name)
-                kernel_info.args[arg_name] = ArgInfo(
-                    parent=kernel_info,
-                    name=arg_name,
-                    type_str=arg_type,
-                    array_shape=arg_shape,
-                    address_qualifier=address_qualifier,
-                    access_qualifier=access_qualifier,
-                    type_qualifiers=type_qualifiers
-                )
-    
+    def _new_kernel_info(self, name:str)->KernelInfo:
+        return KernelInfo(name=name)
+
+    def _new_var_info(self, desc:Dict[str, Any])->VarInfo:
+        return VarInfo(
+            name=desc["name"],
+            type_str=desc["type_str"],
+            array_shape=desc["array_shape"],
+            address_qualifier=self._address_qualifiers.get(desc["address"], cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_PRIVATE),
+            access_qualifier=self._access_qualifiers.get(desc["access"], cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_NONE),
+            type_qualifiers=self._type_qualifier_flags_of(desc["type_qualifiers"]),
+            kernel_flags=desc["kernel_flags"]
+        )
+
+    def _new_arg_info(self, parent:KernelInfo, desc:Dict[str, Any])->ArgInfo:
+        return ArgInfo(
+            parent=parent,
+            name=desc["name"],
+            type_str=desc["type_str"],
+            array_shape=desc["array_shape"],
+            address_qualifier=self._address_qualifiers.get(desc["address"], cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_PRIVATE),
+            access_qualifier=self._access_qualifiers.get(desc["access"], cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_NONE),
+            type_qualifiers=self._type_qualifier_flags_of(desc["type_qualifiers"]),
+            kernel_flags=desc["kernel_flags"]
+        )
+
+    def _type_qualifier_flags_of(self, qualifiers:List[str])->cl_kernel_arg_type_qualifier:
+        flags:cl_kernel_arg_type_qualifier = cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_NONE
+        for qualifier in qualifiers:
+            flags |= self._type_qualifier_flags.get(qualifier, cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_NONE)
+        return flags
+
+    def _is_mem_arg(self, arg:Any)->bool:
+        return arg.is_ptr or (arg.type_str in CLInfo.image_types)
+
+
     @property
     def _meta_file_name(self)->str:
-        return f"{self._cache_folder}/{self._base_name}_{self.md5}.meta"
-    
+        return f"{self._cache_folder}/{self._base_name}_{self.md5}_ts.meta"
+
     @property
     def md5(self)->str:
         return ProgramParser.md5_of(self._includes, self._defines, self._options)
-    
+
     @property
     def cache_folder(self)->str:
         return self._cache_folder
@@ -545,13 +473,13 @@ class Kernel_{kernel_name}(KernelWrapper):
 
         if options is None:
             options = BuildOptions()
-        
+
         clean_includes:List[str] = []
         for include in includes:
             include = os.path.abspath(include).replace("\\", "/")
             if include not in clean_includes:
                 clean_includes.append(include)
-                
+
         content = {
             "includes": clean_includes,
             "defines": defines,
@@ -561,75 +489,3 @@ class Kernel_{kernel_name}(KernelWrapper):
             content["file_name"] = os.path.abspath(file_name).replace("\\", "/")
 
         return md5sums(json.dumps(content, separators=(',', ':'), indent=None))
-
-    def _find_struct_defs(self, code:str)->List[re.Match]:
-        structs = list(self._struct_def_pattern1.finditer(code))
-        structs.extend(list(self._struct_def_pattern2.finditer(code)))
-        return structs
-
-    def _find_kernel_defs(self, code:str)->Iterator[re.Match]:
-        return self._kernel_def_pattern.finditer(code)
-    
-    def _find_address_qualifier(self, arg_code:str)->cl_kernel_arg_address_qualifier:
-        address_qualifier = cl_kernel_arg_address_qualifier.CL_KERNEL_ARG_ADDRESS_PRIVATE
-        match:re.Match = self._address_qualifier_pattern.search(arg_code)
-        if match:
-            match_str:str = match.group(1)
-            match_str:str = match_str.replace("__", "")
-            address_qualifier = getattr(cl_kernel_arg_address_qualifier, f"CL_KERNEL_ARG_ADDRESS_{match_str.upper()}")
-
-        return address_qualifier
-    
-    def _find_access_qualifier(self, arg_code:str)->cl_kernel_arg_access_qualifier:
-        access_qualifier = cl_kernel_arg_access_qualifier.CL_KERNEL_ARG_ACCESS_NONE
-        match:re.Match = self._access_qualifier_pattern.search(arg_code)
-        if match:
-            match_str:str = match.group(1)
-            match_str:str = match_str.replace("__", "")
-            access_qualifier = getattr(cl_kernel_arg_access_qualifier, f"CL_KERNEL_ARG_ACCESS_{match_str.upper()}")
-
-        return access_qualifier
-    
-    def _find_type_qualifiers(self, arg_code:str)->cl_kernel_arg_type_qualifier:
-        type_qualifiers = cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_NONE
-        matches:Iterator[re.Match] = self._type_qualifier_pattern.finditer(arg_code)
-        for match in matches:
-            match_str:str = match.group(1)
-            type_qualifiers |= getattr(cl_kernel_arg_type_qualifier, f"CL_KERNEL_ARG_TYPE_{match_str.upper()}")
-
-        return type_qualifiers
-    
-    def _find_arg_name(self, arg_code:str)->str:
-        arg_name:str = ""
-        match:re.Match = self._arg_name_pattern.search(arg_code)
-        if match:
-            arg_name:str = match.group(1)
-
-        return arg_name
-    
-    def _find_arg_type(self, arg_code:str)->str:
-        arg_code = self._address_qualifier_pattern.sub("", arg_code)
-        arg_code = self._access_qualifier_pattern.sub("", arg_code)
-        arg_code = self._type_qualifier_pattern.sub("", arg_code)
-        arg_code = self._arg_name_pattern.sub("", arg_code)
-        arg_code = re.sub(r"\s{2,}", " ", arg_code)
-        arg_code = re.sub(r"\s+\*", "*", arg_code)
-        arg_code = arg_code.strip("\r\t\n ")
-        return arg_code
-    
-    def _extract_array_shape(self, content: str)->Tuple[str, Tuple[int, ...]]:
-        end_pos = content.find("[")
-        if end_pos == -1:
-            name = content
-        else:
-            name = content[:end_pos].strip()
-
-        matches = re.findall(self._array_shape_pattern, content)
-        
-        if not matches:
-            shape = ()
-        else:
-            shape = tuple(int(x) for x in matches)
-
-        return name, shape
-        

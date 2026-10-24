@@ -347,7 +347,11 @@ class Kernel(CLObject):
                 else:
                     if isinstance(value, np.ndarray):
                         used_value = value
-                        if value.dtype != content_type:
+                        content_dtype = getattr(content_type, "dtype", None) if is_struct else None
+                        if content_dtype is not None:
+                            if value.dtype != content_dtype:
+                                used_value = np.ascontiguousarray(value).view(content_dtype)
+                        elif value.dtype != content_type:
                             used_value = value.astype(content_type)
                     else:
                         ProgramParser._apply_structure_pointers(value, cmd_queue)

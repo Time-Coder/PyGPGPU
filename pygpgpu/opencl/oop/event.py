@@ -63,6 +63,9 @@ class Event(CLObject):
         if isinstance(events, Event):
             events = [events]
 
+        if not events:
+            return
+
         CL.clWaitForEvents(len(events), Event.events_ptr(events))
         error_messages:List[str] = []
         for event in events:
