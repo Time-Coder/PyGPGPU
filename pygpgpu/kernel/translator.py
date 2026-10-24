@@ -322,11 +322,48 @@ class FunctionTranslator:
         param:Optional[str] = self._shape_holder_param(arg.value)
         return param if param == outer_param else None
 
+    def _enumerate_magic_target(self, iter_node:ast.expr)->Optional[Tuple[str, Any]]:
+        """`for i, x in enumerate(arr)` 的数组参数解析, 返回 (参数名, 指针类型)。"""
+        if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
+                and iter_node.func.id == "enumerate" and len(iter_node.args) == 1 and not iter_node.keywords):
+            return None
+        arg:ast.expr = iter_node.args[0]
+        param:str = ""
+        if isinstance(arg, ast.Name):
+            param = arg.id
+        elif (self.self_param and isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
+                and arg.value.id == self.self_param):
+            param = f"_self_{arg.attr}"
+        else:
+            return None
+        t:Any = self._lookup(param)
+        if not is_ptr(t):
+            return None
+        return param, t
+
+    def _emit_work_item_head(self, index_name:str, param:str)->None:
+        """发射 gid 与越界保护。"""
+        self._define(index_name, "int", None)
+        gid_bound:str = self._shape_var(param, 0)
+        if self.backend == "opencl":
+            self._emit(f"const int {index_name} = get_global_id(0);")
+        else:
+            self._emit(f"const int {index_name} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
+        self._emit(f"if ({index_name} >= {gid_bound}) return;")
+
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
         magic_index:Optional[int] = None
+        enumerate_form:Optional[Tuple[str, Any]] = None
         for idx, stmt in enumerate(body):
-            if isinstance(stmt, ast.For) and self._is_shape0_range(stmt.iter):
+            if not isinstance(stmt, ast.For):
+                continue
+            if self._is_shape0_range(stmt.iter):
                 magic_index = idx
+                break
+            enum_info:Optional[Tuple[str, Any]] = self._enumerate_magic_target(stmt.iter)
+            if enum_info is not None:
+                magic_index = idx
+                enumerate_form = enum_info
                 break
 
         if magic_index is None:
@@ -339,6 +376,32 @@ class FunctionTranslator:
         # 魔法循环之前的语句照常翻译(如局部变量初始化)
         for stmt in body[:magic_index]:
             self._visit_statement(stmt)
+
+        if enumerate_form is not None:
+            loop:ast.For = body[magic_index]
+            param, arr_t = enumerate_form
+            target = loop.target
+            if not (isinstance(target, ast.Tuple) and len(target.elts) == 2
+                    and all(isinstance(e, ast.Name) for e in target.elts)):
+                self._error(
+                    "the enumerate magic loop must unpack exactly two names: "
+                    "`for i, x in enumerate(array)`", target)
+            index_name:str = target.elts[0].id
+            value_name:str = target.elts[1].id
+
+            self.gid_param = param
+            self._emit_work_item_head(index_name, param)
+            # x 为元素值快照(与 python 语义一致: 重新绑定 x 不会写回数组)
+            elem_t:Any = arr_t[1]
+            self._define(value_name, elem_t, target.elts[1])
+            self._emit(f"{elem_t} {value_name} = {param}[{index_name}];")
+
+            for stmt in loop.body:
+                self._visit_statement(stmt)
+            for stmt in body[magic_index + 1:]:
+                self._visit_statement(stmt)
+            self.work_size_dims = [(param, 0)]
+            return
 
         loop:ast.For = body[magic_index]
         range_call:ast.Call = loop.iter
@@ -441,6 +504,16 @@ class FunctionTranslator:
         self.scopes.pop()
 
     def _visit_for(self, node:ast.For)->None:
+        if isinstance(node.iter, ast.Name) or isinstance(node.iter, ast.Attribute):
+            self._error(
+                "iterating an array directly (`for x in arr`) is not supported in a kernel: "
+                "a work-item has no index to write through; use `for i, x in enumerate(arr)` "
+                "(x is a read-only element snapshot) or `for i in range(arr.shape[0])`", node.iter)
+        if (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
+                and node.iter.func.id == "enumerate"):
+            self._error(
+                "enumerate() is only supported as the outermost magic loop "
+                "(`for i, x in enumerate(array)`), not as a real inner loop", node.iter)
         if not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name) and node.iter.func.id == "range"):
             self._error("only `for ... in range(...)` loops are supported", node.iter)
         args:List[ast.expr] = node.iter.args
