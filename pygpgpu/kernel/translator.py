@@ -10,6 +10,16 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
+from .builtins import (
+    ATOMIC_BUILTINS,
+    GENERIC_BUILTINS,
+    INDEX_BUILTINS,
+    emit_atomic,
+    emit_barrier,
+    emit_index,
+)
+from .builtins import gpu as GPU_BUILTINS
+
 
 class PyKernelSyntaxError(SyntaxError):
     """Python kernel source contains syntax the backend cannot represent."""
@@ -171,6 +181,7 @@ class FunctionTranslator:
         self.shapes_used:List[Tuple[str, int]] = []
         self.gid_param:Optional[str] = None
         self.work_size_dims:List[Tuple[str, int]] = []
+        self.atomic_targets:Set[str] = set()
         self.return_type:Optional[Any] = None
         self.lines:List[str] = []
         self._indent:int = 1
@@ -260,7 +271,11 @@ class FunctionTranslator:
                 break
 
         if magic_index is None:
-            self._error("kernel body must contain an outermost `for i in range(<array>.shape[0])` loop")
+            # 无魔法循环:用户通过 gpu.get_global_id 等内建自行索引,
+            # work size 由调用方 global_size 或输出数组形状自动推断
+            for stmt in body:
+                self._visit_statement(stmt)
+            return
 
         # 魔法循环之前的语句照常翻译(如局部变量初始化)
         for stmt in body[:magic_index]:
@@ -353,7 +368,10 @@ class FunctionTranslator:
         elif isinstance(node, ast.Return):
             self._visit_return(node)
         elif isinstance(node, ast.Expr):
-            self._visit_expression(node.value)
+            # 表达式语句(如 gpu.atomic_add(...)/gpu.barrier())必须 emit,否则副作用丢失
+            code, _ = self._visit_expression(node.value)
+            if code:
+                self._emit(f"{code};")
         elif isinstance(node, ast.Break):
             self._emit("break;")
         elif isinstance(node, ast.Continue):
@@ -787,6 +805,9 @@ class FunctionTranslator:
 
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             module:Any = self.resolve_global(func.value.id)
+            if module is GPU_BUILTINS:
+                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                return self._emit_gpu_builtin(func.attr, args, node)
             if module is math or module is np:
                 args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
                 return self._emit_math_call(func.attr, args, node, module_name=func.value.id)
@@ -880,6 +901,181 @@ class FunctionTranslator:
             return f"({name})({', '.join(codes)})", name
         return f"make_{name}({', '.join(codes)})", name
 
+    # ---------- gpu.* 设备内建 ----------
+
+    def _emit_gpu_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+        if name in INDEX_BUILTINS:
+            if len(args) != 1 or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, int):
+                self._error(f"gpu.{name}(dim) requires a constant integer dimension (0, 1 or 2)", node)
+            return emit_index(name, node.args[0].value, self.backend), "int"
+
+        if name == "barrier":
+            if args:
+                self._error("gpu.barrier() takes no arguments", node)
+            return emit_barrier(self.backend), "void"
+
+        if name in ATOMIC_BUILTINS:
+            if len(args) != 3:
+                self._error(f"gpu.{name}(array, index, value) takes exactly 3 arguments", node)
+            (arr_code, arr_t), (idx_code, idx_t), (val_code, val_t) = args
+            if not is_ptr(arr_t):
+                self._error(f"gpu.{name}() first argument must be an array", node)
+            if isinstance(node.args[0], ast.Name):
+                # 原子操作通过指针强转写内存,静态分析无法识别该模式,
+                # 记录目标参数,由 PyKernel 在编译后强制标记为可写
+                self.atomic_targets.add(node.args[0].id)
+            if arr_t[1] not in ("int", "uint", "long", "ulong"):
+                self._error(f"gpu.{name}() only supports integer arrays, got {arr_t[1]}", node)
+            if not is_int(idx_t) or not is_int(val_t):
+                self._error(f"gpu.{name}() index and value must be integers", node)
+            return emit_atomic(name, arr_code, idx_code, val_code, arr_t[1], self.backend), arr_t[1]
+
+        if name in GENERIC_BUILTINS:
+            return self._emit_generic_builtin(name, args, node)
+
+        self._error(f"unknown gpu builtin: gpu.{name}", node)
+
+    def _emit_generic_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+        arg_codes:List[str] = [c for c, _ in args]
+        arg_types:List[Any] = [t for _, t in args]
+        vec_t:Any = next((t for t in arg_types if is_vec(t)), None)
+
+        if name in ("rsqrt", "exp2"):
+            if len(args) != 1:
+                self._error(f"gpu.{name}() takes exactly 1 argument", node)
+            code, t = args[0]
+            if is_vec(t):
+                if self.backend == "opencl":
+                    return f"{name}({code})", t
+                return self._vec_componentwise(name, code, t), t
+            code = f"{GENERIC_BUILTINS[name][1]}({code})" if self.backend == "cuda" else f"{name}({code})"
+            return code, t
+
+        if name == "clamp":
+            if len(args) != 3:
+                self._error("gpu.clamp(a, lo, hi) takes exactly 3 arguments", node)
+            if vec_t is not None:
+                if self.backend == "opencl":
+                    return f"clamp({', '.join(arg_codes)})", vec_t
+                return self._emit_vec_clamp(arg_codes, vec_t), vec_t
+            if self.backend == "opencl":
+                return f"clamp({', '.join(arg_codes)})", args[0][1]
+            return f"fminf(fmaxf({arg_codes[0]}, {arg_codes[1]}), {arg_codes[2]})", args[0][1]
+
+        if name == "mix":
+            if len(args) != 3:
+                self._error("gpu.mix(a, b, t) takes exactly 3 arguments", node)
+            if vec_t is not None:
+                if self.backend == "opencl":
+                    return f"mix({', '.join(arg_codes)})", vec_t
+                return self._emit_vec_mix(arg_codes, vec_t), vec_t
+            a, b, t = arg_codes
+            return f"(({a}) * (1.0f - ({t})) + ({b}) * ({t}))", args[0][1]
+
+        if name == "mad":
+            if len(args) != 3:
+                self._error("gpu.mad(a, b, c) takes exactly 3 arguments", node)
+            if vec_t is not None and self.backend == "opencl":
+                return f"mad({', '.join(arg_codes)})", vec_t
+            a, b, c = arg_codes
+            return f"((({a}) * ({b})) + ({c}))", args[0][1]
+
+        if name == "dot":
+            if len(args) != 2:
+                self._error("gpu.dot(a, b) takes exactly 2 arguments", node)
+            (lcode, lt), (rcode, rt) = args
+            if is_vec(lt) and is_vec(rt):
+                if lt != rt:
+                    self._error(f"gpu.dot() operands must have the same type, got {lt} and {rt}", node)
+                if self.backend == "opencl":
+                    return f"dot({lcode}, {rcode})", "float"
+                return self._emit_vec_dot(lcode, rcode, lt), "float"
+            if not (self._is_scalar(lt) and self._is_scalar(rt)):
+                self._error("gpu.dot() requires vectors or scalars", node)
+            return f"(({lcode}) * ({rcode}))", promote(lt, rt)
+
+        if name in ("cross", "normalize", "length", "distance"):
+            return self._emit_vec_builtin(name, args, node)
+
+        self._error(f"unknown gpu builtin: gpu.{name}", node)
+
+    def _is_scalar(self, t:Any)->bool:
+        return isinstance(t, str) and not is_vec(t)
+
+    def _emit_vec_clamp(self, codes:List[str], vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        maker:str = f"make_{vec}"
+        inner:str = ", ".join(
+            f"fminf(fmaxf({codes[0]}.{c}, {codes[1]}.{c}), {codes[2]}.{c})" for c in components)
+        return f"{maker}({inner})"
+
+    def _emit_vec_mix(self, codes:List[str], vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        maker:str = f"make_{vec}"
+        inner:str = ", ".join(
+            f"(({codes[0]}.{c}) * (1.0f - ({codes[2]}.{c})) + ({codes[1]}.{c}) * ({codes[2]}.{c}))"
+            for c in components)
+        return f"{maker}({inner})"
+
+    def _emit_vec_dot(self, lcode:str, rcode:str, vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        terms:str = " + ".join(f"(({lcode}.{c}) * ({rcode}.{c}))" for c in components)
+        return f"({terms})"
+
+    def _emit_vec_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+        opencl_name, _ = GENERIC_BUILTINS[name]
+        expected_args:int = (1 if name in ("normalize", "length") else 2)
+        if len(args) != expected_args:
+            self._error(f"gpu.{name}() takes exactly {expected_args} arguments", node)
+
+        vec_types:List[Any] = [t for _, t in args if is_vec(t)]
+        if not vec_types:
+            self._error(f"gpu.{name}() requires vector arguments "
+                        f"(python has no such functions; use fabs/abs for scalars)", node)
+        vec:str = vec_types[0]
+        if any(t != vec for t in vec_types):
+            self._error(f"gpu.{name}() operands must have the same vector type", node)
+
+        if self.backend == "opencl":
+            return f"{opencl_name}({', '.join(c for c, _ in args)})", vec
+
+        codes:List[str] = [c for c, _ in args]
+        if name == "normalize":
+            return self._emit_vec_normalize(codes[0], vec), vec
+        if name == "length":
+            return f"sqrtf({self._emit_vec_dot(codes[0], codes[0], vec)})", "float"
+        if name == "distance":
+            diff:str = self._vec_componentwise("-", codes[0], vec, right=codes[1])
+            return f"sqrtf({self._emit_vec_dot(diff, diff, vec)})", "float"
+        if name == "cross":
+            return self._emit_vec_cross(codes[0], codes[1], vec), vec
+        self._error(f"gpu.{name} is not supported", node)
+
+    def _emit_vec_normalize(self, code:str, vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        maker:str = f"make_{vec}"
+        dot_expr:str = self._emit_vec_dot(code, code, vec)
+        inner:str = ", ".join(f"(({code}.{c}) * rsqrtf({dot_expr}))" for c in components)
+        return f"{maker}({inner})"
+
+    def _emit_vec_cross(self, lcode:str, rcode:str, vec:str)->str:
+        cls:Any = _vec_registry()[vec]
+        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        maker:str = f"make_{vec}"
+        x, y, z = components[0], components[1], components[2]
+        inner:str = (f"(({lcode}.{y}) * ({rcode}.{z}) - ({lcode}.{z}) * ({rcode}.{y})), "
+                     f"(({lcode}.{z}) * ({rcode}.{x}) - ({lcode}.{x}) * ({rcode}.{z})), "
+                     f"(({lcode}.{x}) * ({rcode}.{y}) - ({lcode}.{y}) * ({rcode}.{x}))")
+        if len(components) == 4:
+            inner += ", 0.0f"
+        elif len(components) != 3:
+            self._error(f"gpu.cross() requires a 3 or 4 component vector, got {vec}")
+        return f"{maker}({inner})"
+
     def _emit_device_call(self, name:str, target:Any, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
@@ -931,9 +1127,6 @@ class FunctionTranslator:
         return f"{header} {{\n{body}\n}}"
 
     def render_kernel(self, c_name:str)->str:
-        if self.gid_param is None:
-            raise PyKernelSyntaxError("kernel body must contain an outermost `for i in range(<array>.shape[0])` loop")
-
         params:List[str] = []
         for name, t in self.params:
             if is_ptr(t):

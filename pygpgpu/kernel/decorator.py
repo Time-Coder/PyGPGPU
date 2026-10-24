@@ -81,6 +81,12 @@ class PyKernel:
         source_path:str = self._write_source(sig, source)
         kernel:Any = self._backend_compile(source_path, c_name)
 
+        # 原子操作目标:静态分析无法识别指针强转写入,直接修正为可写
+        from ..constants import KernelFlags
+        for target_name in translator.atomic_targets:
+            if target_name in kernel._args:
+                kernel._args[target_name].kernel_flags = (kernel._args[target_name].kernel_flags | KernelFlags.Writed)
+
         param_index:Dict[str, int] = {name: i for i, (name, _) in enumerate(translator.params)}
         shape_sources:List[Tuple[int, int]] = [(param_index[array_name], dim) for array_name, dim in translator.shapes_used]
         work_size_dims:List[Tuple[str, int]] = [(param_index[name], dim) for name, dim in translator.work_size_dims]
