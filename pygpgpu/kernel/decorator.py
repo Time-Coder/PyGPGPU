@@ -25,7 +25,7 @@ class PyKernel:
         self.is_pykernel:bool = True
         self.__name__:str = func.__name__
         self.__doc__:str = func.__doc__ or ""
-        self._cache:Dict[str, Tuple[Any, List[Tuple[int, int]]]] = {}  # sig key -> (kernel, shape sources)
+        self._cache:Dict[str, Tuple[Any, List[Tuple[int, int]], List[Tuple[int, int]]]] = {}
         self._source_sig:str = self._source_signature()
 
     def __call__(self, *args:Any, global_size:Optional[int]=None)->Any:
@@ -36,9 +36,15 @@ class PyKernel:
         if entry is None:
             entry = self._compile(args, arg_types, sig)
             self._cache[sig] = entry
-        kernel_obj, shape_sources = entry
+        kernel_obj, shape_sources, work_size_dims = entry
 
         launch_args:List[Any] = self._build_launch_args(args, arg_types, shape_sources)
+        if global_size is not None:
+            gs:Tuple[int, ...] = ((global_size,) if isinstance(global_size, int) else tuple(int(d) for d in global_size))
+            kernel_obj = kernel_obj[(gs, None)]
+        elif work_size_dims:
+            gs = tuple(int(args[pi].shape[dim]) for pi, dim in work_size_dims)
+            kernel_obj = kernel_obj[(gs, None)]
         return kernel_obj(*launch_args)
 
     # ---------- 源码生成 ----------
@@ -77,7 +83,8 @@ class PyKernel:
 
         param_index:Dict[str, int] = {name: i for i, (name, _) in enumerate(translator.params)}
         shape_sources:List[Tuple[int, int]] = [(param_index[array_name], dim) for array_name, dim in translator.shapes_used]
-        return kernel, shape_sources
+        work_size_dims:List[Tuple[str, int]] = [(param_index[name], dim) for name, dim in translator.work_size_dims]
+        return kernel, shape_sources, work_size_dims
 
     def _cache_dir(self)->str:
         source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""

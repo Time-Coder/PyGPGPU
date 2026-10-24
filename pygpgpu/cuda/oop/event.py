@@ -24,6 +24,9 @@ class Event(CUObject):
     def sync(self):
         CUDA.cuEventSynchronize(self.id)
 
+    def wait(self)->None:
+        self.sync()
+
     def msecs_to(self, event:Event)->float:
         msecs = c_float()
         ptr_msecs = pointer(msecs)

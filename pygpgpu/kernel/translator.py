@@ -123,6 +123,7 @@ class FunctionTranslator:
         self.params:List[Tuple[str, Any]] = []
         self.shapes_used:List[Tuple[str, int]] = []
         self.gid_param:Optional[str] = None
+        self.work_size_dims:List[Tuple[str, int]] = []
         self.return_type:Optional[Any] = None
         self.lines:List[str] = []
         self._indent:int = 1
@@ -193,39 +194,92 @@ class FunctionTranslator:
             if self.return_type is None:
                 self.return_type = "void"
 
+    @staticmethod
+    def _is_shape0_range(iter_node:ast.expr)->bool:
+        return (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
+                and iter_node.func.id == "range" and len(iter_node.args) == 1 and not iter_node.keywords
+                and isinstance(iter_node.args[0], ast.Subscript)
+                and isinstance(iter_node.args[0].value, ast.Attribute)
+                and iter_node.args[0].value.attr == "shape"
+                and isinstance(iter_node.args[0].value.value, ast.Name)
+                and isinstance(iter_node.args[0].slice, ast.Constant)
+                and iter_node.args[0].slice.value == 0)
+
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
-        if not body or not isinstance(body[0], ast.For) or not isinstance(body[0].iter, ast.Call):
-            self._error("kernel body must start with `for i in range(<array>.shape[0])` loop", body[0] if body else self.tree)
+        magic_index:Optional[int] = None
+        for idx, stmt in enumerate(body):
+            if isinstance(stmt, ast.For) and self._is_shape0_range(stmt.iter):
+                magic_index = idx
+                break
 
-        loop:ast.For = body[0]
+        if magic_index is None:
+            self._error("kernel body must contain an outermost `for i in range(<array>.shape[0])` loop")
+
+        # 魔法循环之前的语句照常翻译(如局部变量初始化)
+        for stmt in body[:magic_index]:
+            self._visit_statement(stmt)
+
+        loop:ast.For = body[magic_index]
         range_call:ast.Call = loop.iter
-        if not (isinstance(range_call.func, ast.Name) and range_call.func.id == "range" and len(range_call.args) == 1 and not range_call.keywords):
-            self._error("the outermost kernel loop must be `for i in range(<array>.shape[0])`", range_call)
-
         bound:ast.expr = range_call.args[0]
-        if not (isinstance(bound, ast.Subscript) and isinstance(bound.value, ast.Attribute)
-                and bound.value.attr == "shape" and isinstance(bound.value.value, ast.Name)
-                and isinstance(bound.slice, ast.Constant) and bound.slice.value == 0):
-            self._error("the outermost kernel loop bound must be `<array>.shape[0]`", bound)
 
         array_name:str = bound.value.value.id
         if array_name not in {n for n, _ in self.params} or not is_ptr(self._lookup(array_name)):
             self._error(f"'{array_name}' is not an array parameter of this kernel", bound)
 
         self.gid_param = array_name
-        gid_bound:str = self._shape_var(array_name, 0)
 
-        target:str = loop.target.id
-        self._define(target, "int", loop.target)
-        gid_expr:str = ("get_global_id(0)" if self.backend == "opencl" else "(int)(blockIdx.x * blockDim.x + threadIdx.x)")
-        self._emit(f"const int {target} = {gid_expr};")
-        self._emit(f"if ({target} >= {gid_bound}) return;")
+        # 2D 模式: 外层 range(arr.shape[0]) 内嵌 range(arr.shape[1]) -> 二维 NDRange
+        inner_loop:Optional[ast.For] = None
+        if (len(loop.body) == 1 and isinstance(loop.body[0], ast.For)
+                and isinstance(loop.body[0].iter, ast.Call)
+                and isinstance(loop.body[0].iter.func, ast.Name) and loop.body[0].iter.func.id == "range"
+                and len(loop.body[0].iter.args) == 1
+                and isinstance(loop.body[0].iter.args[0], ast.Subscript)
+                and isinstance(loop.body[0].iter.args[0].value, ast.Attribute)
+                and loop.body[0].iter.args[0].value.attr == "shape"
+                and isinstance(loop.body[0].iter.args[0].value.value, ast.Name)
+                and loop.body[0].iter.args[0].value.value.id == array_name
+                and isinstance(loop.body[0].iter.args[0].slice, ast.Constant)
+                and loop.body[0].iter.args[0].slice.value == 1):
+            inner_loop = loop.body[0]
 
-        # 循环体即 work-item 主体
-        for stmt in loop.body:
-            self._visit_statement(stmt)
-        for stmt in body[1:]:
-            self._visit_statement(stmt)
+        def _emit_gid(var:str, dim:int, component:int)->None:
+            self._shape_var(array_name, dim)
+            if self.backend == "opencl":
+                self._emit(f"const int {var} = get_global_id({component});")
+            else:
+                component_expr:str = (".x" if component == 0 else ".y" if component == 1 else ".z")
+                self._emit(f"const int {var} = (int)(blockIdx{component_expr} * blockDim{component_expr} + threadIdx{component_expr});")
+
+        if inner_loop is None:
+            gid_bound:str = self._shape_var(array_name, 0)
+            target:str = loop.target.id
+            self._define(target, "int", loop.target)
+            _emit_gid(target, 0, 0)
+            self._emit(f"if ({target} >= {gid_bound}) return;")
+
+            # 循环体即 work-item 主体
+            for stmt in loop.body:
+                self._visit_statement(stmt)
+        else:
+            outer_target:str = loop.target.id
+            inner_target:str = inner_loop.target.id
+            outer_bound:str = self._shape_var(array_name, 0)
+            inner_bound:str = self._shape_var(array_name, 1)
+            self._define(outer_target, "int", loop.target)
+            self._define(inner_target, "int", inner_loop.target)
+            # gid0 对应最内层(行主序的 x), gid1 对应外层(y)
+            _emit_gid(inner_target, 1, 0)
+            _emit_gid(outer_target, 0, 1)
+            self._emit(f"if ({outer_target} >= {outer_bound} || {inner_target} >= {inner_bound}) return;")
+
+            for stmt in inner_loop.body:
+                self._visit_statement(stmt)
+
+        # work size 来源: 1D -> (shape0); 2D -> (shape1, shape0)
+        self.work_size_dims:List[Tuple[str, int]] = (
+            [(array_name, 1), (array_name, 0)] if inner_loop is not None else [(array_name, 0)])
 
     # ---------- 语句 ----------
 
@@ -329,6 +383,32 @@ class FunctionTranslator:
         if len(node.targets) != 1:
             self._error("chained assignment is not supported", node)
         target:ast.expr = node.targets[0]
+
+        # 元组解包/交换: a, b = b, a
+        if isinstance(target, ast.Tuple):
+            if not isinstance(node.value, ast.Tuple) or len(target.elts) != len(node.value.elts):
+                self._error("tuple assignment requires matching tuples on both sides", node)
+            if not all(isinstance(t, ast.Name) for t in target.elts):
+                self._error("tuple assignment targets must be plain variables", node)
+
+            values:List[Tuple[str, Any]] = [self._visit_expression(v) for v in node.value.elts]
+            temps:List[str] = []
+            for i, (code, t) in enumerate(values):
+                if is_ptr(t):
+                    self._error("cannot swap array parameters", node)
+                tmp:str = f"_swap{i}"
+                self._define(tmp, t, node)
+                self._emit(f"{t} {tmp} = {code};")
+                temps.append((tmp, t))
+
+            for (tmp, t), target_item in zip(temps, target.elts):
+                name:str = target_item.id
+                existing:Any = self._lookup(name)
+                if existing is not None and is_ptr(existing):
+                    self._error(f"cannot assign to array parameter '{name}'", node)
+                self._define(name, t, node)
+                self._emit(f"{name} = {tmp};")
+            return
         code, t = self._visit_expression(node.value)
         if is_ptr(t):
             self._error("cannot assign an array to a variable", node)

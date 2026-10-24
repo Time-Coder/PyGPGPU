@@ -33,7 +33,7 @@ from .image2d import image2d
 from .mem_object import MemObject
 from .pipe import pipe
 from .program_parser import ProgramParser
-from ...utils import detect_work_size, join_with_and
+from ...utils import detect_work_size, join_with_and, local_size_for_global
 from ... import numpy as gnp
 
 if TYPE_CHECKING:
@@ -85,7 +85,8 @@ class Kernel(CLObject):
             if work_dim <= 0:
                 raise ValueError("dimension should be at least 1")
             
-            if work_dim != len(local_work_size):
+            # local_work_size 为 None 表示自动推断(仅指定 global)
+            if local_work_size is not None and work_dim != len(local_work_size):
                 raise ValueError(f"global_work_size={global_work_size} and local_work_size={local_work_size} do not have same dimension")
         
             self._global_work_size = global_work_size
@@ -139,7 +140,11 @@ class Kernel(CLObject):
             self._set_arg(cmd_queue, key, value)
 
         if global_work_size is None or local_work_size is None:
-            global_work_size, local_work_size = self.__detect_work_size(used_device)
+            if global_work_size is None:
+                global_work_size, local_work_size = self.__detect_work_size(used_device)
+            else:
+                # 仅指定 global 时,local 按给定 global 推导(必须整除)
+                local_work_size = local_size_for_global(global_work_size)
 
         work_dim = len(global_work_size)
         global_work_size = (c_size_t * work_dim)(*global_work_size)
@@ -284,6 +289,10 @@ class Kernel(CLObject):
                         if n1 > n2:
                             max_shape = arg_shape
                             break
+
+        if max_shape is None:
+            # 所有参数都无需回读时没有可用形状,退化为单元素
+            return (1,), (1,)
 
         if len(max_shape) > 3:
             max_shape = (math.prod(max_shape),)

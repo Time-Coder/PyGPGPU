@@ -203,3 +203,17 @@ def join_with_and(items):
         return ' and '.join(items)
     
     return ', '.join(items[:-1]) + ', and ' + items[-1]
+
+def local_size_for_global(global_size: Tuple[int, ...], total_local_size: int = 256) -> Tuple[int, ...]:
+    """为给定的 global_work_size 推导一个整除各维的 local_work_size。"""
+    ndim = len(global_size)
+    per_dim_cap:int = max(1, total_local_size // (32 ** (ndim - 1)))
+    local_size = []
+    for g in global_size:
+        g = int(g)
+        l = min(per_dim_cap, g)
+        l = 1 << (l.bit_length() - 1) if l > 0 else 1
+        while g % l != 0 and l > 1:
+            l //= 2
+        local_size.append(max(l, 1))
+    return tuple(local_size)

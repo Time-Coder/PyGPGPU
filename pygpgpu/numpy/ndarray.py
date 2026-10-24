@@ -79,6 +79,23 @@ class ndarray(np.ndarray):
             self._parent:Optional[ndarray] = None
 
     @staticmethod
+    def _print_copy_info()->bool:
+        """后端无关的拷贝日志开关(opencl 的 CL.print_info 或 cuda 的 CUDA.print_info)。"""
+        try:
+            from .opencl.driver import CL
+            if CL.print_info:
+                return True
+        except Exception:
+            pass
+        try:
+            from .cuda.driver import CUDA
+            if CUDA.print_info:
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
     def _set_tree_host_dirty(node:ndarray):
         for mem_obj, cmd_queue in node._mem_objs.values():
             mem_obj.dirty_on_host = True
@@ -179,8 +196,6 @@ class ndarray(np.ndarray):
         return result
 
     def to_host(self):
-        from ..opencl.driver import CL
-
         if not self._should_copy or not hasattr(self, "_parent") or not hasattr(self, "_mem_objs"):
             return
         
@@ -205,7 +220,7 @@ class ndarray(np.ndarray):
 
             lastest_dirty_mem_obj.dirty_on_host = False
 
-            if CL.print_info:
+            if self._print_copy_info():
                 print(f"copy data to host for argument '{self._arg_name}'")
 
         for mem_obj, cmd_queue in self._mem_objs.values():

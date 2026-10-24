@@ -63,6 +63,12 @@ class MemObject(CUObject):
         return self._using
     
     @property
+    def flags(self)->int:
+        # gnp._to_device 用 opencl 的 CL_MEM_READ_ONLY 位判断设备脏标记;
+        # CUDA 的 device memory 总是可读写,返回 0 即"非只读"
+        return 0
+
+    @property
     def dirty_on_device(self)->bool:
         return self._dirty_on_device
     

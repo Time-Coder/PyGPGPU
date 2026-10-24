@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer, c_uint, c_size_t
-from typing import override, Dict, List, Tuple, TYPE_CHECKING
+from typing import override, Any, Dict, List, Tuple, TYPE_CHECKING
 
 from .cuobject import CUObject
 from .event import Event
@@ -45,6 +45,11 @@ class Context(CUObject):
 
         available_buffer.use()
         return available_buffer
+
+    def create_buffer(self, size:int=0, flags:Any=None)->Buffer:
+        """与 gnp ndarray._to_device 的接口对齐(flags 在 CUDA 下仅作记录)。"""
+        from .buffer import Buffer
+        return Buffer(size)
     
     def make_current(self):
         if Context.current() == self:

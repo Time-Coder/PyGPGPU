@@ -8,6 +8,7 @@ from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional, overr
 
 import numpy as np
 
+from ... import numpy as gnp
 from ..driver import (
     CUDA,
     CUInfo,
@@ -19,7 +20,7 @@ from .program_info import ArgInfo
 from .stream import Stream
 from .mem_object import MemObject
 from .program_parser import ProgramParser
-from ...utils import detect_work_size, join_with_and
+from ...utils import detect_work_size, join_with_and, local_size_for_global
 from ... import numpy as gnp
 
 if TYPE_CHECKING:
@@ -67,7 +68,8 @@ class Kernel(CUObject):
             if work_dim <= 0:
                 raise ValueError("dimension should be at least 1")
             
-            if work_dim != len(block_dims):
+            # block_dims 为 None 表示自动推断(仅指定 grid)
+            if block_dims is not None and work_dim != len(block_dims):
                 raise ValueError(f"grid_dims={grid_dims} and block_dims={block_dims} do not have same dimension")
         
             self._grid_dims = grid_dims
@@ -123,7 +125,11 @@ class Kernel(CUObject):
             i += 1
 
         if global_work_size is None or local_work_size is None:
-            global_work_size, local_work_size = self.__detect_work_size()
+            if global_work_size is None:
+                global_work_size, local_work_size = self.__detect_work_size()
+            else:
+                # 仅指定 grid 时,block 按给定 grid 推导(必须整除)
+                local_work_size = local_size_for_global(global_work_size)
 
         # cuLaunchKernel 固定按 3 维传参
         global_work_size = tuple(global_work_size) + (1,) * (3 - len(global_work_size))
@@ -155,8 +161,19 @@ class Kernel(CUObject):
         
         for arg_info in self._args.values():
             if not arg_info.need_read_back:
+                # 只读/只写参数也要在 kernel 完成后归还缓冲池,否则每次调用泄漏一个池对象
+                if arg_info.mem_obj is not None:
+                    def on_release(stream:Stream, error_code:CUresult, mem_obj:MemObject=arg_info.mem_obj):
+                        mem_obj.unuse()
+                    stream.add_callback(on_release)
                 continue
-            
+
+            if isinstance(arg_info.value, gnp.ndarray):
+                # gnp 数组走延迟回读:数据留在设备上,宿主访问(写操作前)由 to_host() 拉取
+                arg_info.mem_obj.dirty_on_device = True
+                arg_info.mem_obj.unuse()
+                continue
+
             arg_info.mem_obj.read(stream)
             callback = partial(on_completed, arg_info)
             stream.add_callback(callback)
@@ -225,6 +242,10 @@ class Kernel(CUObject):
                         if n1 > n2:
                             max_shape = arg_shape
                             break
+
+        if max_shape is None:
+            # 所有参数都无需回读时没有可用形状,退化为单元素
+            return (1,), (1,)
 
         if len(max_shape) > 3:
             max_shape = (math.prod(max_shape),)
