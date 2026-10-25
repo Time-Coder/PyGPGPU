@@ -1,10 +1,12 @@
 # PyGPGPU
 
-装饰一个 Python 函数, 它就运行在 GPU 上——同一份代码, 三个后端 (**OpenCL / CUDA / HIP**)。
+**English** | [Chinese](README.zh-CN.md)
+
+Decorate a Python function and it runs on the GPU — one codebase, three backends (**OpenCL / CUDA / HIP**).
 
 ```python
 import numpy as np
-from pygpgpu.kernel import kernel
+from pygpgpu import kernel
 
 @kernel
 def saxpy(x, y, out, alpha):
@@ -14,82 +16,100 @@ def saxpy(x, y, out, alpha):
 x = np.arange(1_000_000, dtype=np.float32)
 out = np.zeros_like(x)
 
-saxpy(x, x, out, 2.0)              # 默认后端, 自动上 GPU
-saxpy["cuda"](x, x, out, 2.0)      # 中括号切后端
-saxpy["hip:gfx1036"](x, x, out, 2.0)   # 后端:设备
+saxpy(x, x, out, 2.0)              # no backend given: probe cuda -> hip -> opencl, take the first available
+saxpy["cuda"](x, x, out, 2.0)      # bracket switches the backend
+saxpy["hip:gfx1036"](x, x, out, 2.0)   # backend:device
 ```
 
-不需要写任何 C 代码、不需要配置构建系统; 首次调用时自动翻译/编译并缓存, 之后零开销调用。已有手写 kernel 也没关系——`.cl`/`.cu`/`.hip` 文件可以像 Python 模块一样直接 `import`。
+No C code to write, no build system to configure; the first call translates, compiles and caches, every later call is free. Existing handwritten kernels are fine too — `.cl`/`.cu`/`.hip` files can be `import`ed like Python modules.
 
-## 特性
+## Features
 
-- **`@kernel` 装饰器** —— 直接装饰 Python 函数(含类方法/静态方法), 调用时按实参类型翻译为后端源码并编译(单态化);
-- **手写 kernel 文件 import** —— `.cl` / `.cu` / `.hip` 文件像 Python 模块一样 `import`, kernel 与 struct 类型成为模块属性, 自动生成 `.pyi` 类型提示;
-- **底层 OOP API** —— Devices/Context/Buffer/Program/Kernel, 需要精细控制时使用。
-- **统一的中括号语法**指定后端/设备/work size(与手写 kernel 完全一致, 顺序不限):
+- **`@kernel` decorator** — decorate a Python function directly (class methods and static methods included); at call time it is specialized per argument type, translated to backend source and compiled (monomorphization).
+- **Plain-Python helper functions** — a helper called from a kernel needs no decorator and no type annotations: it is translated into a device function and monomorphized from the call site, recursively for helpers that call helpers.
+- **All three backends in one process** — the bracket chooses the backend per call, so a single process (and even a single kernel object) can mix OpenCL, CUDA and HIP; each backend/device pair is specialized and cached separately.
+- **Handwritten kernel file import** — `.cl` / `.cu` / `.hip` files import like Python modules: kernels and struct types become module attributes, and a `.pyi` type stub is generated automatically.
+- **Low-level OOP API** — Device/Context/Buffer/Program/Kernel, for when you need full control.
+- **One bracket syntax** for backend/device/work size (identical to handwritten kernels, order does not matter):
   ```python
-  k(args)                          # 全自动
-  k["cuda"](args)                  # 后端 (opencl/cuda/hip, 含别名 ocl/cu/rocm/amd)
-  k["opencl:gfx1036"](args)        # 后端:设备
-  k[(1024, 256)](args)             # work size: (总数, 每组), None 为自动
-  k["cuda"][(1024, 256)](args)     # 组合
+  k(args)                          # fully automatic
+  k["cuda"](args)                  # backend (opencl/cuda/hip, aliases ocl/cu/rocm/amd)
+  k["opencl:gfx1036"](args)        # backend:device
+  k[(1024, 256)](args)             # work size: (total, per group), None = automatic
+  k["cuda"][(1024, 256)](args)     # combined
   ```
-- **总数语义**(OpenCL/SYCL 风格): `(global, local)` 中的 global 是**总 work-item 数**, CUDA/HIP 的 grid 块数由 `global / local` 自动换算, 三个后端行为严格一致。
-- **静态读写分析**: 解析 kernel 函数体, 推断每个指针参数是只读/只写/读写——只写参数跳过上传, 只读参数跳过回读, 连续调用间数据留在设备上(gnp 数组零中间拷贝)。
-- **向量类型**: 50 个向量类型(float4/int3/...), 支持 `.x/.y/.z/.w` 成员与 swizzle、构造、算术(标量广播)、比较、逐分量 math。
-- **双面函数库** `pygpgpu.vec_types.funcs`: `dot/cross/normalize/clamp/...` 在宿主 Python 直接可运行, 在 `@kernel` 里自动翻译为设备内建。
-- **设备内建命名空间** `gpu.*`: `get_global_id/barrier/atomic_add/dot/...` 覆盖 Python 没有对应物的 GPU 内建, 按后端自动映射。
-- **多维遍历**: `np.ndindex(shape)` / `np.ndenumerate(arr)` 魔法循环(2D/3D), `enumerate(arr)` 一维索引+值快照。
-- **三层缓存**: 解析元信息 / 编译产物 / 生成源码, 全部按 mtime 自动失效, 源码不变则零重编译。
+- **Total-work semantics** (OpenCL/SYCL style): in `(global, local)`, `global` is the **total number of work items**; CUDA/HIP grid dimensions are derived as `global / local`, so all three backends behave exactly the same.
+- **Static read/write analysis**: the kernel body is parsed to infer whether each pointer argument is read-only, write-only or read-write — write-only arguments skip the upload, read-only arguments skip the read-back, and data stays on the device across calls (zero intermediate copies for gnp arrays).
+- **Vector types**: 50 vector types (float4/int3/...) with `.x/.y/.z/.w` members, swizzles, construction, arithmetic (scalar broadcast), comparisons and component-wise math.
+- **Dual-sided function library** `pygpgpu.funcs` (aka `pygpgpu.vec_types.funcs`): `dot/cross/normalize/clamp/...` run as-is in host Python and are translated to device builtins inside `@kernel`.
+- **Device builtin namespace** `gpu.*`: `get_global_id/barrier/atomic_add/dot/...` covers GPU builtins that have no Python counterpart, mapped per backend.
+- **Multi-dimensional iteration**: `np.ndindex(shape)` / `np.ndenumerate(arr)` magic loops (2D/3D), `enumerate(arr)` for a 1D index plus value snapshot.
+- **Three cache layers**: parsed metadata / compiled artifacts / generated sources, all invalidated by mtime — unchanged sources mean zero recompilation.
 
-## 安装
+## Installation
 
 ```bash
 pip install -e .
 ```
 
-Python ≥ 3.12。GPU 运行时按需自备(任一即可):
+Python ≥ 3.12. Bring your own GPU runtime (any one of them is enough):
 
-| 后端 | 需要安装 | 说明 |
+| Backend | What you need | Notes |
 |---|---|---|
-| OpenCL | GPU 驱动(通常已带) | 零额外安装, 支持 NVIDIA/AMD/Intel 多平台 |
-| CUDA | NVIDIA 驱动(含 NVRTC) | Toolkit 不必需, 驱动自带 nvrtc 即可 |
-| HIP | AMD HIP SDK | Windows 上编译走 SDK 自带 clang; 若 MSVC/Windows SDK 不在默认路径, 用 `PYGPGPU_HIP_INCLUDES` 指定 include 目录(os.pathsep 分隔) |
+| OpenCL | GPU driver (usually already installed) | Nothing extra to install; works across NVIDIA/AMD/Intel |
+| CUDA | NVIDIA driver (includes NVRTC) | The Toolkit is not required — the driver-provided nvrtc is enough |
+| HIP | AMD HIP SDK | On Windows compilation runs through the SDK's clang; if MSVC/Windows SDK headers are not on the default paths, point `PYGPGPU_HIP_INCLUDES` at the include directories (os.pathsep-separated) |
 
-## 快速上手
+When `@kernel` has no explicit `backend`, backends are probed in **cuda -> hip -> opencl** order and the first one that enumerates a device wins.
 
-### @kernel 装饰器
+## Quick start
+
+Every commonly used API is importable straight from the `pygpgpu` top level — no need to remember submodule names:
+
+```python
+from pygpgpu import kernel, gpu, funcs, float4       # @kernel / device builtins / dual-sided funcs / vector types
+from pygpgpu import available_devices, get_device
+from pygpgpu import climport, cuimport, hipimport    # import hooks for handwritten .cl/.cu/.hip files
+```
+
+The submodule paths (`pygpgpu.kernel` / `pygpgpu.vec_types` / `pygpgpu.opencl` / ...) still work. Note that top-level `pygpgpu.kernel` is the `@kernel` decorator; to reach things inside the submodule write `from pygpgpu.kernel import ...`.
+
+The three import hooks load lazily: the corresponding backend is only loaded when you actually use the hook, so `import pygpgpu` itself needs no GPU runtime at all.
+
+### The @kernel decorator
 
 ```python
 import math
 import numpy as np
-from pygpgpu.kernel import kernel, gpu
-from pygpgpu.vec_types import funcs, float4
+from pygpgpu import kernel, gpu, funcs, float4
 
 def norm2(v):
     return funcs.dot(v, v)
 
 @kernel
 def normalize_all(vecs, out):
-    for i, v in enumerate(vecs):          # 一维: 索引 + float4 值快照
-        out[i] = funcs.normalize(v)       # 设备端逐分量展开
+    for i, v in enumerate(vecs):          # 1D: index + float4 value snapshot
+        out[i] = funcs.normalize(v)       # expanded component-wise on device
 
 @kernel
 def matrix_scale(m, out, k):
-    for y, x in np.ndindex(out.shape):    # 二维 NDRange
+    for y, x in np.ndindex(out.shape):    # 2D NDRange
         out[y, x] = m[y, x] * k
 
 @kernel(backend="cuda")
 def histogram(data, counts):
+    gpu.work_size(data)                   # iteration domain for a gid-style kernel
     i = gpu.get_global_id(0)
-    gpu.atomic_add(counts, data[i], 1)    # 原子操作, 结果自动回读
+    gpu.atomic_add(counts, data[i], 1)    # atomics, results read back automatically
 ```
 
-支持的能力: 标量/数组/向量参数, if/while/for-range, 算术/比较/位运算, `math.*` 与 `np.*` 数学函数, 类方法(`self.xxx` 属性自动转为参数), 静态方法。不支持的语法抛出带行号的 `SyntaxError`。
+Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/comparison/bit ops, `math.*` and `np.*` math functions, class methods (`self.xxx` attributes become arguments automatically), static methods. Unsupported syntax raises a `SyntaxError` carrying the line number.
 
-### 手写 kernel 文件
+A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `gpu.get_global_id`, declare `gpu.work_size(x)` — that statement is host-side only, erased by the translator, and contributes all of `x`'s dimensions. A `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
 
-已有 C 风格 kernel? `.cl` / `.cu` / `.hip` 文件(对应后端原生语法)可以像 Python 模块一样直接 import。写一个 `vecadd.cl`:
+### Handwritten kernel files
+
+Already have C-style kernels? `.cl` / `.cu` / `.hip` files (native syntax of the matching backend) import like Python modules. Write a `vecadd.cl`:
 
 ```c
 __kernel void vecadd(__global const float* a, __global const float* b,
@@ -102,19 +122,23 @@ __kernel void vecadd(__global const float* a, __global const float* b,
 ```
 
 ```python
-from pygpgpu.opencl import climport    # import pygpgpu.cuda / pygpgpu.hip 同理
+from pygpgpu import climport             # cuimport / hipimport work the same way
 import numpy as np
-import vecadd                          # 就像 import Python 模块
+import vecadd                          # just like importing a Python module
 
 a = np.random.rand(1_000_000).astype(np.float32)
 out = np.zeros_like(a)
-vecadd.vecadd(a, a, out, np.int32(len(a)))    # 自动推断 work size
-vecadd.vecadd[(1024, 256)](a, a, out, np.int32(len(a)))   # 手动指定
+vecadd.vecadd(a, a, out, np.int32(len(a)))    # work size inferred
+vecadd.vecadd[(1_000_192, 256)](a, a, out, np.int32(len(a)))   # explicit (total, per group)
 ```
 
-struct 定义自动映射为 ctypes 类型; kernel 旁自动生成 `.pyi`, IDE 补全可用。
+Note the `n` argument: a handwritten kernel must clamp against the real element count, because the
+launch size is rounded up to a multiple of the local size. `get_global_size(0)` reports that rounded
+size, not the buffer length, so it is not a usable bound.
 
-### 类方法
+Struct definitions map to ctypes types; a `.pyi` stub is generated next to the kernel so IDE completion works.
+
+### Class methods
 
 ```python
 class Model:
@@ -128,50 +152,211 @@ class Model:
             out[i] = x[i] * self.weights[i] + self.lr
 
 m = Model()
-m.apply(x, out)                     # self.weights/self.lr 自动作为 kernel 参数传入
-m.apply["cuda"](x, out)             # 中括号照常可用
+m.apply(x, out)                     # self.weights/self.lr are passed as kernel arguments
+m.apply["cuda"](x, out)             # brackets still available
 ```
 
-### 拷贝优化
+### Copy optimization
 
-kernel 对每个指针参数做函数体级静态分析(`points[i] = ...` 写、`x = a[i]` 读、指针别名传播、跨函数过程间分析):
+Each pointer argument goes through function-body-level static analysis (`points[i] = ...` is a write, `x = a[i]` is a read, plus pointer-alias propagation and interprocedural analysis across functions):
 
 ```python
 @kernel
 def k(a, b, out):
     for i in range(out.shape[0]):
-        out[i] = a[i] + b[i] * 2.0   # a 只读, b 只读, out 只写
-# 运行时: a/b 上传后跳过回读, out 跳过上传只回读
+        out[i] = a[i] + b[i] * 2.0   # a read-only, b read-only, out write-only
+# at runtime: a/b skip the read-back after upload, out skips the upload and only reads back
 ```
 
-配合 `pygpgpu.numpy`(gnp) 数组, 连续 kernel 调用之间数据完全留在设备端, 仅在宿主访问时才同步。
+Combined with `pygpgpu.numpy` (gnp) arrays, data stays entirely on the device between consecutive kernel calls and is synchronized only when the host touches it.
 
-## 设备选择
+## How it compares
 
-中括号里的设备标识三种形式(全部后端一致):
+The same computation, written in this library and in three other GPU-from-Python projects
+([Taichi](https://www.taichi-lang.org/), [Numba](https://numba.pydata.org/),
+[NVIDIA Warp](https://github.com/NVIDIA/warp)). Snippets are cut down to the parts that
+differ — check each project's docs for exact syntax. The examples also show a shared helper
+function, which is where the API gap is widest: here it stays ordinary Python, while the
+others need a second decorator and typed signatures.
 
-| 形式 | 含义 |
+**PyGPGPU** — arrays in, arrays out; no launch geometry, no buffer management, and helper
+functions need no decorator at all:
+
+```python
+from pygpgpu import kernel
+
+def square(v):                          # plain Python: no decorator, no annotations
+    return v * v
+
+def clamp01(v):
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+def weight(v):                          # helpers may call other helpers
+    return clamp01(square(v)) * 0.5 + 0.25
+
+@kernel
+def apply_all(x, out):
+    for i in range(out.shape[0]):       # loop bound = work size
+        out[i] = weight(x[i])
+
+apply_all(x, out)                       # numpy arrays as-is
+apply_all["hip"](x, out)                # the same function, another backend
+```
+
+**Taichi** — declare fields first, then copy data in and out by hand; a helper needs `@ti.func`
+and every argument must be annotated:
+
+```python
+import taichi as ti
+ti.init(arch=ti.gpu)
+
+x = ti.field(ti.f32, n)
+y = ti.field(ti.f32, n)
+out = ti.field(ti.f32, n)
+x.from_numpy(nx)
+y.from_numpy(ny)
+
+@ti.func                                  # helpers need their own decorator
+def weight(v: ti.f32) -> ti.f32:
+    return ti.max(0.0, ti.min(1.0, v * v)) * 0.5 + 0.25
+
+@ti.kernel
+def saxpy(a: ti.f32):
+    for i in range(n):
+        out[i] = x[i] * a + y[i] + weight(x[i])
+
+saxpy(2.0)
+res = out.to_numpy()
+```
+
+**Numba** — compute blocks/threads yourself, guard inside, manage device memory; callable helpers
+are compiled separately with `@cuda.jit(device=True)`:
+
+```python
+from numba import cuda
+
+@cuda.jit(device=True)                    # helpers need device=True
+def weight(v):
+    return min(1.0, max(0.0, v * v)) * 0.5 + 0.25
+
+@cuda.jit
+def saxpy(x, y, out, a):
+    i = cuda.grid(1)
+    if i < out.size:                      # bounds guard is your job
+        out[i] = x[i] * a + y[i] + weight(x[i])
+
+d_x = cuda.to_device(nx)
+d_y = cuda.to_device(ny)
+d_out = cuda.device_array_like(nx)
+threads = 256
+saxpy[(n + threads - 1) // threads, threads](d_x, d_y, d_out, 2.0)
+res = d_out.copy_to_host()
+```
+
+**Warp** — typed array parameters, the launch size is passed explicitly, and helpers need `@wp.func`:
+
+```python
+import warp as wp
+wp.init()
+
+@wp.func                                  # helpers need their own decorator
+def weight(v: float) -> float:
+    return wp.min(1.0, wp.max(0.0, v * v)) * 0.5 + 0.25
+
+@wp.kernel
+def saxpy(x: wp.array(dtype=float), y: wp.array(dtype=float),
+          out: wp.array(dtype=float), a: float):
+    i = wp.tid()
+    out[i] = x[i] * a + y[i] + weight(x[i])
+
+wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
+```
+
+| | PyGPGPU | Taichi | Numba | Warp |
+|---|---|---|---|---|
+| Input data | numpy arrays directly | wrap in `ti.field`, explicit `from_numpy`/`to_numpy` | `cuda.to_device` + `copy_to_host` by hand | wrap in `wp.array` |
+| Helper functions | **plain Python — no decorator, no annotations** | `@ti.func` + annotated args | `@cuda.jit(device=True)` | `@wp.func` + annotated args |
+| Backends in one process | **all three, mixed freely** | one, fixed by `ti.init(arch=...)` | CUDA only | CUDA only |
+| Launch size | inferred from the loop bound (or `gpu.work_size(x)` / a bracket) | inferred from `range` | blocks × threads by hand, plus a guard | pass `dim=` |
+| Bounds guard | emitted for you | emitted for you | you write it | you write it |
+| Backends | OpenCL, CUDA, HIP | CPU, CUDA, Vulkan and others | CPU, CUDA | CPU, CUDA |
+| AMD GPU | HIP (native AMD codegen) and OpenCL | via Vulkan | no | no |
+| Switching backend | bracket `k["hip"]`, same source | `ti.init(arch=...)`, same source | not applicable | not applicable |
+| Install footprint | Python + ctypes only: no LLVM, no CUDA Toolkit | ships its own runtime | needs LLVM | needs the CUDA Toolkit |
+| Handwritten `.cl`/`.cu`/`.hip` | imported as Python modules, `.pyi` generated | no | via the `cuda` module's PTX/cubin path | no |
+| Static read/write analysis | yes — uploads/read-backs skipped per argument | no | no | no |
+
+### Several backends at the same time
+
+Taichi fixes its backend once, at `ti.init(arch=...)`; Numba and Warp only target CUDA. Here the
+bracket picks the backend per call, so one process — and even one kernel object — can use every
+backend the machine has:
+
+```python
+@kernel
+def apply_all(x, out):
+    for i in range(out.shape[0]):
+        out[i] = square(x[i]) + 1.0
+
+apply_all["cuda"](x, out)      # NVIDIA
+apply_all["hip"](x, out)       # AMD
+apply_all["opencl"](x, out)    # whichever device OpenCL enumerates
+apply_all(x, out)              # unqualified: probe cuda -> hip -> opencl
+```
+
+Each backend/device pair is specialized and cached separately, so alternating between them is just
+an extra dictionary lookup — no recompilation after the first call. This is useful for comparing a
+kernel across vendors on one machine (`examples/08_compare_backends.py`), or for falling back to a
+second GPU when the first is busy.
+
+Where the others are ahead — worth knowing before you pick:
+- **Automatic differentiation**: Taichi and Warp can differentiate kernels; this library cannot.
+- **Sparse and irregular data structures**: Taichi has sparse grids and SNode trees; here you pass dense numpy arrays (or handle sparsity yourself).
+- **CPU fallback**: all three can run on the CPU; this library needs a GPU.
+- **Minimum interpreter version**: this library requires Python 3.12+ (it runs on 3.14); the others support a wider range of older versions.
+
+This table was written from each project's documentation and the snippets above; their APIs move
+fast, so confirm against current docs before relying on a specific cell.
+
+## Device selection
+
+Three forms of device identifier inside the brackets (same on every backend):
+
+| Form | Meaning |
 |---|---|
-| `"0"`, `"1"` | 后端设备列表编号(OpenCL 跨平台扁平编号) |
-| `"gfx1036"`, `"geforce"` | 名称/厂商/**架构名**子串匹配(不区分大小写) |
-| `"geforce:1"` | 名称匹配多个时取第 n 个 |
+| `"0"`, `"1"` | index in the backend's device list (OpenCL uses flat numbering across platforms) |
+| `"gfx1036"`, `"geforce"` | case-insensitive substring match on name/vendor/**architecture name** |
+| `"geforce:1"` | when a name matches several devices, take the n-th one |
 
-## 缓存
+Helpers:
 
-| 后端 | 目录 | 内容 |
+```python
+from pygpgpu import available_devices, get_device
+
+available_devices()          # every available "backend:device" string, e.g. ['cuda:0', 'hip:0', 'opencl:0']
+dev = get_device("cuda:0")   # the Device object of that backend, directly
+```
+
+## Caching
+
+| Backend | Directory | Contents |
 |---|---|---|
-| OpenCL | `__clcache__/` | 解析 meta + 分设备二进制 |
-| CUDA | `__cucache__/` | 解析 meta + 分设备 cubin/ptx |
-| HIP | `__hipcache__/` | 解析 meta + 分设备代码对象 |
+| OpenCL | `__clcache__/` | parsed meta + per-device binaries |
+| CUDA | `__cucache__/` | parsed meta + per-device cubin/ptx |
+| HIP | `__hipcache__/` | parsed meta + per-device code objects |
 
-缓存按源文件(及全部 `#include`)mtime 自动失效; `@kernel` 生成的源码按 Python 源码哈希区分。这些目录应加入 `.gitignore`。
+Caches are invalidated by the mtime of the source file (and every `#include`); sources generated by `@kernel` are keyed by a hash of the Python source. These directories should be in `.gitignore`.
 
-## 已知限制
+## Known limitations
 
-- `@kernel` 不支持: 字符串/列表/字典、闭包、递归、kernel 返回值、多维 shape 动态索引;
-- 向量比较/swizzle 写、三元以上嵌套等按跨后端一致性优先做了限制(报错信息会给出替代写法);
-- fp16 (`np.float16`) 参数在 CUDA/HIP 后端不可用(建议 float32);
-- HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用。
+- `@kernel` does not support: strings/lists/dicts, closures, recursion, kernel return values, dynamic multi-dimensional shape indexing;
+- vector comparison, writing through a swizzle, and nesting beyond three operands are restricted in favour of cross-backend consistency (the error message suggests a workaround);
+- fp16 (`np.float16`) arguments are unavailable on the CUDA/HIP backends (use float32);
+- the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used.
 
 ## License
 
