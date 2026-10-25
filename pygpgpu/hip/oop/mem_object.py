@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional
+from typing import TYPE_CHECKING, Dict, IntEnum, override, Union, Tuple, Optional
 from ctypes import c_void_p
 from abc import abstractmethod
 import time
@@ -59,8 +59,8 @@ class MemObject(HIPObject):
     
     @property
     def flags(self)->int:
-        # gnp._to_device 用 opencl 的 CL_MEM_READ_ONLY 位判断设备脏标记;
-        # CUDA 的 device memory 总是可读写,返回 0 即"非只读"
+        # gnp._to_device tests the opencl CL_MEM_READ_ONLY bit to decide the device dirty flag;
+        # CUDA device memory is always readable and writable, so returning 0 means "not read-only"
         return 0
 
     @property

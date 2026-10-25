@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import glob
 import os
-import platform
-from ctypes import CDLL, c_int, c_char_p
+from ctypes import CDLL, c_int
 from typing import Callable, Dict
 
 from .hipinfo import HIPInfo, func_signatures
@@ -32,7 +31,7 @@ class MetaHIP(type):
         candidates = []
         for root in cls.rocm_roots():
             candidates.extend(sorted(glob.glob(f"{root}/bin/amdhip64*.dll"), reverse=True))
-        candidates.append("amdhip64.dll")   # 交给系统搜索
+        candidates.append("amdhip64.dll")   # let the system loader search for it
 
         dll = None
         last_error:Exception = None

@@ -73,12 +73,12 @@ class Pipe(MemObject):
 
     @override
     def write(self):
-        raise AttributeError(f"'Pipe' object has no attribute 'write'")
+        raise AttributeError("'Pipe' object has no attribute 'write'")
 
     @override
     def read(self):
-        raise AttributeError(f"'Pipe' object has no attribute 'read'")
+        raise AttributeError("'Pipe' object has no attribute 'read'")
 
     @override
     def set_data(self):
-        raise AttributeError(f"'Pipe' object has no attribute 'set_data'")
+        raise AttributeError("'Pipe' object has no attribute 'set_data'")

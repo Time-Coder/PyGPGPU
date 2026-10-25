@@ -18,25 +18,30 @@ from .ushort4 import ushort4
 from .ushort8 import ushort8
 from .ushort16 import ushort16
 
-from .int2 import int2
-from .int4 import int4
-from .int8 import int8
-from .int16 import int16
+# The float/int/uint/double 2 and 4 widths that pygf already provides are
+# re-exported from pygf so both libraries share the same classes (identical
+# layout and structured dtype). The widths pygf has no counterpart for (8/16)
+# and the char/uchar/short/ushort families stay PyGPGPU's own.
+from pygf.double2 import double2
+from pygf.double4 import double4
+from pygf.float2 import float2
+from pygf.float4 import float4
+from pygf.int2 import int2
+from pygf.int4 import int4
+from pygf.uint2 import uint2
+from pygf.uint4 import uint4
 
-from .uint2 import uint2
-from .uint4 import uint4
-from .uint8 import uint8
-from .uint16 import uint16
-
-from .float2 import float2
-from .float4 import float4
 from .float8 import float8
 from .float16 import float16
 
-from .double2 import double2
-from .double4 import double4
 from .double8 import double8
 from .double16 import double16
+
+from .int8 import int8
+from .int16 import int16
+
+from .uint8 import uint8
+from .uint16 import uint16
 
 from .genVec import genVec
 from .genVec2 import genVec2

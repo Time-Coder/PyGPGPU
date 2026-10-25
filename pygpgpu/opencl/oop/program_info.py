@@ -7,7 +7,6 @@ from ..driver import (
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,
-    cl_mem_flags,
     CLInfo,
     imagend_t,
     CL

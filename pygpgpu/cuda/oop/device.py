@@ -8,8 +8,6 @@ from ..driver import (
     CUDA,
     CUdevice_attribute,
     CUuuid,
-    CUcontext,
-    ptr_CUcontext,
     CUctx_flags
 )
 from ...utils import sanitize_filename

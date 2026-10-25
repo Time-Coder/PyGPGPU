@@ -15,7 +15,6 @@ from ..driver import (
     CLInfo,
     cl_kernel_info,
     cl_kernel_arg_address_qualifier,
-    cl_mem_flags,
     cl_mem,
     cl_device_type,
     cl_event,
@@ -33,7 +32,7 @@ from .image2d import image2d
 from .mem_object import MemObject
 from .pipe import pipe
 from .program_parser import ProgramParser
-from ...utils import detect_work_size, join_with_and, local_size_for_global
+from ...utils import detect_work_size, join_with_and, local_size_for_global, device_limits
 from ... import numpy as gnp
 
 if TYPE_CHECKING:
@@ -85,7 +84,7 @@ class Kernel(CLObject):
             if work_dim <= 0:
                 raise ValueError("dimension should be at least 1")
             
-            # local_work_size 为 None 表示自动推断(仅指定 global)
+            # a None local_work_size means automatic inference (global specified only)
             if local_work_size is not None and work_dim != len(local_work_size):
                 raise ValueError(f"global_work_size={global_work_size} and local_work_size={local_work_size} do not have same dimension")
         
@@ -143,8 +142,10 @@ class Kernel(CLObject):
             if global_work_size is None:
                 global_work_size, local_work_size = self.__detect_work_size(used_device)
             else:
-                # 仅指定 global 时,local 按给定 global 推导(必须整除)
-                local_work_size = local_size_for_global(global_work_size)
+                # when only global is specified, derive local from the given global (must divide evenly)
+                max_group, max_items = device_limits(used_device)
+                local_work_size = local_size_for_global(
+                    global_work_size, max_work_group_size=max_group, max_work_item_sizes=max_items)
 
         work_dim = len(global_work_size)
         global_work_size = (c_size_t * work_dim)(*global_work_size)
@@ -181,7 +182,7 @@ class Kernel(CLObject):
         events:List[Event] = []
         for arg_info in self._args.values():
             if not arg_info.need_read_back:
-                # 只读/只写参数也要在 kernel 完成后归还缓冲池,否则每次调用泄漏一个池对象
+                # read-only/write-only arguments must also return their buffer to the pool after the kernel completes, otherwise each call leaks one pooled object
                 if arg_info.mem_obj is not None:
                     release_call = partial(on_release, arg_info.mem_obj)
                     if launch_event.finished:
@@ -191,7 +192,7 @@ class Kernel(CLObject):
                 continue
 
             if isinstance(arg_info.value, gnp.ndarray):
-                # gnp 数组走延迟回读:数据留在设备上,宿主访问(写操作前)由 to_host() 拉取
+                # gnp arrays use lazy read-back: data stays on the device, to_host() pulls it on host access (before writes)
                 arg_info.mem_obj.dirty_on_device = True
                 arg_info.mem_obj.unuse()
                 continue
@@ -291,7 +292,7 @@ class Kernel(CLObject):
                             break
 
         if max_shape is None:
-            # 所有参数都无需回读时没有可用形状,退化为单元素
+            # no argument needs read-back so there is no usable shape; degrade to a single element
             return (1,), (1,)
 
         if len(max_shape) > 3:
@@ -308,7 +309,10 @@ class Kernel(CLObject):
         elif device.type == cl_device_type.CL_DEVICE_TYPE_CPU:
             total_local_size:int = 64
 
-        global_work_size, local_work_size = detect_work_size(total_local_size, max_shape)
+        # Clamp to the device's real work-group limits instead of trusting the vendor guess
+        max_group, max_items = device_limits(device)
+        global_work_size, local_work_size = detect_work_size(
+            total_local_size, max_shape, max_work_group_size=max_group, max_work_item_sizes=max_items)
         return global_work_size, local_work_size
 
     def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any):
@@ -371,7 +375,7 @@ class Kernel(CLObject):
                             used_value = content_type(CLInfo.alter_types[base_type_str][1](value))
                         else:
                             used_value = content_type(value)
-                    except BaseException as e:
+                    except BaseException:
                         success = False
 
                     if not success:

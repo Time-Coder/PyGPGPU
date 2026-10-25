@@ -1,6 +1,6 @@
-"""`@kernel` 内核里可用的设备内建函数命名空间。
+"""Namespace of device builtin functions available inside `@kernel` kernels.
 
-用法::
+Usage::
 
     from pygpgpu.kernel import gpu
 
@@ -9,23 +9,21 @@
         i = gpu.get_global_id(0)
         gpu.atomic_add(out, i, 1)
 
-翻译器识别对 `gpu` 的调用并按后端映射到 OpenCL/CUDA 内建。
+The translator recognizes calls on `gpu` and maps them to OpenCL/CUDA builtins per backend.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Tuple
 
-import ast
-import numpy as np
 
 
 class PyKernelSyntaxError(SyntaxError):
-    """builtins 模块独立携带的错误类型(延迟导入会与 translator 循环)。"""
+    """Error type carried by the builtins module itself (a lazy import would cycle with translator)."""
 
 
 
 class GPUNamespace:
-    """标记类型:翻译器识别 `gpu.xxx(...)` 调用并映射到设备内建。"""
+    """Marker type: the translator recognizes `gpu.xxx(...)` calls and maps them to device builtins."""
 
     def __init__(self)->None:
         self.__name__ = "pygpgpu.kernel.builtins"
@@ -42,9 +40,9 @@ class GPUNamespace:
 gpu = GPUNamespace()
 
 
-# ---------- 翻译期使用的映射元数据 ----------
+# ---------- mapping metadata used at translation time ----------
 
-# 索引类: (gpu 名, opencl 名, cuda 表达式模板), dim 参数必须是整数字面量
+# Index builtins: (gpu name, opencl name, cuda expression template); dim argument must be an integer literal
 INDEX_BUILTINS:Dict[str, Tuple[str, str]] = {
     "get_global_id": ("get_global_id", "(int)(blockIdx{c} * blockDim{c} + threadIdx{c})"),
     "get_local_id": ("get_local_id", "(int)threadIdx{c}"),
@@ -54,7 +52,7 @@ INDEX_BUILTINS:Dict[str, Tuple[str, str]] = {
     "get_num_groups": ("get_num_groups", "(int)gridDim{c}"),
 }
 
-# 原子操作: (gpu 名, opencl 名, cuda 名); 签名 (array, index, value), 仅整型元素
+# Atomic ops: (gpu name, opencl name, cuda name); signature (array, index, value), integer element types only
 ATOMIC_BUILTINS:Dict[str, Tuple[str, str]] = {
     "atomic_add": ("atomic_add", "atomicAdd"),
     "atomic_sub": ("atomic_sub", "atomicSub"),
@@ -66,33 +64,33 @@ ATOMIC_BUILTINS:Dict[str, Tuple[str, str]] = {
     "atomic_xchg": ("atomic_xchg", "atomicExch"),
 }
 
-# 数学/向量内建: (gpu 名, opencl 名, cuda 名或 None 表示需特殊生成)
+# Math/vector builtins: (gpu name, opencl name, cuda name or None meaning special codegen is needed)
 GENERIC_BUILTINS:Dict[str, Tuple[str, str]] = {
     "barrier": ("barrier", "__syncthreads()"),
     "rsqrt": ("rsqrt", "rsqrtf"),
     "exp2": ("exp2", "exp2f"),
-    "clamp": ("clamp", ""),      # cuda 需特殊生成
-    "mix": ("mix", ""),          # cuda 需特殊生成 (a*(1-t)+b*t)
+    "clamp": ("clamp", ""),      # cuda needs special codegen
+    "mix": ("mix", ""),          # cuda needs special codegen (a*(1-t)+b*t)
     "mad": ("mad", ""),          # cuda (a*b+c)
-    "saturate": ("clamp", ""),   # cuda 需特殊生成 (clamp 到 0..1)
-    "step": ("step", ""),        # cuda 需特殊生成 (x < edge ? 0 : 1)
-    "select": ("select", ""),    # cuda 需特殊生成 (逐分量 cond ? b : a)
-    "any": ("any", ""),          # 向量归约, cuda 需特殊生成
-    "all": ("all", ""),          # 向量归约, cuda 需特殊生成
-    "isequal": ("isequal", ""),  # 关系函数家族: opencl 原生返回 int 向量,
-    "isnotequal": ("isnotequal", ""),  # cuda 逐分量生成 (int)(l op r)
+    "saturate": ("clamp", ""),   # cuda needs special codegen (clamp to 0..1)
+    "step": ("step", ""),        # cuda needs special codegen (x < edge ? 0 : 1)
+    "select": ("select", ""),    # cuda needs special codegen (per-component cond ? b : a)
+    "any": ("any", ""),          # vector reduction, cuda needs special codegen
+    "all": ("all", ""),          # vector reduction, cuda needs special codegen
+    "isequal": ("isequal", ""),  # relation-function family: opencl natively returns int vectors,
+    "isnotequal": ("isnotequal", ""),  # cuda generates per-component (int)(l op r)
     "isgreater": ("isgreater", ""),
     "isgreaterequal": ("isgreaterequal", ""),
     "isless": ("isless", ""),
     "islessequal": ("islessequal", ""),
     "isordered": ("isordered", ""),
     "isunordered": ("isunordered", ""),
-    "abs_diff": ("abs_diff", ""),  # 整数: cuda 逐分量 abs(l-r)
-    "hadd": ("hadd", ""),          # 整数: cuda (a&b) + ((a^b)>>1)
-    "rhadd": ("rhadd", ""),        # 整数: cuda (a|b) - ((a^b)>>1)
-    "mad24": ("mad24", ""),        # 整数: cuda 普通乘加
-    "mul24": ("mul24", ""),        # 整数: cuda 普通乘法
-    "dot": ("dot", ""),          # 向量: opencl 原生, cuda 逐分量求和
+    "abs_diff": ("abs_diff", ""),  # integer: cuda per-component abs(l-r)
+    "hadd": ("hadd", ""),          # integer: cuda (a&b) + ((a^b)>>1)
+    "rhadd": ("rhadd", ""),        # integer: cuda (a|b) - ((a^b)>>1)
+    "mad24": ("mad24", ""),        # integer: cuda plain multiply-add
+    "mul24": ("mul24", ""),        # integer: cuda plain multiply
+    "dot": ("dot", ""),          # vector: opencl native, cuda per-component sum
     "cross": ("cross", ""),
     "normalize": ("normalize", ""),
     "length": ("length", ""),

@@ -2,7 +2,7 @@ from ctypes import (
     c_char, c_ubyte,
     c_int16, c_uint16,
     c_int32, c_uint32,
-    c_int64, c_uint64,
+    c_uint64,
     c_float, c_double,
     c_uint, c_int, c_void_p, c_ulong, c_size_t, POINTER, c_int64, c_char_p,
 )
@@ -68,9 +68,7 @@ from .cltypes import (
     cl_mem_info,
     cl_event_info,
     cl_command_type,
-    cl_command_execution_status,
     CL_CONTEXT_NOTIFY_CALLBACK,
-    CL_BULD_PROGRAM_CALLBACK,
     CL_EVENT_NOTIFY_CALLBACK,
     ptr_int64,
     ptr_cl_device_id,

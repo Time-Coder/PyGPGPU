@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer, c_uint, c_void_p, cast, POINTER, py_object
-from typing import override, Union, List, Callable, Set
+from typing import override, Union, Callable, Set
 import asyncio
 from concurrent import futures
 

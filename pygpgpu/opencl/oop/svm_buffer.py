@@ -35,7 +35,7 @@ class SVMBuffer(MemObject):
             svm_ptr = c_void_p(svm_ptr)
 
         MemObject.__init__(self, context, svm_ptr, None, None, size, cl_mem_flags.CL_MEM_READ_WRITE)
-        # 默认 finalizer 会调 clReleaseMemObject,SVM 指针必须用 clSVMFree 释放
+        # the default finalizer calls clReleaseMemObject, but an SVM pointer must be freed with clSVMFree
         self._finalizer = weakref.finalize(self, SVMBuffer._svm_free, context, self.id)
 
     @staticmethod

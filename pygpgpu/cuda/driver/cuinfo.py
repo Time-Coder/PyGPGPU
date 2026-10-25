@@ -9,9 +9,8 @@ from .cutypes import (
     CUresult, CUdevice, CUuuid, CUcontext,
     ptr_CUmodule, CUmodule, ptr_CUfunction,
     ptr_CUdeviceptr, CUdeviceptr,
-    ptr_CUstream, CUstream,
-    CUfunction, CUfunction_attribute,
-    CUevent, CUstreamCallback
+    CUstream,
+    CUfunction, CUevent, CUstreamCallback
 )
 
 from .vec_types import (

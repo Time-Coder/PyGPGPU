@@ -1,50 +1,113 @@
-from ctypes import Structure
-import copy
+"""PyGPGPU: decorate a Python function and it runs on the GPU (OpenCL / CUDA / HIP).
 
-import numpy as np
+The top level aggregates the commonly used public API so you do not have to
+remember subpackage names::
+
+    from pygpgpu import kernel, gpu, float4             # @kernel / device builtins / vector types
+    from pygpgpu import available_devices, get_device
+    from pygpgpu import climport, cuimport, hipimport    # import hooks for handwritten .cl/.cu/.hip files
+
+Subpackage paths (pygpgpu.kernel / pygpgpu.vec_types / pygpgpu.opencl / ...)
+still work. Note that top-level `pygpgpu.kernel` refers to the @kernel
+decorator (same name as the subpackage; the top level exports the decorator),
+so to use things from the submodules write `from pygpgpu.kernel import ...`.
+"""
+import importlib
+from typing import Any, List
+
+# pygf owns the single process-wide numpy.array monkey-patch. Importing it
+# applies that patch (patch_nparray), which teaches numpy.array to read a
+# host vector container as its components -- including the structured dtype
+# path the vector-typed buffers below depend on. PyGPGPU no longer ships its
+# own copy of the patch; this is a deliberate unification.
+import pygf  # noqa: F401  (applies the numpy.array patch on import)
 
 
-np_array = np.array
+# ---------- Top-level exports: public API of kernel ----------
+# kernel subpackage's __all__ copied as-is (top-level kernel is the @kernel decorator)
 
-def __has_structure(arr)->bool:
-    if isinstance(arr, Structure):
-        return True
+from .kernel import (
+    DEFAULT_BACKEND_ORDER,
+    PyKernel,
+    PyKernelSyntaxError,
+    available_devices,
+    get_device,
+    gpu,
+    kernel,
+)
 
-    try:
-        for ele in arr:
-            if __has_structure(ele):
-                return True
-    except:
-        pass
+# ---------- Top-level exports: public API of vec_types ----------
 
-    return False
+from .vec_types import (
+    char2, char4, char8, char16,
+    uchar2, uchar4, uchar8, uchar16,
+    short2, short4, short8, short16,
+    ushort2, ushort4, ushort8, ushort16,
+    int2, int4, int8, int16,
+    uint2, uint4, uint8, uint16,
+    float2, float4, float8, float16,
+    double2, double4, double8, double16,
+    genVec, genVec2, genVec3, genVec4, genVec8, genVec16,
+)
+from .vec_types import funcs          # dual-purpose function library: runs on the host, translates to device builtins inside @kernel
 
-def __change_element(arr):
-    try:
-        for i, ele in enumerate(arr):
-            if isinstance(ele, Structure):
-                arr[i] = np_array(ele)
-                continue
 
-            if isinstance(ele, tuple):
-                arr[i] = list(ele)
+# ---------- Top-level exports: import hooks for handwritten kernel files ----------
 
-            __change_element(ele)
-    except:
-        pass
-        
-def array(*args, **kwargs):
-    obj = args[0]
+class _LazyBackendHook:
+    """Lazy proxy for a backend import hook.
 
-    if isinstance(obj, Structure) or not __has_structure(obj):
-        return np_array(*args, **kwargs)
-    
-    obj = copy.deepcopy(obj)
-    if isinstance(obj, tuple):
-        obj = list(obj)
-    
-    __change_element(obj)
-    return np_array(obj, *args[1:], **kwargs)
+    Backend packages initialize their runtime at import time (nvcuda/amdhip64/
+    OpenCL) and raise immediately when the runtime is missing; this defers
+    loading the backend package until a hook method is actually called, so
+    `from pygpgpu import climport, cuimport, hipimport` works on any machine
+    and only the backend you use requires its runtime.
+    """
 
-if np.array != array:
-    np.array = array
+    def __init__(self, module_name:str, attr_name:str):
+        self._module_name:str = module_name
+        self._attr_name:str = attr_name
+        self._target:Any = None
+
+    def _resolve(self)->Any:
+        if self._target is None:
+            module = importlib.import_module(self._module_name, __name__)
+            self._target = getattr(module, self._attr_name)
+        return self._target
+
+    def __getattr__(self, name:str):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return getattr(self._resolve(), name)
+
+    def __repr__(self)->str:
+        return f"<lazy hook {self._module_name}.{self._attr_name}>"
+
+
+climport = _LazyBackendHook(".opencl.climport", "climport")
+cuimport = _LazyBackendHook(".cuda.cuimport", "cuimport")
+hipimport = _LazyBackendHook(".hip.hipimport", "hipimport")
+
+
+__all__ = [
+    # kernel
+    "kernel", "gpu", "PyKernel", "PyKernelSyntaxError", "DEFAULT_BACKEND_ORDER",
+    "available_devices", "get_device",
+    # vec_types
+    "funcs",
+    "char2", "char4", "char8", "char16",
+    "uchar2", "uchar4", "uchar8", "uchar16",
+    "short2", "short4", "short8", "short16",
+    "ushort2", "ushort4", "ushort8", "ushort16",
+    "int2", "int4", "int8", "int16",
+    "uint2", "uint4", "uint8", "uint16",
+    "float2", "float4", "float8", "float16",
+    "double2", "double4", "double8", "double16",
+    "genVec", "genVec2", "genVec3", "genVec4", "genVec8", "genVec16",
+    # import hooks for handwritten kernel files
+    "climport", "cuimport", "hipimport",
+]
+
+
+def __dir__()->List[str]:
+    return sorted(set(globals()) | set(__all__))

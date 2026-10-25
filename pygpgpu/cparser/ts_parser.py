@@ -9,7 +9,7 @@ from tree_sitter import Node
 from ..constants import KernelFlags
 
 if TYPE_CHECKING:
-    from tree_sitter import Parser
+    pass
 
 
 _TYPE_NODE_TYPES:Tuple[str, ...] = ("scalar_type", "primitive_type", "sized_type_specifier", "other_builtin_type", "vector_type", "type_identifier", "enum_specifier")
@@ -474,7 +474,7 @@ class TSParserMixin:
         return None
 
     def _collect_addr_taken_roots(self, node:Node, scopes, found:Set[str])->None:
-        """收集实参表达式内通过取地址暴露的数组根(仅 '&' 形式; 按值传元素不算)。"""
+        """Collect array roots in an argument expression exposed via address-of ('&' form only; passing an element by value does not count)."""
         if node.type == "pointer_expression" and node.text and node.text.decode().lstrip().startswith("&"):
             operand:Optional[Node] = (node.named_children[0] if node.named_children else None)
             if operand is not None:
@@ -533,8 +533,8 @@ class TSParserMixin:
                     ctx["escapes"].add(root)
                 else:
                     self._visit_expression(operand, scopes, ctx, False)
-                    # &arr[i] 经下标取元素地址: 解析不到裸数组名,递归收集底层
-                    # 数组根并标记逃逸(地址暴露 = 可能被写,如 atomicAdd(&arr[i]))
+                    # &arr[i] takes an element address through a subscript: the bare array name does not resolve,
+                    # so recursively collect the underlying array roots and mark them escaped (address exposed = may be written, e.g. atomicAdd(&arr[i]))
                     found:Set[str] = set()
                     self._collect_root_refs(operand, scopes, found)
                     ctx["escapes"].update(found)
@@ -627,7 +627,7 @@ class TSParserMixin:
                 param_is_mem:bool = (helper_info is not None and self._is_mem_arg(helper_info.args[param_names[i]]))
 
                 if root is not None and is_mem and param_is_mem:
-                    # 直接传指针本身:不构成数据访问,只传播 helper 的读写集
+                    # passing the pointer itself: not a data access, only propagate the helper's read/write sets
                     if flags & KernelFlags.Readed:
                         ctx["reads"].add(root)
                     if flags & KernelFlags.Writed:
@@ -649,7 +649,7 @@ class TSParserMixin:
                 if target is not None:
                     ctx["escapes"].add(target)
                 else:
-                    # &arr[i] 传入未知函数(地址暴露),如 atomicAdd(&arr[i], 1)
+                    # &arr[i] passed to an unknown function (address exposed), e.g. atomicAdd(&arr[i], 1)
                     addr_taken:Set[str] = set()
                     self._collect_addr_taken_roots(actual, scopes, addr_taken)
                     ctx["escapes"].update(addr_taken)

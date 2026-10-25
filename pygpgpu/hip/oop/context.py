@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 class Context:
-    """HIP 的上下文即"当前设备"(hipSetDevice); make_current 切换当前设备。"""
+    """A HIP context is simply the "current device" (hipSetDevice); make_current switches the current device."""
 
     _current_context:"Context" = None
 
@@ -48,7 +48,7 @@ class Context:
         return available_buffer
 
     def create_buffer(self, size:int=0, flags:Any=None)->"Buffer":
-        """与 gnp ndarray._to_device 的接口对齐。"""
+        """Aligns with the gnp ndarray._to_device interface."""
         from .buffer import Buffer
         return Buffer(size)
 

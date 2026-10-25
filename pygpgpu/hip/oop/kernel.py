@@ -20,8 +20,7 @@ from .program_info import ArgInfo
 from .stream import Stream
 from .mem_object import MemObject
 from .program_parser import ProgramParser
-from ...utils import detect_work_size, join_with_and, local_size_for_global
-from ... import numpy as gnp
+from ...utils import detect_work_size, join_with_and, local_size_for_global, device_limits
 
 if TYPE_CHECKING:
     from .program import Program
@@ -68,7 +67,7 @@ class Kernel(HIPObject):
             if work_dim <= 0:
                 raise ValueError("dimension should be at least 1")
             
-            # block_dims 为 None 表示自动推断(仅指定 grid)
+            # block_dims being None means auto-infer (only grid was specified)
             if block_dims is not None and work_dim != len(block_dims):
                 raise ValueError(f"grid_dims={grid_dims} and block_dims={block_dims} do not have same dimension")
         
@@ -128,10 +127,12 @@ class Kernel(HIPObject):
             if global_work_size is None:
                 global_work_size, local_work_size = self.__detect_work_size()
             else:
-                # 仅指定 grid 时,block 按给定 grid 推导(必须整除)
-                local_work_size = local_size_for_global(global_work_size)
+                # When only grid is given, derive block from that grid (must divide evenly)
+                max_group, max_items = device_limits(self._program.context.device)
+                local_work_size = local_size_for_global(
+                    global_work_size, max_work_group_size=max_group, max_work_item_sizes=max_items)
 
-        # cuLaunchKernel 固定按 3 维传参
+        # hipModuleLaunchKernel always takes 3 dimensions
         global_work_size = tuple(global_work_size) + (1,) * (3 - len(global_work_size))
         local_work_size = tuple(local_work_size) + (1,) * (3 - len(local_work_size))
         global_work_size = (c_size_t * 3)(*global_work_size)
@@ -143,7 +144,7 @@ class Kernel(HIPObject):
         host_data = arg_value
         if host_data is not buffer.data:
             if isinstance(host_data, np.ndarray) and getattr(host_data.dtype, "fields", None) is not None:
-                # 3 分量向量: 设备端是紧凑布局,解包回结构化字段
+                # 3-component vector: device uses a compact layout, unpack back into structured fields
                 fields:List[str] = list(host_data.dtype.fields.keys())[:3]
                 packed:Any = buffer.data
                 flat:Any = (packed.reshape(-1, 3) if packed.ndim > 1 else packed)
@@ -170,7 +171,7 @@ class Kernel(HIPObject):
         
         for arg_info in self._args.values():
             if not arg_info.need_read_back:
-                # 只读/只写参数也要在 kernel 完成后归还缓冲池,否则每次调用泄漏一个池对象
+                # Read-only/write-only arguments must also return their buffer to the pool once the kernel finishes, otherwise each call leaks one pooled object
                 if arg_info.mem_obj is not None:
                     def on_release(stream:Stream, error_code:int, mem_obj:MemObject=arg_info.mem_obj):
                         mem_obj.unuse()
@@ -178,8 +179,8 @@ class Kernel(HIPObject):
                 continue
 
             if isinstance(arg_info.value, gnp.ndarray) and not self._is_vec3_arg(arg_info):
-                # gnp 数组走延迟回读:数据留在设备上,宿主访问(写操作前)由 to_host() 拉取。
-                # 3 分量向量例外: 设备是紧凑布局,延迟回读无法直接解包,走立即回读
+                # gnp arrays use deferred read-back: data stays on the device and to_host() pulls it before host access (writes).
+                # 3-component vectors are the exception: the device layout is compact, which deferred read-back cannot unpack directly, so read back immediately
                 arg_info.mem_obj.dirty_on_device = True
                 arg_info.mem_obj.unuse()
                 continue
@@ -254,14 +255,16 @@ class Kernel(HIPObject):
                             break
 
         if max_shape is None:
-            # 所有参数都无需回读时没有可用形状,退化为单元素
+            # With no argument needing read-back there is no usable shape, so fall back to a single element
             return (1,), (1,)
 
         if len(max_shape) > 3:
             max_shape = (math.prod(max_shape),)
 
         total_local_size:int = 128
-        global_work_size, block_dims = detect_work_size(total_local_size, max_shape)
+        max_group, max_items = device_limits(self._program.context.device)
+        global_work_size, block_dims = detect_work_size(
+            total_local_size, max_shape, max_work_group_size=max_group, max_work_item_sizes=max_items)
         grid_dims = []
         for value1, value2 in zip(global_work_size, block_dims):
             grid_dims.append(value1 // value2)
@@ -288,7 +291,7 @@ class Kernel(HIPObject):
 
             if not arg_info.is_ptr:
                 if is_vec3:
-                    # HIP 同 CUDA: 3 分量向量紧凑布局传参
+                    # HIP like CUDA: 3-component vectors are passed in a compact layout
                     packed:Any = self._pack_vec3(value, content_type)
                     return pointer(packed)
 
@@ -301,7 +304,7 @@ class Kernel(HIPObject):
                             used_value = content_type(HIPInfo.alter_types[base_type_str][1](value))
                         else:
                             used_value = content_type(value)
-                    except BaseException as e:
+                    except BaseException:
                         success = False
 
                     if not success:
@@ -313,8 +316,8 @@ class Kernel(HIPObject):
                 return pointer(used_value)
             else:
                 if is_vec3:
-                    # HIP 同 CUDA: float3* 等紧凑布局(元素 12B), 宿主结构化数组
-                    # 16B(含 padding 字段) -> 打包/解包转换
+                    # HIP like CUDA: types such as float3* use a compact layout (12B elements) while the
+                    # host structured array is 16B (with a padding field) -> pack/unpack conversion
                     used_value:Any = self._pack_vec3(value, content_type)
                 elif isinstance(value, np.ndarray):
                     used_value = value
@@ -341,7 +344,7 @@ class Kernel(HIPObject):
 
     @staticmethod
     def _pack_vec3(value:Any, content_type:Any)->Any:
-        """把 float3/int3 等 3 分量数据打包为 CUDA 紧凑布局(去掉 padding 分量)。"""
+        """Pack 3-component data such as float3/int3 into the CUDA compact layout (drop the padding component)."""
         fields:List[str] = [f for f, _ in content_type._fields_][:3]
         elem_dtype:Any = content_type.dtype.fields[fields[0]][0]
 

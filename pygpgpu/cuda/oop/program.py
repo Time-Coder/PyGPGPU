@@ -1,21 +1,17 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer
-from typing import Dict, List, Any, Optional, TYPE_CHECKING, Set, override
+from typing import Dict, List, Any, Optional, Set, override
 
 from .cuobject import CUObject
-from .device import Device
 from .build_options import BuildOptions
 from ..driver import (
     CUDA,
-    CUfunction,
-    CUmodule,
-    ptr_CUfunction
+    CUmodule
 )
 from .program_info import KernelInfo
 from .nvrtc_program import NVRTCProgram
 from .kernel import Kernel
 from .context import Context
-from .device import Device
 
 
 class Program(CUObject):

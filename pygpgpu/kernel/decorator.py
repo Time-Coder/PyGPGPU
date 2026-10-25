@@ -6,19 +6,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..utils import local_size_for_global
+from ..utils import local_size_for_global, detect_work_size, device_limits
 from .translator import (
     FunctionTranslator,
     PyKernelSyntaxError,
     infer_ctype,
-    is_ptr,
     scan_self_attrs,
     short_hash,
     type_sig,
 )
 
 
-# ---------- 中括号选择器解析 ----------
+# ---------- bracket selector parsing ----------
 
 _BACKEND_ALIASES:Dict[str, str] = {
     "opencl": "opencl", "ocl": "opencl", "cl": "opencl",
@@ -26,11 +25,56 @@ _BACKEND_ALIASES:Dict[str, str] = {
     "hip": "hip", "rocm": "hip", "amd": "hip",
 }
 
+# Probe order when no backend is specified: take the first backend that enumerates at least one device
+DEFAULT_BACKEND_ORDER:Tuple[str, ...] = ("cuda", "hip", "opencl")
+
+_probed_backend:Optional[str] = None
+
+
+def _backend_devices(backend:str)->List[Any]:
+    """Enumerate the backend's device list (order = numbering used by plain-numeric selectors); raises when the runtime is missing."""
+    if backend == "opencl":
+        from ..opencl.oop.platforms import Platforms
+        return [d for platform in Platforms for d in platform.devices]
+    if backend == "hip":
+        from ..hip.oop.devices import Devices
+        return list(Devices)
+    if backend == "cuda":
+        from ..cuda.oop.devices import Devices
+        return list(Devices)
+    raise ValueError(f"unknown backend '{backend}'")
+
+
+def _probe_backend(backend:str)->Optional[str]:
+    """Probe whether a backend is usable: enumerating at least one device counts as usable.
+
+    Backend packages load their runtime (nvcuda/amdhip64/OpenCL) only at import time; failures are treated as unavailable.
+    """
+    try:
+        if _backend_devices(backend):
+            return backend
+    except Exception:
+        pass
+    return None
+
+
+def _default_backend()->str:
+    """Probe the first usable backend per DEFAULT_BACKEND_ORDER; the result is cached in-process."""
+    global _probed_backend
+    if _probed_backend is None:
+        for backend in DEFAULT_BACKEND_ORDER:
+            if _probe_backend(backend) is not None:
+                _probed_backend = backend
+                break
+        else:
+            _probed_backend = "opencl"
+    return _probed_backend
+
 
 def _parse_selector(sel:str)->Tuple[Optional[str], Optional[str]]:
-    """解析 "后端" / "后端:设备" / "设备" 形式的选择器。
+    """Parse selectors of the form "backend" / "backend:device" / "device".
 
-    返回 (backend, device);未指定的部分为 None(由默认值/先前中括号兜底)。
+    Returns (backend, device); unspecified parts are None (filled in by defaults / earlier brackets).
     """
     if not isinstance(sel, str):
         raise TypeError(f"kernel bracket selector must be a string like 'opencl:gfx1036', got {type(sel).__name__}")
@@ -42,7 +86,7 @@ def _parse_selector(sel:str)->Tuple[Optional[str], Optional[str]]:
         backend:Optional[str] = _BACKEND_ALIASES.get(head.strip().lower())
         if backend is not None:
             return backend, (rest.strip() or None)
-        # 冒号后不是后端名 -> 整串是设备标识(如 "geforce:0")
+        # the part after the colon is not a backend name -> the whole string is a device identifier (e.g. "geforce:0")
         return None, sel
     backend = _BACKEND_ALIASES.get(sel.lower())
     if backend is not None:
@@ -51,7 +95,7 @@ def _parse_selector(sel:str)->Tuple[Optional[str], Optional[str]]:
 
 
 def _parse_work_item(item:Any)->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[int, ...]]]:
-    """解析 work size 中括号: int / (global,) / (global, local), None 表示自动。"""
+    """Parse a work-size bracket: int / (global,) / (global, local); None means automatic."""
     def norm(v:Any)->Optional[Tuple[int, ...]]:
         if v is None:
             return None
@@ -75,16 +119,8 @@ def _parse_work_item(item:Any)->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[
 
 
 def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
-    """按后端解析设备: None/编号/名称子串("名字:序号" 消歧), 返回 (设备对象, 缓存键)。"""
-    if backend == "opencl":
-        from ..opencl.oop.platforms import Platforms
-        devices:List[Any] = [d for pf in Platforms for d in pf.devices]
-    elif backend == "hip":
-        from ..hip.oop.devices import Devices
-        devices = list(Devices)
-    else:
-        from ..cuda.oop.devices import Devices
-        devices = list(Devices)
+    """Resolve a device within a backend: None/index/name substring ("name:ordinal" disambiguates); returns (device object, cache key)."""
+    devices:List[Any] = _backend_devices(backend)
 
     if not devices:
         raise RuntimeError(f"no {backend} devices found")
@@ -118,8 +154,41 @@ def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
     return matches[index], matches[index].name
 
 
+def available_devices()->List[str]:
+    """List all available "backend:device" selector strings, ordered by DEFAULT_BACKEND_ORDER.
+
+    Returns a list like ["cuda:0", "hip:0", "opencl:0", "opencl:1", ...]; the numbering
+    matches the device order used by plain-numeric selectors; backends whose runtime is
+    missing are skipped. Results can be passed directly to `get_device()` or kernel brackets.
+    """
+    selectors:List[str] = []
+    for backend in DEFAULT_BACKEND_ORDER:
+        try:
+            devices:List[Any] = _backend_devices(backend)
+        except Exception:
+            continue
+        for i in range(len(devices)):
+            selectors.append(f"{backend}:{i}")
+    return selectors
+
+
+def get_device(selector:str)->Any:
+    """Return the Device object for a "backend:device" selector string (the backend's own Device class).
+
+    The backend part supports aliases (opencl/ocl/cl, cuda/cu, hip/rocm/amd); the device part is an
+    index or a name/vendor/arch substring ("name:ordinal" disambiguates); with only the device part,
+    the default backend (probed, cuda -> hip -> opencl) is used.
+    """
+    backend:Optional[str]
+    device_sel:Optional[str]
+    backend, device_sel = _parse_selector(selector)
+    if backend is None:
+        backend = _default_backend()
+    return _resolve_device(backend, device_sel)[0]
+
+
 class _KernelCall:
-    """中括号配置形态: k["cuda"][(64, 8)](args) / k[(64, 8)]["cuda"](args), 顺序不限。"""
+    """Bracket-configuration form: k["cuda"][(64, 8)](args) / k[(64, 8)]["cuda"](args), any order."""
 
     def __init__(self, kernel:"PyKernel", instance:Any,
                  backend:Optional[str]=None, device:Optional[str]=None,
@@ -149,7 +218,7 @@ class _KernelCall:
         instance:Any = self._instance
         call_args:Tuple[Any, ...] = args
         if self._kernel._is_method and instance is None:
-            # 类形式: Klass.method["cuda"](instance, args...)
+            # class form: Klass.method["cuda"](instance, args...)
             if not args:
                 raise TypeError(
                     f"{self._kernel.__name__}() is an instance method; pass the instance "
@@ -161,7 +230,7 @@ class _KernelCall:
 
 
 class _BoundKernelMethod:
-    """实例方法绑定形态: instance.kernel_method(...)"""
+    """Bound instance-method form: instance.kernel_method(...)"""
 
     def __init__(self, kernel:"PyKernel", instance:Any):
         self._kernel:"PyKernel" = kernel
@@ -175,19 +244,20 @@ class _BoundKernelMethod:
 
 
 class PyKernel:
-    """`@kernel` 装饰器的实现:调用时把 python 函数翻译为后端源码并编译执行。
+    """Implementation of the `@kernel` decorator: translates the python function into backend source at call time, then compiles and runs it.
 
-    支持装饰类方法: self 在翻译时剔除, 方法体里的 self.xxx 属性引用被转化为
-    附加参数 _self_xxx, 调用时从实例取值传入; 也支持 staticmethod(两种装饰顺序)。
+    Decorating class methods is supported: self is dropped during translation, self.xxx attribute
+    references in the method body become extra parameters _self_xxx, filled from the instance at call
+    time; staticmethod is supported too (either decoration order).
 
-    后端/设备/work size 通过中括号在调用时指定(与手写 kernel 用法统一),
-    可用 0/1/2 个中括号, 顺序不限::
+    Backend/device/work size are given with brackets at call time (same style as handwritten kernels);
+    0, 1 or 2 brackets may be used, in any order::
 
-        k(a, out)                       # 默认后端/设备, work size 自动
-        k["cuda"](a, out)               # 指定后端
-        k["opencl:gfx1036"](a, out)     # 后端 + 设备(编号或名称子串, "名:序号"消歧)
-        k[(64, 8)](a, out)              # global/local(None 为自动)
-        k["cuda"][(64, 8)](a, out)      # 组合, 顺序不限
+        k(a, out)                       # default backend (probed, cuda -> hip -> opencl)/device, work size automatic
+        k["cuda"](a, out)               # pick the backend
+        k["opencl:gfx1036"](a, out)     # backend + device (index or name substring, "name:ordinal" disambiguates)
+        k[(64, 8)](a, out)              # global/local (None means automatic)
+        k["cuda"][(64, 8)](a, out)      # combined, any order
     """
 
     def __init__(self, func:Callable, backend:str):
@@ -211,7 +281,7 @@ class PyKernel:
         self._source_sig:str = self._source_signature()
 
     def __get__(self, obj:Any, objtype:Optional[type]=None)->Any:
-        # 描述符协议: 实例访问返回绑定形态, 类访问/静态方法返回自身
+        # descriptor protocol: instance access returns the bound form, class access/static methods return self
         if obj is None or not self._is_method:
             return self
         return _BoundKernelMethod(self, obj)
@@ -235,6 +305,7 @@ class PyKernel:
         device_obj:Any
         device_key:str
         device_obj, device_key = _resolve_device(backend, device_sel)
+        device_max_group, device_max_items = device_limits(device_obj)
 
         self_values:List[Any] = []
         if self._is_method:
@@ -265,25 +336,59 @@ class PyKernel:
         if entry is None:
             entry = self._compile(args, arg_types, self_types, sig, backend, device_obj)
             self._cache[cache_key] = entry
-        kernel_obj, shape_sources, work_size_dims, local_sizes = entry
+        kernel_obj, shape_sources, work_size_dims, local_sizes, uses_global_id = entry
 
         full:List[Any] = list(args) + list(self_values)
         launch_args:List[Any] = self._build_launch_args(full, arg_types + self_types, shape_sources)
         if backend == "opencl":
-            # cuda 的 local memory 是 __shared__ 静态声明,opencl 才需要传字节数
+            # cuda local memory is a static __shared__ declaration; only opencl needs the byte size passed
             for local_bytes in local_sizes:
                 launch_args.append(local_bytes)
         if global_size is None and work_size_dims:
-            global_size = tuple(int(full[pi].shape[dim]) for pi, dim in work_size_dims)
+            # A dim of -1 is an explicit gpu.work_size(x) declaration: that array contributes
+            # all of its dimensions, matching what np.ndindex(x.shape) would give.
+            extents_list:List[int] = []
+            for pi, dim in work_size_dims:
+                shape:Tuple[int, ...] = tuple(int(s) for s in full[pi].shape)
+                if dim >= 0:
+                    extents_list.append(shape[dim])
+                else:
+                    extents_list.extend(shape)
+            if len(extents_list) > 3:
+                raise ValueError(
+                    f"gpu.work_size({self.__name__}) declared {len(extents_list)} dimensions "
+                    f"from an array of shape {tuple(int(s) for s in full[work_size_dims[0][0]].shape)}; "
+                    f"at most 3 are supported")
+            extents:Tuple[int, ...] = tuple(extents_list)
+            if local_size is None:
+                global_size, local_size = detect_work_size(
+                    256, extents, max_work_group_size=device_max_group,
+                    max_work_item_sizes=device_max_items, allow_padding=True)
+            elif len(local_size) == len(extents):
+                # A user-supplied local size wins; round each extent up to a multiple of it.
+                global_size = tuple(-(-extent // l) * l for extent, l in zip(extents, local_size))
+            else:
+                global_size = extents
         if global_size is None and local_size is not None:
             raise ValueError(
                 "local work size requires a global size: specify both in the bracket "
                 "k[(global, local)] or rely on a magic loop to derive the global size")
+        if global_size is None and uses_global_id:
+            # A gid-style kernel has no loop to read the domain from. Falling back to the
+            # backend's buffer-shape guess used to silently launch a tiny grid (e.g. one work
+            # item for a 100000-element reduction) and produce a wrong result, so refuse.
+            raise ValueError(
+                f"{self.__name__}() dispatches on gpu.get_global_id but declares no iteration "
+                f"domain, so the work size cannot be derived. Either give it a magic loop "
+                f"(`for i in range(x.shape[0]): ...`), declare `gpu.work_size(x)` in the body, "
+                f"or pass a bracket: {self.__name__}[(total, local)](...)")
         if global_size is not None:
-            # 统一总数语义(OpenCL/SYCL): global = 总 work-item 数, 须被 local 整除;
-            # cuda 的 gridDim 是块数, 由 total/local 换算, 对用户透明
+            # Uniform total-work-item semantics (OpenCL/SYCL): global = total number of work items, must be divisible by local;
+            # cuda's gridDim is a block count, derived from total/local, transparent to the user
             if local_size is None:
-                local_size = local_size_for_global(global_size)
+                local_size = local_size_for_global(
+                    global_size, max_work_group_size=device_max_group,
+                    max_work_item_sizes=device_max_items)
             if len(local_size) != len(global_size):
                 raise ValueError(
                     f"global {global_size} and local {local_size} work sizes must have the same dimension")
@@ -293,17 +398,17 @@ class PyKernel:
                         f"global work size {global_size} must be divisible by local {local_size}; "
                         f"use None for an automatically derived local size")
             if backend in ("cuda", "hip"):
-                # cuda/hip 的 gridDim 是块数, 由 总数/local 换算
+                # cuda/hip gridDim is a block count, derived from total/local
                 grid = tuple(g // l for g, l in zip(global_size, local_size))
                 kernel_obj = kernel_obj[(grid, local_size)]
             else:
                 kernel_obj = kernel_obj[(global_size, local_size)]
         return kernel_obj(*launch_args)
 
-    # ---------- 源码生成 ----------
+    # ---------- source generation ----------
 
     def _source_signature(self)->str:
-        """python 源码签名:源码变化 -> 重新生成(缓存目录中内容不同则重编译)。"""
+        """Python source signature: source changes -> regenerate (recompile when cached content differs)."""
         try:
             source:str = inspect.getsource(self.raw_func)
         except OSError:
@@ -330,7 +435,7 @@ class PyKernel:
         device_cache:Dict[Any, Any] = {}
         self_attr_types:Dict[str, Any] = dict(zip(self._self_attrs, self_types))
 
-        # hip 接受 CUDA 语法(threadIdx/atomicAdd/make_float4 等), 代码生成按 cuda 走
+        # hip accepts CUDA syntax (threadIdx/atomicAdd/make_float4 etc.), so codegen goes through cuda
         codegen_backend:str = ("cuda" if backend == "hip" else backend)
         translator:FunctionTranslator = FunctionTranslator(
             self.raw_func, list(arg_types) + list(self_types), codegen_backend,
@@ -339,16 +444,17 @@ class PyKernel:
         translator.translate()
         kernel_code:str = translator.render_kernel(c_name)
 
-        dependency_codes:List[str] = []
-        for entry in device_cache.values():
-            dependency_codes.append(entry["code"])
+        # Device helper functions must be emitted in dependency order: C requires a callee to
+        # be declared before its caller, and the cache is filled depth-first (a nested helper
+        # is finished *after* the helper that calls it). Emit leaves first.
+        dependency_codes:List[str] = [entry["code"] for entry in _dependency_order(device_cache)]
 
         source:str = ("\n".join(dependency_codes) + "\n\n" + kernel_code) if dependency_codes else kernel_code
 
         source_path:str = self._write_source(sig, source, backend)
         kernel:Any = self._backend_compile(source_path, c_name, backend, device_obj)
 
-        # 原子操作目标:静态分析无法识别指针强转写入,直接修正为可写
+        # Atomic targets: static analysis cannot recognize pointer-cast writes, so force them to writable
         from ..constants import KernelFlags
         for target_name in translator.atomic_targets:
             if target_name in kernel._args:
@@ -357,12 +463,17 @@ class PyKernel:
         param_index:Dict[str, int] = {name: i for i, (name, _) in enumerate(translator.params)}
         shape_sources:List[Tuple[int, int]] = [(param_index[array_name], dim) for array_name, dim in translator.shapes_used]
         work_size_dims:List[Tuple[str, int]] = [(param_index[name], dim) for name, dim in translator.work_size_dims]
-        # local memory: opencl 启动时按参数位置传字节数; cuda 是 __shared__ 声明无需传
+        # An explicit gpu.work_size(x) declaration: expand each named array into its own
+        # dimensions. The rank is only known at call time, so record (param, -1) markers and
+        # let _invoke substitute the real per-dimension indices.
+        if not work_size_dims and translator.declared_work_arrays:
+            work_size_dims = [(param_index[name], -1) for name in translator.declared_work_arrays]
+        # local memory: opencl passes byte sizes at launch by parameter position; cuda uses __shared__ declarations and needs nothing passed
         ctype_sizes:Dict[str, int] = {"bool": 1, "char": 1, "uchar": 1, "short": 2, "ushort": 2,
                                       "int": 4, "uint": 4, "long": 8, "ulong": 8,
                                       "float": 4, "double": 8}
         local_sizes:List[int] = [ctype_sizes.get(ctype, 4) * count for _, ctype, count in translator.local_buffers]
-        return kernel, shape_sources, work_size_dims, local_sizes
+        return kernel, shape_sources, work_size_dims, local_sizes, translator.uses_global_id
 
     def _cache_dir(self, backend:str)->str:
         source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
@@ -404,7 +515,7 @@ class PyKernel:
         program:Any = CUProgram(source_path)
         return program.kernels[c_name]
 
-    # ---------- 启动 ----------
+    # ---------- launch ----------
 
     def _build_launch_args(self, args:List[Any], arg_types:List[Any], shape_sources:List[Tuple[int, int]])->List[Any]:
         launch_args:List[Any] = list(args)
@@ -416,10 +527,48 @@ class PyKernel:
         return f"PyKernel({self.__name__}, backend={self.backend})"
 
 
-def kernel(func:Optional[Callable]=None, *, backend:str="opencl"):
-    """`@kernel` 装饰器。
+def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:
+    """Order cached device functions so each callee precedes its callers.
 
-    用法::
+    The cache is populated depth-first, so a nested helper (e.g. `clamp01` called by
+    `weight`) is completed after the helper that calls it. Emitting in insertion order
+    would then reference a function C has not seen yet. Names are matched textually
+    against each entry's generated code.
+    """
+    entries:List[Dict[str, Any]] = [e for e in device_cache.values() if e.get("status") == "done"]
+    if len(entries) <= 1:
+        return entries
+
+    # name -> entry, for the callee lookup
+    by_name:Dict[str, Dict[str, Any]] = {e["c_name"]: e for e in entries}
+    ordered:List[Dict[str, Any]] = []
+    visiting:set = set()
+    done:set = set()
+
+    def visit(entry:Dict[str, Any]) -> None:
+        name:str = entry["c_name"]
+        if name in done or name in visiting:
+            # `visiting` breaks cycles: mutual recursion is rejected elsewhere anyway.
+            return
+        visiting.add(name)
+        for other_name in by_name:
+            if other_name != name and other_name in entry["code"]:
+                visit(by_name[other_name])
+        visiting.discard(name)
+        done.add(name)
+        ordered.append(entry)
+    for entry in entries:
+        visit(entry)
+    return ordered
+
+
+def kernel(func:Optional[Callable]=None, *, backend:Optional[str]=None):
+    """The `@kernel` decorator.
+
+    When backend is not specified, probe in DEFAULT_BACKEND_ORDER (cuda -> hip -> opencl)
+    and take the first backend that enumerates at least one device; the result is cached in-process.
+
+    Usage::
 
         from pygpgpu.kernel import kernel
         import numpy as np
@@ -431,14 +580,14 @@ def kernel(func:Optional[Callable]=None, *, backend:str="opencl"):
 
         add(np.arange(8, dtype=np.float32), np.arange(8, dtype=np.float32) * 2, out)
 
-    - 最外层 `for i in range(<数组参数>.shape[0])` 循环是 work-item 循环,
-      work size 自动取该数组第一维;
-    - 函数调用的普通 python 函数会被翻译为设备函数(按实参类型单态化);
-    - math.* 与 abs/min/max/round 映射到设备内建;
-    - 不支持的语法抛 SyntaxError。
+    - The outermost `for i in range(<array parameter>.shape[0])` loop is the work-item loop;
+      the work size is taken automatically from that array's first dimension;
+    - plain python functions called by the kernel are translated into device functions (monomorphized per argument types);
+    - math.* and abs/min/max/round map to device builtins;
+    - unsupported syntax raises SyntaxError.
     """
     def decorator(f:Callable)->PyKernel:
-        return PyKernel(f, backend)
+        return PyKernel(f, backend or _default_backend())
 
     if func is not None:
         return decorator(func)

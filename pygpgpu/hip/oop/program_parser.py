@@ -4,8 +4,8 @@ import os
 import sys
 import copy
 import json
-from ctypes import c_char_p, Structure, _Pointer, pointer
-from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple
+from ctypes import c_char_p, c_void_p, Structure, _Pointer, pointer
+from typing import Optional, Dict, Any, List, Set, Union
 
 from ...cparser import CPreprocessor
 from ...cparser.ts_parser import TSParserMixin
@@ -22,7 +22,7 @@ import numpy as np
 from ... import numpy as gnp
 
 import tree_sitter_cuda as tscuda
-from tree_sitter import Language, Parser, Node
+from tree_sitter import Language, Parser
 
 
 class ProgramParser(TSParserMixin):
@@ -95,7 +95,7 @@ class ProgramParser(TSParserMixin):
             self._save()
             from .hip_compiler import HipCompiler
             if HipCompiler.print_info:
-                print(f"done. ", flush=True)
+                print("done. ", flush=True)
         else:
             from .hip_compiler import HipCompiler
             if HipCompiler.print_info:
@@ -311,7 +311,7 @@ class Kernel_{kernel_name}(Kernel):
                 member_type *= n_elements
 
             if member.is_ptr:
-                _fields_.append((f"_{struct_info.name}_ptr_{member.name}", ptr_cl_mem))
+                _fields_.append((f"_{struct_info.name}_ptr_{member.name}", c_void_p))
                 dtype.append((member.name, np.uint64))
                 pointer_types[member.name] = member_type
             else:

@@ -27,6 +27,7 @@ from ..driver import (
 
 if TYPE_CHECKING:
     from .platform import Platform
+    from .svm_buffer import SVMBuffer
 
 from .device import Device
 from .clobject import CLObject

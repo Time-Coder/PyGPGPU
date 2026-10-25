@@ -1,13 +1,14 @@
-"""向量数学函数(宿主端实现)。
+"""Vector math functions (host-side implementation).
 
-这些函数可以直接在 python 解释器中运行(作用于 genVec 实例或标量);
-在 @kernel 内核中使用时,翻译器会把它们映射为对应的设备内建
-(与 pygpgpu.kernel.gpu 命名空间相同),因此同一份代码双端可用。
+These functions run directly in the Python interpreter (on genVec instances or
+scalars); when used inside an @kernel, the translator maps them to the
+corresponding device builtins (the same namespace as pygpgpu.kernel.gpu), so
+one code base works on both sides.
 """
 from __future__ import annotations
 
 import math
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from .genVec import genVec
 
@@ -20,8 +21,17 @@ __all__ = [
 ]
 
 
+def _is_vec(v:Any)->bool:
+    """Whether v is a host vector: a ctypes Structure with component fields.
+
+    Duck-typed so both PyGPGPU's own genVec types and the pygf vector types that
+    the shared float/int/double/uint 2/4 widths now re-export are recognised.
+    """
+    return isinstance(v, genVec) or (hasattr(v, "_fields_") and hasattr(v, "__len__"))
+
+
 def _components(v:Any)->Optional[List[Any]]:
-    return list(v) if isinstance(v, genVec) else None
+    return list(v) if _is_vec(v) else None
 
 
 def _check_same_shape(a:Any, b:Any)->None:
@@ -167,13 +177,13 @@ def exp2(x:Any)->Any:
 
 
 def select(a:Any, b:Any, cond:Any)->Any:
-    """逐分量选择: cond 分量非零取 b, 否则取 a。"""
+    """Component-wise selection: pick b where the cond component is nonzero, otherwise a."""
     a_components, b_components, cond_components = _components(a), _components(b), _components(cond)
 
     def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
         return values[i] if components is not None else values
 
-    result_type:Any = (type(a) if isinstance(a, genVec) else type(b) if isinstance(b, genVec) else float)
+    result_type:Any = (type(a) if _is_vec(a) else type(b) if _is_vec(b) else float)
     if a_components is None:
         return b if cond else a
 
@@ -200,10 +210,10 @@ def all(cond:Any)->int:
 def _relation(name:str, op:Callable, a:Any, b:Any)->Any:
     _check_same_shape(a, b)
     a_components, b_components = _components(a), _components(b)
-    result_type:Any = (type(a) if isinstance(a, genVec) else type(b) if isinstance(b, genVec) else float)
+    result_type:Any = (type(a) if _is_vec(a) else type(b) if _is_vec(b) else float)
 
     def int_result_type()->Any:
-        if isinstance(result_type, type) and issubclass(result_type, genVec):
+        if isinstance(result_type, type) and (hasattr(result_type, "_fields_") or issubclass(result_type, genVec)):
             dim:str = "".join(c for c in result_type.__name__ if c.isdigit())
             from . import int2, int4
             return {"2": int2}.get(dim, int4)

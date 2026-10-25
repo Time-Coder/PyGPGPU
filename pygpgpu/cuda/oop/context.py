@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer, c_uint, c_size_t
-from typing import override, Any, Dict, List, Tuple, TYPE_CHECKING
+from typing import override, Any, Dict, List, Optional, TYPE_CHECKING
 
 from .cuobject import CUObject
 from .event import Event
@@ -47,7 +47,7 @@ class Context(CUObject):
         return available_buffer
 
     def create_buffer(self, size:int=0, flags:Any=None)->Buffer:
-        """与 gnp ndarray._to_device 的接口对齐(flags 在 CUDA 下仅作记录)。"""
+        """Aligns with the gnp ndarray._to_device interface (flags are only recorded under CUDA)."""
         from .buffer import Buffer
         return Buffer(size)
     

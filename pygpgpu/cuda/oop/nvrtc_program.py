@@ -1,7 +1,7 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer, c_size_t, c_char
 import warnings
-from typing import Dict, List, Any, Optional, Union, Set, override
+from typing import Dict, List, Any, Optional, Set, override
 
 from .cuobject import CUObject
 from .build_options import BuildOptions
@@ -34,7 +34,7 @@ class NVRTCProgram(CUObject):
     def _create_with_source(self)->nvrtcProgram:
         program_id = nvrtcProgram(0)
         ptr_program_id = pointer(program_id)
-        # NVRTC 按 C++ 编译,extern "C" 防止 kernel 名被 mangle;#line 1 保持错误行号映射
+        # NVRTC compiles as C++; extern "C" stops kernel names being mangled; #line 1 keeps error line numbers mapped
         source_text:str = 'extern "C" {\n#line 1\n' + self._program_parser.clean_code + "\n}"
         source = c_char_p(source_text.encode("utf-8") + b"\0")
         name = c_char_p(b"<kernel>")
@@ -54,8 +54,8 @@ class NVRTCProgram(CUObject):
             success = (error_code == nvrtcResult.NVRTC_SUCCESS)
 
             if NVRTC.print_info:
-                print(f"done.", flush=True)
-        except RuntimeError as e:
+                print("done.", flush=True)
+        except RuntimeError:
             success = False
 
         if success:
@@ -80,7 +80,7 @@ class NVRTCProgram(CUObject):
                 self._save_cubin(device)
 
         if NVRTC.print_info and not success:
-            print(f"error.", flush=True)
+            print("error.", flush=True)
 
         if NVRTC.check_error:
             log_size = c_size_t(0)

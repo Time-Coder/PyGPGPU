@@ -1,5 +1,6 @@
 from __future__ import annotations
 from ctypes import Structure
+from typing import Any
 
 from .helper import from_import
 
@@ -20,6 +21,19 @@ class genVec(Structure):
         "==": (lambda a, b: a == b),
         "!=": (lambda a, b: a != b),
     }
+
+    @classmethod
+    def numpy_dtype(cls)->Any:
+        """The structured numpy dtype for this vector type.
+
+        Built from the ctypes ``_fields_`` (``('x', c_float)`` and friends), so
+        ``np.dtype(cls.numpy_dtype())`` names each component exactly as the type
+        stores it. Mirrors pygf's ``numpy_dtype()`` so every class in the type
+        registry (PyGPGPU's own and the pygf ones it re-exports) answers the same
+        question the same way.
+        """
+        import numpy as np
+        return np.dtype(cls._fields_)
 
     def __init__(self, *args)->None:
         values = []

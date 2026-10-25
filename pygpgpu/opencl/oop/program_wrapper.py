@@ -1,7 +1,6 @@
 from __future__ import annotations
 from ctypes import c_char_p
 from typing import Dict, List, Any, Optional, Set
-from types import ModuleType
 
 from .device import Device
 from .build_options import BuildOptions

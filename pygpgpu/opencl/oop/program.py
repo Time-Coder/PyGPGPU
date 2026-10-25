@@ -79,7 +79,10 @@ class Program(CLObject):
 
         try:
             program_id = CL.clCreateProgramWithBinary(self.context.id, cl_uint(self.n_devices), self.device_ids, binary_sizes, binaries, binary_status, pointer(error_code))
-        except BaseException as e:
+        except BaseException:
+            # The name bound by `except ... as e` is deleted when the block ends, so it cannot
+            # be re-raised here; clCreateProgramWithBinary reports failures through error_code
+            # instead. The status check below turns them into an exception.
             pass
 
         if CL.check_error:
@@ -96,7 +99,7 @@ class Program(CLObject):
                 raise RuntimeError(f"{error_code}:\n{'\n'.join(error_messages)}")
 
             if error_code.value != ErrorCode.CL_SUCCESS:
-                raise e
+                raise RuntimeError(f"clCreateProgramWithBinary failed: {error_code}")
             
         if CL.print_info:
             print(f"load {self._program_parser.base_name}'s binary from cache.")
@@ -106,6 +109,7 @@ class Program(CLObject):
         return program_id
 
     def _build(self, save:bool):
+        build_error:str = ""
         try:
             if CL.print_info:
                 print(f"building {self._program_parser.base_name} ... ", end="", flush=True)
@@ -114,15 +118,17 @@ class Program(CLObject):
             success = (error_code == ErrorCode.CL_SUCCESS)
 
             if CL.print_info:
-                print(f"done.", flush=True)
+                print("done.", flush=True)
         except RuntimeError as e:
+            # Keep the raised exception's message: the name is deleted when this block ends.
+            build_error:str = str(e)
             success = False
 
         if save and success:
             self._save_bin()
 
         if CL.print_info and not success:
-            print(f"error.", flush=True)
+            print("error.", flush=True)
 
         if CL.check_error:
             error_messages = []
@@ -139,7 +145,7 @@ class Program(CLObject):
                 if error_messages:
                     raise CompileError(final_message)
                 else:
-                    raise e
+                    raise CompileError(build_error or f"OpenCL build failed: {error_code}")
             else:
                 if error_messages:
                     warnings.warn(final_message, CompileWarning)

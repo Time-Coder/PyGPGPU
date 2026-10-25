@@ -4,19 +4,19 @@ import importlib.util
 from types import ModuleType
 from typing import Optional
 
-from ..utils import local_size_for_global
+from ..utils import local_size_for_global, device_limits
 from .oop.program import Program
 from .oop.build_options import BuildOptions
 from .oop.devices import Devices
 
 
 class CUKernelWrapper:
-    """手写 .cu kernel 的中括号包装, 与 opencl 手写 kernel 用法对齐::
+    """Bracket-style wrapper for handwritten .cu kernels, matching the handwritten opencl kernel usage::
 
-        k(a, out)                    # 默认设备, work size 自动
-        k["geforce"](a, out)         # 设备(编号 / 名称子串 / "名:序号")
-        k[grid, block](a, out)       # grid/block(block None 为自动)
-        k["geforce"][grid, block](a, out)   # 顺序不限
+        k(a, out)                    # default device, automatic work size
+        k["geforce"](a, out)         # device (index / name substring / "name:ordinal")
+        k[grid, block](a, out)       # grid/block (a None block means automatic)
+        k["geforce"][grid, block](a, out)   # either order
     """
 
     def __init__(self, cu_path:str, name:str, kernel, nvrtc_program, type_checked:bool, options:BuildOptions):
@@ -41,8 +41,8 @@ class CUKernelWrapper:
         return kernel
 
     def _apply_sizes(self, kernel):
-        """总数语义(与 opencl/@kernel 统一): total=总线程数, local=每组大小,
-        cuda 的 gridDim(块数) 由 total/local 换算。"""
+        """Total-work-item semantics (unified with opencl/@kernel): total = number of threads, local = size per group;
+        the cuda gridDim (number of blocks) is derived from total/local."""
         if self._total is None:
             return kernel
 
@@ -54,7 +54,10 @@ class CUKernelWrapper:
         total = norm(self._total)
         local = norm(self._local)
         if local is None:
-            local = local_size_for_global(total)
+            device = (self._device if self._device is not None else Devices[0])
+            max_group, max_items = device_limits(device)
+            local = local_size_for_global(
+                total, max_work_group_size=max_group, max_work_item_sizes=max_items)
         if len(local) != len(total):
             raise ValueError(
                 f"global {total} and local {local} work sizes must have the same dimension")
@@ -68,7 +71,7 @@ class CUKernelWrapper:
         return kernel[grid, local]
 
     def __getitem__(self, item):
-        # 设备与尺寸都记在包装内, 调用时统一换算(保证链式任意顺序都是总数语义)
+        # Record device and sizes on the wrapper and convert them together at call time (so any chaining order keeps total-work-item semantics)
         if isinstance(item, str):
             self._device = Devices.device(item)
         elif isinstance(item, tuple) and len(item) == 2:

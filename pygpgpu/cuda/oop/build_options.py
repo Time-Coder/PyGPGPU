@@ -1,4 +1,4 @@
-from typing import Optional, List, Optional
+from typing import List, Optional
 from ..driver import GPUArch, CppStd, OptInfoKind
 
 
@@ -136,13 +136,13 @@ class BuildOptions:
             options.append(f"--fmad={str(self.fmad).lower()}")
 
         if self.use_fast_math is not None:
-            options.append(f"--use-fast-math")
+            options.append("--use-fast-math")
 
         if self.extra_device_vectorization is not None:
-            options.append(f"--extra-device-vectorization")
+            options.append("--extra-device-vectorization")
 
         if self.modify_stack_limit is not None:
-            options.append(f"--modify-stack-limit")
+            options.append("--modify-stack-limit")
 
         if self.std is not None:
             options.append(f"--std={self.std.name.replace("cpp", "c++")}")
@@ -154,19 +154,19 @@ class BuildOptions:
             options.append(f"--builtin-initializer-list={str(self.builtin_initializer_list).lower()}")
 
         if self.disable_warnings is not None:
-            options.append(f"--disable-warnings")
+            options.append("--disable-warnings")
 
         if self.w is not None:
-            options.append(f"-w")
+            options.append("-w")
 
         if self.restrict is not None:
-            options.append(f"--restrict")
+            options.append("--restrict")
 
         if self.device_as_default_execution_space is not None:
-            options.append(f"--device-as-default-execution-space")
+            options.append("--device-as-default-execution-space")
 
         if self.default_device is not None:
-            options.append(f"-default-device")
+            options.append("-default-device")
 
         if self.optimization_info is not None:
             options.append(f"--optimization-info={self.optimization_info.name}")
@@ -181,7 +181,7 @@ class BuildOptions:
             options.append(f"-dQ={str(self.dQ).lower()}")
 
         if self.display_error_number is not None:
-            options.append(f"--display-error-number")
+            options.append("--display-error-number")
 
         if self.diag_error is not None:
             options.append(f"--diag-error={','.join(self.diag_error)}")

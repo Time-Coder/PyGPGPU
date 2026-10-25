@@ -3,7 +3,7 @@ from __future__ import annotations
 from ctypes import c_char, byref
 from typing import Optional, TYPE_CHECKING
 
-from ..driver import HIP, CUdevice
+from ..driver import HIP
 
 if TYPE_CHECKING:
     from .context import Context
@@ -16,8 +16,8 @@ class Device:
     def __init__(self, device_id:int):
         self._id:int = device_id
 
-        # hipDeviceProp_t 布局随版本变化: name 固定在偏移 0(char[256]),
-        # gcnArchName 位置不定 -> 整块读出后扫描 b"gfx" 提取架构
+        # The hipDeviceProp_t layout changes across versions: name sits at offset 0 (char[256]),
+        # while gcnArchName has no fixed position -> read the whole block and scan for b"gfx" to extract the arch
         buf = (c_char * Device._props_buffer_size)()
         HIP.hipGetDeviceProperties(byref(buf), self._id)
         raw:bytes = bytes(buf)
@@ -27,6 +27,20 @@ class Device:
         self._vendor:str = "AMD"
 
         self._default_context:Optional[Context] = None
+        self._max_threads_per_block:Optional[int] = None
+
+    @property
+    def max_threads_per_block(self)->int:
+        """Device limit for the block size; 1024 on every current AMD GPU.
+
+        hipDeviceProp_t has no stable layout across ROCm versions (see __init__), and
+        hipDeviceGetAttribute is not part of the binding table, so use AMD's documented
+        limit instead of reading an offset that may be wrong.
+        """
+        if self._max_threads_per_block is None:
+            self._max_threads_per_block = 1024
+
+        return self._max_threads_per_block
 
     @property
     def id(self)->int:
@@ -38,7 +52,7 @@ class Device:
 
     @property
     def arch(self)->str:
-        """GCN 架构名, 如 gfx1036(编译目标)。"""
+        """GCN architecture name, e.g. gfx1036 (the compile target)."""
         return self._arch
 
     @property

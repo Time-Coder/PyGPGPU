@@ -6,7 +6,7 @@ from ctypes import (
 )
 
 from .hiptypes import (
-    CUdevice, CUdeviceptr, CUmodule, CUfunction, CUstream, CUevent,
+    CUdeviceptr, CUmodule, CUfunction, CUstream, CUevent,
     ptr_CUmodule, ptr_CUfunction, ptr_CUdeviceptr, ptr_CUstream, ptr_CUevent,
     CUstreamCallback
 )
@@ -14,12 +14,12 @@ from .hiptypes import (
 
 class HIPInfo:
 
-    # 错误信息经 hipGetErrorString 动态获取,无需静态表
+    # Error strings are obtained dynamically via hipGetErrorString, so no static table is needed
     error_codes = {}
     no_need_check_error_funcs = {"hipGetErrorString", "hipEventQuery", "hipStreamQuery", "hipGetLastError"}
 
-    # 向量类型直接复用 opencl 注册表(50 个, 含 float3 等)
-    vec_types = None  # 惰性填充(见 _vec_types())
+    # Vector types reuse the opencl registry directly (50 of them, including float3 etc.)
+    vec_types = None  # filled lazily (see _vec_types())
 
     basic_types = {
         'char': c_int8, 'uchar': c_uint8,
@@ -53,12 +53,12 @@ class HIPInfo:
         return cls.vec_types
 
     def __getattr__(self, name:str):
-        # vec_types 惰性访问: HIPInfo.vec_types 触发 __getattr__? 类属性 None -> 实例不触发;
-        # 这里为类级属性访问兜底
+        # Lazy access to vec_types: does HIPInfo.vec_types trigger __getattr__? A class attribute of None -> instances never trigger it;
+        # this is a safety net for class-level attribute access
         raise AttributeError(name)
 
 
-# 类属性访问兼容: HIPInfo.vec_types 由 _vec_types 填充后即为普通 dict
+# Class-attribute access compatibility: once _vec_types fills HIPInfo.vec_types it is a plain dict
 def __getattr__(name:str):
     if name == "vec_types":
         return HIPInfo._vec_types()
@@ -133,6 +133,6 @@ func_signatures = {
 }
 
 
-# import 时填充(避免循环导入, 放在模块尾)
+# Filled at import time (avoids circular imports, so it sits at the end of the module)
 HIPInfo.scalar_types = HIPInfo._scalar_types()
 HIPInfo.vec_types = HIPInfo._vec_types()

@@ -14,7 +14,7 @@ class CPreprocessor:
         try:
             rel_file_name = os.path.relpath(abs_file_name).replace("\\", "/")
         except ValueError:
-            # 跨盘符无法计算相对路径(如临时文件在 C:, 工程在 E:)
+            # relative paths cannot be computed across drives (e.g. the temp file is on C:, the project on E:)
             return abs_file_name
         if len(rel_file_name) > len(abs_file_name):
             return abs_file_name
@@ -89,11 +89,13 @@ class CPreprocessor:
 
     @staticmethod
     def __collect_includes(file_name:str, include_paths:List[str], related:Set[str], processed:Set[str])->None:
-        """递归收集 #include 展开涉及的文件。
+        """Recursively collect the files involved in #include expansion.
 
-        pcpp 只对产生输出行的文件生成 #line 指令,纯宏定义的 include 不会出现在
-        输出里,导致 related_files 漏掉它们(include 变更永远不触发缓存失效)。
-        processed 是去重集合,related 是输出集合(可能已含 #line 提取到的文件)。
+        pcpp only emits #line directives for files that produce output lines, so
+        includes containing pure macro definitions never appear in the output and
+        related_files misses them (a changed include never invalidates the cache).
+        processed is the dedup set, related is the output set (which may already
+        contain files extracted from #line).
         """
         abs_file_name:str = os.path.abspath(file_name).replace("\\", "/")
         if abs_file_name in processed:
@@ -128,6 +130,6 @@ class CPreprocessor:
         input = open(filename, 'r', encoding='utf-8')
 
         clean_code, line_map, related_files = CPreprocessor.macros_expand(input, include_paths, defines)
-        # #line 只能提取产生输出行的文件,这里递归补齐全部 include
+        # #line only yields files that produce output lines; recursively complete the full include set here
         CPreprocessor.__collect_includes(filename, include_paths or [], related_files, set())
         return clean_code, line_map, related_files

@@ -21,11 +21,10 @@ from .builtins import (
 )
 from .builtins import gpu as GPU_BUILTINS
 from ..vec_types import funcs as VEC_FUNCS
-from ..vec_types import funcs as VEC_FUNCS
 
 
 def get_dedented_source(func:Callable)->str:
-    """读取函数源码, 去掉装饰器行并 dedent(类方法源码带缩进, ast.parse 需要顶层 def)。"""
+    """Read the function source, drop decorator lines and dedent (class methods are indented; ast.parse needs a top-level def)."""
     try:
         source:str = inspect.getsource(func)
     except OSError as e:
@@ -36,7 +35,7 @@ def get_dedented_source(func:Callable)->str:
 
 
 def scan_self_attrs(func:Callable, self_param:str)->List[str]:
-    """收集方法体里引用的 self.xxx 属性名(按首次出现顺序)。"""
+    """Collect the self.xxx attribute names referenced in the method body (in first-occurrence order)."""
     if not self_param:
         return []
     tree:ast.Module = ast.parse(get_dedented_source(func), mode="exec")
@@ -70,12 +69,12 @@ DTYPE_MAP:Dict[str, str] = {
     "float16": "half", "float32": "float", "float64": "double",
 }
 
-PTR = "*"  # 类型记法: ("*", base) 表示数组参数,字符串表示标量
+PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string means a scalar
 
 _C_FIELD_TYPES:Dict[Any, str] = {}
 
 def _vec_registry()->Dict[str, Any]:
-    """vec 类型名 -> ctypes 类(如 float4),惰性构建。"""
+    """vec type name -> ctypes class (e.g. float4), built lazily."""
     global _VEC_REGISTRY
     try:
         return _VEC_REGISTRY
@@ -139,9 +138,9 @@ def promote(t1:Any, t2:Any)->Any:
     return "int"
 
 def infer_ctype(value:Any)->Any:
-    """调用时实参 -> C 类型。"""
+    """Actual call argument -> C type."""
     registry:Dict[str, Any] = _vec_registry()
-    dtype_to_vec:Dict[Any, str] = {cls.dtype: name for name, cls in registry.items()}
+    dtype_to_vec:Dict[Any, str] = {cls.numpy_dtype(): name for name, cls in registry.items()}
 
     if isinstance(value, np.void):
         vec_name:str = dtype_to_vec.get(value.dtype)
@@ -181,10 +180,10 @@ def short_hash(text:str)->str:
 
 
 class FunctionTranslator:
-    """将单个 Python 函数翻译为 C 函数(kernel 或设备函数)。
+    """Translate a single Python function into a C function (kernel or device function).
 
-    is_kernel=True 时函数体最外层的
-    `for i in range(<array>.shape[0])` 循环会被翻译为 work-item。
+    With is_kernel=True, the outermost `for i in range(<array>.shape[0])`
+    loop of the function body is translated into the work-item dispatch.
     """
 
     def __init__(self, func:Callable, param_types:List[Any], backend:str,
@@ -212,6 +211,16 @@ class FunctionTranslator:
         self.shapes_used:List[Tuple[str, int]] = []
         self.gid_param:Optional[str] = None
         self.work_size_dims:List[Tuple[str, int]] = []
+        # Array names declared by an explicit `gpu.work_size(x)` statement; this is the
+        # gid-style equivalent of a magic loop's implied iteration domain. The rank comes
+        # from each array's runtime shape (a pointer type carries no rank).
+        self.declared_work_arrays:List[str] = []
+        # Set when the body calls gpu.get_global_id()/... , i.e. it dispatches on the launch
+        # index and therefore needs an iteration domain from somewhere.
+        self.uses_global_id:bool = False
+        # Set once a magic loop is detected: it fixes the iteration domain, so an explicit
+        # gpu.work_size(...) declaration would be redundant.
+        self.magic_loop_present:bool = False
         self.atomic_targets:Set[str] = set()
         self._tmp_counter:int = 0
         self.local_buffers:List[Tuple[str, str, int]] = []
@@ -235,14 +244,14 @@ class FunctionTranslator:
                 raise PyKernelSyntaxError("type annotations are not needed, remove them", arg)
             scope[arg.arg] = t
             self.params.append((arg.arg, t))
-        # self.xxx 属性 -> 附加设备参数 _self_xxx,调用时由实例取值传入
+        # self.xxx attributes -> extra device parameters _self_xxx, filled from the instance at call time
         for attr, t in self.self_attr_types.items():
             pname:str = f"_self_{attr}"
             scope[pname] = t
             self.params.append((pname, t))
         self.scopes.append(scope)
 
-    # ---------- 基础工具 ----------
+    # ---------- basic utilities ----------
 
     def _error(self, message:str, node:Optional[ast.AST]=None)->Any:
         raise PyKernelSyntaxError(message, node, self.filename)
@@ -275,7 +284,7 @@ class FunctionTranslator:
     def _trim_source(self)->str:
         return get_dedented_source(self.func)
 
-    # ---------- 翻译入口 ----------
+    # ---------- translation entry ----------
 
     def translate(self)->None:
         body:List[ast.stmt] = self.tree.body
@@ -288,7 +297,7 @@ class FunctionTranslator:
                 self.return_type = "void"
 
     def _shape_holder_param(self, attr_node:ast.expr)->Optional[str]:
-        """`X.shape` 的 X 是数组参数时返回参数名(普通参数名或 _self_ 属性参数名)。"""
+        """When X in `X.shape` is an array parameter, return its parameter name (plain name or _self_ attribute parameter)."""
         if not (isinstance(attr_node, ast.Attribute) and attr_node.attr == "shape"):
             return None
         base:ast.expr = attr_node.value
@@ -312,7 +321,7 @@ class FunctionTranslator:
         return (self._shape0_range_param(iter_node) is not None)
 
     def _enumerate_magic_target(self, iter_node:ast.expr)->Optional[Tuple[str, Any]]:
-        """`for i, x in enumerate(arr)` 的数组参数解析, 返回 (参数名, 指针类型)。"""
+        """Resolve the array parameter of `for i, x in enumerate(arr)`, returning (parameter name, pointer type)."""
         if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
                 and iter_node.func.id == "enumerate" and len(iter_node.args) == 1 and not iter_node.keywords):
             return None
@@ -331,7 +340,7 @@ class FunctionTranslator:
         return param, t
 
     def _emit_work_item_head(self, index_name:str, param:str)->None:
-        """发射 gid 与越界保护。"""
+        """Emit the gid definition and the out-of-range guard."""
         self._define(index_name, "int", None)
         gid_bound:str = self._shape_var(param, 0)
         if self.backend == "opencl":
@@ -341,9 +350,10 @@ class FunctionTranslator:
         self._emit(f"if ({index_name} >= {gid_bound}) return;")
 
     def _nd_magic_target(self, iter_node:ast.expr)->Optional[Tuple[str, str, str]]:
-        """np.ndindex(arr.shape) / np.ndenumerate(arr) 魔法循环解析。
+        """Parse the np.ndindex(arr.shape) / np.ndenumerate(arr) magic loops.
 
-        返回 (形式, 数组参数名, 模块名); ndenumerate 的元素类型由调用方查 scope。
+        Returns (form, array parameter name, module name); ndenumerate's element
+        type is looked up in scope by the caller.
         """
         if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Attribute)
                 and isinstance(iter_node.func.value, ast.Name) and len(iter_node.args) == 1
@@ -359,11 +369,11 @@ class FunctionTranslator:
         arg:ast.expr = iter_node.args[0]
         param:str = ""
         if form == "ndindex":
-            # np.ndindex(<数组>.shape)
+            # np.ndindex(<array>.shape)
             if isinstance(arg, ast.Attribute) and arg.attr == "shape":
                 param = (self._shape_holder_param(arg) or "")
         else:
-            # np.ndenumerate(<数组>)
+            # np.ndenumerate(<array>)
             if isinstance(arg, ast.Name):
                 param = arg.id
             elif (self.self_param and isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
@@ -374,7 +384,7 @@ class FunctionTranslator:
         return form, param, iter_node.func.value.id
 
     def _emit_nd_head(self, names:List[str], param:str)->None:
-        """多维 work-item 头: names[0] 对应第 0 维(最慢), 最后一维对应 gid0(最快)。"""
+        """Multi-dimensional work-item head: names[0] maps to dimension 0 (slowest), the last name maps to gid0 (fastest)."""
         ndim:int = len(names)
         for d, name in enumerate(names):
             self._define(name, "int", None)
@@ -392,7 +402,7 @@ class FunctionTranslator:
         self._emit(f"if ({' || '.join(checks)}) return;")
 
     def _nd_flat_index(self, names:List[str], param:str)->str:
-        """行主序扁平下标表达式: n0*s1*s2 + n1*s2 + n2。"""
+        """Row-major flat index expression: n0*s1*s2 + n1*s2 + n2."""
         terms:List[str] = []
         ndim:int = len(names)
         for d, name in enumerate(names):
@@ -424,13 +434,18 @@ class FunctionTranslator:
                 break
 
         if magic_index is None:
-            # 无魔法循环:用户通过 gpu.get_global_id 等内建自行索引,
-            # work size 由调用方 global_size 或输出数组形状自动推断
+            # No magic loop: the user indexes via gpu.get_global_id and friends. The iteration
+            # domain then has to come from somewhere: either an explicit gpu.work_size(...)
+            # declaration, or the bracket at call time. Without either, the launch size cannot
+            # be derived (see PyKernel._invoke).
             for stmt in body:
                 self._visit_statement(stmt)
             return
 
-        # 魔法循环之前的语句照常翻译(如局部变量初始化)
+        # Statements before the magic loop are translated as usual (e.g. local variable initialization).
+        # The magic loop already fixes the iteration domain, so a gpu.work_size(...) declaration
+        # among them would be redundant: flag it before visiting so the check sees the conflict.
+        self.magic_loop_present = True
         for stmt in body[:magic_index]:
             self._visit_statement(stmt)
 
@@ -448,7 +463,7 @@ class FunctionTranslator:
 
             self.gid_param = param
             self._emit_work_item_head(index_name, param)
-            # x 为元素值快照(与 python 语义一致: 重新绑定 x 不会写回数组)
+            # x is an element-value snapshot (matches python semantics: rebinding x does not write back to the array)
             elem_t:Any = arr_t[1]
             self._define(value_name, elem_t, target.elts[1])
             self._emit(f"{elem_t} {value_name} = {param}[{index_name}];")
@@ -465,7 +480,7 @@ class FunctionTranslator:
             loop:ast.For = body[magic_index]
             target = loop.target
 
-            # 目标解包: ndindex -> (y, x); ndenumerate -> ((y, x), v)
+            # Target unpacking: ndindex -> (y, x); ndenumerate -> ((y, x), v)
             value_name:str = ""
             names_node:ast.expr = target
             if form == "ndenumerate":
@@ -523,14 +538,14 @@ class FunctionTranslator:
             self._emit(f"const int {target} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
         self._emit(f"if ({target} >= {gid_bound}) return;")
 
-        # 循环体即 work-item 主体; 嵌套的 range 循环按真实串行循环翻译
+        # The loop body is the work-item body; nested range loops translate as real serial loops
         for stmt in loop.body:
             self._visit_statement(stmt)
         for stmt in body[magic_index + 1:]:
             self._visit_statement(stmt)
         self.work_size_dims = [(array_name, 0)]
 
-    # ---------- 语句 ----------
+    # ---------- statements ----------
 
     def _visit_statement(self, node:ast.stmt)->None:
         if isinstance(node, ast.Assign):
@@ -555,10 +570,18 @@ class FunctionTranslator:
         elif isinstance(node, ast.Return):
             self._visit_return(node)
         elif isinstance(node, ast.Expr):
-            # 表达式语句(如 gpu.atomic_add(...)/gpu.barrier())必须 emit,否则副作用丢失
-            code, _ = self._visit_expression(node.value)
-            if code:
-                self._emit(f"{code};")
+            # Bare string literals (e.g. the function docstring) are ignored, not emitted into the kernel
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                pass
+            elif self._is_work_size_decl(node.value):
+                # gpu.work_size(...) is host-side only: it declares the iteration domain and
+                # produces no device code at all.
+                self._handle_work_size_decl(node.value)
+            else:
+                # Other expression statements (e.g. gpu.atomic_add(...)/gpu.barrier()) must be emitted, otherwise side effects are lost
+                code, _ = self._visit_expression(node.value)
+                if code:
+                    self._emit(f"{code};")
         elif isinstance(node, ast.Break):
             self._emit("break;")
         elif isinstance(node, ast.Continue):
@@ -653,14 +676,14 @@ class FunctionTranslator:
             self._error("chained assignment is not supported", node)
         target:ast.expr = node.targets[0]
 
-        # self.xxx = ... : 宿主属性无法从设备端写回
+        # self.xxx = ... : host attributes cannot be written back from device code
         if (self.self_param and isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
                 and target.value.id == self.self_param):
             self._error(
                 f"cannot assign to self.{target.attr}: host attributes cannot be written by device code; "
                 f"write into an array element (self.{target.attr}[i] = ...) or use a local variable", node)
 
-        # local memory 声明: buf = gpu.local(np.float32, 64)
+        # local memory declaration: buf = gpu.local(np.float32, 64)
         if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
                 and node.value.func.attr == "local"
                 and isinstance(node.value.func.value, ast.Name)
@@ -668,7 +691,7 @@ class FunctionTranslator:
             self._handle_local_declaration(node)
             return
 
-        # 元组解包/交换: a, b = b, a
+        # Tuple unpacking/swap: a, b = b, a
         if isinstance(target, ast.Tuple):
             if not isinstance(node.value, ast.Tuple) or len(target.elts) != len(node.value.elts):
                 self._error("tuple assignment requires matching tuples on both sides", node)
@@ -718,10 +741,10 @@ class FunctionTranslator:
             self._error(f"unsupported assignment target: {target.__class__.__name__}", node)
 
     def _handle_local_declaration(self, node:ast.Assign)->None:
-        """buf = gpu.local(np.float32, 64) -> local memory 数组。
+        """buf = gpu.local(np.float32, 64) -> a local memory array.
 
-        opencl: kernel 签名追加 __local 参数, 启动时传字节数;
-        cuda: 函数体开头声明 __shared__ 数组。
+        opencl: append a __local parameter to the kernel signature, pass byte size at launch;
+        cuda: declare a __shared__ array at the top of the function body.
         """
         call:ast.Call = node.value
         if len(call.args) != 2 or call.keywords:
@@ -758,6 +781,55 @@ class FunctionTranslator:
         if not isinstance(target, ast.Name):
             self._error("gpu.local() result must be assigned to a plain variable", node)
         self._define(target.id, ("lptr", ctype, c_name, count_node.value), node)
+
+    def _is_work_size_decl(self, node:ast.expr)->bool:
+        """True for a `gpu.work_size(...)` statement call."""
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "work_size"
+                and isinstance(node.func.value, ast.Name)
+                and self.resolve_global(node.func.value.id) is GPU_BUILTINS)
+
+    def _handle_work_size_decl(self, call:ast.Call)->None:
+        """`gpu.work_size(x)` declares the iteration domain as x's full shape.
+
+        This is the gid-style counterpart of a magic loop: a kernel that dispatches on
+        `gpu.get_global_id` has no loop to read the domain from, so without this the launch
+        size cannot be derived. The statement is host-side only and emits no device code.
+
+        The single argument is an array parameter, and it contributes ALL of its dimensions,
+        exactly what `for ... in np.ndindex(x.shape)` would give: a 1-D array (the usual
+        reduction) declares one dimension, an (h, w) array declares two. The generated kernel
+        still clamps each work item against those bounds.
+        """
+        if not self.is_kernel:
+            self._error("gpu.work_size() is only meaningful in a @kernel function", call)
+        if call.keywords:
+            self._error("gpu.work_size() takes no keyword arguments", call)
+        if len(call.args) != 1:
+            self._error(
+                "gpu.work_size() takes exactly one array parameter: that array supplies the "
+                "iteration domain, dimension by dimension (like np.ndindex(x.shape)). "
+                "For a 1-D reduction this is gpu.work_size(x).", call)
+        if self.work_size_dims or self.magic_loop_present:
+            self._error(
+                "gpu.work_size() is redundant here: this kernel's magic loop already "
+                "declares the iteration domain", call)
+        if self.declared_work_arrays:
+            self._error("gpu.work_size() must appear only once per kernel", call)
+
+        item:ast.expr = call.args[0]
+        if not isinstance(item, ast.Name):
+            self._error(
+                "gpu.work_size() takes an array parameter, e.g. gpu.work_size(x)", item)
+        name:str = item.id
+        if not is_ptr(self._lookup(name)):
+            self._error(
+                f"gpu.work_size({name}) requires an array parameter; "
+                f"'{name}' is not an array", item)
+
+        # Record the array name; the concrete dimension count comes from its shape at launch
+        # time (a pointer type carries no rank), which PyKernel expands at call time.
+        self.declared_work_arrays = [name]
 
     def _visit_augassign(self, node:ast.AugAssign)->None:
         target_code, target_t = self._visit_target(node.target)
@@ -836,7 +908,7 @@ class FunctionTranslator:
             return f"_self_{node.attr}"
         self._error("unsupported array expression", node)
 
-    # ---------- 表达式 ----------
+    # ---------- expressions ----------
 
     def _visit_expression(self, node:ast.expr)->Tuple[str, Any]:
         if isinstance(node, ast.Constant):
@@ -898,10 +970,11 @@ class FunctionTranslator:
         self._error(f"unknown name '{node.id}' (only parameters, local variables and int/float/bool global constants are supported)", node)
 
     def _vec_componentwise(self, op:str, left:str, vec:str, right:str="", scalar:str="")->str:
-        """CUDA 没有向量算术/数学重载,展开为逐分量。
+        """CUDA has no vector arithmetic/math overloads; expand into per-component form.
 
-        op 为中缀符号(+ - * /)时生成 `l.c op r.c`;为函数名(sqrt 等)时生成 `op(l.c, r.c)`。
-        right 为向量操作数,scalar 为广播标量操作数。
+        When op is an infix symbol (+ - * /) generate `l.c op r.c`; when it is a
+        function name (sqrt etc.) generate `op(l.c, r.c)`.
+        right is a vector operand, scalar is a broadcast scalar operand.
         """
         cls:Any = _vec_registry()[vec]
         components:List[str] = [field_name for field_name, _ in cls._fields_]
@@ -938,7 +1011,7 @@ class FunctionTranslator:
                     return self._vec_componentwise(symbol, left, lt, right=right), lt
                 return self._vec_componentwise_compare(symbol, left, lt, right), self._get_int_vec_type(lt)
 
-            # 向量与标量: 广播逐分量
+            # vector with scalar: broadcast per component
             vec, vec_side_left = (lt, True) if is_vec(lt) else (rt, False)
             if self.backend == "opencl":
                 code:str = f"({left} {symbol} {right})" if vec_side_left else f"({right} {symbol} {left})"
@@ -1004,7 +1077,7 @@ class FunctionTranslator:
 
         left, lt = self._visit_expression(node.left)
         if is_vec(lt):
-            # 向量比较(opencl 原生返回 int 向量; cuda 逐分量生成), 与 genVec._compare_op 语义一致
+            # vector comparison (opencl natively returns an int vector; cuda generates per-component), same semantics as genVec._compare_op
             if len(node.ops) != 1:
                 self._error("chained comparison is not supported on vector types", node)
             name:str = node.ops[0].__class__.__name__
@@ -1034,7 +1107,7 @@ class FunctionTranslator:
             array_name:str = self._array_name(value.value)
             t:Any = self._lookup(array_name)
             if not is_ptr(t):
-                self._error(f"'.shape' is only available on array parameters", node)
+                self._error("'.shape' is only available on array parameters", node)
             index:ast.expr = node.slice
             if isinstance(index, ast.Constant) and isinstance(index.value, int):
                 return self._shape_var(array_name, index.value), "int"
@@ -1045,7 +1118,7 @@ class FunctionTranslator:
         return f"{base_code}[{index_code}]", base_t
 
     def _visit_attribute(self, node:ast.Attribute)->Tuple[str, Any]:
-        # self.xxx -> 附加参数 _self_xxx
+        # self.xxx -> extra parameter _self_xxx
         if (self.self_param and isinstance(node.value, ast.Name) and node.value.id == self.self_param):
             if node.attr not in self.self_attr_types:
                 self._error(
@@ -1071,7 +1144,7 @@ class FunctionTranslator:
             return f"({base_code}.{node.attr})", _C_FIELD_TYPES[field_key]
         self._error(f"unsupported attribute access: .{node.attr}", node)
 
-    # ---------- 调用 ----------
+    # ---------- calls ----------
 
     def _visit_call(self, node:ast.Call)->Tuple[str, Any]:
         func:ast.expr = node.func
@@ -1097,7 +1170,7 @@ class FunctionTranslator:
 
             target:Any = self.resolve_global(name)
             if callable(target):
-                # pygpgpu.vec_types.funcs 的向量数学函数与 gpu.* 内建同名同语义
+                # vector math functions in pygpgpu.vec_types.funcs share name and semantics with gpu.* builtins
                 if getattr(target, "__module__", "") == VEC_FUNCS.__name__:
                     return self._emit_gpu_builtin(name, args, node)
                 return self._emit_device_call(name, target, args, node)
@@ -1161,8 +1234,8 @@ class FunctionTranslator:
         vec_arg:Optional[str] = None
         for i, (code, t) in enumerate(args):
             if is_ptr(t):
-                # python 语义: math.* 只接受标量; np.*(arr) 是宿主端逐元素运算,
-                # 返回新数组, 无法在 work-item 内核中表示 -> 要求索引到元素
+                # python semantics: math.* only accepts scalars; np.*(arr) is a host-side element-wise
+                # operation returning a new array, which cannot be represented in a work-item kernel -> require indexing to an element
                 arr_desc:str = (node.args[i].id if isinstance(node.args[i], ast.Name) else "the argument")
                 self._error(
                     f"{module_name}.{attr}() cannot be applied to the array '{arr_desc}': "
@@ -1175,8 +1248,8 @@ class FunctionTranslator:
                 ret = "double"
 
         if vec_arg is not None:
-            # python 语义: math/np 函数不接受向量结构体(np.sqrt(float4_value) 会 TypeError)。
-            # OpenCL 原生支持逐分量向量数学; CUDA 通过逐分量展开实现。
+            # python semantics: math/np functions do not accept vector structs (np.sqrt(float4_value) raises TypeError).
+            # OpenCL natively supports per-component vector math; CUDA implements it by per-component expansion.
             if ret_override is not None:
                 self._error(
                     f"{module_name}.{attr}() on vector type {vec_arg} is not supported "
@@ -1208,12 +1281,14 @@ class FunctionTranslator:
             return f"({name})({', '.join(codes)})", name
         return f"make_{name}({', '.join(codes)})", name
 
-    # ---------- gpu.* 设备内建 ----------
+    # ---------- gpu.* device builtins ----------
 
     def _emit_gpu_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         if name in INDEX_BUILTINS:
             if len(args) != 1 or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, int):
                 self._error(f"gpu.{name}(dim) requires a constant integer dimension (0, 1 or 2)", node)
+            if name in ("get_global_id", "get_global_size"):
+                self.uses_global_id = True
             return emit_index(name, node.args[0].value, self.backend), "int"
 
         if name == "barrier":
@@ -1228,8 +1303,8 @@ class FunctionTranslator:
             if not is_ptr(arr_t):
                 self._error(f"gpu.{name}() first argument must be an array", node)
             if isinstance(node.args[0], ast.Name):
-                # 原子操作通过指针强转写内存,静态分析无法识别该模式,
-                # 记录目标参数,由 PyKernel 在编译后强制标记为可写
+                # atomic ops write memory via pointer casts, which static analysis cannot recognize;
+                # record the target parameter so PyKernel forcibly marks it writable after compilation
                 self.atomic_targets.add(node.args[0].id)
             if arr_t[1] not in ("int", "uint", "long", "ulong"):
                 self._error(f"gpu.{name}() only supports integer arrays, got {arr_t[1]}", node)
@@ -1343,9 +1418,9 @@ class FunctionTranslator:
             if is_vec(a_t):
                 if not is_vec(c_t):
                     self._error("gpu.select() on vectors requires a vector condition", node)
-                # opencl 原生 select 对 int 条件的判断实现相关(NVIDIA 按 MSB):
-                # 用 (cond == 0) 生成 0/-1 掩码(MSB 明确), select(b, a, mask) 即
-                # cond 非 0 -> b, cond == 0 -> a
+                # opencl's native select treats int conditions implementation-defined (NVIDIA uses the MSB):
+                # (cond == 0) yields a 0/-1 mask (MSB unambiguous), select(b, a, mask) means
+                # cond nonzero -> b, cond == 0 -> a
                 if self.backend == "opencl":
                     int_vec:str = self._get_int_vec_type(a_t)
                     return f"select({b_code}, {a_code}, ({c_code} == ({int_vec})(0)))", a_t
@@ -1362,7 +1437,7 @@ class FunctionTranslator:
                 if not (is_vec(lt) and is_vec(rt)) or lt != rt:
                     self._error(f"gpu.{name}() vector operands must have the same type", node)
                 if self.backend == "opencl":
-                    # opencl 向量关系函数的 true 是 -1(全 1 位), & 1 归一化为 1
+                    # opencl vector relation functions use -1 (all-1 bits) for true; & 1 normalizes it to 1
                     return f"({name}({lcode}, {rcode}) & 1)", self._get_int_vec_type(lt)
                 return self._emit_vec_relation(name, lcode, rcode, lt), self._get_int_vec_type(lt)
             if self.backend == "opencl":
@@ -1388,9 +1463,9 @@ class FunctionTranslator:
             if any(is_vec(t) for _, t in args):
                 if not all(is_vec(t) for _, t in args) or len({t for _, t in args}) != 1:
                     self._error(f"gpu.{name}() vector operands must all be the same vector type", node)
-                # 整数函数族统一逐分量生成: NVIDIA 的 opencl 实现会把返回类型无符号化
-                # (abs_diff/hadd/rhadd/mul24/mad24),直接调用 int 向量会编译失败或
-                # 结果类型漂移;逐分量展开则与 cuda 路径和宿主语义完全一致
+                # generate the integer function family uniformly per-component: NVIDIA's opencl implementation
+                # unsigned-izes the return type (abs_diff/hadd/rhadd/mul24/mad24), so calling it directly on int
+                # vectors fails to compile or drifts the result type; per-component expansion matches the cuda path and host semantics exactly
                 if name == "abs_diff":
                     return self._emit_vec_absdiff(arg_codes[0], arg_codes[1], vec_t), vec_t
                 if name == "hadd":
@@ -1445,7 +1520,7 @@ class FunctionTranslator:
         return f"{maker}({inner})"
 
     def _emit_vec_swizzle(self, code:str, vec:str, swizzle:str, node:ast.Attribute)->Tuple[str, Any]:
-        """读 swizzle: opencl 原生 v.xy; cuda 逐分量 make_float2(v.x, v.y)。"""
+        """Read a swizzle: opencl uses native v.xy; cuda generates per-component make_float2(v.x, v.y)."""
         cls:Any = _vec_registry()[vec]
         valid:Set[str] = {f_name for f_name, _ in cls._fields_}
         chars:Set[str] = set(swizzle)
@@ -1453,7 +1528,7 @@ class FunctionTranslator:
             self._error(f"vector type {vec} has no components '{swizzle}' "
                         f"(available: {''.join(sorted(valid))})", node)
 
-        # 结果类型 = 同元素类型的分量数向量(float4 的 .zyx -> float3, .xy -> float2)
+        # Result type = vector with the same element type and the component count (.zyx of float4 -> float3, .xy -> float2)
         result_vec:str = vec
         if len(swizzle) != len(cls._fields_):
             elem_ctype:str = _C_FIELD_TYPES[(vec, cls._fields_[0][0])]
@@ -1466,7 +1541,7 @@ class FunctionTranslator:
         if self.backend == "opencl":
             return f"({code}.{swizzle})", result_vec
         if len(swizzle) == len(cls._fields_):
-            # 全分量重排
+            # full-component reorder
             maker:str = f"make_{result_vec}"
             inner:str = ", ".join(f"({code}.{c})" for c in swizzle)
             return f"{maker}({inner})", result_vec
@@ -1475,12 +1550,12 @@ class FunctionTranslator:
         return f"{maker}({inner})", result_vec
 
     def _get_int_vec_type(self, vec:str)->str:
-        """向量比较的结果类型(同形整型向量, 与 genVec._compare_op 语义一致)。"""
+        """Result type of vector comparisons (same-shape integer vector, same semantics as genVec._compare_op)."""
         return "int" + (vec[len(prefix):] if (prefix := "".join(c for c in vec if not c.isdigit())) else "") if vec[-1].isdigit() else ("int" + vec)
 
     def _vec_componentwise_compare(self, op:str, left:str, vec:str, right:str)->str:
-        """向量比较: 结果归一化为逐分量 0/1(设备比较的 true 是 -1 全 1 位,
-        与 genVec._compare_op 的 int(True)=1 语义不同, 这里统一为 0/1)。"""
+        """Vector comparison: normalize the result to per-component 0/1 (device comparisons use -1,
+        all-1 bits, for true, unlike genVec._compare_op's int(True)=1; here it is unified to 0/1)."""
         cls:Any = _vec_registry()[vec]
         components:List[str] = [f_name for f_name, _ in cls._fields_]
         int_vec:str = self._get_int_vec_type(vec)
@@ -1532,7 +1607,7 @@ class FunctionTranslator:
         return f"((int)(({lcode}) {op} ({rcode})))"
 
     def _vec_maker(self, vec:str, inner:str)->str:
-        """按后端组装向量: opencl (vec)(...) / cuda make_vec(...)。"""
+        """Assemble the vector per backend: opencl (vec)(...) / cuda make_vec(...)."""
         if self.backend == "opencl":
             return f"({vec})({inner})"
         return f"make_{vec}({inner})"

@@ -1,22 +1,18 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer
-from typing import Dict, List, Any, Optional, TYPE_CHECKING, Set, override
+from typing import Dict, List, Any, Optional, Set, override
 
 from .hipobject import HIPObject
-from .device import Device
 from .build_options import BuildOptions
 from ..driver import (
     HIP,
-    CUfunction,
-    CUmodule,
-    ptr_CUfunction
+    CUmodule
 )
 from ctypes import c_char
 from .program_info import KernelInfo
 from .hip_compiler import HipCompiler
 from .kernel import Kernel
 from .context import Context
-from .device import Device
 
 
 class Program(HIPObject):

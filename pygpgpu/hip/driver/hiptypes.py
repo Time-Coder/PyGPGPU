@@ -1,4 +1,4 @@
-from ctypes import c_int, c_uint, c_void_p, c_ulonglong, c_char_p, POINTER, CFUNCTYPE
+from ctypes import c_int, c_void_p, c_ulonglong, c_char_p, POINTER, CFUNCTYPE
 from enum import IntEnum
 
 
@@ -9,7 +9,7 @@ class hipError(IntEnum):
     NOT_INITIALIZED = 3
 
 
-# 与 cuda 后端同名的类型别名,便于 oop 层移植
+# Type aliases named like the cuda backend's, to ease porting of the oop layer
 CUdevice = c_int
 CUdeviceptr = c_ulonglong
 CUmodule = c_void_p

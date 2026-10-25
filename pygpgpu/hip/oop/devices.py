@@ -38,7 +38,7 @@ class MetaDevices(type):
             self.__devices_set.add(device_id.value)
     
     def device(self, keyword:str)->Device:
-        """按 编号 / 名称或厂商子串 / "名字:序号" 查找设备。"""
+        """Look up a device by index / name or vendor substring / "name:ordinal"."""
         keyword_lower:str = keyword.lower()
 
         if keyword_lower in self.__devices_map:

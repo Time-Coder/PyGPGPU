@@ -4,8 +4,8 @@ import os
 import sys
 import copy
 import json
-from ctypes import c_char_p, c_uint64, Structure, _Pointer, pointer
-from typing import Optional, Dict, Any, List, Set, Union, Iterator, Tuple, TYPE_CHECKING
+from ctypes import c_char_p, c_uint64, Structure
+from typing import Optional, Dict, Any, List, Set, Union, TYPE_CHECKING
 
 from ...cparser import CPreprocessor
 from ...cparser.ts_parser import TSParserMixin
@@ -14,8 +14,7 @@ from ..driver import (
     cl_kernel_arg_address_qualifier,
     cl_kernel_arg_access_qualifier,
     cl_kernel_arg_type_qualifier,
-    CLInfo,
-    ptr_cl_mem
+    CLInfo
 )
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
@@ -28,7 +27,7 @@ import numpy as np
 from ... import numpy as gnp
 
 import tree_sitter_opencl as tscl
-from tree_sitter import Language, Parser, Node
+from tree_sitter import Language, Parser
 
 
 class ProgramParser(TSParserMixin):
@@ -113,7 +112,7 @@ class ProgramParser(TSParserMixin):
             self._parse()
             self._save()
             if CL.print_info:
-                print(f"done. ", flush=True)
+                print("done. ", flush=True)
         else:
             if CL.print_info:
                 print(f"load {self.base_name}'s meta info from cache.", flush=True)
@@ -231,7 +230,7 @@ class Kernel_{kernel_name}(KernelWrapper):
         return self._newest_mtime
 
     def is_up_to_date(self)->bool:
-        """进程内缓存复用前的新鲜度校验,判定逻辑与 _load 一致。"""
+        """Freshness check before reusing the in-process cache; the logic matches _load."""
         if not self._file_name:
             return False
 
@@ -397,7 +396,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                     svm_buffer.kernel_flags = var_info.kernel_flags
                     event = svm_buffer.set_data(cmd_queue, used_value)
 
-                    # SVM 指针既是主机地址也是设备地址,可直接嵌入 struct
+                    # an SVM pointer is both a host address and a device address, so it can be embedded directly into a struct
                     setattr(self, ptr_field_prefix + ori_name, svm_buffer.id.value)
 
                     need_read_back:bool = (var_info.need_read_back and not isinstance(data, gnp.ndarray))

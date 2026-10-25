@@ -4,19 +4,19 @@ import importlib.util
 from types import ModuleType
 from typing import Optional
 
-from ..utils import local_size_for_global
+from ..utils import local_size_for_global, device_limits
 from .oop.program import Program
 from .oop.build_options import BuildOptions
 from .oop.devices import Devices
 
 
 class HIPKernelWrapper:
-    """手写 .hip kernel 的中括号包装(总数语义, 与 opencl/cuda 手写用法对齐)。
+    """Bracket-style wrapper for handwritten .hip kernels (total-work-item semantics, matching the handwritten opencl/cuda usage).
 
-        k(args)                          # 默认设备, work size 自动
-        k["gfx1036"](args)               # 设备(编号/名称子串/名:序号)
-        k[total, local](args)            # local 可 None(自动)
-        k["gfx1036"][total, local](args) # 顺序不限
+        k(args)                          # default device, automatic work size
+        k["gfx1036"](args)               # device (index/name substring/name:ordinal)
+        k[total, local](args)            # local may be None (automatic)
+        k["gfx1036"][total, local](args) # either order
     """
 
     def __init__(self, hip_path:str, name:str, kernel, compiler, type_checked:bool, options:BuildOptions):
@@ -52,7 +52,10 @@ class HIPKernelWrapper:
         total = norm(self._total)
         local = norm(self._local)
         if local is None:
-            local = local_size_for_global(total)
+            device = (self._device if self._device is not None else Devices[0])
+            max_group, max_items = device_limits(device)
+            local = local_size_for_global(
+                total, max_work_group_size=max_group, max_work_item_sizes=max_items)
         if len(local) != len(total):
             raise ValueError(
                 f"global {total} and local {local} work sizes must have the same dimension")

@@ -1,9 +1,8 @@
 from __future__ import annotations
 import functools
-from typing import Dict, Tuple, TYPE_CHECKING, List, Optional, Any
+from typing import Dict, Tuple, TYPE_CHECKING, List, Optional
 
 import numpy as np
-from numpy.typing import ArrayLike
 
 if TYPE_CHECKING:
     from ..opencl.oop import CommandQueue, Event, MemObject
@@ -80,7 +79,7 @@ class ndarray(np.ndarray):
 
     @staticmethod
     def _print_copy_info()->bool:
-        """后端无关的拷贝日志开关(opencl 的 CL.print_info 或 cuda 的 CUDA.print_info)。"""
+        """Backend-agnostic copy-logging switch (CL.print_info for opencl or CUDA.print_info for cuda)."""
         try:
             from .opencl.driver import CL
             if CL.print_info:
@@ -251,7 +250,7 @@ class ndarray(np.ndarray):
         else:
             self._mem_objs[key][1] = cmd_queue
 
-        # kernel 回调统一 unuse(),这里必须配对 use(),否则回调时 unuse 会失败
+        # kernel callbacks always call unuse(), so use() must be paired here, otherwise unuse fails at callback time
         event = None
         mem_obj = self._mem_objs[key][0]
         mem_obj.use()

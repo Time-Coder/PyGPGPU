@@ -1,18 +1,17 @@
-"""HIP 源码编译器: 本机 hipRTC 损坏(空日志错误), 改用 ROCm 自带 clang 子进程。
+"""HIP source compiler: hipRTC is broken on this machine (errors with an empty log), so we spawn ROCm's own clang instead.
 
-编译需要 C++ 标准库头(hip 的 clang wrapper 强制 include cstdlib 等),
-自动发现 MSVC / Windows SDK 的 include 路径(支持任意盘符),
-可用环境变量 PYGPGPU_HIP_INCLUDES(os.pathsep 分隔)覆盖。
+Compiling needs C++ standard library headers (hip's clang wrapper force-includes cstdlib etc.),
+so we auto-discover the MSVC / Windows SDK include paths (any drive letter),
+overridable with the PYGPGPU_HIP_INCLUDES environment variable (os.pathsep-separated).
 """
 from __future__ import annotations
 
 import glob
 import os
 import subprocess
-from ctypes import pointer, c_char
 from typing import Any, Dict, List, Optional
 
-from ...utils import save_bin, load_bin, modify_time
+from ...utils import modify_time
 from .program_parser import ProgramParser
 
 
@@ -34,7 +33,7 @@ class HipCompiler:
         else:
             self._program_parser:ProgramParser = program_parser
 
-    # ---------- include 路径发现 ----------
+    # ---------- include path discovery ----------
 
     @classmethod
     def include_dirs(cls)->List[str]:
@@ -56,7 +55,7 @@ class HipCompiler:
         for drive in drives:
             for pattern in patterns:
                 for found in glob.glob(pattern % drive):
-                    msvc_dirs[drive] = found   # 每盘取最后一个(glob 字典序最大版本)
+                    msvc_dirs[drive] = found   # keep the last match per drive (highest glob lexicographic version)
         dirs.extend(msvc_dirs.values())
 
         sdk_dirs:Dict[str, List[str]] = {}
@@ -67,7 +66,7 @@ class HipCompiler:
                     path = os.path.join(sdkver, sub)
                     if os.path.isdir(path):
                         sdk_dirs[drive].append(path)
-        # 与 MSVC 同盘的 SDK 优先
+        # Prefer the SDK on the same drive as MSVC
         for drive in msvc_dirs:
             if drive in sdk_dirs:
                 dirs.extend(sdk_dirs.pop(drive))
@@ -86,10 +85,10 @@ class HipCompiler:
                 return candidate
         return "clang.exe"
 
-    # ---------- 编译 ----------
+    # ---------- compilation ----------
 
     def code_object(self, device:Any)->bytes:
-        """按设备架构编译(gfx1036 等), 返回代码对象字节(hipModuleLoadData 可直接加载)。"""
+        """Compile for the device architecture (gfx1036 etc.) and return code object bytes hipModuleLoadData can load directly."""
         arch:str = device.arch
         parser:ProgramParser = self._program_parser
         key:str = f"{parser.md5}|{arch}"
@@ -114,9 +113,9 @@ class HipCompiler:
         newest_mtime = parser.newest_mtime
         if (not os.path.isfile(obj_path)
                 or (newest_mtime and modify_time(clean_path) > modify_time(obj_path))):
-            # hipRTC 按路径失败时用 clang: extern "C" 由 parser 生成的 clean_code 已带
-            # --cuda-device-only: 产出未捆绑的裸 AMDGCN 代码对象,
-            # hipModuleLoadData 可直接加载(-x hip 默认产出宿主 COFF 内嵌 fatbin, 会报 image invalid)
+            # Use clang when hipRTC fails on this path: the extern "C" wrapper is already in the parser-generated clean_code
+            # --cuda-device-only: emits an unbundled raw AMDGCN code object,
+            # which hipModuleLoadData can load directly (-x hip defaults to a host COFF with an embedded fatbin, which reports image invalid)
             cmd:List[str] = [
                 self.clang_path(),
                 "--cuda-device-only",
@@ -151,7 +150,7 @@ class HipCompiler:
         self._objects[key] = data
         return data
 
-    # ---------- 兼容 cuda Program 使用的属性(转发 parser) ----------
+    # ---------- attributes the cuda Program expects (forwarded to the parser) ----------
 
     @property
     def file_name(self)->str:

@@ -4,7 +4,6 @@ from .clobject import CLObject
 from ctypes import pointer, c_void_p, cast, POINTER, py_object
 import concurrent.futures
 import asyncio
-import traceback
 from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, override, Set
 
 from ..driver import (
@@ -132,8 +131,8 @@ class Event(CLObject):
 
     @property
     def finished(self)->bool:
-        # 只有 CL_COMPLETE 才算完成;状态查询失败(ErrorCode)不代表事件已结束,
-        # 否则会误走同步回调路径,在事件真正完成前拷贝脏数据
+        # only CL_COMPLETE counts as finished; a failed status query (ErrorCode) does not mean the event ended,
+        # otherwise the synchronous callback path would be taken by mistake and copy dirty data before the event truly completes
         return (self.status == cl_command_execution_status.CL_COMPLETE)
 
     @property

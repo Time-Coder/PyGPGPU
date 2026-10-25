@@ -2,7 +2,7 @@ from typing import Optional, List
 
 
 class BuildOptions:
-    """hip(clang 子进程)编译选项; 额外选项原样透传 clang。"""
+    """Compile options for hip (clang subprocess); extra options are passed through to clang verbatim."""
 
     def __init__(self, extra_options:Optional[List[str]]=None, fast_math:bool=False, debug:bool=False):
         self.extra_options:List[str] = list(extra_options or [])
