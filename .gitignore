@@ -1,7 +1,8 @@
 __pycache__
 __clcache__
-result.json
-.VSCodeCounter
-*.npy__cucache__
+__cucache__
 __hipcache__
-pygpgpu.egg-info/
+.VSCodeCounter
+*.egg-info
+.dsh-acl-recovery
+.ruff_cache

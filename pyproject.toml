@@ -38,6 +38,8 @@ Homepage = "https://github.com/Time-Coder/PyGPGPU"
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "ruff>=0.9",
+    "ty>=0.0.60",
 ]
 
 [tool.setuptools.packages.find]
@@ -45,3 +47,84 @@ include = ["pygpgpu*"]
 
 [tool.setuptools.package-data]
 pygpgpu = ["**/*.pyi", "**/*.pyi.in"]
+
+# ---------------------------------------------------------------------------
+# ruff -- Python static checks (lint). Run: python -m ruff check
+#   Legacy sources inside pygpgpu, auto-generated .pyi stubs and the vendored
+#   pcpp code are excluded from checking; see extend-exclude and per-file-ignores.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [
+    # auto-generated / regenerated on demand by the import hooks -- never hand-edit
+    "**/*.pyi",
+    # vendored third-party preprocessor
+    "pygpgpu/cparser/pcpp",
+    # legacy cparser: not imported at runtime (cparser.csyntaxtree/ctokens/ShaderBuiltins, ...)
+    "pygpgpu/cparser/cparser.py",
+    "pygpgpu/cparser/minifyc.py",
+    "pygpgpu/cparser/csyntaxtree.py",
+    "pygpgpu/cparser/ctokens.py",
+    "pygpgpu/cparser/ShaderBuiltins.py",
+]
+
+[tool.ruff.lint]
+# Start from the ruff defaults (E4/E7/E9 + F). Wider sets (I/UP/B/SIM) surface far more
+# pre-existing violations than this codebase currently satisfies, so they are left out
+# until that backlog is worked through.
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+    # Bare `except` is deliberate in two shapes:
+    #  - the ctypes error-code wrapper (driver/*.py) converts a return value and swallows
+    #    conversion failures, then reports through CL.check_error;
+    #  - __repr__ fallbacks must never raise.
+    # Besides, the ctypes bindings raise plain exceptions at the FFI boundary, so a narrow
+    # `except SomeError` would be wrong there.
+    "E722",
+    # `l` (local id) is the conventional name for a work-item's local index, `i/j/k` are
+    # taken by indices in the same expressions: e.g. `l = gpu.get_local_id(0)`.
+    "E741",
+    # `from numpy import *` re-exports the numpy surface as pygpgpu.numpy (gnp).
+    "F403",
+    "F405",
+]
+
+# re-export style __init__.py (public aggregation for driver/vector types): F401 unused imports are fine
+[tool.ruff.lint.per-file-ignores]
+"pygpgpu/**/__init__.py" = ["F401"]
+# Generated vector-type module: its hex-digit table maps both 'A'..'F' and 'a'..'f'; ruff's
+# F601 reports these as repeated keys because it compares case-insensitively, which is a false
+# positive. The file is produced from templates, so edit the template, not this file.
+"pygpgpu/vec_types/genVec*.py" = ["F601"]
+# This example installs the .cl import hook on purpose before importing the kernel module,
+# so the `import vecadd` cannot sit at the top of the file.
+"examples/06_handwritten_kernels.py" = ["E402"]
+
+# ---------------------------------------------------------------------------
+# ty -- Python type checking. Run: python -m ty check
+#   Auto-generated .pyi stubs, the vendored pcpp and the legacy cparser sources
+#   are skipped at the file-discovery stage via src.exclude (src.exclude only
+#   takes effect during discovery, unlike overrides.trim.globs which change rules).
+# ---------------------------------------------------------------------------
+[tool.ty]
+environment.python-version = "3.12"
+src.exclude = [
+    # auto-generated stubs
+    "**/*.pyi",
+    # vendored third-party preprocessor
+    "pygpgpu/cparser/pcpp/**",
+    # legacy cparser sources, not imported at runtime
+    "pygpgpu/cparser/cparser.py",
+    "pygpgpu/cparser/minifyc.py",
+    "pygpgpu/cparser/csyntaxtree.py",
+    "pygpgpu/cparser/ctokens.py",
+    "pygpgpu/cparser/ShaderBuiltins.py",
+    # ctypes binding layer. These modules build call signatures from the runtime's function
+    # tables (dynamically created restype/argtypes, pointer arithmetic over ctypes buffers), so
+    # the checker cannot model them and reports thousands of invalid-argument-type /
+    # not-subscriptable diagnostics that do not correspond to real defects. What can be checked
+    # statically -- the kernel translator, the work-size heuristics and the vector types -- is
+    # kept in scope.
+    "pygpgpu/**/driver/**",
+]
