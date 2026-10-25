@@ -4,12 +4,31 @@ import copy
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
-from tree_sitter import Node
+from tree_sitter import Language, Node, Parser
 
 from ..constants import KernelFlags
 
 if TYPE_CHECKING:
     pass
+
+
+def make_parser(language: Language) -> Parser:
+    """Create a tree-sitter Parser configured for ``language``.
+
+    The tree-sitter Python bindings changed across releases: the legacy
+    0.20.x line (the last line shipping CPython 3.7+ wheels) requires
+    ``Parser(); parser.set_language(language)`` and its ``Parser(language)``
+    constructor silently produces a parser that fails at parse time, whereas
+    modern 0.21+ (which only installs on CPython 3.9+) has ``set_language``
+    removed and requires ``Parser(language)``. This helper picks the correct
+    construction for whichever tree-sitter is importable, so consumer code can
+    be written once and run on Python 3.7 or newer.
+    """
+    if hasattr(Parser, "set_language"):
+        parser = Parser()
+        parser.set_language(language)
+        return parser
+    return Parser(language)
 
 
 _TYPE_NODE_TYPES:Tuple[str, ...] = ("scalar_type", "primitive_type", "sized_type_specifier", "other_builtin_type", "vector_type", "type_identifier", "enum_specifier")

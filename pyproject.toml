@@ -7,7 +7,7 @@ name = "pygpgpu"
 version = "0.1.0"
 description = "Import GPU kernels like Python functions across OpenCL / CUDA / HIP backends"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.7"
 license = { text = "MIT" }
 authors = [{ name = "Time-Coder" }]
 keywords = ["gpu", "opencl", "cuda", "hip", "rocm", "kernel", "jit"]
@@ -18,6 +18,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -25,10 +26,14 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "numpy>=1.26",
+    "numpy>=1.21",
     "imageio>=2.30",
-    "tree-sitter>=0.21",
-    "tree-sitter-opencl>=0.1",
+    "tree-sitter>=0.20.0",
+    "tree-sitter-opencl>=0.0.1",
+    # The CUDA/HIP backends require tree-sitter-cuda. Python 3.7 can only run
+    # wheel builds through the separate tree-sitter-cuda37 distribution, so
+    # install that on 3.7 when using a CUDA/HIP backend; the default OpenCL
+    # backend works on 3.7 out of the box.
     "tree-sitter-cuda>=0.1",
     # pygpgpu/__init__.py imports pygf for the numpy.array monkey-patch and re-exports its
     # vector types, so it is a hard requirement rather than an optional extra.

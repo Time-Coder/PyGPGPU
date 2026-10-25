@@ -27,7 +27,8 @@ import numpy as np
 from ... import numpy as gnp
 
 import tree_sitter_opencl as tscl
-from tree_sitter import Language, Parser
+
+from ...cparser.ts_parser import make_parser
 
 
 class ProgramParser(TSParserMixin):
@@ -50,7 +51,7 @@ class ProgramParser(TSParserMixin):
         "pipe": cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE
     }
 
-    _parser = Parser(Language(tscl.language()))
+    _parser = make_parser(tscl.language())
 
     def __init__(self):
         self._file_name:str = ""

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ctypes import create_string_buffer, c_size_t, pointer
 from typing import Optional, Any
 from typing_extensions import override

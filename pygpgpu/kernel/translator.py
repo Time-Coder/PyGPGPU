@@ -34,11 +34,82 @@ def get_dedented_source(func:Callable)->str:
     return textwrap.dedent("\n".join(lines[start:]))
 
 
+def _get_attr(obj:Any, name:str, default:Any=None)->Any:
+    """Attribute read that falls back to a default instead of raising."""
+    return getattr(obj, name, default)
+
+
+def _copy_ast(node:ast.AST, cls:type, fields:Dict[str, Any])->ast.AST:
+    """Build a node of ``cls`` from a field dict shared with a 3.7-era node."""
+    obj:ast.AST = cls()
+    for _f in getattr(cls, "_fields", ()):
+        try:
+            setattr(obj, _f, fields.get(_f))
+        except Exception:
+            pass
+    try:
+        ast.fix_missing_locations(obj)
+    except Exception:
+        pass
+    return obj
+
+
+def _normalize_ast_legacy_nodes(tree:ast.AST)->ast.AST:
+    """Fold Python 3.7/3.8-only AST node shapes into the post-3.8 form.
+
+    CPython 3.9 removed several AST node classes that 3.7/3.8 still emitted: the
+    ``ast.Index`` slice wrapper (``Subscript(slice=Index(value=...))``) and the
+    ``ast.Num`` / ``ast.Str`` / ``ast.Bytes`` / ``ast.NameConstant`` constant
+    aliases, plus the ``ast.Ellipsis`` singleton, all replaced by ``ast.Constant``.
+    The translator only inspects the tree structurally, so rewriting these legacy
+    forms to their modern equivalents lets the same code run unchanged on 3.7 and
+    3.9+. On 3.9+ the legacy classes no longer exist and ``ast.parse`` already
+    returns the modern shape, so this is a no-op.
+
+    The legacy class names are looked up dynamically (``getattr``) rather than
+    referenced statically so type checkers do not flag their deprecation on new
+    CPython versions.
+    """
+    if not hasattr(ast, "Num"):
+        # CPython 3.9+: the constant aliases no longer exist and ast.parse
+        # already returns the modern form, so no rewriting is needed.
+        return tree
+    _ast_index = getattr(ast, "Index", None)
+    if _ast_index is not None and isinstance(tree, _ast_index):
+        return _normalize_ast_legacy_nodes(tree.value)
+    _ast_num = getattr(ast, "Num", None)
+    if _ast_num is not None and isinstance(tree, _ast_num):
+        return _copy_ast(tree, ast.Constant, {"value": _get_attr(tree, "n"), "kind": None})
+    _ast_str = getattr(ast, "Str", None)
+    if _ast_str is not None and isinstance(tree, _ast_str):
+        return _copy_ast(tree, ast.Constant, {"value": _get_attr(tree, "s"), "kind": None})
+    _ast_bytes = getattr(ast, "Bytes", None)
+    if _ast_bytes is not None and isinstance(tree, _ast_bytes):
+        return _copy_ast(tree, ast.Constant, {"value": _get_attr(tree, "s"), "kind": None})
+    _ast_name_constant = getattr(ast, "NameConstant", None)
+    if _ast_name_constant is not None and isinstance(tree, _ast_name_constant):
+        return _copy_ast(tree, ast.Constant, {"value": _get_attr(tree, "value"), "kind": None})
+    _ast_ellipsis = getattr(ast, "Ellipsis", None)
+    if _ast_ellipsis is not None and isinstance(tree, _ast_ellipsis):
+        return _copy_ast(tree, ast.Constant, {"value": Ellipsis, "kind": None})
+    for _field, _value in ast.iter_fields(tree):
+        if isinstance(_value, list):
+            _value[:] = [_normalize_ast_legacy_nodes(v) for v in _value]
+        elif isinstance(_value, ast.AST):
+            setattr(tree, _field, _normalize_ast_legacy_nodes(_value))
+    return tree
+
+
+def _parse_kernel_source(source:str)->ast.Module:
+    """Parse a kernel source string into an AST normalized across Python versions."""
+    return _normalize_ast_legacy_nodes(ast.parse(source, mode="exec"))
+
+
 def scan_self_attrs(func:Callable, self_param:str)->List[str]:
     """Collect the self.xxx attribute names referenced in the method body (in first-occurrence order)."""
     if not self_param:
         return []
-    tree:ast.Module = ast.parse(get_dedented_source(func), mode="exec")
+    tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
     func_def:ast.FunctionDef = tree.body[0]
     attrs:List[str] = []
     for node in ast.walk(func_def):
@@ -204,7 +275,7 @@ class FunctionTranslator:
         self.self_attr_types:Dict[str, Any] = dict(self_attr_types or {})
 
         try:
-            tree:ast.Module = ast.parse(self._trim_source(), mode="exec")
+            tree:ast.Module = _parse_kernel_source(self._trim_source())
             if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
                 raise PyKernelSyntaxError("decorated object must be a plain function")
             self.tree:ast.FunctionDef = tree.body[0]

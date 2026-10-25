@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ctypes import c_void_p, sizeof, _SimpleCData, Structure, c_size_t, pointer, c_char
 from typing import Dict, Any
-from typing_extensions import get_args
+from typing_extensions import get_args, get_origin
 from abc import ABC, abstractmethod
 import weakref
 
@@ -114,7 +114,11 @@ class CLObject(ABC):
 
     @staticmethod
     def _parse_result(buffer:bytes, cls:type):
-        if cls.__name__.startswith("List"):
+        # Detect a `typing.List[...]` annotation without relying on `. __name__`,
+        # which CPython 3.7's typing raises an AttributeError for on parameterized
+        # forms (e.g. List[c_size_t]); get_origin works on 3.7 through typing_extensions
+        # and on 3.9+ through the stdlib.
+        if get_origin(cls) is not None and get_origin(cls).__name__ == "list":
             args = get_args(cls)
             ele_cls = args[0]
             if issubclass(ele_cls, (IntFlag, IntEnum)):

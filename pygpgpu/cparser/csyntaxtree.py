@@ -5,6 +5,8 @@ import tree_sitter_c as tsc
 import sys
 from typing import List, Optional
 
+from .ts_parser import make_parser
+
 
 class CSyntaxTree:
 
@@ -71,8 +73,10 @@ class CSyntaxTree:
         if CSyntaxTree.__c_raw_parser is not None:
             return CSyntaxTree.__c_raw_parser
 
-        GLSL_LANGUAGE = tree_sitter.Language(tsc.language())
-        CSyntaxTree.__c_raw_parser = tree_sitter.Parser(GLSL_LANGUAGE)
+        c_language = tsc.language()
+        if not isinstance(c_language, tree_sitter.Language):
+            c_language = tree_sitter.Language(c_language)
+        CSyntaxTree.__c_raw_parser = make_parser(c_language)
         return CSyntaxTree.__c_raw_parser
 
     def clear(self):

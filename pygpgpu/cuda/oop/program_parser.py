@@ -22,12 +22,13 @@ import numpy as np
 from ... import numpy as gnp
 
 import tree_sitter_cuda as tscuda
-from tree_sitter import Language, Parser
+
+from ...cparser.ts_parser import make_parser
 
 
 class ProgramParser(TSParserMixin):
 
-    _parser = Parser(Language(tscuda.language()))
+    _parser = make_parser(tscuda.language())
 
     def __init__(self):
         self._file_name:str = ""

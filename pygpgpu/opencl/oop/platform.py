@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ctypes import pointer
 from typing import List, Dict, Tuple, Optional, Any
 from typing_extensions import override
