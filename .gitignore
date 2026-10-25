@@ -4,3 +4,4 @@ result.json
 .VSCodeCounter
 *.npy__cucache__
 __hipcache__
+pygpgpu.egg-info/
