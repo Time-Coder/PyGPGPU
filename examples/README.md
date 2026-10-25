@@ -13,7 +13,9 @@ matching the rest of the repository.
 - `06` needs the runtime for the handwritten-kernel import hook (OpenCL by default, available on nearly every platform);
 - `07` uses the low-level OOP API, on the default OpenCL device;
 - `08` compares backends only across the backends actually present on your machine — a missing one is skipped, so it always produces results;
-- `09` uses only `@kernel` plus atomics, so any single backend works.
+- `09` uses only `@kernel` plus atomics, so any single backend works;
+- `10` uses `submit`/`async_call` on a decorated kernel (any backend);
+- `11` needs no GPU at all: it runs entirely on the pure-Python backend.
 
 ## Contents
 
@@ -28,6 +30,8 @@ matching the rest of the repository.
 | [07_low_level_oop.py](07_low_level_oop.py) | Low-level OOP API: Platforms/Device/Context/Buffer/Program/Kernel |
 | [08_compare_backends.py](08_compare_backends.py) | The same kernel benchmarked on OpenCL / CUDA / HIP |
 | [09_reduction.py](09_reduction.py) | Array-sum reduction: per-element atomics, strided private sums, and a local-memory tree reduction |
+| [10_async_launch.py](10_async_launch.py) | Non-blocking launches of a `@kernel` function: `submit` / `async_call` |
+| [11_python_backend.py](11_python_backend.py) | The pure-Python backend: `k["python"]`, magic loop vs gid-style, plus `submit`/`async_call` |
 
 `@kernel` function bodies accept a docstring (the leading string literal is ignored by the
 translator and never reaches the generated GPU source), so writing explanations inside a
@@ -53,6 +57,11 @@ against the real bound, so this is safe for `@kernel`.
 Handwritten kernels must clamp themselves, and they cannot use `get_global_size(0)` for that: it
 reports the rounded launch size, not the element count. Pass the real count as a kernel argument
 and compare against it, as `vecadd.cl` does.
+
+The pure-Python backend (`k["python"]`) keeps the same meaning for both styles: a magic-loop kernel
+runs once as written (the loop already covers the elements), while a gid-style kernel runs once per
+work item of its iteration domain. It cannot emulate `gpu.local`, since group-shared memory needs
+parallel work items.
 
 ## About backend initialization
 

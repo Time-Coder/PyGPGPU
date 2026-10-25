@@ -12,7 +12,9 @@
 - `06` 需要手写 kernel 导入钩子对应的运行时(默认 OpenCL, 几乎全平台可用);
 - `07` 使用底层 OOP API, 默认 OpenCL 设备;
 - `08` 三后端对比只在机器上实际存在的后端上运行, 缺哪个跳过哪个, 总能出结果;
-- `09` 只用 `@kernel` + 原子操作, 任意单后端均可。
+- `09` 只用 `@kernel` + 原子操作, 任意单后端均可;
+- `10` 装饰后 kernel 的 `submit`/`async_call` 非阻塞启动(任意后端);
+- `11` 完全不需要 GPU: 全部运行在纯 Python 解释器后端上。
 
 ## 目录
 
@@ -27,6 +29,8 @@
 | [07_low_level_oop.py](07_low_level_oop.py) | 底层 OOP API: Platforms/Device/Context/Buffer/Program/Kernel |
 | [08_compare_backends.py](08_compare_backends.py) | 同一内核在 OpenCL / CUDA / HIP 上的速度对比 |
 | [09_reduction.py](09_reduction.py) | 数组求和归约: 逐元素原子、跨步私有累加、本地内存树形归约三种写法 |
+| [10_async_launch.py](10_async_launch.py) | 装饰后 kernel 的非阻塞启动: `submit` / `async_call` |
+| [11_python_backend.py](11_python_backend.py) | 纯 Python 后端: `k["python"]`、魔法循环与 gid 写法、`submit`/`async_call` |
 
 `@kernel` 函数体支持 docstring(第一行的字符串字面量会被翻译器自动忽略,
 不会进入生成的 GPU 源码), 所以可以放心在装饰函数里写说明文字。
@@ -41,6 +45,8 @@ kernel 有两种方式声明自己的迭代域, 自动 work size 需要其中之
 有了迭代域后, `@kernel` 依据这些 extent 推导 local size, 并可能把 global size 向上取整到 local 的整数倍(这样在 shape 尴尬时——例如长度为质数——仍能保持高效的工作组划分, 而不是退化成单个 work item)。生成的 kernel 会为每个 work-item 做越界保护, 所以对 `@kernel` 是安全的。
 
 手写 kernel 必须自己 clamp, 而且不能用 `get_global_size(0)` 来做: 它返回的是取整后的启动规模, 不是元素个数。请像 `vecadd.cl` 那样把真实元素数作为 kernel 参数传入并据此比较。
+
+纯 Python 后端(`k["python"]`)对两种写法保持同样的语义: 魔法循环 kernel 按原样只跑一次(循环本身已覆盖所有元素), gid 写法 kernel 按其迭代域的每个工作项跑一次。它无法模拟 `gpu.local`, 因为组内共享内存需要并行的工作项。
 
 ## 关于后端初始化
 

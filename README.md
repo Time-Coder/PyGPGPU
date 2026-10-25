@@ -19,6 +19,7 @@ out = np.zeros_like(x)
 saxpy(x, x, out, 2.0)              # no backend given: probe cuda -> hip -> opencl, take the first available
 saxpy["cuda"](x, x, out, 2.0)      # bracket switches the backend
 saxpy["hip:gfx1036"](x, x, out, 2.0)   # backend:device
+saxpy["python"](x, x, out, 2.0)    # the same function, serially in the interpreter (no GPU)
 ```
 
 No C code to write, no build system to configure; the first call translates, compiles and caches, every later call is free. Existing handwritten kernels are fine too — `.cl`/`.cu`/`.hip` files can be `import`ed like Python modules.
@@ -28,12 +29,13 @@ No C code to write, no build system to configure; the first call translates, com
 - **`@kernel` decorator** — decorate a Python function directly (class methods and static methods included); at call time it is specialized per argument type, translated to backend source and compiled (monomorphization).
 - **Plain-Python helper functions** — a helper called from a kernel needs no decorator and no type annotations: it is translated into a device function and monomorphized from the call site, recursively for helpers that call helpers.
 - **All three backends in one process** — the bracket chooses the backend per call, so a single process (and even a single kernel object) can mix OpenCL, CUDA and HIP; each backend/device pair is specialized and cached separately.
+- **Pure-Python backend** — `k["python"]` runs the same `@kernel` body in the interpreter, serially on the CPU: no GPU, no compiler, no runtime. Useful for testing, for small inputs and as a reference for what the GPU semantics mean.
 - **Handwritten kernel file import** — `.cl` / `.cu` / `.hip` files import like Python modules: kernels and struct types become module attributes, and a `.pyi` type stub is generated automatically.
 - **Low-level OOP API** — Device/Context/Buffer/Program/Kernel, for when you need full control.
 - **One bracket syntax** for backend/device/work size (identical to handwritten kernels, order does not matter):
   ```python
   k(args)                          # fully automatic
-  k["cuda"](args)                  # backend (opencl/cuda/hip, aliases ocl/cu/rocm/amd)
+  k["cuda"](args)                  # backend (opencl/cuda/hip/python, aliases ocl/cu/rocm/amd/py)
   k["opencl:gfx1036"](args)        # backend:device
   k[(1024, 256)](args)             # work size: (total, per group), None = automatic
   k["cuda"][(1024, 256)](args)     # combined
@@ -59,6 +61,7 @@ Python ≥ 3.7. Bring your own GPU runtime (any one of them is enough):
 | OpenCL | GPU driver (usually already installed) | Nothing extra to install; works across NVIDIA/AMD/Intel |
 | CUDA | NVIDIA driver (includes NVRTC) | The Toolkit is not required — the driver-provided nvrtc is enough |
 | HIP | AMD HIP SDK | On Windows compilation runs through the SDK's clang; if MSVC/Windows SDK headers are not on the default paths, point `PYGPGPU_HIP_INCLUDES` at the include directories (os.pathsep-separated) |
+| Python | nothing | Runs the `@kernel` body serially in the interpreter; selected explicitly with `k["python"]` and never probed for |
 
 When `@kernel` has no explicit `backend`, backends are probed in **cuda -> hip -> opencl** order and the first one that enumerates a device wins.
 
@@ -135,6 +138,34 @@ saxpy["opencl"][(len(x), 256)].async_call(x, y, out, 2.0)
 The result is only safe to read from the future: the output arrays are written back by the completion callback, so touching them before the future resolves races with the transfer. `submit` and `async_call` differ only in the future type (`concurrent.futures.Future` vs `asyncio.Future`).
 
 One caveat on the CUDA and HIP backends: every launch creates a stream that is only released when the Python object is garbage-collected, so a long run of launches accumulates streams. In practice a `gc.collect()` reclaims them, and the OpenCL backend is unaffected. Prefer the OpenCL backend for heavy asynchronous workloads until that is reworked.
+
+### The pure-Python backend
+
+`k["python"]` (aliases `"py"` and `"host"`) runs the decorated function in the interpreter instead of compiling it for a device. Nothing is translated, so the body does not have to stay inside what the GPU translator accepts, and nothing has to be installed: no driver, no cache directory, no device.
+
+```python
+@kernel
+def saxpy(x, y, out, alpha):
+    for i in range(out.shape[0]):
+        out[i] = x[i] * alpha + y[i]
+
+saxpy["python"](x, y, out, 2.0)      # ordinary Python, one call, serial
+saxpy["py"].submit(x, y, out, 2.0)   # same launch on a thread pool
+```
+
+It is a correctness and convenience backend, not a speed one: the whole kernel runs on the CPU, serially. A launch can also be started with `submit` (a `concurrent.futures.Future`) or `async_call` (an `asyncio.Future`), both backed by a `ThreadPoolExecutor`; one launch is still serial, so concurrent launches must write to different arrays.
+
+The two kernel styles keep their meanings, which is where the interpreter differs from a plain call:
+
+| Kernel style | What `k["python"](...)` does |
+|---|---|
+| magic loop (`for i in range(x.shape[0])`, `enumerate(x)`, `np.ndindex`/`np.ndenumerate`) | runs the function once: the loop already covers every element. A `(total, local)` bracket changes nothing here, because the loop, not the launch, decides the extent |
+| gid-style (`gpu.get_global_id`), domain from `gpu.work_size(x)` | runs the body once per work item of the declared domain (`x`'s full shape), with `gpu.get_global_id` reporting the current index — one serial step per element, in `np.ndindex` order |
+| gid-style, domain from a `k[(total, local)]` bracket | same, one step per work item of the bracket, so the body must clamp itself against the real element count exactly as it does on a GPU |
+
+Inside such a body `gpu.*` resolves to host implementations: the indexing builtins, the atomics (plain read-modify-writes — serial execution makes them exact), `gpu.barrier()` (a no-op) and the vector math family, which uses `pygpgpu.funcs`' host implementation. Two things cannot be emulated and raise instead: `gpu.local` (group-local memory is shared by parallel work items) and a `gpu.get_global_id` call inside a magic-loop body, where there is no current work item — use the loop variable there.
+
+Vector-typed arrays work unchanged: reading `v = points[i]` yields a vector instance, and `out[i] = v.xyzy * 2.0` writes its components.
 
 ### Handwritten kernel files
 
@@ -334,6 +365,7 @@ def apply_all(x, out):
 apply_all["cuda"](x, out)      # NVIDIA
 apply_all["hip"](x, out)       # AMD
 apply_all["opencl"](x, out)    # whichever device OpenCL enumerates
+apply_all["python"](x, out)    # the interpreter, on the CPU (no device needed)
 apply_all(x, out)              # unqualified: probe cuda -> hip -> opencl
 ```
 
@@ -345,7 +377,7 @@ second GPU when the first is busy.
 Where the others are ahead — worth knowing before you pick:
 - **Automatic differentiation**: Taichi and Warp can differentiate kernels; this library cannot.
 - **Sparse and irregular data structures**: Taichi has sparse grids and SNode trees; here you pass dense numpy arrays (or handle sparsity yourself).
-- **CPU fallback**: all three can run on the CPU; this library needs a GPU.
+- **CPU fallback**: all three can run on the CPU; this library runs on the CPU only through the explicit `k["python"]` interpreter backend, which is serial and meant for testing rather than throughput.
 - **Minimum interpreter version**: this library runs on Python 3.7 and newer, on both 64- and 32-bit Windows builds; the others require a newer interpreter.
 
 This table was written from each project's documentation and the snippets above; their APIs move
@@ -377,6 +409,7 @@ dev = get_device("cuda:0")   # the Device object of that backend, directly
 | OpenCL | `__clcache__/` | parsed meta + per-device binaries |
 | CUDA | `__cucache__/` | parsed meta + per-device cubin/ptx |
 | HIP | `__hipcache__/` | parsed meta + per-device code objects |
+| Python | none | nothing is generated or compiled; the body runs as-is |
 
 Caches are invalidated by the mtime of the source file (and every `#include`); sources generated by `@kernel` are keyed by a hash of the Python source. These directories should be in `.gitignore`.
 
@@ -407,7 +440,8 @@ set_print_info(True)       # verbose again (the default)
 - `@kernel` does not support: strings/lists/dicts, closures, recursion, kernel return values, dynamic multi-dimensional shape indexing;
 - vector comparison, writing through a swizzle, and nesting beyond three operands are restricted in favour of cross-backend consistency (the error message suggests a workaround);
 - fp16 (`np.float16`) arguments are unavailable on the CUDA/HIP backends (use float32);
-- the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used.
+- the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used;
+- the pure-Python backend (`k["python"]`) does not emulate `gpu.local` (group-shared memory): it runs serially and has no parallel work items to share it.
 
 ## License
 

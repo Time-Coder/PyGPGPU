@@ -10,10 +10,14 @@ Usage::
         gpu.atomic_add(out, i, 1)
 
 The translator recognizes calls on `gpu` and maps them to OpenCL/CUDA builtins per backend.
+The `python` backend serves the same names from a thread-local frame instead: its
+interpreter runs the kernel body directly, so `gpu.get_global_id` and friends must
+report the work item the serial loop is currently emulating (see python_backend.py).
 """
 from __future__ import annotations
 
-from typing import Callable, Dict, Tuple
+import threading
+from typing import Any, Callable, Dict, Optional, Tuple
 
 
 
@@ -22,13 +26,37 @@ class PyKernelSyntaxError(SyntaxError):
 
 
 
+# The python backend installs one frame per thread for the duration of a kernel call.
+# It lives here (rather than in python_backend.py) so attribute access on `gpu` can find
+# it without importing the backend, which would cycle back through the translator.
+_HOST_FRAME = threading.local()
+
+
+def set_host_frame(frame: Optional[Any])->None:
+    """Install the active python-backend frame for this thread (None clears it)."""
+    _HOST_FRAME.frame = frame
+
+
+def get_host_frame()->Optional[Any]:
+    """The frame installed by the python backend on this thread, or None."""
+    return getattr(_HOST_FRAME, "frame", None)
+
+
 class GPUNamespace:
-    """Marker type: the translator recognizes `gpu.xxx(...)` calls and maps them to device builtins."""
+    """Marker type: the translator recognizes `gpu.xxx(...)` calls and maps them to device builtins.
+
+    While a python-backend call is running on the current thread, the same attributes
+    resolve to the host implementations supplied by that frame instead.
+    """
 
     def __init__(self)->None:
         self.__name__ = "pygpgpu.kernel.builtins"
 
     def __getattr__(self, name:str)->Callable:
+        frame:Optional[Any] = get_host_frame()
+        if frame is not None:
+            return frame.builtin(name)
+
         def _not_callable(*args, **kwargs)->None:
             from .translator import PyKernelSyntaxError
             raise PyKernelSyntaxError(

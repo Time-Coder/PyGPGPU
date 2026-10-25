@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from ..utils import local_size_for_global, detect_work_size, device_limits
+from .python_backend import PythonKernel
 from .translator import (
     FunctionTranslator,
     PyKernelSyntaxError,
@@ -25,6 +26,8 @@ _BACKEND_ALIASES:Dict[str, str] = {
     "opencl": "opencl", "ocl": "opencl", "cl": "opencl",
     "cuda": "cuda", "cu": "cuda",
     "hip": "hip", "rocm": "hip", "amd": "hip",
+    # The pure-python backend: no translation, no device, serial execution on the host.
+    "python": "python", "py": "python", "host": "python",
 }
 
 # Probe order when no backend is specified: take the first backend that enumerates at least one device
@@ -311,6 +314,9 @@ class PyKernel:
         self._self_attrs:List[str] = (scan_self_attrs(func, self._self_param) if self._is_method else [])
 
         self._cache:Dict[str, Tuple[Any, List[Tuple[int, int]], List[Tuple[int, int]], List[int]]] = {}
+        # The python backend executes the body as-is, so there is nothing to specialize or
+        # cache: one runner per kernel object serves every call.
+        self._python_runner:Any = None
         self._source_sig:str = self._source_signature()
 
     def __get__(self, obj:Any, objtype:Optional[type]=None)->Any:
@@ -369,6 +375,8 @@ class PyKernel:
                 global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
                 launch:str = "call")->Any:
         backend:str = (backend_sel or self.backend)
+        if backend == "python":
+            return self._invoke_python(instance, args, device_sel, global_size, local_size, launch)
         device_obj:Any
         device_key:str
         device_obj, device_key = _resolve_device(backend, device_sel)
@@ -475,6 +483,30 @@ class PyKernel:
         if launch == "async":
             return kernel_obj.async_call(*launch_args)
         return kernel_obj(*launch_args)
+
+    def _invoke_python(self, instance:Any, args:Tuple[Any, ...],
+                       device_sel:Optional[str],
+                       global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
+                       launch:str)->Any:
+        """Run the body in the Python interpreter (no translation, no device).
+
+        The backend is device-free, so a device selector in the bracket is rejected
+        rather than ignored; the work size and launch style mean what they mean on the
+        GPU backends. The runner decides what a work item is (see python_backend.py): a
+        magic-loop kernel runs once as written, a gid-style kernel runs once per work
+        item of its domain.
+        """
+        if device_sel is not None:
+            raise ValueError(
+                f"the python backend has no devices, so '{self.__name__}[\"python:{device_sel}\"]' "
+                f"has no meaning; use {self.__name__}[\"python\"]")
+        if self._is_method and instance is None:
+            raise TypeError(f"{self.__name__}() requires an instance")
+        runner:Any = self._python_runner
+        if runner is None:
+            runner = PythonKernel(self.raw_func, self._is_method, self._self_param)
+            self._python_runner = runner
+        return runner.call(instance, args, global_size, local_size, launch=launch)
 
     # ---------- source generation ----------
 

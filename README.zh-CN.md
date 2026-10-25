@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-装饰一个 Python 函数, 它就运行在 GPU 上——同一份代码, 三个后端 (**OpenCL / CUDA / HIP**)。
+装饰一个 Python 函数, 它就运行在 GPU 上——同一份代码, 三个后端 (**OpenCL / CUDA / HIP**), 外加一个纯 Python 解释器后端。
 
 ```python
 import numpy as np
@@ -19,6 +19,7 @@ out = np.zeros_like(x)
 saxpy(x, x, out, 2.0)              # 未指定后端: 按 cuda -> hip -> opencl 探测第一个可用后端
 saxpy["cuda"](x, x, out, 2.0)      # 中括号切后端
 saxpy["hip:gfx1036"](x, x, out, 2.0)   # 后端:设备
+saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运行(不需要 GPU)
 ```
 
 不需要写任何 C 代码、不需要配置构建系统; 首次调用时自动翻译/编译并缓存, 之后零开销调用。已有手写 kernel 也没关系——`.cl`/`.cu`/`.hip` 文件可以像 Python 模块一样直接 `import`。
@@ -28,12 +29,13 @@ saxpy["hip:gfx1036"](x, x, out, 2.0)   # 后端:设备
 - **`@kernel` 装饰器** —— 直接装饰 Python 函数(含类方法/静态方法), 调用时按实参类型翻译为后端源码并编译(单态化);
 - **普通 Python 子函数** —— kernel 里调用的子函数不需要任何装饰器、不需要类型标注: 它会被翻译成设备函数, 并在调用点按实参类型单态化; 子函数继续调子函数也支持(递归展开)。
 - **同一进程内三后端并存** —— 由中括号在每次调用时选择后端, 所以一个进程(甚至同一个 kernel 对象)可以混用 OpenCL / CUDA / HIP; 每个 "后端 + 设备" 组合单独单态化并缓存。
+- **纯 Python 后端** —— `k["python"]` 用解释器运行同一份 `@kernel` 函数体, 在 CPU 上串行执行: 不需要 GPU、不需要编译器、不需要任何运行时; 适合测试、小规模数据和作为 GPU 语义的参照实现。
 - **手写 kernel 文件 import** —— `.cl` / `.cu` / `.hip` 文件像 Python 模块一样 `import`, kernel 与 struct 类型成为模块属性, 自动生成 `.pyi` 类型提示;
 - **底层 OOP API** —— Devices/Context/Buffer/Program/Kernel, 需要精细控制时使用。
 - **统一的中括号语法**指定后端/设备/work size(与手写 kernel 完全一致, 顺序不限):
   ```python
   k(args)                          # 全自动
-  k["cuda"](args)                  # 后端 (opencl/cuda/hip, 含别名 ocl/cu/rocm/amd)
+  k["cuda"](args)                  # 后端 (opencl/cuda/hip/python, 含别名 ocl/cu/rocm/amd/py)
   k["opencl:gfx1036"](args)        # 后端:设备
   k[(1024, 256)](args)             # work size: (总数, 每组), None 为自动
   k["cuda"][(1024, 256)](args)     # 组合
@@ -59,6 +61,7 @@ Python ≥ 3.7。GPU 运行时按需自备(任一即可):
 | OpenCL | GPU 驱动(通常已带) | 零额外安装, 支持 NVIDIA/AMD/Intel 多平台 |
 | CUDA | NVIDIA 驱动(含 NVRTC) | Toolkit 不必需, 驱动自带 nvrtc 即可 |
 | HIP | AMD HIP SDK | Windows 上编译走 SDK 自带 clang; 若 MSVC/Windows SDK 不在默认路径, 用 `PYGPGPU_HIP_INCLUDES` 指定 include 目录(os.pathsep 分隔) |
+| Python | 无 | 在解释器里串行执行 `@kernel` 函数体; 用 `k["python"]` 显式选择, 不参与自动探测 |
 
 `@kernel` 未指定 `backend` 时, 按 **cuda -> hip -> opencl** 顺序探测, 取第一个枚举到设备的后端。
 
@@ -135,6 +138,34 @@ saxpy["opencl"][(len(x), 256)].async_call(x, y, out, 2.0)
 输出数组由完成回调写回, 所以只能在 future 完成之后再读: 提前访问会与传输竞争。`submit` 与 `async_call` 只差 future 的类型(`concurrent.futures.Future` 与 `asyncio.Future`)。
 
 CUDA 与 HIP 后端有一点需要留意: 每次启动都会创建一个 stream, 而它只在对应的 Python 对象被垃圾回收时才释放, 所以连续大量启动会累积 stream。实际使用中 `gc.collect()` 可以回收, OpenCL 后端不受影响。在大量异步负载下建议先用 OpenCL 后端。
+
+### 纯 Python 解释器后端
+
+`k["python"]`(别名 `"py"` / `"host"`)把装饰后的函数交给解释器执行, 而不是编译给设备。它不做任何翻译, 因此函数体不必限制在 GPU 翻译器接受的语法内, 也不需要安装任何东西: 没有驱动、没有缓存目录、没有设备。
+
+```python
+@kernel
+def saxpy(x, y, out, alpha):
+    for i in range(out.shape[0]):
+        out[i] = x[i] * alpha + y[i]
+
+saxpy["python"](x, y, out, 2.0)      # 普通 Python, 一次调用, 串行
+saxpy["py"].submit(x, y, out, 2.0)   # 同一次启动, 放到线程池里执行
+```
+
+它的定位是正确性和便利性, 不是速度: 整个 kernel 在 CPU 上串行跑完。启动方式同样支持 `submit`(返回 `concurrent.futures.Future`)与 `async_call`(返回 `asyncio.Future`), 两者都由 `ThreadPoolExecutor` 执行; 单次启动仍是串行的, 所以并发启动的多次调用必须写不同的输出数组。
+
+两种 kernel 写法保持各自语义, 这也是它与普通调用的区别所在:
+
+| kernel 写法 | `k["python"](...)` 的行为 |
+|---|---|
+| 魔法循环(`for i in range(x.shape[0])`、`enumerate(x)`、`np.ndindex`/`np.ndenumerate`) | 函数只调用一次: 循环本身已经覆盖了所有元素。此时 `(total, local)` 中括号不改变任何东西, 因为决定迭代范围的是循环, 不是启动规模 |
+| gid 写法(`gpu.get_global_id`), 迭代域来自 `gpu.work_size(x)` | 按声明的迭代域(`x` 的完整 shape)每个工作项跑一遍函数体, `gpu.get_global_id` 返回当前索引——也就是按 `np.ndindex` 顺序, 每个元素一步 |
+| gid 写法, 迭代域来自 `k[(total, local)]` 中括号 | 同上, 按中括号的每个工作项跑一遍, 因此函数体必须像在 GPU 上一样, 自己针对真实元素个数做越界保护 |
+
+这类函数体里的 `gpu.*` 会解析到 host 侧实现: 索引内建、原子操作(退化为普通读-改-写, 串行执行使其结果精确)、`gpu.barrier()`(空操作)以及向量数学函数族(直接调用 `pygpgpu.funcs` 的 host 实现)。有两种东西无法模拟, 会直接报错: `gpu.local`(组内共享内存需要并行工作项)与魔法循环函数体里的 `gpu.get_global_id`(那里没有"当前工作项", 请改用循环变量)。
+
+向量数组可以照常使用: 读取 `v = points[i]` 得到向量实例, `out[i] = v.xyzy * 2.0` 写回各分量。
 
 ### 手写 kernel 文件
 
@@ -328,6 +359,7 @@ def apply_all(x, out):
 apply_all["cuda"](x, out)      # NVIDIA
 apply_all["hip"](x, out)       # AMD
 apply_all["opencl"](x, out)    # OpenCL 枚举到的设备
+apply_all["python"](x, out)    # 解释器, 在 CPU 上执行(不需要设备)
 apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
 ```
 
@@ -339,7 +371,7 @@ apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
 
 - **自动微分**: Taichi、Warp 可以对 kernel 求导, 本库不支持;
 - **稀疏与不规则数据结构**: Taichi 有 sparse grid / SNode tree, 本库传的是稠密 numpy 数组(稀疏要自己处理);
-- **CPU 回退**: 三者都能跑 CPU, 本库必须有 GPU;
+- **CPU 回退**: 三者都能跑 CPU; 本库只有显式的 `k["python"]` 解释器后端跑 CPU, 而且它是串行的, 定位是测试而非吞吐;
 - **最低解释器版本**: 本库支持 Python 3.7 及以上, 64 位与 32 位 Windows 均可; 其他几个需要更新的解释器。
 
 这张表依据各项目文档与上面的代码片段整理; 它们的 API 迭代很快, 依赖某一格之前请核对当前文档。
@@ -370,6 +402,7 @@ dev = get_device("cuda:0")   # 直接取对应后端的 Device 对象
 | OpenCL | `__clcache__/` | 解析 meta + 分设备二进制 |
 | CUDA | `__cucache__/` | 解析 meta + 分设备 cubin/ptx |
 | HIP | `__hipcache__/` | 解析 meta + 分设备代码对象 |
+| Python | 无 | 不生成也不编译任何东西, 函数体直接执行 |
 
 缓存按源文件(及全部 `#include`)mtime 自动失效; `@kernel` 生成的源码按 Python 源码哈希区分。这些目录应加入 `.gitignore`。
 
@@ -400,7 +433,8 @@ set_print_info(True)       # 恢复详细输出(默认)
 - `@kernel` 不支持: 字符串/列表/字典、闭包、递归、kernel 返回值、多维 shape 动态索引;
 - 向量比较/swizzle 写、三元以上嵌套等按跨后端一致性优先做了限制(报错信息会给出替代写法);
 - fp16 (`np.float16`) 参数在 CUDA/HIP 后端不可用(建议 float32);
-- HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用。
+- HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用;
+- 纯 Python 后端(`k["python"]`)不模拟 `gpu.local`(组内共享内存), 它是串行执行的, 没有并行工作项的概念。
 
 ## License
 

@@ -1,13 +1,14 @@
 # AGENTS.md
 
-PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP. Pure Python + ctypes, Python >= 3.7, packaged with setuptools. `README.md` is the English version (shown first on GitHub); `README.zh-CN.md` holds the Chinese version and the two link to each other at the top — when editing user-facing docs, keep both in sync.
+PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP, and can also run them serially in the interpreter through the `python` backend. Pure Python + ctypes, Python >= 3.7, packaged with setuptools. `README.md` is the English version (shown first on GitHub); `README.zh-CN.md` holds the Chinese version and the two link to each other at the top — when editing user-facing docs, keep both in sync.
 
 ## Language policy: English only (hard rule)
 
-- **All comments, docstrings, error messages, log/UI text, and every other string in code must be written in English. Never generate Chinese (CJK) characters** in `.py` / `.cl` / `.cu` / `.hip` sources, generated stubs and templates (`*.pyi`, `*.pyi.in`), `examples/`, `pyproject.toml`, or any documentation file.
+- **All comments, docstrings, error messages, log/UI text, and every other string in code must be written in English. Never generate Chinese (CJK) characters** in `.py` / `.cl` / `.cu` / `.hip` sources, generated stubs and templates (`*.pyi`, `*.pyi.in`), `examples/`, or any documentation file.
 - The **only** permitted Chinese files are `README.zh-CN.md` mirrors of an English `README.md`, in any directory (currently two: repo root and `examples/`). When user-facing docs change, keep the matching mirror in sync. Nothing else may be added in Chinese, and no code, script, or tool may emit Chinese text.
+- One narrow exception, and do not extend it: the native-form author name in `pyproject.toml`'s `authors` table, kept alongside the ASCII `Binghui Wang` entry used everywhere else. Machine-readable packaging metadata is the only place CJK is allowed; the ASCII form is canonical for all prose, code, and display.
 - If you find Chinese in a file you are touching, translate it to English as part of that edit rather than copying the style.
-- Spot check before finishing a task: search the tree for CJK codepoints (`rg -n '[\p{Han}]' --glob '!README.zh-CN.md'`) — it must come back empty. Language bars link with the word `[Chinese]`, never CJK, so no file outside a mirror needs an exemption.
+- Spot check before finishing a task: search the tree for CJK codepoints (`rg -n '[\p{Han}]' --glob '!README.zh-CN.md'`) — the only acceptable hits are the two `README.zh-CN.md` mirrors and the native-form author name in `pyproject.toml`. Language bars link with the word `[Chinese]`, never CJK, so no other file needs an exemption.
 - This rule is self-referential: AGENTS.md itself contains no CJK, and neither should any file you add.
 
 ## Setup and verification
@@ -20,7 +21,7 @@ PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP.
 
 ## Layout and ownership
 
-- `pygpgpu/kernel/`: `@kernel` decorator (`decorator.py`), Python-to-device AST translator (`translator.py`), and `gpu.*` builtin mapping (`builtins.py`). Backend-neutral except that HIP reuses CUDA code generation.
+- `pygpgpu/kernel/`: `@kernel` decorator (`decorator.py`), Python-to-device AST translator (`translator.py`), and `gpu.*` builtin mapping (`builtins.py`). Backend-neutral except that HIP reuses CUDA generation. `python_backend.py` is the interpreter backend: it translates nothing and executes the body serially, so it is not a fourth code generator — keep it that way (no AST translation there, only the source scan that tells a magic loop from a gid-style body).
 - `pygpgpu/{opencl,cuda,hip}/driver/`: ctypes bindings. Vendor headers are in `driver/include/`; function/enum tables are in `*info.py` / `*types.py`.
 - `pygpgpu/{opencl,cuda,hip}/oop/`: parallel Device/Context/Buffer/Program/Kernel APIs. The three stacks are intentionally similar but not shared; a semantic change usually needs mirrored edits in all three.
 - `pygpgpu/cparser/`: the active parse path is `cpreprocessor.py` + `ts_parser.py` (tree-sitter mixin used by all backends). `cparser.py`, `csyntaxtree.py`, `ctokens.py`, and `ShaderBuiltins.py` are legacy and not imported at runtime. `pcpp/` is vendored; avoid patching it.
@@ -35,7 +36,8 @@ PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP.
 - A gid-style kernel (`gpu.get_global_id`) has no loop for the automatic work size to read a domain from, so it must declare one: `gpu.work_size(x)` at the top of the body (host-side only, erased by the translator, contributes all of `x`'s dimensions) or a `k[(total, local)]` bracket. Without either, the launch raises instead of falling back to a buffer-shape guess: that guess used to silently pick a 1-work-item grid for a 100000-element reduction and produce a wrong answer.
 - `@kernel` specialization is per backend + device + argument type signature, compiled at first call rather than decoration. Kernels need retrievable Python source: define them in real `.py` files, not stdin/`exec` strings (`inspect.getsource`).
 - Helper functions called from a kernel need no decorator and no annotations: `_emit_device_call` translates them into device functions and monomorphizes per call-site argument types, recursively. Emission order must be dependency order (`_dependency_order` in `decorator.py`) because C requires a callee before its caller and the cache fills depth-first. A helper defined in `python -c`/stdin has a `<string>` filename and yields an invalid C identifier, so keep helpers in real `.py` files.
-- All three backends can be used in one process, and the same `PyKernel` object caches one specialization per backend + device + signature. Keep that working: do not add process-wide backend state (Taichi-style `init(arch=...)` global config), and keep backend package imports lazy so importing `pygpgpu` still needs no GPU runtime.
+- All three backends can be used in one process, and the same `PyKernel` object caches one specialization per backend + device + signature. Keep that working: do not add process-wide backend state (Taichi-style `init(arch=...)` global config), and keep backend package imports lazy so importing `pygpgpu` still needs no GPU runtime. The `python` backend takes part in the same bracket dispatch but caches nothing (there is nothing to specialize) and is never probed as a default, so a machine without a GPU keeps raising instead of silently falling back to the interpreter.
+- The `python` backend's launch semantics must stay in step with the GPU ones: a magic-loop body runs once as written, a gid-style body runs once per work item of its `gpu.work_size(...)` domain or `(total, local)` bracket, and `gpu.*` resolves through the thread-local frame in `builtins.py` so concurrent launches never share a work item.
 - Static read/write analysis (`KernelFlags` in `constants.py`, implemented in `ts_parser.py`) decides which arguments are uploaded/downloaded. Do not defeat it when adding argument handling.
 - Importing `pygpgpu` monkey-patches `numpy.array` process-wide to support nested `ctypes.Structure` values. Keep that behavior unless the change is deliberate.
 - Caches live beside the source (`__clcache__`, `__cucache__`, `__hipcache__`; generated `@kernel` sources under `.../pykernels`) and invalidate by mtime/source hash. Delete the relevant cache when debugging stale generated code.
@@ -44,5 +46,5 @@ PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP.
 
 ## Known scope limits
 
-- `@kernel` does not support strings/lists/dicts, closures, recursion, return values, or dynamic multi-dimensional indexing; unsupported syntax raises `PyKernelSyntaxError` with a line number.
+- `@kernel` does not support strings/lists/dicts, closures, recursion, return values, or dynamic multi-dimensional indexing; unsupported syntax raises `PyKernelSyntaxError` with a line number. These limits belong to the GPU translator: the `python` backend runs the body as-is and accepts such code, except `gpu.local` (no serial equivalent) and `gpu.get_global_id` inside a magic-loop body (no current work item).
 - fp16 arguments are unsupported on CUDA/HIP; use float32.
