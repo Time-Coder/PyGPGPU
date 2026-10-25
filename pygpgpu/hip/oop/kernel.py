@@ -1,5 +1,4 @@
 from __future__ import annotations
-import math
 from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_p, cast
 from functools import partial
 import concurrent.futures
@@ -20,7 +19,7 @@ from .program_info import ArgInfo
 from .stream import Stream
 from .mem_object import MemObject
 from .program_parser import ProgramParser
-from ...utils import detect_work_size, join_with_and, local_size_for_global, device_limits
+from ...utils import detect_work_size, join_with_and, local_size_for_global, device_limits, product
 
 if TYPE_CHECKING:
     from .program import Program
@@ -265,7 +264,7 @@ class Kernel(HIPObject):
             return (1,), (1,)
 
         if len(max_shape) > 3:
-            max_shape = (math.prod(max_shape),)
+            max_shape = (product(max_shape),)
 
         total_local_size:int = 128
         max_group, max_items = device_limits(self._program.context.device)

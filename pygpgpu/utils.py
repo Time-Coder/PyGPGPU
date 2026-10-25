@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import re
 import os
@@ -11,7 +13,7 @@ import numpy as np
 
 
 def product(values:Iterable[int])->int:
-    """Product of an iterable; Python < 3.8 replacement for ``math.prod``."""
+    """Product of an iterable (kept local so callers need no math import)."""
     total:int = 1
     for value in values:
         total *= value
