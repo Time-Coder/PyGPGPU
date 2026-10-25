@@ -29,16 +29,21 @@ dependencies = [
     "numpy>=1.21",
     "imageio>=2.30",
     "tree-sitter>=0.20.0",
-    "tree-sitter-opencl>=0.0.1",
-    # The CUDA/HIP backends parse through a tree-sitter CUDA grammar. Python 3.7
-    # cannot use the PyPI tree-sitter-cuda (it requires Python >=3.10), so the
-    # CUDA/HIP parse path on 3.7 needs the separate tree-sitter-cuda37 build; on
-    # modern Pythons the PyPI distribution works. The parser modules prefer
-    # cuda37 and fall back to cuda, and codegen coerces a PyCapsule to a Language.
-    "tree-sitter-cuda>=0.1",
+    "tree-sitter-opencl>=0.0.2",
+    # The CUDA/HIP backends parse through a tree-sitter CUDA grammar. The upstream
+    # tree-sitter-cuda requires Python >=3.10, which would make this package
+    # uninstallable on 3.7, so the dependency is the tree-sitter-cuda37
+    # distribution instead: a fork of the same grammar released at the matching
+    # 0.21.2 whose language() returns a native Language on both tree-sitter
+    # 0.20.x and 0.21+. The parser modules still fall back to tree-sitter-cuda
+    # when it happens to be installed, and codegen coerces a PyCapsule to a
+    # Language, so either grammar distribution works.
+    "tree-sitter-cuda37>=0.21.2",
     # pygpgpu/__init__.py imports pygf for the numpy.array monkey-patch and re-exports its
     # vector types, so it is a hard requirement rather than an optional extra.
-    "pygf",
+    # 0.1.4 is the first release whose metadata builds under the newest setuptools
+    # that supports 3.7, so a 3.7 source build of the dependency succeeds.
+    "pygf>=0.1.4",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",
