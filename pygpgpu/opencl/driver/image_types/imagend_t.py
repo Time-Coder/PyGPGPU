@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from ctypes import c_void_p
 from typing import Optional, Tuple, Union
 from abc import ABC, abstractmethod
@@ -16,6 +15,7 @@ from ..cltypes import (
     cl_channel_type
 )
 from .... import numpy as gnp
+from ....utils import product
 
 
 class imagend_t(ABC):
@@ -34,7 +34,7 @@ class imagend_t(ABC):
         if data is None:
             self._shape = shape
             self._dtype = dtype
-            self._size = math.prod(shape) * self._dtype.itemsize
+            self._size = product(shape) * self._dtype.itemsize
             self._update_format()
 
         self.flags = flags
@@ -98,7 +98,7 @@ class imagend_t(ABC):
             self._shape = shape
             self._data = None
             self._host_ptr = None
-            self._size = math.prod(shape) * self._dtype.itemsize
+            self._size = product(shape) * self._dtype.itemsize
             self._update_format()
     
     @property
@@ -111,7 +111,7 @@ class imagend_t(ABC):
             self._dtype = dtype
             self._data = None
             self._host_ptr = None
-            self._size = math.prod(self._shape) * self._dtype.itemsize
+            self._size = product(self._shape) * self._dtype.itemsize
             self._update_format()
     
     @property

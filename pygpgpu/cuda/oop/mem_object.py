@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional, Any
+from typing import TYPE_CHECKING, Dict, Union, Tuple, Optional, Any
+from typing_extensions import override
 from ctypes import c_void_p
 from abc import abstractmethod
 import time

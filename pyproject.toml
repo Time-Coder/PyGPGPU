@@ -33,6 +33,9 @@ dependencies = [
     # pygpgpu/__init__.py imports pygf for the numpy.array monkey-patch and re-exports its
     # vector types, so it is a hard requirement rather than an optional extra.
     "pygf",
+    # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
+    # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
+    "typing_extensions>=4.4.0",
 ]
 
 [project.urls]

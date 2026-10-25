@@ -1,6 +1,7 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import override, Dict, TYPE_CHECKING, Any
+from typing import Dict, TYPE_CHECKING, Any
+from typing_extensions import override
 
 from ..driver import (
     cl_addressing_mode,

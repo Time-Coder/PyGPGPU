@@ -3,7 +3,8 @@ from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_
 from functools import partial
 import concurrent.futures
 import asyncio
-from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional, override
+from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional
+from typing_extensions import override
 
 import numpy as np
 

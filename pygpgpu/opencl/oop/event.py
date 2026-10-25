@@ -4,7 +4,8 @@ from .clobject import CLObject
 from ctypes import pointer, c_void_p, cast, POINTER, py_object
 import concurrent.futures
 import asyncio
-from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, override, Set, Any
+from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, Set, Any
+from typing_extensions import override
 
 from ..driver import (
     CL,

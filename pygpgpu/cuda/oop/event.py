@@ -1,6 +1,7 @@
 from __future__ import annotations
 from ctypes import pointer, c_float
-from typing import override, Any
+from typing import Any
+from typing_extensions import override
 
 from .cuobject import CUObject
 

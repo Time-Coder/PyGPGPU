@@ -2,7 +2,8 @@
 
 from ctypes import c_void_p, pointer
 import ctypes
-from typing import Optional, Tuple, Union, override
+from typing import Optional, Tuple, Union
+from typing_extensions import override
 
 import numpy as np
 

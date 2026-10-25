@@ -1,6 +1,7 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer
-from typing import Dict, List, Any, Optional, Set, override
+from typing import Dict, List, Any, Optional, Set
+from typing_extensions import override
 
 from .cuobject import CUObject
 from .build_options import BuildOptions

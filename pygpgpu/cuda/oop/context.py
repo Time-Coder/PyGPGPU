@@ -1,6 +1,7 @@
 from __future__ import annotations
 from ctypes import pointer, c_uint, c_size_t
-from typing import override, Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing_extensions import override
 
 from .cuobject import CUObject
 from .event import Event

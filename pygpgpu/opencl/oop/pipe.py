@@ -1,6 +1,7 @@
 from __future__ import annotations
 from ctypes import pointer, sizeof
-from typing import override, TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional
+from typing_extensions import override
 
 from ..driver import (
     CL,

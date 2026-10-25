@@ -1,5 +1,5 @@
 from ctypes import c_void_p, POINTER, c_char_p, c_size_t, c_int
-from typing import TypeAlias
+from typing_extensions import TypeAlias
 
 from ...constants import IntEnum
 

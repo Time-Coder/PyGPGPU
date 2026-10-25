@@ -1,6 +1,7 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import TYPE_CHECKING, Dict, Optional, override, Any
+from typing import TYPE_CHECKING, Dict, Optional, Any
+from typing_extensions import override
 
 if TYPE_CHECKING:
     from .context import Context

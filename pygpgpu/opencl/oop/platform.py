@@ -1,5 +1,6 @@
 from ctypes import pointer
-from typing import List, Dict, Tuple, Optional, Any, override
+from typing import List, Dict, Tuple, Optional, Any
+from typing_extensions import override
 
 from ..driver import (
     CL, CLInfo, IntEnum,

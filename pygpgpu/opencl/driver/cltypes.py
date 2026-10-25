@@ -1,6 +1,6 @@
 from ctypes import c_char, c_uint64, c_ubyte, c_uint32, c_int32, c_int64, c_void_p, c_size_t, c_char_p, POINTER, Structure, CFUNCTYPE
 from ...constants import IntConstant, IntEnum, IntFlag
-from typing import TypeAlias
+from typing_extensions import TypeAlias
 import sys
 
 cl_int = c_int32

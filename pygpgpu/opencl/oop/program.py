@@ -1,7 +1,8 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer, c_size_t, c_char, POINTER, c_ubyte, string_at
 import warnings
-from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union, Set, override
+from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union, Set
+from typing_extensions import override
 
 from .clobject import CLObject
 from .device import Device

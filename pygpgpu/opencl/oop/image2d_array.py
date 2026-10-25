@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from ctypes import c_void_p, pointer, c_size_t
-from typing import TYPE_CHECKING, List, Tuple, Optional, override
+from typing import TYPE_CHECKING, List, Tuple, Optional
+from typing_extensions import override
 
 import numpy as np
 

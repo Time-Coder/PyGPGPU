@@ -1,5 +1,6 @@
 from ctypes import create_string_buffer, c_size_t, pointer
-from typing import override, Optional, Any
+from typing import Optional, Any
+from typing_extensions import override
 from uuid import UUID
 
 from .cuobject import CUObject

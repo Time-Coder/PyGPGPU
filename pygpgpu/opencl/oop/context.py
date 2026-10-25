@@ -1,7 +1,8 @@
 from __future__ import annotations
 from ctypes import pointer
 from collections import defaultdict
-from typing import Tuple, Dict, Optional, Any, List, Union, TYPE_CHECKING, override
+from typing import Tuple, Dict, Optional, Any, List, Union, TYPE_CHECKING
+from typing_extensions import override
 
 import numpy as np
 

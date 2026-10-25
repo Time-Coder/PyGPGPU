@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer, c_float
-from typing import override
+from typing_extensions import override
 
 from .hipobject import HIPObject
 from ..driver import CUevent, HIP, hipError

@@ -3,7 +3,7 @@ from ctypes import (
     c_size_t, Structure, c_char, c_void_p, c_uint64,
     CFUNCTYPE
 )
-from typing import TypeAlias
+from typing_extensions import TypeAlias
 
 from ...constants import IntEnum, IntFlag
 
