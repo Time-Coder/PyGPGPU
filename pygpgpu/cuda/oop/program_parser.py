@@ -21,7 +21,15 @@ from .program_info import KernelInfo, ArgInfo, StructInfo, VarInfo
 import numpy as np
 from ... import numpy as gnp
 
-import tree_sitter_cuda as tscuda
+# Prefer the dual-version tree-sitter-cuda37 distribution: it returns a native
+# tree_sitter.Language on both the legacy tree-sitter 0.20.x line (Python 3.7)
+# and modern 0.21+, whereas the original tree-sitter-cuda's language() yields a
+# raw PyCapsule that newer tree-sitter's Parser() rejects. Fall back to it when
+# the cuda37 package is not installed.
+try:
+    import tree_sitter_cuda37 as tscuda
+except ImportError:  # pragma: no cover - original distribution fallback
+    import tree_sitter_cuda as tscuda
 
 from ...cparser.ts_parser import make_parser
 

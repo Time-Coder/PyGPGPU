@@ -15,6 +15,11 @@ if TYPE_CHECKING:
 def make_parser(language: Language) -> Parser:
     """Create a tree-sitter Parser configured for ``language``.
 
+    ``language`` may be either an already-built ``tree_sitter.Language`` (the
+    form returned by the OpenCL/CUDA grammar distributions used here) or a raw
+    ``PyCapsule`` such as the one the classic ``tree-sitter-cuda`` binding
+    returns; it is coerced into a ``tree_sitter.Language`` on the modern line.
+
     The tree-sitter Python bindings changed across releases: the legacy
     0.20.x line (the last line shipping CPython 3.7+ wheels) requires
     ``Parser(); parser.set_language(language)`` and its ``Parser(language)``
@@ -24,6 +29,10 @@ def make_parser(language: Language) -> Parser:
     construction for whichever tree-sitter is importable, so consumer code can
     be written once and run on Python 3.7 or newer.
     """
+    if not isinstance(language, Language):
+        # A capsule is what the classic tree-sitter-cuda binding exposes on the
+        # modern line; wrap it so both old and new callers get a Language.
+        language = Language(language)
     if hasattr(Parser, "set_language"):
         parser = Parser()
         parser.set_language(language)
