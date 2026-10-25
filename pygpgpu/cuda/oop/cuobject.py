@@ -5,7 +5,7 @@ from typing import Dict, Any, Union, TYPE_CHECKING
 from abc import ABC, abstractmethod
 import weakref
 
-from ..driver import CUDA, CUInfo
+from ..driver import CUInfo
 
 if TYPE_CHECKING:
     from .context import Context
@@ -116,17 +116,17 @@ class CUObject(ABC):
 
     @staticmethod
     @abstractmethod
-    def _get_info_func()->CUDA.Func:
+    def _get_info_func()->Any:
         pass
 
     @staticmethod
     @abstractmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         pass
 
     @staticmethod
     @abstractmethod
-    def _release_func()->CUDA.Func:
+    def _release_func()->Any:
         pass
 
     @classmethod

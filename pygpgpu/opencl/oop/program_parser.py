@@ -5,7 +5,7 @@ import sys
 import copy
 import json
 from ctypes import c_char_p, c_uint64, Structure
-from typing import Optional, Dict, Any, List, Set, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Union
 
 from ...cparser import CPreprocessor
 from ...cparser.ts_parser import TSParserMixin

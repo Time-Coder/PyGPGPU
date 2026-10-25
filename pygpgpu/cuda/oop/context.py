@@ -195,15 +195,15 @@ class Context(CUObject):
 
     @staticmethod
     @override
-    def _get_info_func()->CUDA.Func:
+    def _get_info_func()->Any:
         return None
 
     @staticmethod
     @override
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return None
 
     @staticmethod
     @override
-    def _release_func()->CUDA.Func:
+    def _release_func()->Any:
         return CUDA.cuCtxDestroy

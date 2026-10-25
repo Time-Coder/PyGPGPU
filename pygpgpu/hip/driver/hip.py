@@ -3,7 +3,7 @@ from __future__ import annotations
 import glob
 import os
 from ctypes import CDLL, c_int
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 from .hipinfo import HIPInfo, func_signatures
 
@@ -34,7 +34,7 @@ class MetaHIP(type):
         candidates.append("amdhip64.dll")   # let the system loader search for it
 
         dll = None
-        last_error:Exception = None
+        last_error:Optional[Exception]=None
         for candidate in candidates:
             try:
                 folder = os.path.dirname(os.path.abspath(candidate)) if os.path.sep in candidate or "/" in candidate else None

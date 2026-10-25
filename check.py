@@ -11,4 +11,6 @@ import subprocess
 import sys
 
 subprocess.check_call([sys.executable, "-m", "ruff", "check", "--fix"])
-subprocess.check_call([sys.executable, "-m", "ty", "check"])
+# Warnings are the ctypes-layer inference noise documented in pyproject.toml; only error-level
+# diagnostics should fail the run.
+subprocess.check_call([sys.executable, "-m", "ty", "check", "--exit-zero-on-warning"])

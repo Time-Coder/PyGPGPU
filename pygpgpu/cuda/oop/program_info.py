@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from typing import Tuple, Any, Dict, List, Optional
 
 import numpy as np
@@ -9,6 +9,7 @@ from ..driver import CUInfo, CUDA
 from .mem_object import MemObject
 from .stream import Stream
 from .buffer import Buffer
+from .event import Event
 
 
 class VarInfo:
@@ -58,7 +59,7 @@ class VarInfo:
     def need_read_back(self)->bool:
         return (self.is_ptr and bool(self.kernel_flags & KernelFlags.Writed))
     
-    def use_buffer(self, stream:Stream, data:np.ndarray)->Buffer:
+    def use_buffer(self, stream:Stream, data:np.ndarray)->Tuple[Buffer, Optional[Event]]:
         if isinstance(data, gnp.ndarray):
             used_buffer, event = data._to_device(stream, self.name, kernel_flags=self.kernel_flags)
         else:

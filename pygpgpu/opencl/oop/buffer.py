@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ctypes import c_void_p, pointer
 import ctypes
-from typing import TYPE_CHECKING, Union, Optional, List, override
+from typing import List, Optional, TYPE_CHECKING, Tuple, Union, override
 
 import numpy as np
 
@@ -58,7 +58,7 @@ class Buffer(MemObject):
         MemObject.__init__(self, context, buffer_id, data, host_ptr, size, flags)
 
     @override
-    def write(self, cmd_queue:CommandQueue, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def write(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as buffer")
         
@@ -77,7 +77,7 @@ class Buffer(MemObject):
         return Event(self.context, event_id, CL.clEnqueueWriteBuffer)
 
     @override
-    def read(self, cmd_queue:CommandQueue, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def read(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as buffer")
         
@@ -96,7 +96,7 @@ class Buffer(MemObject):
         return Event(self.context, event_id, CL.clEnqueueReadBuffer)
 
     @override
-    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event:
+    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as buffer")
         

@@ -42,8 +42,8 @@ class Kernel(CUObject):
         self._arg_names:List[str] = []
 
         self.type_checked:bool = False
-        self._grid_dims:Optional[Tuple[int]] = None
-        self._block_dims:Optional[Tuple[int]] = None
+        self._grid_dims:Optional[Tuple[int, ...]] = None
+        self._block_dims:Optional[Tuple[int, ...]] = None
 
     def __getitem__(self, sizes_or_device:Tuple[Union[int, Tuple[int,...], str], ...])->Kernel:
         if not isinstance(sizes_or_device, tuple):
@@ -178,6 +178,12 @@ class Kernel(CUObject):
                     stream.add_callback(on_release)
                 continue
 
+            # From here on the argument's buffer must exist: deferred read-back, the immediate
+            # read-back and the completion callback all dereference it.
+            if arg_info.mem_obj is None:
+                raise RuntimeError(
+                    f"argument '{arg_info.name}' has no device buffer to read back")
+
             if isinstance(arg_info.value, gnp.ndarray) and not self._is_vec3_arg(arg_info):
                 # gnp arrays use deferred read-back: data stays on the device and to_host() pulls it before host access (writes).
                 # 3-component vectors are the exception: the device layout is compact, which deferred read-back cannot unpack directly, so read back immediately
@@ -236,7 +242,7 @@ class Kernel(CUObject):
                 if ((
                         arg.base_type_str in CUInfo.vec_types and
                         len(arg_shape) >= 2 and
-                        arg_shape[-1] == CUInfo.vec_types[arg.base_type_str].__len__(None)
+                        arg_shape[-1] == CUInfo.vec_types[arg.base_type_str].component_count()
                     )
                 ):
                     arg_shape = arg_shape[:-1]
@@ -271,7 +277,7 @@ class Kernel(CUObject):
 
         return grid_dims, block_dims
 
-    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any)->c_void_p:
+    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any)->Any:
         arg_type_str = arg_info.type_str        
         arg_type_str = arg_info.type_str
         base_type_str = arg_info.base_type_str
@@ -403,12 +409,12 @@ class Kernel(CUObject):
 
     @override    
     @staticmethod
-    def _get_info_func()->CUDA.Func:
+    def _get_info_func()->Any:
         return None
 
     @override    
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return None
 
     @override    

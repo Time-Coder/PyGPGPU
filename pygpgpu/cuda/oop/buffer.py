@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from ctypes import c_void_p, pointer
 import ctypes
-from typing import Union, Optional, override
+from typing import Optional, Tuple, Union, override
 
 import numpy as np
 
@@ -22,25 +22,25 @@ class Buffer(MemObject):
         MemObject.__init__(self, buffer_id, None, None, size)
 
     @override
-    def write(self, stream:Stream, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None)->Event:        
+    def write(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None)->Event:        
         if region is None:
             region = self._size
 
         if host_ptr is None:
             host_ptr = self._host_ptr
 
-        CUDA.cuMemcpyHtoDAsync(CUdeviceptr(self.id.value + origin), host_ptr, region, stream.id)
+        CUDA.cuMemcpyHtoDAsync(CUdeviceptr(self.id.value + self._byte_offset(origin)), host_ptr, region, stream.id)
         return stream.record_event()
 
     @override
-    def read(self, stream:Stream, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None)->Event:        
+    def read(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None)->Event:        
         if region is None:
             region = self._size
 
         if host_ptr is None:
             host_ptr = self._host_ptr
 
-        CUDA.cuMemcpyDtoHAsync(host_ptr, CUdeviceptr(self.id.value + origin), region, stream.id)
+        CUDA.cuMemcpyDtoHAsync(host_ptr, CUdeviceptr(self.id.value + self._byte_offset(origin)), region, stream.id)
         return stream.record_event()
 
     @override

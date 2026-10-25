@@ -4,7 +4,7 @@ from .clobject import CLObject
 from ctypes import pointer, c_void_p, cast, POINTER, py_object
 import concurrent.futures
 import asyncio
-from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, override, Set
+from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, override, Set, Any
 
 from ..driver import (
     CL,
@@ -193,17 +193,17 @@ class Event(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetEventInfo
 
     @override
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.event_info_types
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_event_info
 
     @override

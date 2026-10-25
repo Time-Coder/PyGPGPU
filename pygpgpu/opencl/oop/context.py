@@ -92,7 +92,7 @@ class Context(CLObject):
         self.__samplers:Dict[str, sampler] = {}
 
     @staticmethod
-    def _release_func()->CL.Func:
+    def _release_func()->Any:
         return CL.clReleaseContext
 
     @property
@@ -297,15 +297,15 @@ class Context(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetContextInfo
 
     @override
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.context_info_types
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_context_info

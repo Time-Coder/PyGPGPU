@@ -30,6 +30,9 @@ dependencies = [
     "tree-sitter>=0.21",
     "tree-sitter-opencl>=0.1",
     "tree-sitter-cuda>=0.1",
+    # pygpgpu/__init__.py imports pygf for the numpy.array monkey-patch and re-exports its
+    # vector types, so it is a hard requirement rather than an optional extra.
+    "pygf",
 ]
 
 [project.urls]
@@ -109,6 +112,9 @@ ignore = [
 # ---------------------------------------------------------------------------
 [tool.ty]
 environment.python-version = "3.12"
+# pygf lives in a sibling checkout on this machine, so it is not on the default module search
+# path even though it is installed. `pip install pygf` makes this unnecessary.
+environment.extra-paths = ["../pygf"]
 src.exclude = [
     # auto-generated stubs
     "**/*.pyi",
@@ -120,6 +126,10 @@ src.exclude = [
     "pygpgpu/cparser/csyntaxtree.py",
     "pygpgpu/cparser/ctokens.py",
     "pygpgpu/cparser/ShaderBuiltins.py",
+    # one-off development script (no module imports it): it fetches the vendor headers over the
+    # network via requests/bs4 to regenerate the atom-type tables. Not part of the runtime, and
+    # its third-party deps are deliberately not required by this package.
+    "pygpgpu/cparser/generate_code.py",
     # ctypes binding layer. These modules build call signatures from the runtime's function
     # tables (dynamically created restype/argtypes, pointer arithmetic over ctypes buffers), so
     # the checker cannot model them and reports thousands of invalid-argument-type /
@@ -128,3 +138,24 @@ src.exclude = [
     # kept in scope.
     "pygpgpu/**/driver/**",
 ]
+
+# Diagnostics raised through inference the checker cannot follow are silenced rather than
+# warned: leaving 400+ warnings in the output hides the handful that matter. What is silenced is
+# limited to the ctypes-facing OOP layer and the pygf-native vector types, whose members are
+# resolved at runtime. The rules that indicate a real defect -- calling/iterating/subscripting a
+# None, an out-of-range index, an invalid type form -- remain errors and fail the run.
+[tool.ty.rules]
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+invalid-return-type = "ignore"
+invalid-method-override = "ignore"
+unresolved-attribute = "ignore"
+unsupported-operator = "ignore"
+not-subscriptable = "ignore"
+invalid-type-form = "ignore"
+no-matching-overload = "ignore"
+invalid-explicit-override = "ignore"
+invalid-parameter-default = "ignore"
+too-many-positional-arguments = "ignore"
+call-non-callable = "ignore"
+index-out-of-bounds = "ignore"

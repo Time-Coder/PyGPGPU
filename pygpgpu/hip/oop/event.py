@@ -51,7 +51,7 @@ class Event(HIPObject):
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return None
 
     @override

@@ -81,13 +81,13 @@ class ndarray(np.ndarray):
     def _print_copy_info()->bool:
         """Backend-agnostic copy-logging switch (CL.print_info for opencl or CUDA.print_info for cuda)."""
         try:
-            from .opencl.driver import CL
+            from ..opencl.driver import CL
             if CL.print_info:
                 return True
         except Exception:
             pass
         try:
-            from .cuda.driver import CUDA
+            from ..cuda.driver import CUDA
             if CUDA.print_info:
                 return True
         except Exception:
@@ -227,7 +227,7 @@ class ndarray(np.ndarray):
 
         self._should_copy = True
 
-    def _to_device(self, cmd_queue:CommandQueue, arg_name:str, flags:cl_mem_flags=(1 << 0), kernel_flags:cl_mem_flags=(1 << 0), image_info:imagend_t=None)->Tuple[MemObject, Event]:
+    def _to_device(self, cmd_queue:CommandQueue, arg_name:str, flags:cl_mem_flags=(1 << 0), kernel_flags:cl_mem_flags=(1 << 0), image_info:Optional[imagend_t]=None)->Tuple[MemObject, Event]:
         old_shoule_copy = self._should_copy
         self._should_copy = False
 

@@ -5,7 +5,7 @@ import sys
 import copy
 import json
 from ctypes import c_char_p, c_void_p, Structure, _Pointer, pointer
-from typing import Optional, Dict, Any, List, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from ...cparser import CPreprocessor
 from ...cparser.ts_parser import TSParserMixin
@@ -36,7 +36,7 @@ class ProgramParser(TSParserMixin):
         self._includes:List[str] = []
         self._defines:Dict[str, Any] = {}
         self._options:BuildOptions = BuildOptions()
-        self._options_ptr:ptr_ptr_char = None
+        self._options_ptr:Optional[ptr_ptr_char]=None
         self._n_options:int = 0
         self._line_map:Dict[int, str] = {}
         self._related_files:Set[str] = set()

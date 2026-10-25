@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional, List
+from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional, List, Any
 from ctypes import c_void_p
 from abc import abstractmethod
 import time
@@ -22,15 +22,17 @@ if TYPE_CHECKING:
 
 import numpy as np
 
+from ...constants import HostPointer
+
 
 class MemObject(CLObject):
 
-    def __init__(self, context:Context, mem_id:cl_mem, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:c_void_p, size:int, flags:cl_mem_flags):
+    def __init__(self, context:Context, mem_id:cl_mem, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:HostPointer, size:int, flags:cl_mem_flags):
         self._context:Context = context
         self._flags:cl_mem_flags = flags
         self._kernel_flags:cl_mem_flags = cl_mem_flags.CL_MEM_READ_WRITE
         self._data:Union[bytes, bytearray, np.ndarray, None] = data
-        self._host_ptr:c_void_p = host_ptr
+        self._host_ptr:HostPointer = host_ptr
         self._size:int = size
         self._using:bool = False
         self._dirty_on_device:bool = False
@@ -39,15 +41,15 @@ class MemObject(CLObject):
         CLObject.__init__(self, mem_id)
 
     @abstractmethod
-    def write(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def write(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List[Event]]=None)->Event:
         pass
 
     @abstractmethod
-    def read(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def read(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List[Event]]=None)->Event:
         pass
 
     @abstractmethod
-    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List[Event]=None)->Event:
+    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:Optional[List[Event]]=None)->Event:
         pass
 
     @property
@@ -71,7 +73,7 @@ class MemObject(CLObject):
         self._kernel_flags = flags
     
     @property
-    def host_ptr(self)->c_void_p:
+    def host_ptr(self)->HostPointer:
         return self._host_ptr
     
     @property
@@ -125,20 +127,20 @@ class MemObject(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetMemObjectInfo
 
     @override
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.mem_info_types
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_mem_info
 
     @override
     @staticmethod
-    def _release_func()->CL.Func:
+    def _release_func()->Any:
         return CL.clReleaseMemObject

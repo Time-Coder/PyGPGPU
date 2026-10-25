@@ -1,6 +1,6 @@
 from __future__ import annotations
 import itertools
-from typing import List, Set, Dict
+from typing import Dict, List, Set
 from types import ModuleType
 import importlib
 import os

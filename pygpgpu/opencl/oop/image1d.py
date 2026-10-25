@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p, pointer, c_size_t
-from typing import TYPE_CHECKING, List, Optional, override
+from typing import List, Optional, TYPE_CHECKING, Tuple, Union, override
 
 import numpy as np
 
@@ -26,7 +26,7 @@ class image1d(imagend):
         imagend.__init__(self, context, image)
 
     @override
-    def write(self, cmd_queue:CommandQueue, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def write(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as current image1d")
         
@@ -48,7 +48,7 @@ class image1d(imagend):
         return Event(self.context, event_id, CL.clEnqueueWriteImage)
 
     @override
-    def read(self, cmd_queue:CommandQueue, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def read(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as current image1d")
         
@@ -70,7 +70,7 @@ class image1d(imagend):
         return Event(self.context, event_id, CL.clEnqueueReadImage)
 
     @override
-    def set_data(self, cmd_queue:CommandQueue, data:np.ndarray, after_events:List[Event]=None)->Event:
+    def set_data(self, cmd_queue:CommandQueue, data:np.ndarray, after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as current image1d")
         

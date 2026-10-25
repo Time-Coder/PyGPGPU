@@ -1,5 +1,5 @@
 from ctypes import create_string_buffer, c_size_t, pointer
-from typing import override, Optional
+from typing import override, Optional, Any
 from uuid import UUID
 
 from .cuobject import CUObject
@@ -71,15 +71,15 @@ class Device(CUObject):
 
     @staticmethod
     @override
-    def _get_info_func()->CUDA.Func:
+    def _get_info_func()->Any:
         return CUDA.cuDeviceGetAttribute
 
     @staticmethod
     @override
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return CUdevice_attribute
 
     @staticmethod
     @override
-    def _release_func()->CUDA.Func:
+    def _release_func()->Any:
         return None

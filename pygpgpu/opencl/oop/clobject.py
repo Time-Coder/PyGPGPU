@@ -5,7 +5,7 @@ from typing import Dict, Any, get_args
 from abc import ABC, abstractmethod
 import weakref
 
-from ..driver import CL, IntEnum, IntFlag, cl_bool, cl_uint, CLInfo
+from ..driver import IntEnum, IntFlag, cl_bool, cl_uint, CLInfo
 
 
 class CLObject(ABC):
@@ -87,22 +87,22 @@ class CLObject(ABC):
 
     @staticmethod
     @abstractmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         pass
 
     @staticmethod
     @abstractmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         pass
 
     @staticmethod
     @abstractmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         pass
 
     @staticmethod
     @abstractmethod
-    def _release_func()->CL.Func:
+    def _release_func()->Any:
         pass
 
     @classmethod

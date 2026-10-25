@@ -145,7 +145,7 @@ class BuildOptions:
             options.append("--modify-stack-limit")
 
         if self.std is not None:
-            options.append(f"--std={self.std.name.replace("cpp", "c++")}")
+            options.append(f"--std={self.std.name.replace('cpp', 'c++')}")
 
         if self.builtin_move_forward is not None:
             options.append(f"--builtin-move-forward={str(self.builtin_move_forward).lower()}")

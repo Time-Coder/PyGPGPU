@@ -3,7 +3,7 @@ from __future__ import annotations
 from .clobject import CLObject
 import concurrent.futures
 import asyncio
-from typing import Optional, List, TYPE_CHECKING, Callable, Union, overload
+from typing import Optional, List, TYPE_CHECKING, Callable, Union, overload, Any
 
 from ..driver import (
     cl_event,
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 class Event(CLObject):
 
-    def __init__(self, context:Context, event_id:Optional[cl_event]=None, func:Optional[CL.Func]=None): ...
+    def __init__(self, context:Context, event_id:Optional[cl_event]=None, func:Optional[Any]=None): ...
 
     def wait(self)->None: ...
 

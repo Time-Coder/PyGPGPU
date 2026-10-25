@@ -27,7 +27,7 @@ class image2d(imagend):
         imagend.__init__(self, context, image)
 
     @override
-    def write(self, cmd_queue:CommandQueue, origin:Tuple[int, int]=(0, 0), region:Optional[Tuple[int, int]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def write(self, cmd_queue:CommandQueue, origin:Tuple[int, int]=(0, 0), region:Optional[Tuple[int, int]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as current image2d")
         
@@ -49,7 +49,7 @@ class image2d(imagend):
         return Event(self.context, event_id, CL.clEnqueueWriteImage)
 
     @override
-    def read(self, cmd_queue:CommandQueue, origin:Tuple[int, int]=(0, 0), region:Optional[Tuple[int, int]]=None, host_ptr:c_void_p=None, after_events:List[Event]=None)->Event:
+    def read(self, cmd_queue:CommandQueue, origin:Tuple[int, int]=(0, 0), region:Optional[Tuple[int, int]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as current image2d")
         
@@ -71,7 +71,7 @@ class image2d(imagend):
         return Event(self.context, event_id, CL.clEnqueueReadImage)
 
     @override
-    def set_data(self, cmd_queue:CommandQueue, data:np.ndarray, after_events:List[Event]=None)->Event:
+    def set_data(self, cmd_queue:CommandQueue, data:np.ndarray, after_events:Optional[List[Event]]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as current image2d")
         

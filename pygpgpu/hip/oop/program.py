@@ -17,7 +17,7 @@ from .context import Context
 
 class Program(HIPObject):
 
-    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, compiler:HipCompiler=None):
+    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, compiler:Optional[HipCompiler]=None):
         self._kernels:Dict[str, Kernel] = {}
         self._type_checked:bool = type_checked
         if compiler is None:
@@ -132,7 +132,7 @@ class Program(HIPObject):
 
     @override    
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return None
 
     @override    

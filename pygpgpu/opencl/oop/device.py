@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, List, Dict, override
+from typing import TYPE_CHECKING, List, Dict, override, Any
 
 if TYPE_CHECKING:
     from .platform import Platform
@@ -43,20 +43,20 @@ class Device(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetDeviceInfo
 
     @override
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.device_info_types
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_device_info
     
     @override
     @staticmethod
-    def _release_func()->CL.Func:
+    def _release_func()->Any:
         return None

@@ -1,7 +1,17 @@
 from __future__ import annotations
-from typing import Dict, Union, Any
+from typing import TYPE_CHECKING, Dict, Union, Any
 from ctypes import c_uint, sizeof
 import enum
+
+if TYPE_CHECKING:
+    from ctypes import Array, _Pointer, c_void_p
+
+# A host-side pointer as the ctypes layers use it: an explicit c_void_p, a raw address, a
+# bytes-like buffer, or a ctypes Array/_Pointer. Declared once so the three backend stacks
+# agree (Buffers construct such values in several places).
+#   The names after "from __future__ import annotations" are strings, so nothing here is
+#   evaluated at runtime -- ctypes.Array/_Pointer are not subscriptable.
+HostPointer = Union["c_void_p", int, bytes, bytearray, "Array[Any]", "_Pointer[Any]", None]
 
 
 class Constant:

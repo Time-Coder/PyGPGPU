@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional
+from typing import TYPE_CHECKING, Dict, override, Union, Tuple, Optional, Any
 from ctypes import c_void_p
 from abc import abstractmethod
 import time
@@ -10,7 +10,7 @@ from ..driver import (
     IntEnum,
     CUDA
 )
-from ...constants import KernelFlags
+from ...constants import HostPointer, KernelFlags
 from .cuobject import CUObject
 
 if TYPE_CHECKING:
@@ -22,9 +22,9 @@ import numpy as np
 
 class MemObject(CUObject):
 
-    def __init__(self, mem_id:CUdeviceptr, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:c_void_p, size:int):
+    def __init__(self, mem_id:CUdeviceptr, data:Union[bytes, bytearray, np.ndarray, None], host_ptr:HostPointer, size:int):
         self._data:Union[bytes, bytearray, np.ndarray, None] = data
-        self._host_ptr:c_void_p = host_ptr
+        self._host_ptr:HostPointer = host_ptr
         self._size:int = size
         self._using:bool = False
         self._dirty_on_device:bool = False
@@ -34,11 +34,11 @@ class MemObject(CUObject):
         CUObject.__init__(self, mem_id)
 
     @abstractmethod
-    def write(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None)->Event:
+    def write(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None)->Event:
         pass
 
     @abstractmethod
-    def read(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:c_void_p=None)->Event:
+    def read(self, stream:Stream, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None)->Event:
         pass
 
     @abstractmethod
@@ -50,12 +50,25 @@ class MemObject(CUObject):
         return self._data
     
     @property
-    def host_ptr(self)->c_void_p:
+    def host_ptr(self)->HostPointer:
         return self._host_ptr
     
     @property
     def size(self)->int:
         return self._size
+
+    @staticmethod
+    def _byte_offset(origin:Union[int, Tuple[int, ...]])->int:
+        """Return the byte offset for a flat element offset.
+
+        CUDA/HIP buffers are 1-D allocations, so `origin` must be a flat element index.
+        A per-dimension tuple (used by image reads/writes on the OpenCL side) has no
+        meaningful flat byte address here; reject it instead of silently mis-addressing.
+        """
+        if isinstance(origin, tuple):
+            raise TypeError(
+                f"origin must be a flat element offset for this backend, got a tuple {origin}")
+        return int(origin)
 
     @property
     def using(self)->bool:
@@ -118,20 +131,20 @@ class MemObject(CUObject):
 
     @override
     @staticmethod
-    def _get_info_func()->CUDA.Func:
+    def _get_info_func()->Any:
         return None
 
     @override
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return None
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return None
 
     @override
     @staticmethod
-    def _release_func()->CUDA.Func:
+    def _release_func()->Any:
         return CUDA.cuMemFree

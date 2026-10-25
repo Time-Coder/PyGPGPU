@@ -19,7 +19,7 @@ from ...utils import save_bin, load_bin, modify_time
 
 class NVRTCProgram(CUObject):
 
-    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, program_parser:ProgramParser=None):
+    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, program_parser:Optional[ProgramParser]=None):
         self._ptx:Dict[Device, bytes] = {}
         self._cubin:Dict[Device, bytes] = {}
 
@@ -218,7 +218,7 @@ class NVRTCProgram(CUObject):
 
     @override    
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return None
 
     @override    

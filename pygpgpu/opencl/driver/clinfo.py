@@ -18,7 +18,7 @@ from .vec_types import (
     float2, float3, float4, float8, float16,
     double2, double3, double4, double8, double16
 )
-from typing import List
+from typing import Any, Dict, List
 
 from .cltypes import (
     cl_platform_info,
@@ -280,7 +280,13 @@ class CLInfo:
         'double': (c_double, float)
     }
 
-    func_signatures = {
+    # Each entry maps a CL function name to a heterogeneous record: "args" is a dict of
+    # per-argument info, "errors" maps an error code to its message, "restype"/"dll_func"
+    # hold the return type and the resolved symbol. The literal below is the single source
+    # of truth, but annotating it as Dict[str, Any] keeps lookups (e.g. the error-message
+    # path in Event) from being rejected by the checker: inferred literal types do not
+    # include every key combination the callers index.
+    func_signatures:Dict[str, Any] = {
         # cl_int clGetPlatformInfo(
         #   cl_platform_id platform,
         #   cl_platform_info param_name,

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 class Program(CLObject):
 
-    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, program_parser:ProgramParser=None):
+    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, program_parser:Optional[ProgramParser]=None):
         self._context:Context = context
         self._binaries:Dict[Device, bytes] = {}
         self._kernels:Dict[str, Kernel] = {}
@@ -96,7 +96,8 @@ class Program(CLObject):
                     error_messages.append(f"binary for {device} error: {ErrorCode.CL_INVALID_VALUE}: program binary is not a valid binary for this device")
 
             if error_messages:
-                raise RuntimeError(f"{error_code}:\n{'\n'.join(error_messages)}")
+                details:str = "\n".join(error_messages)
+                raise RuntimeError(f"{error_code}:\n{details}")
 
             if error_code.value != ErrorCode.CL_SUCCESS:
                 raise RuntimeError(f"clCreateProgramWithBinary failed: {error_code}")
@@ -348,17 +349,17 @@ class Program(CLObject):
 
     @override    
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetProgramInfo
 
     @override    
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.program_info_types
 
     @override    
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_program_info
 
     @override    

@@ -7,7 +7,7 @@ import math
 import os
 import re
 import textwrap
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple
 
 import numpy as np
 
@@ -72,6 +72,10 @@ DTYPE_MAP:Dict[str, str] = {
 PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string means a scalar
 
 _C_FIELD_TYPES:Dict[Any, str] = {}
+
+# Declared here (and filled on first use) because importing the driver tables eagerly would
+# load a GPU runtime at `import pygpgpu` time.
+_VEC_REGISTRY:Dict[str, Any]
 
 def _vec_registry()->Dict[str, Any]:
     """vec type name -> ctypes class (e.g. float4), built lazily."""
@@ -253,7 +257,9 @@ class FunctionTranslator:
 
     # ---------- basic utilities ----------
 
-    def _error(self, message:str, node:Optional[ast.AST]=None)->Any:
+    def _error(self, message:str, node:Optional[ast.AST]=None)->NoReturn:
+        """Raise a translation error. Declared NoReturn so callers can rely on it not
+        falling through (the checker then stops treating each call site as nullable)."""
         raise PyKernelSyntaxError(message, node, self.filename)
 
     def _emit(self, line:str)->None:
@@ -265,7 +271,9 @@ class FunctionTranslator:
                 return scope[name]
         return None
 
-    def _define(self, name:str, t:Any, node:ast.AST)->None:
+    def _define(self, name:str, t:Any, node:Optional[ast.AST])->None:
+        """Record a variable's type; node is optional because some declarations have no
+        source node to blame in an error message."""
         existing:Any = self._lookup(name)
         if existing is None:
             self.scopes[-1][name] = t
@@ -1551,7 +1559,10 @@ class FunctionTranslator:
 
     def _get_int_vec_type(self, vec:str)->str:
         """Result type of vector comparisons (same-shape integer vector, same semantics as genVec._compare_op)."""
-        return "int" + (vec[len(prefix):] if (prefix := "".join(c for c in vec if not c.isdigit())) else "") if vec[-1].isdigit() else ("int" + vec)
+        prefix:str = "".join(c for c in vec if not c.isdigit())
+        if vec[-1].isdigit():
+            return "int" + (vec[len(prefix):] if prefix else "")
+        return "int" + vec
 
     def _vec_componentwise_compare(self, op:str, left:str, vec:str, right:str)->str:
         """Vector comparison: normalize the result to per-component 0/1 (device comparisons use -1,

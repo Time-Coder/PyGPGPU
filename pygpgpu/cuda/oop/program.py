@@ -16,7 +16,7 @@ from .context import Context
 
 class Program(CUObject):
 
-    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, nvrtc_program:NVRTCProgram=None):
+    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, nvrtc_program:Optional[NVRTCProgram]=None):
         self._kernels:Dict[str, Kernel] = {}
         self._type_checked:bool = type_checked
         if nvrtc_program is None:
@@ -125,7 +125,7 @@ class Program(CUObject):
 
     @override    
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return None
 
     @override    

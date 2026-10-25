@@ -22,7 +22,7 @@ class Platform(CLObject):
     def __init__(self, id:cl_platform_id):
         CLObject.__init__(self, id)
         self.__n_devices:int = 0
-        self.__devices:Tuple[Device] = ()
+        self.__devices:Tuple[Device, ...] = ()
         self.__default_context:Optional[Context] = None
     
     @property
@@ -135,20 +135,20 @@ class Platform(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetPlatformInfo
 
     @override
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.platform_info_types
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_platform_info
     
     @override
     @staticmethod
-    def _release_func()->CL.Func:
+    def _release_func()->Any:
         return None

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer, c_uint, c_void_p, cast, POINTER, py_object
-from typing import override, Union, Callable, Set
+from typing import override, Union, Callable, Set, Any
 import asyncio
 from concurrent import futures
 
@@ -83,15 +83,15 @@ class Stream(HIPObject):
 
     @staticmethod
     @override
-    def _get_info_func()->HIP.Func:
+    def _get_info_func()->Any:
         return None
 
     @staticmethod
     @override
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return None
 
     @staticmethod
     @override
-    def _release_func()->HIP.Func:
+    def _release_func()->Any:
         return HIP.hipStreamDestroy

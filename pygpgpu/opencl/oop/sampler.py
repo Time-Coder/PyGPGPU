@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import override, Dict, TYPE_CHECKING
+from typing import override, Dict, TYPE_CHECKING, Any
 
 from ..driver import (
     cl_addressing_mode,
@@ -63,20 +63,20 @@ class sampler(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetSamplerInfo
 
     @override
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.sampler_info_types
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_sampler_info
 
     @override
     @staticmethod
-    def _release_func()->CL.Func:
+    def _release_func()->Any:
         return CL.clReleaseSampler

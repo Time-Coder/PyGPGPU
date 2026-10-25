@@ -53,8 +53,8 @@ class Kernel(CLObject):
 
         self.type_checked:bool = False
         self._used_device:Optional[Device] = None
-        self._global_work_size:Optional[Tuple[int]] = None
-        self._local_work_size:Optional[Tuple[int]] = None
+        self._global_work_size:Optional[Tuple[int, ...]] = None
+        self._local_work_size:Optional[Tuple[int, ...]] = None
 
     def __getitem__(self, sizes_or_device:Tuple[Union[int, Tuple[int,...], str], ...])->Kernel:
         if not isinstance(sizes_or_device, tuple):
@@ -69,13 +69,17 @@ class Kernel(CLObject):
                 raise ValueError(f"device {device} is not in current context")
             self._used_device = device
         elif len(sizes_or_device) == 2:
-            global_work_size = sizes_or_device[0]
-            local_work_size = sizes_or_device[1]
-            if isinstance(global_work_size, int):
-                global_work_size = (global_work_size,)
-
-            if isinstance(local_work_size, int):
-                local_work_size = (local_work_size,)
+            global_sizes = sizes_or_device[0]
+            local_sizes = sizes_or_device[1]
+            if isinstance(global_sizes, str) or isinstance(local_sizes, str):
+                raise TypeError(
+                    "the two-element form takes (global_work_size, local_work_size); "
+                    "a device name is given as a single-element bracket")
+            global_work_size:Tuple[int, ...] = ((global_sizes,) if isinstance(global_sizes, int)
+                                                else tuple(global_sizes))
+            local_work_size:Optional[Tuple[int, ...]] = (
+                (local_sizes,) if isinstance(local_sizes, int)
+                else (tuple(local_sizes) if local_sizes is not None else None))
 
             work_dim = len(global_work_size)
             if work_dim > 3:
@@ -191,6 +195,12 @@ class Kernel(CLObject):
                         launch_event.on_completed_callbacks.append(release_call)
                 continue
 
+            # From here on the argument's buffer must exist: lazy read-back, the immediate
+            # read-back and the completion callback all dereference it.
+            if arg_info.mem_obj is None:
+                raise RuntimeError(
+                    f"argument '{arg_info.name}' has no device buffer to read back")
+
             if isinstance(arg_info.value, gnp.ndarray):
                 # gnp arrays use lazy read-back: data stays on the device, to_host() pulls it on host access (before writes)
                 arg_info.mem_obj.dirty_on_device = True
@@ -271,7 +281,7 @@ class Kernel(CLObject):
                 if ((
                         arg.base_type_str in CLInfo.vec_types and
                         len(arg_shape) >= 2 and
-                        arg_shape[-1] == CLInfo.vec_types[arg.base_type_str].__len__(None)
+                        arg_shape[-1] == CLInfo.vec_types[arg.base_type_str].component_count()
                     ) or (
                         len(arg_shape) == 3 and isinstance(arg.mem_obj, image2d)
                     )
@@ -466,17 +476,17 @@ class Kernel(CLObject):
 
     @override    
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetKernelInfo
 
     @override    
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.kernel_info_types
 
     @override    
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_kernel_info
 
     @override    

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import TYPE_CHECKING, Dict, Optional, override
+from typing import TYPE_CHECKING, Dict, Optional, override, Any
 
 if TYPE_CHECKING:
     from .context import Context
@@ -62,17 +62,17 @@ class CommandQueue(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->CL.Func:
+    def _get_info_func()->Any:
         return CL.clGetCommandQueueInfo
 
     @override
     @staticmethod
-    def _info_types_map()->Dict[IntEnum, type]:
+    def _info_types_map()->Dict[IntEnum, type]|None:
         return CLInfo.command_queue_info_types
 
     @override
     @staticmethod
-    def _info_enum()->type:
+    def _info_enum()->type|None:
         return cl_command_queue_info
 
     @override

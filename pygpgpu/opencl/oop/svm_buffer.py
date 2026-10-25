@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ctypes import c_void_p, pointer
 import ctypes
-from typing import Union, Optional, List, override, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING, Tuple, Union, override
 import weakref
 
 import numpy as np
@@ -49,7 +49,7 @@ class SVMBuffer(MemObject):
         return None
 
     @override
-    def write(self, cmd_queue:CommandQueue, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None, after_events:List=None)->Event:
+    def write(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as svm buffer")
 
@@ -68,7 +68,7 @@ class SVMBuffer(MemObject):
         return Event(self.context, event_id, CL.clEnqueueSVMMemcpy)
 
     @override
-    def read(self, cmd_queue:CommandQueue, origin:int=0, region:Optional[int]=None, host_ptr:c_void_p=None, after_events:List=None)->Event:
+    def read(self, cmd_queue:CommandQueue, origin:Union[int, Tuple[int,...]]=0, region:Optional[Union[int, Tuple[int,...]]]=None, host_ptr:Optional[c_void_p]=None, after_events:Optional[List]=None)->Event:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as svm buffer")
 
@@ -87,7 +87,7 @@ class SVMBuffer(MemObject):
         return Event(self.context, event_id, CL.clEnqueueSVMMemcpy)
 
     @override
-    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:List=None)->Optional[Event]:
+    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:Optional[List]=None)->Optional[Event]:
         if cmd_queue.context != self.context:
             raise ValueError("cmd_queue should be in the same context as svm buffer")
 

@@ -4,9 +4,18 @@ import os
 import pickle
 from charset_normalizer import from_path
 from functools import lru_cache
+from collections.abc import Iterable
 from typing import Union, Any, Tuple, Optional, List
 
 import numpy as np
+
+
+def product(values:Iterable[int])->int:
+    """Product of an iterable; Python < 3.8 replacement for ``math.prod``."""
+    total:int = 1
+    for value in values:
+        total *= value
+    return total
 
 
 def modify_time(file_path:str)->float:
@@ -62,7 +71,7 @@ def load_var(file_name:str)->Any:
     with open(file_name, "rb") as file:
         return pickle.load(file)
     
-def save_bin(bin:Union[bytes | bytearray], file_name:str)->None:
+def save_bin(bin:Union[bytes, bytearray], file_name:str)->None:
     target_folder:str = os.path.dirname(os.path.abspath(file_name))
     if not os.path.isdir(target_folder) or not os.path.exists(target_folder):
         os.makedirs(target_folder)

@@ -222,8 +222,13 @@ def _relation(name:str, op:Callable, a:Any, b:Any)->Any:
     if a_components is None:
         return int(op(a, b))
 
+    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
+        return values[i] if components is not None else values
+
+    # `a` is a vector; `b` may be a scalar, in which case it broadcasts across components.
     int_vec:Any = int_result_type()
-    return int_vec(*[int(op(x, y)) for x, y in zip(a_components, b_components)])
+    return int_vec(*[int(op(x, value_at(b, b_components, i)))
+                     for i, x in enumerate(a_components)])
 
 
 def isequal(a:Any, b:Any)->Any:

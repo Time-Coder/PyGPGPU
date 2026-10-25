@@ -25,17 +25,25 @@ _STATEMENT_NODE_TYPES:Tuple[str, ...] = (
 class TSParserMixin:
     """Shared tree-sitter based parser for GPU kernel sources (OpenCL / CUDA).
 
-    Host parser must provide:
-        self._parser: tree_sitter.Parser
-        self._clean_code: str
-        self._struct_infos: Dict[str, StructInfo]
-        self._kernel_infos: Dict[str, KernelInfo]
-        _new_struct_info(name) -> StructInfo
-        _new_var_info(desc) -> VarInfo
-        _new_kernel_info(name) -> KernelInfo
-        _new_arg_info(parent, desc) -> ArgInfo
-        _is_mem_arg(arg) -> bool
+    The host parser class supplies the state and factory methods declared below; this mixin
+    only implements the tree walking. Declaring them as class-level annotations keeps that
+    contract visible to a type checker instead of living only in this docstring.
     """
+
+    _parser:Any
+    _clean_code:str
+    _parse_code:str
+    _struct_infos:Dict[str, Any]
+    _kernel_infos:Dict[str, Any]
+
+    @staticmethod
+    def _node_text(node:Node)->str:
+        """Decode a tree-sitter node's source text.
+
+        `Node.text` is Optional in the bindings (it is None for a node that no longer
+        references its original tree), so callers must not decode it directly.
+        """
+        return (node.text or b"").decode()
 
     _array_dim_pattern:re.Pattern = re.compile(r"\[\s*(\d+)\s*\]")
 
@@ -60,7 +68,7 @@ class TSParserMixin:
         ast = self._parser.parse(parse_code.encode())
         for child in ast.root_node.named_children:
             if child.type == "type_definition":
-                specifier, alias = child.named_children[0], (child.named_children[1].text.decode() if len(child.named_children) > 1 else "")
+                specifier, alias = child.named_children[0], (self._node_text(child.named_children[1]) if len(child.named_children) > 1 else "")
                 if specifier.type in ("struct_specifier", "union_specifier"):
                     self._parse_struct(specifier, alias)
             elif child.type == "struct_specifier":
@@ -78,7 +86,7 @@ class TSParserMixin:
         field_list:Optional[Node] = None
         for child in node.named_children:
             if child.type == "type_identifier":
-                struct_name = child.text.decode()
+                struct_name = self._node_text(child)
             elif child.type == "field_declaration_list":
                 field_list = child
 
@@ -117,7 +125,7 @@ class TSParserMixin:
         declarator:Optional[Node] = None
         for child in node.children:
             if child.type == "function_qualifier":
-                is_kernel = is_kernel or ("kernel" in child.text.decode()) or ("__global__" in child.text.decode())
+                is_kernel = is_kernel or ("kernel" in self._node_text(child)) or ("__global__" in self._node_text(child))
             elif child.type == "__global__":
                 is_kernel = True
             elif child.type == "function_declarator":
@@ -126,7 +134,7 @@ class TSParserMixin:
         if declarator is None:
             return
 
-        func_name:str = declarator.named_children[0].text.decode()
+        func_name:str = self._node_text(declarator.named_children[0])
         kernel_info:Any = self._new_kernel_info(func_name)
 
         param_list:Optional[Node] = next((c for c in declarator.named_children if c.type == "parameter_list"), None)
@@ -161,11 +169,11 @@ class TSParserMixin:
         for child in node.children:
             child_type:str = child.type
             if child_type == "address_space_qualifier":
-                address = child.text.decode().strip("_")
+                address = self._node_text(child).strip("_")
             elif child_type == "access_qualifier":
-                access = child.text.decode().strip("_")
+                access = self._node_text(child).strip("_")
             elif child_type == "type_qualifier":
-                qualifier_name:str = child.text.decode().strip("_")
+                qualifier_name:str = self._node_text(child).strip("_")
                 if qualifier_name in self._address_qualifier_names:
                     address = self._address_qualifier_names[qualifier_name]
                 else:
@@ -177,11 +185,11 @@ class TSParserMixin:
             elif child_type == "struct_specifier" or child_type == "union_specifier":
                 type_parts.append(self._specifier_text(child))
             elif child_type in _TYPE_NODE_TYPES:
-                qualifier_name:str = child.text.decode().strip("_")
+                qualifier_name:str = self._node_text(child).strip("_")
                 if qualifier_name in self._address_qualifier_names:
                     address = self._address_qualifier_names[qualifier_name]
                 else:
-                    type_parts.append(" ".join(child.text.decode().split()))
+                    type_parts.append(" ".join(self._node_text(child).split()))
             elif child_type in _DECLARATOR_NODE_TYPES:
                 declarators.append(child)
 
@@ -206,7 +214,7 @@ class TSParserMixin:
     def _walk_declarator(self, node:Node)->Tuple[str, bool, Tuple[int, ...]]:
         node_type:str = node.type
         if node_type in ("identifier", "field_identifier"):
-            return node.text.decode(), False, ()
+            return self._node_text(node), False, ()
 
         if node_type == "pointer_declarator":
             for child in node.named_children:
@@ -216,7 +224,7 @@ class TSParserMixin:
             return "", True, ()
 
         if node_type == "array_declarator":
-            dims:Tuple[int, ...] = tuple(int(x) for x in self._array_dim_pattern.findall(node.text.decode()))
+            dims:Tuple[int, ...] = tuple(int(x) for x in self._array_dim_pattern.findall(self._node_text(node)))
             for child in node.named_children:
                 if child.type in _DECLARATOR_NODE_TYPES:
                     name, is_ptr, _ = self._walk_declarator(child)
@@ -231,7 +239,7 @@ class TSParserMixin:
         if node_type == "function_declarator":
             for child in node.named_children:
                 if child.type == "identifier":
-                    return child.text.decode(), False, ()
+                    return self._node_text(child), False, ()
             for child in node.named_children:
                 if child.type in ("pointer_declarator", "parenthesized_declarator", "array_declarator"):
                     return self._walk_declarator(child)
@@ -244,7 +252,7 @@ class TSParserMixin:
         return "", False, ()
 
     def _specifier_text(self, node:Node)->str:
-        text:str = node.text.decode()
+        text:str = self._node_text(node)
         brace_pos:int = text.find("{")
         if brace_pos != -1:
             text = text[:brace_pos]
@@ -386,7 +394,7 @@ class TSParserMixin:
 
     def _resolve_expr_root(self, node:Node, scopes:List[Dict[str, Tuple[Optional[str], bool]]])->Tuple[Optional[str], bool]:
         if node.type in ("identifier", "field_identifier"):
-            return self._resolve(node.text.decode(), scopes)
+            return self._resolve(self._node_text(node), scopes)
         return None, False
 
     def _bind_symbol(self, name:str, symbol:Tuple[Optional[str], bool], scopes:List[Dict[str, Tuple[Optional[str], bool]]])->None:
@@ -456,7 +464,7 @@ class TSParserMixin:
             return None
 
         if node_type == "identifier" or node_type == "field_identifier":
-            root, is_ptr = self._resolve(node.text.decode(), scopes)
+            root, is_ptr = self._resolve(self._node_text(node), scopes)
             return root if (root is not None and is_ptr) else None
 
         if node_type == "binary_expression":
@@ -475,7 +483,7 @@ class TSParserMixin:
 
     def _collect_addr_taken_roots(self, node:Node, scopes, found:Set[str])->None:
         """Collect array roots in an argument expression exposed via address-of ('&' form only; passing an element by value does not count)."""
-        if node.type == "pointer_expression" and node.text and node.text.decode().lstrip().startswith("&"):
+        if node.type == "pointer_expression" and node.text and self._node_text(node).lstrip().startswith("&"):
             operand:Optional[Node] = (node.named_children[0] if node.named_children else None)
             if operand is not None:
                 root, is_mem = self._resolve_expr_root(operand, scopes)
@@ -503,7 +511,7 @@ class TSParserMixin:
         node_type:str = node.type
 
         if node_type in ("identifier", "field_identifier"):
-            root, _ = self._resolve(node.text.decode(), scopes)
+            root, _ = self._resolve(self._node_text(node), scopes)
             if root is not None:
                 (ctx["writes"] if is_write else ctx["reads"]).add(root)
             return
@@ -523,7 +531,7 @@ class TSParserMixin:
             return
 
         if node_type == "pointer_expression":
-            operator:str = (node.text.decode()[0] if node.text else "*")
+            operator:str = (self._node_text(node)[0] if node.text else "*")
             operand:Optional[Node] = (node.named_children[0] if node.named_children else None)
             if operand is None:
                 return
@@ -555,7 +563,7 @@ class TSParserMixin:
                 field:Node = node.named_children[-1]
                 if field.type in ("field_identifier", "identifier"):
                     member_bucket:Dict[str, Set[str]] = (ctx["member_writes"] if is_write else ctx["member_reads"])
-                    member_bucket.setdefault(root, set()).add(field.text.decode())
+                    member_bucket.setdefault(root, set()).add(self._node_text(field))
 
                 if base.type != "identifier":
                     self._visit_expression(base, scopes, ctx, False)
@@ -569,14 +577,14 @@ class TSParserMixin:
             operator:str = "="
             for child in node.children:
                 if (not child.is_named) and child.text and child.type not in ("(", ")"):
-                    operator = child.text.decode()
+                    operator = self._node_text(child)
                     break
 
             lroot, lisptr = self._resolve_expr_root(left, scopes)
             if lisptr and left.type == "identifier":
                 source:Optional[str] = self._alias_source(right, scopes)
                 if source is not None:
-                    self._bind_symbol(left.text.decode(), (source, True), scopes)
+                    self._bind_symbol(self._node_text(left), (source, True), scopes)
                     return
 
                 found:Set[str] = set()
@@ -608,7 +616,7 @@ class TSParserMixin:
     def _visit_call(self, node:Node, scopes, ctx)->None:
         children:List[Node] = node.named_children
         func:Node = children[0]
-        func_name:str = (func.text.decode() if func.type == "identifier" else "")
+        func_name:str = (self._node_text(func) if func.type == "identifier" else "")
         arg_list:Node = (children[1] if len(children) > 1 and children[1].type == "argument_list" else None)
         actuals:List[Node] = (list(arg_list.named_children) if arg_list is not None else [])
 
