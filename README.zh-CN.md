@@ -344,6 +344,28 @@ dev = get_device("cuda:0")   # 直接取对应后端的 Device 对象
 
 缓存按源文件(及全部 `#include`)mtime 自动失效; `@kernel` 生成的源码按 Python 源码哈希区分。这些目录应加入 `.gitignore`。
 
+## 进度输出
+
+各后端会打印它做了什么——翻译、编译、数据拷贝, 以及每次内核启动, 并带上实际运行的后端名:
+
+```
+launch OpenCL Kernel('pyk_saxpy_fb5e5907') on Device('NVIDIA GeForce RTX 4070 Laptop GPU')
+       with global_work_size=(1024,), local_work_size=(256,)
+launch CUDA Kernel('pyk_saxpy_e6a555c8') on Device('NVIDIA GeForce RTX 4070 Laptop GPU')
+       with grid_dim=(3907, 1, 1), block_dim=(256, 1, 1)
+```
+
+日志默认开启, 由每个后端各一个开关控制(`CL.print_info`、`CUDA.print_info`、`NVRTC.print_info`、`HIP.print_info`、`HipCompiler.print_info`)。一次全部关闭/打开:
+
+```python
+from pygpgpu import set_print_info
+
+set_print_info(False)      # 此后静默
+set_print_info(True)       # 恢复详细输出(默认)
+```
+
+`set_print_info` 只作用于**已经导入**的后端模块, 所以它绝不会仅仅为了静默输出而加载某个 GPU 运行时。在调用之后才导入的后端会重新回到详细模式——请在你用到的后端都导入后再调用, 或者直接单独设置某个开关(`pygpgpu.opencl.driver.CL.print_info = False`)。
+
 ## 已知限制
 
 - `@kernel` 不支持: 字符串/列表/字典、闭包、递归、kernel 返回值、多维 shape 动态索引;

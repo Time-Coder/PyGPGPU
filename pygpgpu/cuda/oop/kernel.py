@@ -99,7 +99,7 @@ class Kernel(CUObject):
             0, stream.id, value_ptrs, None
         )
         if CUDA.print_info:
-            print(f"launch {self} on {stream.device} with grid_dim={tuple(grid_dims)}, block_dim={tuple(block_dims)}", flush=True)
+            print(f"launch CUDA {self} on {stream.device} with grid_dim={tuple(grid_dims)}, block_dim={tuple(block_dims)}", flush=True)
 
         self.__after_call(stream)
 

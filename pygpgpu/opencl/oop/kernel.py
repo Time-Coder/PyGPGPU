@@ -119,7 +119,7 @@ class Kernel(CLObject):
         CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, pointer(event_id))
         launch_event = Event(self.context, event_id, CL.clEnqueueNDRangeKernel)
         if CL.print_info:
-            print(f"launch {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
+            print(f"launch OpenCL {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
 
         return self.__after_call(cmd_queue, launch_event)
 
