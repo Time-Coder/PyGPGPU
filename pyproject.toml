@@ -9,7 +9,9 @@ description = "Import GPU kernels like Python functions across OpenCL / CUDA / H
 readme = "README.md"
 requires-python = ">=3.7"
 license = { file = "LICENSE" }
-authors = [{ name = "Time-Coder" }]
+authors = [
+    { name = "王炳辉 (Bing-Hui WANG)", email = "binghui.wang@foxmail.com" }
+]
 keywords = ["gpu", "opencl", "cuda", "hip", "rocm", "kernel", "jit"]
 classifiers = [
     "Development Status :: 3 - Alpha",
