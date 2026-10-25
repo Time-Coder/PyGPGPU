@@ -4,7 +4,6 @@ import hashlib
 import re
 import os
 import pickle
-from charset_normalizer import from_path
 from functools import lru_cache
 from collections.abc import Iterable
 from typing import Union, Any, Tuple, Optional, List
@@ -51,6 +50,16 @@ def md5sums(content:str)->str:
     return md5sum(content.encode("utf-8"))
 
 def cat(file_name: str) -> str:
+    # charset_normalizer ships with imageio, but it was never a declared
+    # dependency and importing it at module scope made this module -- and
+    # therefore the whole package -- fail to import wherever it is absent.
+    # It is only needed to guess the encoding of an unreadable file, so import
+    # it on demand and fall back to UTF-8 when it is not installed.
+    try:
+        from charset_normalizer import from_path
+    except ImportError:
+        with open(file_name, "r", encoding="utf-8", errors="replace") as file:
+            return file.read()
     return str(from_path(file_name).best())
     
 def echo(content:str, file_name:str)->None:

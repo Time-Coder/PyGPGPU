@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Import GPU kernels like Python functions across OpenCL / CUDA / HIP backends"
 readme = "README.md"
 requires-python = ">=3.7"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "Time-Coder" }]
 keywords = ["gpu", "opencl", "cuda", "hip", "rocm", "kernel", "jit"]
 classifiers = [
@@ -19,11 +19,16 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 dependencies = [
     "numpy>=1.21",
@@ -63,7 +68,7 @@ dev = [
 include = ["pygpgpu*"]
 
 [tool.setuptools.package-data]
-pygpgpu = ["**/*.pyi", "**/*.pyi.in"]
+pygpgpu = ["py.typed", "**/*.pyi", "**/*.pyi.in"]
 
 # ---------------------------------------------------------------------------
 # ruff -- Python static checks (lint). Run: python -m ruff check
