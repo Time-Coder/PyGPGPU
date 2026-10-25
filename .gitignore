@@ -6,3 +6,8 @@ __hipcache__
 *.egg-info
 .dsh-acl-recovery
 .ruff_cache
+
+# Type stubs generated next to handwritten .cl/.cu/.hip kernels on import. The vector-type
+# stubs under pygpgpu/vec_types are committed on purpose; these are per-kernel byproducts of
+# running examples/ and should not be tracked.
+examples/*.pyi
