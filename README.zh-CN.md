@@ -49,10 +49,10 @@ saxpy["hip:gfx1036"](x, x, out, 2.0)   # 后端:设备
 ## 安装
 
 ```bash
-pip install -e .
+pip install pygpgpu
 ```
 
-Python ≥ 3.12。GPU 运行时按需自备(任一即可):
+Python ≥ 3.7。GPU 运行时按需自备(任一即可):
 
 | 后端 | 需要安装 | 说明 |
 |---|---|---|
@@ -311,7 +311,7 @@ apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
 - **自动微分**: Taichi、Warp 可以对 kernel 求导, 本库不支持;
 - **稀疏与不规则数据结构**: Taichi 有 sparse grid / SNode tree, 本库传的是稠密 numpy 数组(稀疏要自己处理);
 - **CPU 回退**: 三者都能跑 CPU, 本库必须有 GPU;
-- **最低解释器版本**: 本库要求 Python 3.12+(当前在 3.14 上跑通), 其他几个支持更老的一批版本。
+- **最低解释器版本**: 本库支持 Python 3.7 及以上, 64 位与 32 位 Windows 均可; 其他几个需要更新的解释器。
 
 这张表依据各项目文档与上面的代码片段整理; 它们的 API 迭代很快, 依赖某一格之前请核对当前文档。
 

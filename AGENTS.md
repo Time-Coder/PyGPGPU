@@ -1,6 +1,6 @@
 # AGENTS.md
 
-PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP. Pure Python + ctypes, Python >= 3.12, packaged with setuptools. `README.md` is the English version (shown first on GitHub); `README.zh-CN.md` holds the Chinese version and the two link to each other at the top — when editing user-facing docs, keep both in sync.
+PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP. Pure Python + ctypes, Python >= 3.7, packaged with setuptools. `README.md` is the English version (shown first on GitHub); `README.zh-CN.md` holds the Chinese version and the two link to each other at the top — when editing user-facing docs, keep both in sync.
 
 ## Language policy: English only (hard rule)
 

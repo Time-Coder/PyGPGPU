@@ -49,10 +49,10 @@ No C code to write, no build system to configure; the first call translates, com
 ## Installation
 
 ```bash
-pip install -e .
+pip install pygpgpu
 ```
 
-Python ≥ 3.12. Bring your own GPU runtime (any one of them is enough):
+Python ≥ 3.7. Bring your own GPU runtime (any one of them is enough):
 
 | Backend | What you need | Notes |
 |---|---|---|
@@ -317,7 +317,7 @@ Where the others are ahead — worth knowing before you pick:
 - **Automatic differentiation**: Taichi and Warp can differentiate kernels; this library cannot.
 - **Sparse and irregular data structures**: Taichi has sparse grids and SNode trees; here you pass dense numpy arrays (or handle sparsity yourself).
 - **CPU fallback**: all three can run on the CPU; this library needs a GPU.
-- **Minimum interpreter version**: this library requires Python 3.12+ (it runs on 3.14); the others support a wider range of older versions.
+- **Minimum interpreter version**: this library runs on Python 3.7 and newer, on both 64- and 32-bit Windows builds; the others require a newer interpreter.
 
 This table was written from each project's documentation and the snippets above; their APIs move
 fast, so confirm against current docs before relying on a specific cell.
