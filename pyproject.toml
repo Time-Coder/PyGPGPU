@@ -70,6 +70,10 @@ include = ["pygpgpu*"]
 [tool.setuptools.package-data]
 pygpgpu = ["py.typed", "**/*.pyi", "**/*.pyi.in"]
 
+# What the sdist carries beyond the package itself is declared in MANIFEST.in: the
+# numbered scripts under examples/ ship as worked examples, while doc/ (4.6 MB of
+# vendor reference PDFs) is excluded.
+
 # ---------------------------------------------------------------------------
 # ruff -- Python static checks (lint). Run: python -m ruff check
 #   Legacy sources inside pygpgpu, auto-generated .pyi stubs and the vendored

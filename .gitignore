@@ -7,6 +7,12 @@ __hipcache__
 .dsh-acl-recovery
 .ruff_cache
 
+# Packaging output. A stray build/ directory is not just clutter: it holds a second
+# copy of the package under build/lib/, which ruff then scans, so `python check.py`
+# reports hundreds of duplicated findings from the copy until it is removed.
+build/
+dist/
+
 # Type stubs generated next to handwritten .cl/.cu/.hip kernels on import. The vector-type
 # stubs under pygpgpu/vec_types are committed on purpose; these are per-kernel byproducts of
 # running examples/ and should not be tracked.

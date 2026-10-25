@@ -1,0 +1,14 @@
+# Source distribution contents beyond the package itself.
+#
+# The numbered scripts under examples/ are the project's end-to-end smoke tests and
+# the only worked examples covering all three backends, so they ship with the sdist
+# (the wheel installs just the pygpgpu package). Their generated .pyi stubs are
+# excluded because they are byproducts of running the examples.
+include README.md
+include README.zh-CN.md
+include LICENSE
+recursive-include examples *.py *.md *.cl *.cu *.hip
+recursive-exclude examples *.pyi
+
+# doc/ is deliberately not included: it holds vendor reference PDFs for the CUDA
+# driver API and NVRTC guides, not project documentation.
