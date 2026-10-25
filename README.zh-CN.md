@@ -107,6 +107,35 @@ def histogram(data, counts):
 
 kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `gpu.get_global_id` 的写法里声明 `gpu.work_size(x)` —— 这条语句只在 host 侧生效, 会被翻译器擦除, 并贡献 `x` 的全部维度。用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
 
+### 非阻塞启动
+
+装饰后的 kernel 与手写 kernel 一样提供 `submit` / `async_call`, 所以 `@kernel` 函数不用写任何 C 代码也能异步启动:
+
+```python
+import asyncio
+from pygpgpu import kernel
+
+@kernel
+def saxpy(x, y, out, alpha):
+    for i in range(out.shape[0]):
+        out[i] = x[i] * alpha + y[i]
+
+# concurrent.futures
+future = saxpy.submit(x, y, out, 2.0)
+future.result()                       # 回读完成后才返回
+
+# asyncio
+await saxpy.async_call(x, y, out, 2.0)
+
+# 中括号同样适用
+saxpy["cuda"].submit(x, y, out, 2.0)
+saxpy["opencl"][(len(x), 256)].async_call(x, y, out, 2.0)
+```
+
+输出数组由完成回调写回, 所以只能在 future 完成之后再读: 提前访问会与传输竞争。`submit` 与 `async_call` 只差 future 的类型(`concurrent.futures.Future` 与 `asyncio.Future`)。
+
+CUDA 与 HIP 后端有一点需要留意: 每次启动都会创建一个 stream, 而它只在对应的 Python 对象被垃圾回收时才释放, 所以连续大量启动会累积 stream。实际使用中 `gc.collect()` 可以回收, OpenCL 后端不受影响。在大量异步负载下建议先用 OpenCL 后端。
+
 ### 手写 kernel 文件
 
 已有 C 风格 kernel? `.cl` / `.cu` / `.hip` 文件(对应后端原生语法)可以像 Python 模块一样直接 import。写一个 `vecadd.cl`:

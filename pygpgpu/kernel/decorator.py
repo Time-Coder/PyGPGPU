@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -228,6 +230,29 @@ class _KernelCall:
         return self._kernel._invoke(
             instance, call_args, self._backend, self._device, self._global_size, self._local_size)
 
+    def _launch(self, launch:str, args:Tuple[Any, ...])->Any:
+        """Shared body of the three launch styles, honouring the bracket selectors."""
+        instance:Any = self._instance
+        call_args:Tuple[Any, ...] = args
+        if self._kernel._is_method and instance is None:
+            if not args:
+                raise TypeError(
+                    f"{self._kernel.__name__}() is an instance method; pass the instance "
+                    f"as the first argument")
+            instance = args[0]
+            call_args = args[1:]
+        return self._kernel._invoke(
+            instance, call_args, self._backend, self._device,
+            self._global_size, self._local_size, launch=launch)
+
+    def submit(self, *args:Any)->concurrent.futures.Future:
+        """Non-blocking launch of the bracketed form, e.g. ``k["cuda"].submit(...)``."""
+        return self._launch("submit", args)
+
+    def async_call(self, *args:Any)->asyncio.Future:
+        """Non-blocking asyncio launch of the bracketed form, e.g. ``k["cuda"].async_call(...)``."""
+        return self._launch("async", args)
+
 
 class _BoundKernelMethod:
     """Bound instance-method form: instance.kernel_method(...)"""
@@ -241,6 +266,14 @@ class _BoundKernelMethod:
 
     def __call__(self, *args:Any)->Any:
         return self._kernel._invoke(self._instance, args, None, None, None, None)
+
+    def submit(self, *args:Any)->concurrent.futures.Future:
+        """Non-blocking launch: ``instance.kernel_method.submit(...)``."""
+        return self._kernel._invoke(self._instance, args, None, None, None, None, launch="submit")
+
+    def async_call(self, *args:Any)->asyncio.Future:
+        """Non-blocking asyncio launch: ``instance.kernel_method.async_call(...)``."""
+        return self._kernel._invoke(self._instance, args, None, None, None, None, launch="async")
 
 
 class PyKernel:
@@ -298,9 +331,43 @@ class PyKernel:
             return self._invoke(args[0], args[1:], None, None, None, None)
         return self._invoke(None, args, None, None, None, None)
 
+    def submit(self, *args:Any)->concurrent.futures.Future:
+        """Launch without waiting, returning a ``concurrent.futures.Future``.
+
+        Same arguments and same backend/work-size selection as calling the kernel
+        directly; the difference is that this returns as soon as the launch is
+        enqueued instead of blocking until the kernel finishes and its results
+        are read back. The future completes when every transfer has landed, so
+        the output arrays are only safe to read from its result (or after
+        ``.result()``/``.wait()``).
+        """
+        if self._is_method:
+            if not args:
+                raise TypeError(
+                    f"{self.__name__}() is an instance method; call it on an instance "
+                    f"or pass the instance as the first argument")
+            return self._invoke(args[0], args[1:], None, None, None, None, launch="submit")
+        return self._invoke(None, args, None, None, None, None, launch="submit")
+
+    def async_call(self, *args:Any)->asyncio.Future:
+        """Launch without waiting, returning an ``asyncio.Future``.
+
+        The asyncio counterpart of ``submit``; use ``await`` on the result. The
+        kernel is enqueued immediately, so awaiting only waits for completion,
+        and the returned future resolves once the read-back has finished.
+        """
+        if self._is_method:
+            if not args:
+                raise TypeError(
+                    f"{self.__name__}() is an instance method; call it on an instance "
+                    f"or pass the instance as the first argument")
+            return self._invoke(args[0], args[1:], None, None, None, None, launch="async")
+        return self._invoke(None, args, None, None, None, None, launch="async")
+
     def _invoke(self, instance:Any, args:Tuple[Any, ...],
                 backend_sel:Optional[str], device_sel:Optional[str],
-                global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]])->Any:
+                global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
+                launch:str = "call")->Any:
         backend:str = (backend_sel or self.backend)
         device_obj:Any
         device_key:str
@@ -403,6 +470,10 @@ class PyKernel:
                 kernel_obj = kernel_obj[(grid, local_size)]
             else:
                 kernel_obj = kernel_obj[(global_size, local_size)]
+        if launch == "submit":
+            return kernel_obj.submit(*launch_args)
+        if launch == "async":
+            return kernel_obj.async_call(*launch_args)
         return kernel_obj(*launch_args)
 
     # ---------- source generation ----------

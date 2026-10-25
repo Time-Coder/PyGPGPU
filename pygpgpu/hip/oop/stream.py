@@ -61,7 +61,11 @@ class Stream(HIPObject):
         if self.finished:
             on_completed(self, self.status)
         else:
-            self._on_completed_callbacks.add(on_completed)
+            # Register through add_callback, not by appending to the set: the set is
+            # only drained by the driver callback that add_callback queues, so a
+            # callback added here without one would never run and the future would
+            # never complete.
+            self.add_callback(on_completed)
 
         return future
 

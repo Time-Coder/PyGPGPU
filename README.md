@@ -107,6 +107,35 @@ Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/compari
 
 A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `gpu.get_global_id`, declare `gpu.work_size(x)` — that statement is host-side only, erased by the translator, and contributes all of `x`'s dimensions. A `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
 
+### Non-blocking launches
+
+A decorated kernel takes the same `submit` / `async_call` methods as a handwritten one, so a `@kernel` function can be launched and awaited without writing any C:
+
+```python
+import asyncio
+from pygpgpu import kernel
+
+@kernel
+def saxpy(x, y, out, alpha):
+    for i in range(out.shape[0]):
+        out[i] = x[i] * alpha + y[i]
+
+# concurrent.futures
+future = saxpy.submit(x, y, out, 2.0)
+future.result()                       # resolves once the read-back has landed
+
+# asyncio
+await saxpy.async_call(x, y, out, 2.0)
+
+# the brackets apply here too
+saxpy["cuda"].submit(x, y, out, 2.0)
+saxpy["opencl"][(len(x), 256)].async_call(x, y, out, 2.0)
+```
+
+The result is only safe to read from the future: the output arrays are written back by the completion callback, so touching them before the future resolves races with the transfer. `submit` and `async_call` differ only in the future type (`concurrent.futures.Future` vs `asyncio.Future`).
+
+One caveat on the CUDA and HIP backends: every launch creates a stream that is only released when the Python object is garbage-collected, so a long run of launches accumulates streams. In practice a `gc.collect()` reclaims them, and the OpenCL backend is unaffected. Prefer the OpenCL backend for heavy asynchronous workloads until that is reworked.
+
 ### Handwritten kernel files
 
 Already have C-style kernels? `.cl` / `.cu` / `.hip` files (native syntax of the matching backend) import like Python modules. Write a `vecadd.cl`:
