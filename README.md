@@ -443,6 +443,8 @@ set_print_info(True)       # verbose again (the default)
 - the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used;
 - the pure-Python backend (`k["python"]`) does not emulate `gpu.local` (group-shared memory): it runs serially and has no parallel work items to share it.
 
+On CUDA, the array APIs (`Array` upload/read-back through `cuMemcpy2D`) work on every supported interpreter, but `TextureObject` depends on the driver accepting `cuTexObjectCreate` under that interpreter. On the machine this was developed on (driver 13.4), ten fresh attempts succeeded ten times under CPython 3.14 and zero times under CPython 3.7, with byte-identical descriptors and the same GPU, so tex2D sampling is usable on 3.14 and unavailable on 3.7 there. `examples/11_texture2d.py` reports this instead of raising, and the sampling results it does produce are bit-exact.
+
 ## License
 
 MIT

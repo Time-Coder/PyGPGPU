@@ -436,6 +436,8 @@ set_print_info(True)       # 恢复详细输出(默认)
 - HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用;
 - 纯 Python 后端(`k["python"]`)不模拟 `gpu.local`(组内共享内存), 它是串行执行的, 没有并行工作项的概念。
 
+在 CUDA 上, 数组 API(`Array` 通过 `cuMemcpy2D` 上传与回读)在所有受支持的解释器上都可用, 但 `TextureObject` 取决于驱动是否在该解释器下接受 `cuTexObjectCreate`。在开发这一功能所用的机器上(驱动 13.4), 十次全新尝试在 CPython 3.14 下十次成功, 在 CPython 3.7 下十次全部失败; 描述符字节完全一致、GPU 相同。因此该机器上 tex2D 采样在 3.14 可用、在 3.7 不可用。`examples/11_texture2d.py` 遇到这种情况会给出说明而不是直接抛异常, 且能够产出的采样结果都是位精确的。
+
 ## License
 
 MIT
