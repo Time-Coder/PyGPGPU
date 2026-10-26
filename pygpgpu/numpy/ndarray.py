@@ -4,6 +4,8 @@ from typing import Dict, Tuple, TYPE_CHECKING, List, Optional
 
 import numpy as np
 
+from ..utils import get_print_info
+
 if TYPE_CHECKING:
     from ..opencl.oop import CommandQueue, Event, MemObject
     from ..opencl.driver import cl_mem_flags, imagend_t
@@ -79,20 +81,13 @@ class ndarray(np.ndarray):
 
     @staticmethod
     def _print_copy_info()->bool:
-        """Backend-agnostic copy-logging switch (CL.print_info for opencl or CUDA.print_info for cuda)."""
-        try:
-            from ..opencl.driver import CL
-            if CL.print_info:
-                return True
-        except Exception:
-            pass
-        try:
-            from ..cuda.driver import CUDA
-            if CUDA.print_info:
-                return True
-        except Exception:
-            pass
-        return False
+        """Whether the backends in use currently log progress.
+
+        Consulted through utils rather than by importing each backend's driver
+        class: the copy logger used to name CL and CUDA explicitly, which both
+        reached below this layer and silently ignored HIP.
+        """
+        return get_print_info()
 
     @staticmethod
     def _set_tree_host_dirty(node:ndarray):

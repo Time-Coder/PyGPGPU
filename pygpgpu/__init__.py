@@ -91,38 +91,10 @@ hipimport = _LazyBackendHook(".hip.hipimport", "hipimport")
 
 # ---------- Top-level export: the progress-logging switch ----------
 
-def set_print_info(enabled:bool)->None:
-    """Turn the progress logging of every backend on or off.
-
-    Each backend keeps its own ``print_info`` flag (``CL``, ``CUDA``, ``NVRTC``,
-    ``HIP`` and ``HipCompiler``), and every one of them defaults to ``True``, so
-    a single kernel call prints translation, compilation, copy and launch lines.
-    Flipping them one by one means importing five private classes and reaching
-    into packages that may not have a runtime installed; this helper does it in
-    one call and only touches the backends that are already imported, so it
-    never pulls in a runtime just to silence output::
-
-        from pygpgpu import set_print_info
-        set_print_info(False)      # quiet
-        set_print_info(True)       # verbose again (the default)
-
-    A backend imported *after* this call starts out verbose, because its flag is
-    a class attribute that only exists once its module is loaded. To keep the
-    whole process quiet, call this after the backends you use have been
-    imported -- or silence a single backend directly with, for example,
-    ``pygpgpu.opencl.driver.CL.print_info = False``.
-    """
-    import sys
-
-    for module_name in ("pygpgpu.opencl.driver.cl", "pygpgpu.cuda.driver.cuda",
-                        "pygpgpu.cuda.driver.nvrtc", "pygpgpu.hip.driver.hip",
-                        "pygpgpu.hip.oop.hip_compiler"):
-        module = sys.modules.get(module_name)
-        if module is None:
-            continue
-        for value in vars(module).values():
-            if isinstance(value, type) and "print_info" in vars(value):
-                setattr(value, "print_info", enabled)
+# The switch itself lives in utils, below every backend, so the copy logger inside
+# the numpy layer can consult the same source of truth without reaching into a
+# backend driver. This name is the public entry point.
+from .utils import get_print_info, set_print_info  # noqa: E402  (needs to follow the imports above)
 
 
 __all__ = [

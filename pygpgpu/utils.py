@@ -360,3 +360,66 @@ def local_size_for_global(global_size: Tuple[int, ...], total_local_size: int = 
         budget = min(budget, max(1, int(max_work_group_size)))
 
     return _pick_local_size(extents, budget, max_work_item_sizes)
+
+
+# ---------- progress-logging switch ----------
+
+# Modules that own a ``print_info`` flag. Kept here, below every backend, so the
+# single source of truth is importable from any layer without pulling a GPU
+# runtime in: the modules are looked up in sys.modules and skipped when absent.
+_PRINT_INFO_MODULES:Tuple[str, ...] = (
+    "pygpgpu.opencl.driver.cl",
+    "pygpgpu.cuda.driver.cuda",
+    "pygpgpu.cuda.driver.nvrtc",
+    "pygpgpu.hip.driver.hip",
+    "pygpgpu.hip.oop.hip_compiler",
+)
+
+
+def get_print_info() -> bool:
+    """Whether progress logging is currently on for any already-imported backend.
+
+    A backend that has not been imported yet keeps its default (verbose) flag, so
+    this reports False only when every loaded backend has been silenced. That is
+    what the copy logger wants: it should stay quiet when the backends the caller
+    actually uses are quiet.
+    """
+    import sys
+
+    for module_name in _PRINT_INFO_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        for value in vars(module).values():
+            if isinstance(value, type) and vars(value).get("print_info", False):
+                return True
+    return False
+
+
+def set_print_info(enabled:bool) -> None:
+    """Turn the progress logging of every already-imported backend on or off.
+
+    Each backend keeps its own ``print_info`` flag (``CL``, ``CUDA``, ``NVRTC``,
+    ``HIP`` and ``HipCompiler``), all defaulting to ``True``, so a single kernel
+    call prints translation, compilation, copy and launch lines. This flips them
+    all in one call and only touches modules already in ``sys.modules``, so it
+    never pulls in a GPU runtime just to silence output::
+
+        from pygpgpu import set_print_info
+        set_print_info(False)      # quiet
+        set_print_info(True)       # verbose again (the default)
+
+    A backend imported *after* this call starts out verbose, because its flag is a
+    class attribute that only exists once its module is loaded. To keep the whole
+    process quiet, call this after the backends you use have been imported -- or
+    silence one backend directly, e.g. ``pygpgpu.opencl.driver.CL.print_info = False``.
+    """
+    import sys
+
+    for module_name in _PRINT_INFO_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        for value in vars(module).values():
+            if isinstance(value, type) and "print_info" in vars(value):
+                setattr(value, "print_info", enabled)
