@@ -66,23 +66,41 @@ class Context:
         available_buffer.use()
         return available_buffer
 
-    def create_buffer(self, size:int=0, flags:Any=None)->"Buffer":
-        """Aligns with the gnp ndarray._to_device interface."""
-        from .buffer import Buffer
-        return Buffer(size)
-
     # ---------- stream pools ----------
 
-    def get_sync_stream(self)->"Stream":
+    def _take_idle_sync(self) -> Optional["Stream"]:
+        """Pop the least-recently-used idle stream from the synchronous cache.
+
+        Caller must hold _stream_lock.
+        """
+        for ident, stream in self._sync_streams.items():
+            if not stream.busy:
+                del self._sync_streams[ident]
+                return stream
+        return None
+
+    def _take_idle_async(self) -> Optional["Stream"]:
+        """Pop an idle stream from the asynchronous pool (caller holds the lock)."""
+        for index, stream in enumerate(self._async_streams):
+            if not stream.busy:
+                del self._async_streams[index]
+                return stream
+        return None
+
+    def get_sync_stream(self) -> "Stream":
         """The stream a blocking call should use.
 
         The main thread runs on the NULL stream, which is never created and never
-        destroyed. Other threads share a least-recently-used cache keyed by thread
-        id and capped at STREAM_POOL_SIZE, so a program that keeps spawning and
-        joining threads reuses a bounded set of streams instead of leaking one per
-        thread. A cached stream is only reused by the thread that created it: HIP,
-        like CUDA, ties a stream to the context current on the creating thread, so
-        a recycled thread id gets a fresh stream rather than a foreign handle.
+        destroyed, so the common case allocates nothing.
+
+        Other threads share a least-recently-used cache capped at STREAM_POOL_SIZE,
+        keyed by thread id. A HIP stream belongs to the context that was current
+        when it was created, not to the thread, so it can be handed to another
+        thread as long as this context is made current there first. Three things
+        avoid needless create/destroy cycles: a new thread takes over the
+        least-recently-used idle entry; a full cache re-keys its victim onto the
+        current thread instead of destroying it; and the asynchronous pool is
+        drained before a new stream is created, so both pools share one budget.
         """
         if threading.current_thread() is threading.main_thread():
             with self._stream_lock:
@@ -92,47 +110,54 @@ class Context:
                 return self._legacy_stream
 
         ident = threading.get_ident()
-        victims:List[Stream] = []
         with self._stream_lock:
             self.make_current()
 
-            entry = self._sync_streams.get(ident)
-            if entry is not None:
-                stream, owner = entry
-                if owner is threading.current_thread() and not stream.busy:
-                    self._sync_streams.move_to_end(ident)
-                    stream.busy = True
-                    return stream
-                del self._sync_streams[ident]
-                if not stream.busy:
-                    victims.append(stream)
+            cached = self._sync_streams.get(ident)
+            if cached is not None and not cached.busy:
+                self._sync_streams.move_to_end(ident)
+                cached.busy = True
+                return cached
+
+            stream = self._take_idle_sync()
+            if stream is None:
+                stream = self._take_idle_async()
+                if stream is not None:
+                    self._async_slots.release()
+            if stream is not None:
+                stream.busy = True
+                self._sync_streams[ident] = stream
+                return stream
 
             from .stream import Stream
             stream = Stream()
             stream.busy = True
-            self._sync_streams[ident] = (stream, threading.current_thread())
+            self._sync_streams[ident] = stream
 
-            while len(self._sync_streams) > STREAM_POOL_SIZE:
-                evicted = False
-                for victim_ident, (victim, _owner) in self._sync_streams.items():
-                    if victim_ident == ident:
-                        continue
-                    if not victim.busy:
-                        del self._sync_streams[victim_ident]
-                        victims.append(victim)
-                        evicted = True
-                        break
-                if not evicted:
-                    del self._sync_streams[ident]
-                    break
+            if len(self._sync_streams) > STREAM_POOL_SIZE:
+                self._shrink_sync_cache(ident)
 
-        for victim in victims:
-            try:
-                victim._release(victim.id)
-            except BaseException:
-                pass
+            return stream
 
-        return stream
+    def _shrink_sync_cache(self, keep_ident:int)->None:
+        """Bring the synchronous cache back to STREAM_POOL_SIZE (caller holds lock).
+
+        The least-recently-used entry is re-keyed onto ``keep_ident`` instead of
+        being destroyed, so nothing is allocated or released. If every other entry
+        is busy, the newest is left out of the cache.
+        """
+        while len(self._sync_streams) > STREAM_POOL_SIZE:
+            for victim_ident, victim in self._sync_streams.items():
+                if victim_ident == keep_ident:
+                    continue
+                if victim.busy:
+                    continue
+                del self._sync_streams[victim_ident]
+                del self._sync_streams[keep_ident]
+                self._sync_streams[keep_ident] = victim
+                return
+            del self._sync_streams[keep_ident]
+            return
 
     def release_sync_stream(self, stream:"Stream")->None:
         """Return a synchronous stream to the cache (the NULL stream is kept)."""
@@ -146,8 +171,8 @@ class Context:
 
         ``blocking`` decides what happens when all STREAM_POOL_SIZE streams are in
         flight: a caller willing to wait blocks here, while an asynchronous launch
-        asks with ``blocking=False`` and waits on its own worker instead. Returns
-        None when ``blocking=False`` and no stream is free.
+        asks with ``blocking=False`` and waits on its own worker. An idle stream
+        from the synchronous cache is taken over before creating a new one.
         """
         if blocking:
             self._async_slots.acquire()
@@ -157,16 +182,18 @@ class Context:
         with self._stream_lock:
             self.make_current()
 
-            current = threading.current_thread()
-            for stream, owner in self._async_streams:
-                if not stream.busy and owner is current:
-                    stream.busy = True
-                    return stream
+            stream = self._take_idle_async()
+            if stream is None:
+                stream = self._take_idle_sync()
+            if stream is not None:
+                stream.busy = True
+                self._async_streams.append(stream)
+                return stream
 
             from .stream import Stream
             stream = Stream(flags=1)   # hipStreamNonBlocking
             stream.busy = True
-            self._async_streams.append((stream, current))
+            self._async_streams.append(stream)
             return stream
 
     def release_async_stream(self, stream:"Stream")->None:
@@ -174,6 +201,11 @@ class Context:
         with self._stream_lock:
             stream.busy = False
         self._async_slots.release()
+
+    def create_buffer(self, size:int=0, flags:Any=None)->"Buffer":
+        """Aligns with the gnp ndarray._to_device interface."""
+        from .buffer import Buffer
+        return Buffer(size)
 
     @property
     def device(self)->"Device":
