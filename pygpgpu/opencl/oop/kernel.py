@@ -111,12 +111,32 @@ class Kernel(CLObject):
         self._args:Dict[str, ArgInfo] = {}
         self._arg_list:List[ArgInfo] = []
         self._arg_names:List[str] = []
-        self._member_readbacks:List[Dict[str, Any]] = []
 
         self.type_checked:bool = False
-        self._used_device:Optional[Device] = None
-        self._global_work_size:Optional[Tuple[int, ...]] = None
-        self._local_work_size:Optional[Tuple[int, ...]] = None
+        # Per-call bracket state (device / work size / member read-backs), set by
+        # __getitem__ and consumed by the next launch. Thread-local because one
+        # compiled Kernel instance is shared by every thread using the kernel; as
+        # plain attributes one thread's bracket would leak into another's launch.
+        self._call_state = threading.local()
+
+    def _take_call_state(self):
+        """Read and clear the pending bracket state for the current thread."""
+        state = self._call_state
+        taken = (
+            getattr(state, "device", None),
+            getattr(state, "global_work_size", None),
+            getattr(state, "local_work_size", None),
+            getattr(state, "member_readbacks", None) or [],
+        )
+        state.device = None
+        state.global_work_size = None
+        state.local_work_size = None
+        state.member_readbacks = []
+        return taken
+
+    def _pending_device(self) -> Optional[Device]:
+        """The device a bracket selected, without consuming it."""
+        return getattr(self._call_state, "device", None)
 
     def __getitem__(self, sizes_or_device:Tuple[Union[int, Tuple[int,...], str], ...])->Kernel:
         if not isinstance(sizes_or_device, tuple):
@@ -129,7 +149,7 @@ class Kernel(CLObject):
             device = Platforms.device(sizes_or_device[0])
             if device not in self._program.context.devices:
                 raise ValueError(f"device {device} is not in current context")
-            self._used_device = device
+            self._call_state.device = device
         elif len(sizes_or_device) == 2:
             global_sizes = sizes_or_device[0]
             local_sizes = sizes_or_device[1]
@@ -154,8 +174,8 @@ class Kernel(CLObject):
             if local_work_size is not None and work_dim != len(local_work_size):
                 raise ValueError(f"global_work_size={global_work_size} and local_work_size={local_work_size} do not have same dimension")
         
-            self._global_work_size = global_work_size
-            self._local_work_size = local_work_size
+            self._call_state.global_work_size = global_work_size
+            self._call_state.local_work_size = local_work_size
         else:
             raise TypeError(f"Kernel.__getitem__ takes at most 2 argument, {len(sizes_or_device)} were given")
         
@@ -163,7 +183,7 @@ class Kernel(CLObject):
 
     def __call__(self, *args, **kwargs)->None:
         context = self._program.context
-        device = self._used_device or context.devices[0]
+        device = self._pending_device() or context.devices[0]
         queue = context.get_sync_queue(device)
         try:
             all_events = self._call(args, kwargs, queue)
@@ -187,7 +207,7 @@ class Kernel(CLObject):
         """
         future = future_type()
         context = self._program.context
-        device = self._used_device or context.devices[0]
+        device = self._pending_device() or context.devices[0]
         queue = context.get_async_queue(device, blocking=False)
 
         if queue is None:
@@ -233,7 +253,7 @@ class Kernel(CLObject):
             context.release_sync_queue(queue)
 
     def _call(self, args, kwargs, cmd_queue:Optional[CommandQueue]=None)->List[Event]:
-        cmd_queue, global_work_size, local_work_size = self.__before_call(args, kwargs, cmd_queue)
+        cmd_queue, global_work_size, local_work_size, bound = self.__before_call(args, kwargs, cmd_queue)
         work_dim = len(global_work_size)
 
         event_id = cl_event(0)
@@ -242,17 +262,13 @@ class Kernel(CLObject):
         if CL.print_info:
             print(f"launch OpenCL {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
 
-        return self.__after_call(cmd_queue, launch_event)
+        return self.__after_call(cmd_queue, launch_event, bound)
 
     def __before_call(self, args, kwargs, cmd_queue:Optional[CommandQueue]=None):
-        used_device = self._used_device
-        global_work_size = self._global_work_size
-        local_work_size = self._local_work_size
-
-        self._used_device = None
-        self._global_work_size = None
-        self._local_work_size = None
-        self._member_readbacks = []
+        used_device, global_work_size, local_work_size, member_readbacks = self._take_call_state()
+        # Kept for __detect_work_size / __after_call, which still consult the
+        # per-call state below; the shared attributes are gone.
+        self._call_state.member_readbacks = member_readbacks
 
         used_kwargs = self.__check_args(args, kwargs)
 
@@ -261,8 +277,9 @@ class Kernel(CLObject):
 
         if cmd_queue is None:
             cmd_queue = self.context.create_command_queue(used_device)
+        bound:Dict[str, Any] = {}
         for key, value in used_kwargs.items():
-            self._set_arg(cmd_queue, key, value)
+            self._set_arg(cmd_queue, key, value, bound)
 
         if global_work_size is None or local_work_size is None:
             if global_work_size is None:
@@ -276,7 +293,7 @@ class Kernel(CLObject):
         work_dim = len(global_work_size)
         global_work_size = (c_size_t * work_dim)(*global_work_size)
         local_work_size = (c_size_t * work_dim)(*local_work_size)
-        return cmd_queue, global_work_size, local_work_size
+        return cmd_queue, global_work_size, local_work_size, bound
 
     @staticmethod
     def __copy_to_host(arg_value:Union[np.ndarray, image2d_t, List[Any]], buffer:MemObject):
@@ -292,7 +309,7 @@ class Kernel(CLObject):
             elif isinstance(host_data, Structure):
                 memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
-    def __after_call(self, cmd_queue:CommandQueue, launch_event:Event)->List[Event]:
+    def __after_call(self, cmd_queue:CommandQueue, launch_event:Event, bound:Dict[str, Any])->List[Event]:
 
         def on_completed(arg_value:Union[np.ndarray, List[Any]], mem_obj:MemObject, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
             if error_code == ErrorCode.CL_SUCCESS:
@@ -307,10 +324,14 @@ class Kernel(CLObject):
 
         events:List[Event] = []
         for arg_info in self._args.values():
+            entry = bound.get(arg_info.name)
+            mem_obj:Optional[MemObject] = entry[0] if entry is not None else None
+            arg_value:Any = entry[1] if entry is not None else None
+
             if not arg_info.need_read_back:
                 # read-only/write-only arguments must also return their buffer to the pool after the kernel completes, otherwise each call leaks one pooled object
-                if arg_info.mem_obj is not None:
-                    release_call = partial(on_release, arg_info.mem_obj)
+                if mem_obj is not None:
+                    release_call = partial(on_release, mem_obj)
                     if launch_event.finished:
                         release_call(launch_event, launch_event.status)
                     else:
@@ -319,25 +340,25 @@ class Kernel(CLObject):
 
             # From here on the argument's buffer must exist: lazy read-back, the immediate
             # read-back and the completion callback all dereference it.
-            if arg_info.mem_obj is None:
+            if mem_obj is None:
                 raise RuntimeError(
                     f"argument '{arg_info.name}' has no device buffer to read back")
 
-            if isinstance(arg_info.value, gnp.ndarray):
+            if isinstance(arg_value, gnp.ndarray):
                 # gnp arrays use lazy read-back: data stays on the device, to_host() pulls it on host access (before writes)
-                arg_info.mem_obj.dirty_on_device = True
-                arg_info.mem_obj.unuse()
+                mem_obj.dirty_on_device = True
+                mem_obj.unuse()
                 continue
 
-            event:Event = arg_info.mem_obj.read(cmd_queue)
-            call_back = partial(on_completed, arg_info.value, arg_info.mem_obj, arg_info)
+            event:Event = mem_obj.read(cmd_queue)
+            call_back = partial(on_completed, arg_value, mem_obj, arg_info)
             if event.finished:
                 call_back(event, event.status)
             else:
                 event.on_completed_callbacks.append(call_back)
                 events.append(event)
 
-        for entry in self._member_readbacks:
+        for entry in bound.get("__member_readbacks__", []):
             mem_obj:MemObject = entry["mem_obj"]
             if entry["need_read_back"]:
                 event:Event = mem_obj.read(cmd_queue)
@@ -447,7 +468,7 @@ class Kernel(CLObject):
             total_local_size, max_shape, max_work_group_size=max_group, max_work_item_sizes=max_items)
         return global_work_size, local_work_size
 
-    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any):
+    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any, bound:Dict[str, Any]):
         if isinstance(index_or_name, int):
             arg_info = self._arg_list[index_or_name]
             index = index_or_name
@@ -514,7 +535,8 @@ class Kernel(CLObject):
                         raise TypeError(f"type of argument '{arg_info.name}' need {content_type.__name__}, got {value.__class__.__name__}, and cannot convert {value.__class__.__name__} to {content_type.__name__}")
 
                 if is_struct:
-                    self._member_readbacks.extend(used_value.apply_pointers(cmd_queue, arg_info.member_infos or None))
+                    bound.setdefault("__member_readbacks__", []).extend(
+                        used_value.apply_pointers(cmd_queue, arg_info.member_infos or None))
 
                 CL.clSetKernelArg(self.id, index, sizeof(used_value), pointer(used_value))
             else:
@@ -528,7 +550,7 @@ class Kernel(CLObject):
 
                     bytes_per_group *= sizeof(content_type)                    
                     CL.clSetKernelArg(self.id, index, bytes_per_group, None)
-                    arg_info.value = value
+                    bound[arg_info.name] = (None, value, None)
                 else:
                     if isinstance(value, np.ndarray):
                         used_value = value
@@ -547,7 +569,7 @@ class Kernel(CLObject):
 
                     buffer, event = arg_info.use_buffer(cmd_queue, used_value)
                     CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
-                    arg_info.mem_obj = buffer
+                    bound[arg_info.name] = (buffer, value, used_value)
         elif arg_type_str in CLInfo.image_types:
             image_type = CLInfo.image_types[arg_type_str]
             if not isinstance(value, (np.ndarray, image_type)):
@@ -559,11 +581,9 @@ class Kernel(CLObject):
             
             image, event = arg_info.use_image(cmd_queue, used_value)
             CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(image.id))
-            arg_info.mem_obj = image
+            bound[arg_info.name] = (image, value, used_value)
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
-        
-        arg_info.value = value
 
     @property
     def _func_head(self)->str:

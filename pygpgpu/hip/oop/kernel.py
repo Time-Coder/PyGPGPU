@@ -91,8 +91,19 @@ class Kernel(HIPObject):
         self._arg_names:List[str] = []
 
         self.type_checked:bool = False
-        self._grid_dims:Optional[Tuple[int, ...]] = None
-        self._block_dims:Optional[Tuple[int, ...]] = None
+        # Per-call geometry set by __getitem__ and consumed by the next launch.
+        # Thread-local for the same reason as the CUDA backend: one compiled Kernel
+        # instance is shared by every thread that uses the kernel.
+        self._call_state = threading.local()
+
+    def _take_geometry(self):
+        """Read and clear the pending bracket geometry for the current thread."""
+        state = self._call_state
+        grid = getattr(state, "grid_dims", None)
+        block = getattr(state, "block_dims", None)
+        state.grid_dims = None
+        state.block_dims = None
+        return grid, block
 
     def __getitem__(self, sizes_or_device:Tuple[Union[int, Tuple[int,...], str], ...])->Kernel:
         if not isinstance(sizes_or_device, tuple):
@@ -120,8 +131,8 @@ class Kernel(HIPObject):
             if block_dims is not None and work_dim != len(block_dims):
                 raise ValueError(f"grid_dims={grid_dims} and block_dims={block_dims} do not have same dimension")
         
-            self._grid_dims = grid_dims
-            self._block_dims = block_dims
+            self._call_state.grid_dims = grid_dims
+            self._call_state.block_dims = block_dims
         else:
             raise TypeError(f"Kernel.__getitem__ takes at most 2 argument, {len(sizes_or_device)} were given")
         
@@ -194,7 +205,7 @@ class Kernel(HIPObject):
 
     def _launch_on(self, stream:Stream, args, kwargs)->None:
         """Bind the arguments and enqueue the launch on an already-taken stream."""
-        grid_dims, block_dims, value_ptrs = self.__prepare_call(args, kwargs, stream)
+        grid_dims, block_dims, value_ptrs, bound = self.__prepare_call(args, kwargs, stream)
         HIP.hipModuleLaunchKernel(
             self.id,
             grid_dims[0], grid_dims[1], grid_dims[2],
@@ -204,7 +215,7 @@ class Kernel(HIPObject):
         if HIP.print_info:
             print(f"launch HIP {self} on {stream.device} with grid_dim={tuple(grid_dims)}, block_dim={tuple(block_dims)}", flush=True)
 
-        self.__after_call(stream)
+        self.__after_call(stream, bound)
 
     def _release_stream(self, stream:Stream, async_launch:bool)->None:
         context = self._program.context
@@ -214,7 +225,7 @@ class Kernel(HIPObject):
             context.release_sync_stream(stream)
 
     def _call(self, args, kwargs, async_launch:bool=False)->Stream:
-        stream, grid_dims, block_dims, value_ptrs = self.__before_call(args, kwargs, async_launch)
+        stream, grid_dims, block_dims, value_ptrs, bound = self.__before_call(args, kwargs, async_launch)
         HIP.hipModuleLaunchKernel(
             self.id,
             grid_dims[0], grid_dims[1], grid_dims[2],
@@ -224,7 +235,7 @@ class Kernel(HIPObject):
         if HIP.print_info:
             print(f"launch HIP {self} on {stream.device} with grid_dim={tuple(grid_dims)}, block_dim={tuple(block_dims)}", flush=True)
 
-        self.__after_call(stream)
+        self.__after_call(stream, bound)
 
         return stream
 
@@ -235,24 +246,23 @@ class Kernel(HIPObject):
         else:
             stream = context.get_sync_stream()
 
-        grid_dims, block_dims, value_ptrs = self.__prepare_call(args, kwargs, stream)
-        return stream, grid_dims, block_dims, value_ptrs
+        grid_dims, block_dims, value_ptrs, bound = self.__prepare_call(args, kwargs, stream)
+        return stream, grid_dims, block_dims, value_ptrs, bound
 
     def __prepare_call(self, args, kwargs, stream:Stream):
         """Bind arguments to ``stream`` and resolve the launch geometry."""
-        global_work_size = self._grid_dims
-        local_work_size = self._block_dims
-
-        self._grid_dims = None
-        self._block_dims = None
+        global_work_size, local_work_size = self._take_geometry()
 
         used_kwargs = self.__check_args(args, kwargs)
 
+        # Argument bindings for this launch only; see the CUDA backend for why they
+        # must not live on the shared ArgInfo objects.
+        bound:Dict[str, Any] = {}
         value_ptrs = (c_void_p * len(self._args))()
         i = 0
         for key, arg_info in self._args.items():
             value = used_kwargs[key]
-            value_ptrs[i] = cast(self._process_arg(stream, arg_info, value), c_void_p)
+            value_ptrs[i] = cast(self._process_arg(stream, arg_info, value, bound), c_void_p)
             i += 1
 
         if global_work_size is None or local_work_size is None:
@@ -269,7 +279,7 @@ class Kernel(HIPObject):
         local_work_size = tuple(local_work_size) + (1,) * (3 - len(local_work_size))
         global_work_size = (c_size_t * 3)(*global_work_size)
         local_work_size = (c_size_t * 3)(*local_work_size)
-        return global_work_size, local_work_size, value_ptrs
+        return global_work_size, local_work_size, value_ptrs, bound
 
     @staticmethod
     def __copy_to_host(arg_value:Union[np.ndarray, List[Any]], buffer:MemObject):
@@ -291,40 +301,44 @@ class Kernel(HIPObject):
             elif isinstance(host_data, Structure):
                 memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
-    def __after_call(self, stream:Stream):
+    def __after_call(self, stream:Stream, bound:Dict[str, Any]):
         
-        def on_completed(arg_info:ArgInfo, stream:Stream, error_code:int):
+        def on_completed(arg_info:ArgInfo, arg_value:Any, mem_obj:MemObject, stream:Stream, error_code:int):
             if error_code == hipError.SUCCESS:
-                self.__copy_to_host(arg_info.value, arg_info.mem_obj)
+                self.__copy_to_host(arg_value, mem_obj)
                 if HIP.print_info:
                     print(f"copy data to host for argument '{arg_info.name}'")
 
-            arg_info.mem_obj.unuse()
+            mem_obj.unuse()
         
         for arg_info in self._args.values():
+            entry = bound.get(arg_info.name)
+            mem_obj:Optional[MemObject] = entry[0] if entry is not None else None
+            arg_value:Any = entry[1] if entry is not None else None
+
             if not arg_info.need_read_back:
                 # Read-only/write-only arguments must also return their buffer to the pool once the kernel finishes, otherwise each call leaks one pooled object
-                if arg_info.mem_obj is not None:
-                    def on_release(stream:Stream, error_code:int, mem_obj:MemObject=arg_info.mem_obj):
+                if mem_obj is not None:
+                    def on_release(stream:Stream, error_code:int, mem_obj:MemObject=mem_obj):
                         mem_obj.unuse()
                     stream.add_callback(on_release)
                 continue
 
             # From here on the argument's buffer must exist: deferred read-back, the immediate
             # read-back and the completion callback all dereference it.
-            if arg_info.mem_obj is None:
+            if mem_obj is None:
                 raise RuntimeError(
                     f"argument '{arg_info.name}' has no device buffer to read back")
 
-            if isinstance(arg_info.value, gnp.ndarray) and not self._is_vec3_arg(arg_info):
+            if isinstance(arg_value, gnp.ndarray) and not self._is_vec3_arg(arg_info):
                 # gnp arrays use deferred read-back: data stays on the device and to_host() pulls it before host access (writes).
                 # 3-component vectors are the exception: the device layout is compact, which deferred read-back cannot unpack directly, so read back immediately
-                arg_info.mem_obj.dirty_on_device = True
-                arg_info.mem_obj.unuse()
+                mem_obj.dirty_on_device = True
+                mem_obj.unuse()
                 continue
 
-            arg_info.mem_obj.read(stream)
-            callback = partial(on_completed, arg_info)
+            mem_obj.read(stream)
+            callback = partial(on_completed, arg_info, arg_value, mem_obj)
             stream.add_callback(callback)
 
     def __check_args(self, args, kwargs)->Dict[str, Any]:
@@ -409,7 +423,7 @@ class Kernel(HIPObject):
 
         return grid_dims, block_dims
 
-    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any)->Any:
+    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any, bound:Dict[str, Any])->Any:
         arg_type_str = arg_info.type_str        
         arg_type_str = arg_info.type_str
         base_type_str = arg_info.base_type_str
@@ -469,8 +483,7 @@ class Kernel(HIPObject):
                     used_value = np.ascontiguousarray(used_value)
 
                 buffer, event = arg_info.use_buffer(stream, used_value)
-                arg_info.mem_obj = buffer
-                arg_info.value = value
+                bound[arg_info.name] = (buffer, value, used_value)
                 return pointer(c_void_p(buffer.id.value))
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
