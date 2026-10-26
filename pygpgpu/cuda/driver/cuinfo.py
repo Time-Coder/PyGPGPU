@@ -197,8 +197,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuDeviceTotalMem_v2(size_t* bytes, CUdevice dev)
-        "cuDeviceTotalMem_v2": {
+        # CUresult cuDeviceTotalMem(size_t* bytes, CUdevice dev)
+        "cuDeviceTotalMem": {
             "args": {
                 "bytes": POINTER(c_size_t),
                 "dev": CUdevice
@@ -206,8 +206,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuDeviceGetUuid_v2(CUuuid *uuid, CUdevice dev)
-        "cuDeviceGetUuid_v2": {
+        # CUresult cuDeviceGetUuid(CUuuid *uuid, CUdevice dev)
+        "cuDeviceGetUuid": {
             "args": {
                 "uuid": POINTER(CUuuid),
                 "dev": CUdevice
@@ -218,7 +218,7 @@ class CUInfo:
         # CUresult cuCtxCreate_v2(CUcontext* pctx, unsigned int flags, CUdevice dev)
         #
         # The _v2 entry point, not the 1.0-era cuCtxCreate: on this driver the old
-        # symbol yields a context that rejects cuArrayCreate with
+        # symbol yields a context that rejects cuArrayCreate_v2 with
         # CUDA_ERROR_INVALID_CONTEXT, so image support requires this one.
         "cuCtxCreate_v2": {
             "args": {
@@ -229,8 +229,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuCtxDestroy_v2(CUcontext ctx)
-        "cuCtxDestroy_v2": {
+        # CUresult cuCtxDestroy(CUcontext ctx)
+        "cuCtxDestroy": {
             "args": {
                 "ctx": CUcontext
             },
@@ -263,8 +263,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuCtxPopCurrent_v2(CUcontext* pctx)
-        "cuCtxPopCurrent_v2": {
+        # CUresult cuCtxPopCurrent(CUcontext* pctx)
+        "cuCtxPopCurrent": {
             "args": {
                 "pctx": POINTER(CUcontext)
             },
@@ -296,8 +296,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuCtxSynchronize_v2(void)
-        "cuCtxSynchronize_v2": {
+        # CUresult cuCtxSynchronize(void)
+        "cuCtxSynchronize": {
             "args": {},
             "restype": c_int
         },
@@ -324,7 +324,7 @@ class CUInfo:
         # object binds an array together with the sampling rules a kernel reads
         # through tex2D.
 
-        # CUresult cuArrayCreate(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
+        # CUresult cuArrayCreate_v2(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
         "cuArrayCreate_v2": {
             "args": {
                 "pHandle": POINTER(CUarray),
@@ -341,7 +341,7 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuArrayGetDescriptor(CUDA_ARRAY_DESCRIPTOR* pArrayDescriptor, CUarray hArray)
+        # CUresult cuArrayGetDescriptor_v2(CUDA_ARRAY_DESCRIPTOR* pArrayDescriptor, CUarray hArray)
         "cuArrayGetDescriptor_v2": {
             "args": {
                 "pArrayDescriptor": POINTER(CU_ARRAY_DESC),
@@ -371,7 +371,7 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuMemcpy2D(const CUDA_MEMCPY2D* pCopy)
+        # CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D* pCopy)
         "cuMemcpy2D_v2": {
             "args": {
                 "pCopy": POINTER(CUDA_MEMCPY2D)
@@ -379,7 +379,7 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
+        # CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
         "cuMemcpy2DAsync_v2": {
             "args": {
                 "pCopy": POINTER(CUDA_MEMCPY2D),
@@ -601,8 +601,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuEventElapsedTime_v2(float* pMilliseconds, CUevent hStart, CUevent hEnd)
-        "cuEventElapsedTime_v2": {
+        # CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd)
+        "cuEventElapsedTime": {
             "args": {
                 "pMilliseconds": POINTER(c_float),
                 "hStart": CUevent,
@@ -611,16 +611,16 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuEventDestroy_v2(CUevent hEvent)
-        "cuEventDestroy_v2": {
+        # CUresult cuEventDestroy(CUevent hEvent)
+        "cuEventDestroy": {
             "args": {
                 "hEvent": CUevent
             },
             "restype": c_int
         },
 
-        # CUresult cuStreamDestroy_v2(CUstream hStream)
-        "cuStreamDestroy_v2": {
+        # CUresult cuStreamDestroy(CUstream hStream)
+        "cuStreamDestroy": {
             "args": {
                 "hStream": CUstream
             },
@@ -660,7 +660,7 @@ Devices are often unavailable due to use of CU_COMPUTEMODE_EXCLUSIVE_PROCESS or 
 * the green context passed to an API call was not converted to a CUcontext using cuCtxFromGreenCtx API.
 """,
         CUresult.CUDA_ERROR_CONTEXT_ALREADY_CURRENT: """the context being supplied as a parameter to the API call was already the active context.
-attempt to push the active context via cuCtxPushCurrent().
+attempt to push the active context via cuCtxPushCurrent_v2().
 """,
         CUresult.CUDA_ERROR_MAP_FAILED: "a map or register operation has failed.",
         CUresult.CUDA_ERROR_UNMAP_FAILED: "an unmap or unregister operation has failed.",

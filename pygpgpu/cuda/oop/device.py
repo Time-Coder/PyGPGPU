@@ -39,7 +39,7 @@ class Device(CUObject):
         if not self._total_memory:
             nbytes = c_size_t()
             ptr_nbytes = pointer(nbytes)
-            CUDA.cuDeviceTotalMem_v2(ptr_nbytes, self.id)
+            CUDA.cuDeviceTotalMem(ptr_nbytes, self.id)
             self._total_memory = nbytes.value
         return self._total_memory
     
@@ -48,7 +48,7 @@ class Device(CUObject):
         if not self._uuid:
             result = CUuuid()
             ptr_result = pointer(result)
-            CUDA.cuDeviceGetUuid_v2(ptr_result, self.id)
+            CUDA.cuDeviceGetUuid(ptr_result, self.id)
             self._uuid = UUID(bytes=bytes(result))
 
         return self._uuid

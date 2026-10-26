@@ -131,4 +131,4 @@ class Stream(CUObject):
     @staticmethod
     @override
     def _release_func()->Any:
-        return CUDA.cuStreamDestroy_v2
+        return CUDA.cuStreamDestroy

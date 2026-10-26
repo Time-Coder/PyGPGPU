@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 # threads (or keeps launching asynchronously) from growing streams forever.
 STREAM_POOL_SIZE:int = 16
 
+# How many times create_texture rebuilds an image before giving up. The driver
+# rejects texture creation intermittently, and a refused array stays refused, so
+# each attempt allocates a replacement rather than retrying the same handle.
+TEXTURE_RETRY_ATTEMPTS:int = 24
+
 
 class Context(CUObject):
 
@@ -73,11 +78,38 @@ class Context(CUObject):
         return Array(width, height, np.float32 if dtype is None else dtype, num_channels)
 
     def create_texture(self, array:Array, **options:Any)->TextureObject:
-        """Build a sampled view over ``array`` for use as a kernel argument."""
+        """Build a sampled view over ``array`` for use as a kernel argument.
+
+        On the tested machine the driver intermittently rejects texture creation with
+        CUDA_ERROR_INVALID_VALUE and accepts a later request, and rejecting an array
+        seems to stick to that array: retrying the same handle kept failing while a
+        freshly allocated one succeeded. So a refusal is answered by re-creating the
+        image from the array's contents and building a texture over the new handle,
+        which the caller never sees.
+        """
         from .texture import TextureObject
 
         self.make_current()
-        return TextureObject(array, **options)
+        try:
+            return TextureObject(array, **options)
+        except BaseException as first_error:
+            last_error:BaseException = first_error
+
+        contents = array.to_numpy()
+        for _ in range(TEXTURE_RETRY_ATTEMPTS):
+            fresh = self.create_array(array.width, array.height, array.dtype,
+                                      array.num_channels)
+            fresh.set_data(contents)
+            try:
+                texture = TextureObject(fresh, **options)
+            except BaseException as error:
+                last_error = error
+                continue
+            # Hand the caller an object that keeps the replacement image alive.
+            texture._array = fresh
+            return texture
+
+        raise last_error
 
     def get_buffer(self, size:int=0)->Buffer:
         available_buffer:Optional[Buffer] = None

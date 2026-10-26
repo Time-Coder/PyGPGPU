@@ -1,4 +1,4 @@
-﻿"""11_texture2d.py -- sample a 2D image in a CUDA kernel with tex2D.
+"""11_texture2d.py -- sample a 2D image in a CUDA kernel with tex2D.
 
 An OpenCL kernel takes an ``image2d_t`` and a sampler; CUDA splits that into an
 *array* (the storage the texture hardware reads) and a *texture object* (the
@@ -6,11 +6,11 @@ array plus its sampling rules). PyGPGPU exposes both through the context:
 
     array = ctx.create_array(width, height, np.float32)
     array.set_data(host_image)
-    texture = ctx.create_texture(array, normalized=False)
+    texture = ctx.create_texture(array, normalized=True)
 
 The texture is then passed to a kernel as an opaque handle and sampled with
 ``tex2D<float>(tex, x, y)``. Coordinates are pixel indices when the texture is
-created with ``normalized=False``, which keeps the kernel arithmetic the same as
+created with ``normalized=True``, which keeps the kernel arithmetic the same as
 for any other integer pixel loop.
 
 Note: this example needs a driver whose cuTexObjectCreate works under the running
@@ -36,7 +36,10 @@ from pygpgpu.cuda.oop.context import Context
 
 CUDA.print_info = False
 
-# A handwritten kernel: the texture analogue of the .cl examples.
+# A handwritten kernel: the texture analogue of the .cl examples. The texture is
+# created with normalized coordinates, so each pixel centre maps to
+# ((x + 0.5) / w, (y + 0.5) / h); with point sampling that returns the pixel the
+# thread is responsible for.
 SOURCE = """
 typedef unsigned long long cudaTextureObject_t;
 
@@ -46,7 +49,9 @@ __global__ void sample_flat(cudaTextureObject_t tex, float *out, int w, int h)
     if (i < w * h) {
         int px = i % w;
         int py = i / w;
-        out[i] = tex2D<float>(tex, px, py);
+        float u = ((float)px + 0.5f) / (float)w;
+        float v = ((float)py + 0.5f) / (float)h;
+        out[i] = tex2D<float>(tex, u, v);
     }
 }
 
@@ -54,8 +59,11 @@ __global__ void sample_2d(cudaTextureObject_t tex, float *out, int w, int h)
 {
     int px = blockIdx.x * blockDim.x + threadIdx.x;
     int py = blockIdx.y * blockDim.y + threadIdx.y;
-    if (px < w && py < h)
-        out[py * w + px] = tex2D<float>(tex, px, py);
+    if (px < w && py < h) {
+        float u = ((float)px + 0.5f) / (float)w;
+        float v = ((float)py + 0.5f) / (float)h;
+        out[py * w + px] = tex2D<float>(tex, u, v);
+    }
 }
 """
 
@@ -77,14 +85,12 @@ def main():
     ramp = np.arange(width * height, dtype=np.float32).reshape(height, width)
     scaled = ramp * 2.0 + 5.0
 
-    # The array APIs work everywhere; the texture object depends on the driver
-    # accepting cuTexObjectCreate under this interpreter.
     array_a = context.create_array(width, height, np.float32)
     array_a.set_data(ramp)
     print("array upload/read-back  :", bool(np.array_equal(array_a.to_numpy(), ramp)))
 
     try:
-        texture_a = context.create_texture(array_a, normalized=False)
+        texture_a = context.create_texture(array_a, normalized=True)
     except BaseException as error:
         print("this driver/interpreter combination refuses cuTexObjectCreate")
         print("(%s); the array APIs above still work" % type(error).__name__)
@@ -92,7 +98,7 @@ def main():
 
     array_b = context.create_array(width, height, np.float32)
     array_b.set_data(scaled)
-    texture_b = context.create_texture(array_b, normalized=False)
+    texture_b = context.create_texture(array_b, normalized=True)
 
     folder = tempfile.mkdtemp()
     with open(os.path.join(folder, "texture2d.cu"), "w") as handle:
@@ -118,4 +124,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
