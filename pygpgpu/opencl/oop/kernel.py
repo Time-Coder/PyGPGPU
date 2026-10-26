@@ -3,6 +3,7 @@ from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_
 from functools import partial
 import concurrent.futures
 import asyncio
+import threading
 from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional
 from typing_extensions import override
 
@@ -39,6 +40,67 @@ if TYPE_CHECKING:
     from .program import Program
     from .context import Context
     from .device import Device
+
+
+_async_executor:Optional[concurrent.futures.ThreadPoolExecutor] = None
+_async_executor_lock = threading.Lock()
+
+
+def _async_workers()->concurrent.futures.ThreadPoolExecutor:
+    """Lazily create the worker pool that completes asynchronous launches.
+
+    A launch that finds every pooled queue busy is finished here rather than on
+    the caller's thread, so submit()/async_call() never block.
+    """
+    global _async_executor
+    with _async_executor_lock:
+        if _async_executor is None:
+            _async_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="pygpgpu-opencl")
+        return _async_executor
+
+
+def _set_error(future:Any, error:BaseException)->None:
+    """Deliver an exception to an asyncio or concurrent future from any thread."""
+    if isinstance(future, asyncio.Future):
+        loop = future.get_loop()
+        if loop.is_running():
+            loop.call_soon_threadsafe(future.set_exception, error)
+            return
+    future.set_exception(error)
+
+
+def _deliver(future:Any, pending:concurrent.futures.Future)->Optional[BaseException]:
+    """Move a completed stream future onto the caller's future; return any error."""
+    try:
+        error = pending.exception()
+    except BaseException as caught:
+        error = caught
+    if error is None:
+        if isinstance(future, asyncio.Future):
+            loop = future.get_loop()
+            if loop.is_running():
+                loop.call_soon_threadsafe(future.set_result, None)
+            else:
+                future.set_result(None)
+        else:
+            future.set_result(None)
+    else:
+        _set_error(future, error)
+    return error
+
+
+def _bridge(completion:Any, future:Any, on_done:Any)->None:
+    """Mirror a completion future onto the caller's and then run ``on_done``.
+
+    ``on_done`` returns the queue to the pool, so it must wait until every event
+    the launch registered has completed.
+    """
+    def relay(pending:concurrent.futures.Future)->None:
+        _deliver(future, pending)
+        on_done()
+
+    completion.add_done_callback(relay)
 
 
 class Kernel(CLObject):
@@ -100,19 +162,78 @@ class Kernel(CLObject):
         return self
 
     def __call__(self, *args, **kwargs)->None:
-        all_events = self._call(args, kwargs)
-        Event.wait(all_events)
+        context = self._program.context
+        device = self._used_device or context.devices[0]
+        queue = context.get_sync_queue(device)
+        try:
+            all_events = self._call(args, kwargs, queue)
+            Event.wait(all_events)
+        finally:
+            # Every read-back event has completed, so the queue is idle.
+            self._release_queue(queue, async_launch=False)
 
     def submit(self, *args, **kwargs)->concurrent.futures.Future:
-        all_events = self._call(args, kwargs)
-        return Event.create_future(all_events, concurrent.futures.Future)
-    
-    def async_call(self, *args, **kwargs)->asyncio.Future:
-        all_events = self._call(args, kwargs)
-        return Event.create_future(all_events, asyncio.Future)
+        return self._launch_async(args, kwargs, concurrent.futures.Future)
 
-    def _call(self, args, kwargs)->List[Event]:
-        cmd_queue, global_work_size, local_work_size = self.__before_call(args, kwargs)
+    def async_call(self, *args, **kwargs)->asyncio.Future:
+        return self._launch_async(args, kwargs, asyncio.Future)
+
+    def _launch_async(self, args, kwargs, future_type:type):
+        """Launch without waiting, drawing from the asynchronous queue pool.
+
+        When every pooled queue is busy this returns a pending future at once and
+        finishes the launch on a worker thread once a queue frees up, so the
+        caller never blocks.
+        """
+        future = future_type()
+        context = self._program.context
+        device = self._used_device or context.devices[0]
+        queue = context.get_async_queue(device, blocking=False)
+
+        if queue is None:
+            _async_workers().submit(self._launch_when_free, future, args, kwargs, future_type)
+            return future
+
+        try:
+            events = self._call(args, kwargs, queue)
+        except BaseException as error:
+            self._release_queue(queue, async_launch=True)
+            future.set_exception(error)
+            return future
+
+        _bridge(Event.create_future(events, future_type), future,
+                lambda: self._release_queue(queue, async_launch=True))
+        return future
+
+    def _launch_when_free(self, future, args, kwargs, future_type:type)->None:
+        """Worker-thread half of an asynchronous launch that had to wait."""
+        context = self._program.context
+        device = context.devices[0]
+        try:
+            queue = context.get_async_queue(device, blocking=True)
+        except BaseException as error:
+            _set_error(future, error)
+            return
+
+        try:
+            events = self._call(args, kwargs, queue)
+        except BaseException as error:
+            self._release_queue(queue, async_launch=True)
+            _set_error(future, error)
+            return
+
+        _bridge(Event.create_future(events, future_type), future,
+                lambda: self._release_queue(queue, async_launch=True))
+
+    def _release_queue(self, queue:CommandQueue, async_launch:bool)->None:
+        context = self._program.context
+        if async_launch:
+            context.release_async_queue(queue)
+        else:
+            context.release_sync_queue(queue)
+
+    def _call(self, args, kwargs, cmd_queue:Optional[CommandQueue]=None)->List[Event]:
+        cmd_queue, global_work_size, local_work_size = self.__before_call(args, kwargs, cmd_queue)
         work_dim = len(global_work_size)
 
         event_id = cl_event(0)
@@ -123,7 +244,7 @@ class Kernel(CLObject):
 
         return self.__after_call(cmd_queue, launch_event)
 
-    def __before_call(self, args, kwargs):
+    def __before_call(self, args, kwargs, cmd_queue:Optional[CommandQueue]=None):
         used_device = self._used_device
         global_work_size = self._global_work_size
         local_work_size = self._local_work_size
@@ -138,7 +259,8 @@ class Kernel(CLObject):
         if used_device is None:
             used_device = self._program.context.devices[0]
 
-        cmd_queue = self.context.create_command_queue(used_device)
+        if cmd_queue is None:
+            cmd_queue = self.context.create_command_queue(used_device)
         for key, value in used_kwargs.items():
             self._set_arg(cmd_queue, key, value)
 

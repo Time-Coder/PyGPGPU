@@ -137,7 +137,7 @@ saxpy["opencl"][(len(x), 256)].async_call(x, y, out, 2.0)
 
 输出数组由完成回调写回, 所以只能在 future 完成之后再读: 提前访问会与传输竞争。`submit` 与 `async_call` 只差 future 的类型(`concurrent.futures.Future` 与 `asyncio.Future`)。
 
-CUDA 与 HIP 后端有一点需要留意: 一次启动需要一条 stream, 而这些 stream 是池化的, 不是每次调用都新建。主线程的同步调用使用后端的默认(NULL)stream, 不分配任何资源; 其它线程的同步调用各自缓存一条 stream, 放在每个 context 上限为 16 条的 LRU 表里, 所以反复创建/结束线程也不会累积 stream。异步启动从另一个上限为 16 条的非阻塞 stream 池中取用: 当它们全部在飞行中时, `submit`/`async_call` 会立即返回, 等有 stream 空出来后在工作线程上完成, 而同步调用则直接等待。若某条 stream 所属线程的 context 已经不存在, 该 stream 会被丢弃而不再复用, 因为 CUDA/HIP 的 stream 属于创建它时的那个线程的 context。OpenCL 后端不受影响。 stream 还会跨线程、跨两个池之间回收: 新线程会接管一个空闲的缓存 stream 而不是新建, 缓存满时把最久未用的条目改挂到当前线程而不是销毁, 一个池在新建之前会先取走另一个池的空闲 stream, 因此两个池共用同一份存活 stream 预算。
+一次启动需要一条执行通道, 三个后端都是池化复用而不是每次调用新建。在 CUDA 与 HIP 上这条通道是 stream: 主线程的同步调用使用后端的默认(NULL)stream, 不分配任何资源; 其它线程的同步调用各自缓存一条 stream, 放在每个 context 上限为 16 条的 LRU 表里, 所以反复创建/结束线程也不会累积 stream。异步启动从另一个上限为 16 条的非阻塞 stream 池中取用: 当它们全部在飞行中时, `submit`/`async_call` 会立即返回, 等有 stream 空出来后在工作线程上完成, 而同步调用则直接等待。若某条 stream 所属线程的 context 已经不存在, 该 stream 会被丢弃而不再复用, 因为 CUDA/HIP 的 stream 属于创建它时的那个线程的 context。 OpenCL 同样池化命令队列, 只有一点不同: 它没有默认队列, 所以主线程也要缓存一条, 而不是走共享的 NULL 通道。队列放在每个 context 上限为 16 条的 LRU 表里, 同样具备接管 / 改挂 / 跨池借用的策略, 异步启动使用另一个上限为 16 条的池。现在一百次阻塞启动除了已缓存的那条之外不会再创建任何队列。 stream 还会跨线程、跨两个池之间回收: 新线程会接管一个空闲的缓存 stream 而不是新建, 缓存满时把最久未用的条目改挂到当前线程而不是销毁, 一个池在新建之前会先取走另一个池的空闲 stream, 因此两个池共用同一份存活 stream 预算。
 
 ### 纯 Python 解释器后端
 

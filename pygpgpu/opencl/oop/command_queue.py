@@ -25,6 +25,9 @@ class CommandQueue(CLObject):
     def __init__(self, context:Context, device:Device, properties:Optional[cl_command_queue_properties]=None):
         self._context:Context = context
         self._device:Device = device
+        # Set while a launch owns the queue; the Context pool only hands out
+        # queues whose flag is clear and only releases idle ones.
+        self.busy:bool = False
 
         error_code = cl_int(0)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
+import threading
+from collections import OrderedDict, defaultdict
 from ctypes import pointer
-from collections import defaultdict
 from typing import Tuple, Dict, Optional, Any, List, Union, TYPE_CHECKING
 from typing_extensions import override
 
@@ -48,6 +49,11 @@ from .image1d_array import image1d_array
 from .pipe import Pipe, pipe
 
 
+# Upper bound on the command queues a Context keeps alive, mirroring the
+# CUDA/HIP stream pools.
+STREAM_POOL_SIZE:int = 16
+
+
 class Context(CLObject):
 
     def __init__(self, *devices):
@@ -88,6 +94,17 @@ class Context(CLObject):
         self.__pipes:Dict[pipe, Pipe] = {}
         self.__queues:Dict[queue_t, CommandQueue] = {}
         self.__buffers: Dict[Tuple[int, cl_mem_flags], List[Buffer]] = defaultdict(list)
+
+        # Command-queue pools, mirroring the CUDA/HIP backends.
+        #
+        # OpenCL has no default queue, so unlike CUDA every thread needs a real
+        # queue; the main thread is not special. Queues are pooled in a
+        # least-recently-used table capped at STREAM_POOL_SIZE and reused across
+        # launches, instead of creating and releasing one per call.
+        self._sync_queues:OrderedDict[int, CommandQueue] = OrderedDict()
+        self._async_queues:List[CommandQueue] = []
+        self._async_slots = threading.Semaphore(STREAM_POOL_SIZE)
+        self._queue_lock = threading.RLock()
         self.__svm_buffers: Dict[int, List["SVMBuffer"]] = defaultdict(list)
         self.__images: Dict[Tuple[str, Tuple[int, ...], type, cl_mem_flags], List[imagend]] = defaultdict(list)
         self.__samplers:Dict[str, sampler] = {}
@@ -117,6 +134,134 @@ class Context(CLObject):
             raise KeyError(device)
         
         return CommandQueue(self, device, properties)
+
+    # ---------- command-queue pools ----------
+
+    def _take_idle_sync_queue(self) -> Optional[CommandQueue]:
+        """Pop the least-recently-used idle queue (caller holds _queue_lock)."""
+        for ident, queue in self._sync_queues.items():
+            if not queue.busy:
+                del self._sync_queues[ident]
+                return queue
+        return None
+
+    def _take_idle_async_queue(self) -> Optional[CommandQueue]:
+        """Pop an idle queue from the asynchronous pool (caller holds the lock)."""
+        for index, queue in enumerate(self._async_queues):
+            if not queue.busy:
+                del self._async_queues[index]
+                return queue
+        return None
+
+    def get_sync_queue(self, device:Device) -> CommandQueue:
+        """The command queue a blocking call should use.
+
+        OpenCL has no default queue, so unlike CUDA the main thread needs a real
+        one too. Queues are cached per thread in a least-recently-used table
+        capped at STREAM_POOL_SIZE, and the three strategies used by the CUDA/HIP
+        pools apply here as well: a new thread takes over the least-recently-used
+        idle queue, a full cache re-keys its victim onto the current thread
+        instead of destroying it, and the asynchronous pool is drained before a
+        new queue is created. A cached queue is only reused for the device it was
+        created for.
+        """
+        ident = threading.get_ident()
+        with self._queue_lock:
+            cached = self._sync_queues.get(ident)
+            if cached is not None and not cached.busy and cached.device == device:
+                self._sync_queues.move_to_end(ident)
+                cached.busy = True
+                return cached
+
+            queue = self._take_idle_sync_queue()
+            if queue is not None and queue.device != device:
+                self._sync_queues[id(queue)] = queue   # wrong device: put it back
+                queue = None
+            if queue is None:
+                queue = self._take_idle_async_queue()
+                if queue is not None:
+                    if queue.device != device:
+                        self._async_queues.append(queue)
+                        queue = None
+                    else:
+                        self._async_slots.release()
+            if queue is not None:
+                queue.busy = True
+                self._sync_queues[ident] = queue
+                return queue
+
+            queue = self.create_command_queue(device)
+            queue.busy = True
+            self._sync_queues[ident] = queue
+
+            if len(self._sync_queues) > STREAM_POOL_SIZE:
+                self._shrink_sync_cache(ident)
+
+            return queue
+
+    def _shrink_sync_cache(self, keep_ident:int)->None:
+        """Trim the cache back to STREAM_POOL_SIZE (caller holds the lock).
+
+        The least-recently-used entry is re-keyed onto ``keep_ident`` rather than
+        destroyed, so nothing is released. If every other entry is busy, the
+        newest one is dropped from the cache and left to its finalizer.
+        """
+        while len(self._sync_queues) > STREAM_POOL_SIZE:
+            for victim_ident, victim in self._sync_queues.items():
+                if victim_ident == keep_ident:
+                    continue
+                if victim.busy:
+                    continue
+                del self._sync_queues[victim_ident]
+                del self._sync_queues[keep_ident]
+                self._sync_queues[keep_ident] = victim
+                return
+            del self._sync_queues[keep_ident]
+            return
+
+    def release_sync_queue(self, queue:CommandQueue)->None:
+        """Return a command queue to the cache."""
+        with self._queue_lock:
+            queue.busy = False
+
+    def get_async_queue(self, device:Device, blocking:bool=True) -> Optional[CommandQueue]:
+        """Take a command queue for an asynchronous launch.
+
+        ``blocking`` decides what happens when all STREAM_POOL_SIZE queues are in
+        flight: a caller willing to wait blocks here, while an asynchronous launch
+        asks with ``blocking=False`` and waits on its own worker instead. An idle
+        queue from the synchronous cache is taken over before creating a new one.
+        """
+        if blocking:
+            self._async_slots.acquire()
+        elif not self._async_slots.acquire(blocking=False):
+            return None
+
+        with self._queue_lock:
+            queue = self._take_idle_async_queue()
+            if queue is not None and queue.device != device:
+                self._async_queues.append(queue)
+                queue = None
+            if queue is None:
+                queue = self._take_idle_sync_queue()
+                if queue is not None and queue.device != device:
+                    self._sync_queues[id(queue)] = queue
+                    queue = None
+            if queue is not None:
+                queue.busy = True
+                self._async_queues.append(queue)
+                return queue
+
+            queue = self.create_command_queue(device)
+            queue.busy = True
+            self._async_queues.append(queue)
+            return queue
+
+    def release_async_queue(self, queue:CommandQueue)->None:
+        """Return a command queue to the asynchronous pool and free its slot."""
+        with self._queue_lock:
+            queue.busy = False
+        self._async_slots.release()
 
     def create_buffer(self, data:Union[bytes, bytearray, np.ndarray, None]=None, size:int=0, flags:Optional[cl_mem_flags]=None)->Buffer:
         return Buffer(self, data=data, size=size, flags=flags)
@@ -179,32 +324,38 @@ class Context(CLObject):
     def get_buffer(self, size:int=0, flags:cl_mem_flags=cl_mem_flags.CL_MEM_READ_WRITE)->Buffer:
         key = (size, flags)
 
-        available_buffer = None
-        for buffer in self.__buffers[key]:
-            if not buffer.using:
-                available_buffer = buffer
-                break
+        # Selecting an idle buffer and claiming it must be one atomic step: two
+        # threads that both see a buffer as free would otherwise be handed the
+        # same one, and the second unuse() would then fail with "not in using".
+        with self._queue_lock:
+            available_buffer = None
+            for buffer in self.__buffers[key]:
+                if not buffer.using:
+                    available_buffer = buffer
+                    break
 
-        if available_buffer is None:
-            available_buffer = self.create_buffer(size=size, flags=flags)
-            self.__buffers[key].append(available_buffer)
+            if available_buffer is None:
+                available_buffer = self.create_buffer(size=size, flags=flags)
+                self.__buffers[key].append(available_buffer)
 
-        available_buffer.use()
+            available_buffer.use()
         return available_buffer
 
     def get_svm_buffer(self, size:int=0)->"SVMBuffer":
-        available_buffer = None
-        for buffer in self.__svm_buffers[size]:
-            if not buffer.using:
-                available_buffer = buffer
-                break
+        # Same atomic select-and-claim requirement as get_buffer.
+        with self._queue_lock:
+            available_buffer = None
+            for buffer in self.__svm_buffers[size]:
+                if not buffer.using:
+                    available_buffer = buffer
+                    break
 
-        if available_buffer is None:
-            from .svm_buffer import SVMBuffer
-            available_buffer = SVMBuffer(self, size)
-            self.__svm_buffers[size].append(available_buffer)
+            if available_buffer is None:
+                from .svm_buffer import SVMBuffer
+                available_buffer = SVMBuffer(self, size)
+                self.__svm_buffers[size].append(available_buffer)
 
-        available_buffer.use()
+            available_buffer.use()
         return available_buffer
     
     def get_image(self, image:imagend_t)->image2d:
