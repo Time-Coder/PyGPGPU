@@ -133,11 +133,15 @@ class CUDA_MEMCPY2D(Structure):
 
 
 class _CUDA_RESOURCE_DESC_ARRAY(Structure):
+    """The ``array`` member of the resource union: a single array handle.
+
+    cuda.h declares only ``CUarray hArray`` here. The format and channel count are
+    properties of the array itself, set when it is created, and writing them into
+    this struct would overlap the other union members (they land where ``linear``
+    keeps its format/size fields).
+    """
     _fields_ = [
         ("hArray", CUarray),
-        ("Format", c_uint),
-        ("NumChannels", c_uint),
-        ("Flags", c_uint),
     ]
 
 

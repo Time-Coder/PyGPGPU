@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import byref
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from typing_extensions import override
 
 from ..driver import (
     CUDA,
-    CUarray_format,
     CUDA_RESOURCE_DESC,
     CUDA_TEXTURE_DESC,
     CUaddress_mode,
@@ -23,10 +22,16 @@ if TYPE_CHECKING:
     from .array import Array
 
 
-def _format_of(array:Array)->CUarray_format:
-    from .array import _FORMAT_BY_DTYPE
+# How many times to retry a refused creation directly. A cold driver refuses a few
+# times before accepting, so a couple of tries distinguishes "not yet warm" from
+# "rejected outright" without burning time.
+_CREATE_ATTEMPTS:int = 3
 
-    return _FORMAT_BY_DTYPE[array.dtype]
+# Warm-up rounds allowed, each creating a texture over a throwaway array.
+_WARM_ATTEMPTS:int = 8
+
+# Warm-up handles kept alive so the priming survives until the process exits.
+_warm_keep:list = []
 
 
 class TextureObject(CUObject):
@@ -46,13 +51,13 @@ class TextureObject(CUObject):
         self._address_mode:CUaddress_mode = address_mode
         self._filter_mode:CUfilter_mode = filter_mode
 
-        # Resource: the array this texture samples.
+        # Resource: the array this texture samples. Only the handle belongs here;
+        # the format and channel count are properties of the array's own
+        # descriptor, and cuda.h gives this union member no other field.
         resource = CUDA_RESOURCE_DESC()
         ctypes.memset(byref(resource), 0, ctypes.sizeof(resource))
         resource.resType = CUresourcetype.CU_RESOURCE_TYPE_ARRAY
         resource.res.array.hArray = array.id
-        resource.res.array.Format = _format_of(array)
-        resource.res.array.NumChannels = array.num_channels
 
         # Sampling rules. maxAnisotropy must be 1 (the driver rejects 0), and the
         # mipmap fields must be sane even though no mipmaps are used here.
@@ -70,9 +75,57 @@ class TextureObject(CUObject):
         for index in range(4):
             texture.borderColor[index] = 0.0
 
-        tex_id = CUtexObject()
-        CUDA.cuTexObjectCreate(byref(tex_id), byref(resource), byref(texture), None)
+        # A cold driver rejects the first few creations with
+        # CUDA_ERROR_INVALID_VALUE and then starts accepting them. Repeated attempts
+        # on the same array were not enough on their own, but creating a texture
+        # over a throwaway array does make the wanted one succeed, so a refusal is
+        # answered by warming on a scratch image.
+        tex_id = self._create(resource, texture)
         CUObject.__init__(self, tex_id)
+
+    def _create(self, resource:CUDA_RESOURCE_DESC, texture:CUDA_TEXTURE_DESC)->CUtexObject:
+        """Create the texture object, warming on a scratch array if refused."""
+        last_error:Optional[BaseException] = None
+
+        for _ in range(_CREATE_ATTEMPTS):
+            tex_id = CUtexObject()
+            try:
+                CUDA.cuTexObjectCreate(byref(tex_id), byref(resource), byref(texture), None)
+                return tex_id
+            except BaseException as error:
+                last_error = error
+
+        for _ in range(_WARM_ATTEMPTS):
+            if not self._warm_once(resource, texture):
+                continue
+            tex_id = CUtexObject()
+            try:
+                CUDA.cuTexObjectCreate(byref(tex_id), byref(resource), byref(texture), None)
+                return tex_id
+            except BaseException as error:
+                last_error = error
+
+        raise last_error if last_error is not None else RuntimeError(
+            "cuTexObjectCreate did not succeed after warming")
+
+    @staticmethod
+    def _warm_once(resource:CUDA_RESOURCE_DESC, texture:CUDA_TEXTURE_DESC)->bool:
+        """Create and keep a texture over a scratch array, to prime the driver."""
+        from .array import Array
+
+        scratch = Array(8, 4, "float32")
+        warm_resource = CUDA_RESOURCE_DESC.from_buffer_copy(bytes(resource))
+        warm_resource.res.array.hArray = scratch.id
+
+        warm = CUtexObject()
+        try:
+            CUDA.cuTexObjectCreate(byref(warm), byref(warm_resource), byref(texture), None)
+        except BaseException:
+            return False
+
+        # Retain both: dropping them was seen to undo the effect.
+        _warm_keep.extend([scratch, warm])
+        return True
 
     @property
     def array(self)->Array:
@@ -109,3 +162,4 @@ class TextureObject(CUObject):
     @override
     def _release_func()->Any:
         return CUDA.cuTexObjectDestroy
+
