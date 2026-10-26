@@ -8,6 +8,28 @@ from typing import Callable, Dict, Optional
 from .hipinfo import HIPInfo, func_signatures
 
 
+def _add_dll_folder(folder:Optional[str])->None:
+    """Make the folder holding the HIP runtime discoverable by the DLL loader.
+
+    Python 3.8 added ``os.add_dll_directory`` and stopped consulting ``PATH`` for
+    extension dependencies; on 3.7 the attribute does not exist at all, so that
+    call raised AttributeError and HIP could never load there even with a valid
+    runtime installed. 3.7 keeps using ``PATH``, which is what CPython itself
+    consults before 3.8.
+    """
+    if not folder:
+        return
+    add_dir = getattr(os, "add_dll_directory", None)
+    if add_dir is not None:
+        # Not keeping the returned handle is deliberate: closing it would remove
+        # the directory again, and the DLL stays loaded for the life of the process.
+        add_dir(folder)
+        return
+    path = os.environ.get("PATH", "")
+    if folder not in path.split(os.pathsep):
+        os.environ["PATH"] = folder + os.pathsep + path
+
+
 class MetaHIP(type):
 
     __dll = None
@@ -38,8 +60,7 @@ class MetaHIP(type):
         for candidate in candidates:
             try:
                 folder = os.path.dirname(os.path.abspath(candidate)) if os.path.sep in candidate or "/" in candidate else None
-                if folder:
-                    os.add_dll_directory(folder)
+                _add_dll_folder(folder)
                 dll = CDLL(candidate)
                 break
             except OSError as e:
