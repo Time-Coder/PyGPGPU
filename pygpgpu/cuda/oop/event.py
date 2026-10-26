@@ -31,7 +31,7 @@ class Event(CUObject):
     def msecs_to(self, event:Event)->float:
         msecs = c_float()
         ptr_msecs = pointer(msecs)
-        CUDA.cuEventElapsedTime(ptr_msecs, self.id, event.id)
+        CUDA.cuEventElapsedTime_v2(ptr_msecs, self.id, event.id)
         return msecs.value
 
     @staticmethod
@@ -52,4 +52,4 @@ class Event(CUObject):
     @staticmethod
     @override
     def _release_func()->Any:
-        return CUDA.cuEventDestroy
+        return CUDA.cuEventDestroy_v2

@@ -10,7 +10,9 @@ from .cutypes import (
     ptr_CUmodule, CUmodule, ptr_CUfunction,
     ptr_CUdeviceptr, CUdeviceptr,
     CUstream,
-    CUfunction, CUevent, CUstreamCallback
+    CUfunction, CUevent, CUstreamCallback,
+    CUarray, CUtexObject, CU_ARRAY_DESC, CUDA_MEMCPY2D, CUDA_RESOURCE_DESC,
+    CUDA_TEXTURE_DESC, CUDA_RESOURCE_VIEW_DESC
 )
 
 from .vec_types import (
@@ -195,8 +197,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuDeviceTotalMem(size_t* bytes, CUdevice dev)
-        "cuDeviceTotalMem": {
+        # CUresult cuDeviceTotalMem_v2(size_t* bytes, CUdevice dev)
+        "cuDeviceTotalMem_v2": {
             "args": {
                 "bytes": POINTER(c_size_t),
                 "dev": CUdevice
@@ -204,8 +206,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuDeviceGetUuid(CUuuid *uuid, CUdevice dev)
-        "cuDeviceGetUuid": {
+        # CUresult cuDeviceGetUuid_v2(CUuuid *uuid, CUdevice dev)
+        "cuDeviceGetUuid_v2": {
             "args": {
                 "uuid": POINTER(CUuuid),
                 "dev": CUdevice
@@ -213,8 +215,12 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuCtxCreate(CUcontext* pctx, unsigned int flags, CUdevice dev)
-        "cuCtxCreate": {
+        # CUresult cuCtxCreate_v2(CUcontext* pctx, unsigned int flags, CUdevice dev)
+        #
+        # The _v2 entry point, not the 1.0-era cuCtxCreate: on this driver the old
+        # symbol yields a context that rejects cuArrayCreate with
+        # CUDA_ERROR_INVALID_CONTEXT, so image support requires this one.
+        "cuCtxCreate_v2": {
             "args": {
                 "pctx": POINTER(CUcontext),
                 "flags": c_uint,
@@ -223,8 +229,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuCtxDestroy(CUcontext ctx)
-        "cuCtxDestroy": {
+        # CUresult cuCtxDestroy_v2(CUcontext ctx)
+        "cuCtxDestroy_v2": {
             "args": {
                 "ctx": CUcontext
             },
@@ -257,16 +263,16 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuCtxPopCurrent(CUcontext* pctx)
-        "cuCtxPopCurrent": {
+        # CUresult cuCtxPopCurrent_v2(CUcontext* pctx)
+        "cuCtxPopCurrent_v2": {
             "args": {
                 "pctx": POINTER(CUcontext)
             },
             "restype": c_int
         },
 
-        # CUresult cuCtxPushCurrent(CUcontext ctx)
-        "cuCtxPushCurrent": {
+        # CUresult cuCtxPushCurrent_v2(CUcontext ctx)
+        "cuCtxPushCurrent_v2": {
             "args": {
                 "ctx": CUcontext
             },
@@ -290,8 +296,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuCtxSynchronize(void)
-        "cuCtxSynchronize": {
+        # CUresult cuCtxSynchronize_v2(void)
+        "cuCtxSynchronize_v2": {
             "args": {},
             "restype": c_int
         },
@@ -308,6 +314,76 @@ class CUInfo:
         "cuCtxSetCurrent": {
             "args": {
                 "ctx": CUcontext
+            },
+            "restype": c_int
+        },
+
+        # ---------- arrays and texture objects ----------
+        #
+        # An array is device-side image storage the hardware can sample; a texture
+        # object binds an array together with the sampling rules a kernel reads
+        # through tex2D.
+
+        # CUresult cuArrayCreate(CUarray* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
+        "cuArrayCreate_v2": {
+            "args": {
+                "pHandle": POINTER(CUarray),
+                "pAllocateArray": POINTER(CU_ARRAY_DESC)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuArrayDestroy(CUarray hArray)
+        "cuArrayDestroy": {
+            "args": {
+                "hArray": CUarray
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuArrayGetDescriptor(CUDA_ARRAY_DESCRIPTOR* pArrayDescriptor, CUarray hArray)
+        "cuArrayGetDescriptor_v2": {
+            "args": {
+                "pArrayDescriptor": POINTER(CU_ARRAY_DESC),
+                "hArray": CUarray
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuTexObjectCreate(CUtexObject* pTexObject, const CUDA_RESOURCE_DESC* pResDesc,
+        #                            const CUDA_TEXTURE_DESC* pTexDesc,
+        #                            const CUDA_RESOURCE_VIEW_DESC* pResViewDesc)
+        "cuTexObjectCreate": {
+            "args": {
+                "pTexObject": POINTER(CUtexObject),
+                "pResDesc": POINTER(CUDA_RESOURCE_DESC),
+                "pTexDesc": POINTER(CUDA_TEXTURE_DESC),
+                "pResViewDesc": POINTER(CUDA_RESOURCE_VIEW_DESC)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuTexObjectDestroy(CUtexObject texObject)
+        "cuTexObjectDestroy": {
+            "args": {
+                "texObject": CUtexObject
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemcpy2D(const CUDA_MEMCPY2D* pCopy)
+        "cuMemcpy2D_v2": {
+            "args": {
+                "pCopy": POINTER(CUDA_MEMCPY2D)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D* pCopy, CUstream hStream)
+        "cuMemcpy2DAsync_v2": {
+            "args": {
+                "pCopy": POINTER(CUDA_MEMCPY2D),
+                "hStream": CUstream
             },
             "restype": c_int
         },
@@ -368,8 +444,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuMemAlloc(CUdeviceptr* dptr, size_t bytesize)
-        "cuMemAlloc": {
+        # CUresult cuMemAlloc_v2(CUdeviceptr* dptr, size_t bytesize)
+        "cuMemAlloc_v2": {
             "args": {
                 "dptr": ptr_CUdeviceptr,
                 "bytesize": c_size_t
@@ -377,8 +453,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuMemcpyHtoD(CUdeviceptr dstDevice, const void* srcHost, size_t ByteCount)
-        "cuMemcpyHtoD": {
+        # CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void* srcHost, size_t ByteCount)
+        "cuMemcpyHtoD_v2": {
             "args": {
                 "dstDevice": CUdeviceptr,
                 "srcHost": c_void_p,
@@ -387,8 +463,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuMemcpyDtoH(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount)
-        "cuMemcpyDtoH": {
+        # CUresult cuMemcpyDtoH_v2(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount)
+        "cuMemcpyDtoH_v2": {
             "args": {
                 "dstHost": c_void_p,
                 "srcDevice": CUdeviceptr,
@@ -397,8 +473,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void* srcHost, size_t ByteCount, CUstream hStream)
-        "cuMemcpyHtoDAsync": {
+        # CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void* srcHost, size_t ByteCount, CUstream hStream)
+        "cuMemcpyHtoDAsync_v2": {
             "args": {
                 "dstDevice": CUdeviceptr,
                 "srcHost": c_void_p,
@@ -408,8 +484,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuMemcpyDtoHAsync(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream)
-        "cuMemcpyDtoHAsync": {
+        # CUresult cuMemcpyDtoHAsync_v2(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream)
+        "cuMemcpyDtoHAsync_v2": {
             "args": {
                 "dstHost": c_void_p,
                 "srcDevice": CUdeviceptr,
@@ -419,8 +495,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuMemFree(CUdeviceptr dptr)
-        "cuMemFree": {
+        # CUresult cuMemFree_v2(CUdeviceptr dptr)
+        "cuMemFree_v2": {
             "args": {
                 "dptr": CUdeviceptr
             },
@@ -525,8 +601,8 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd)
-        "cuEventElapsedTime": {
+        # CUresult cuEventElapsedTime_v2(float* pMilliseconds, CUevent hStart, CUevent hEnd)
+        "cuEventElapsedTime_v2": {
             "args": {
                 "pMilliseconds": POINTER(c_float),
                 "hStart": CUevent,
@@ -535,16 +611,16 @@ class CUInfo:
             "restype": c_int
         },
 
-        # CUresult cuEventDestroy(CUevent hEvent)
-        "cuEventDestroy": {
+        # CUresult cuEventDestroy_v2(CUevent hEvent)
+        "cuEventDestroy_v2": {
             "args": {
                 "hEvent": CUevent
             },
             "restype": c_int
         },
 
-        # CUresult cuStreamDestroy(CUstream hStream)
-        "cuStreamDestroy": {
+        # CUresult cuStreamDestroy_v2(CUstream hStream)
+        "cuStreamDestroy_v2": {
             "args": {
                 "hStream": CUstream
             },

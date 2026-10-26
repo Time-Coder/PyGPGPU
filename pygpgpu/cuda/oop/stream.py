@@ -8,6 +8,7 @@ from concurrent import futures
 from .cuobject import CUObject
 from .event import Event
 from ..driver import CUstream, CUDA, CUstream_flags, CUevent_wait_flags, CUresult, CUstreamCallback, CUInfo
+from ...utils import settle_future
 
 
 class Stream(CUObject):
@@ -77,10 +78,13 @@ class Stream(CUObject):
         future:Union[asyncio.Future, futures.Future] = future_type()
 
         def on_completed(stream:Stream, error_code:CUresult):
+            # The callback runs on a driver thread; settle_future hands the
+            # completion to the event loop so a bare `await future` wakes up.
             if error_code != CUresult.CUDA_SUCCESS:
-                future.set_exception(RuntimeError(str(error_code) + ": " + CUInfo.error_codes[error_code]))
+                settle_future(future, RuntimeError(
+                    str(error_code) + ": " + CUInfo.error_codes[error_code]))
             else:
-                future.set_result(None)
+                settle_future(future)
         
         if self.finished:
             on_completed(self, self.status)
@@ -127,4 +131,4 @@ class Stream(CUObject):
     @staticmethod
     @override
     def _release_func()->Any:
-        return CUDA.cuStreamDestroy
+        return CUDA.cuStreamDestroy_v2

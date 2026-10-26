@@ -3,6 +3,7 @@ from ctypes import (
     c_size_t, Structure, c_char, c_void_p, c_uint64,
     CFUNCTYPE
 )
+import ctypes as _ctypes
 from typing_extensions import TypeAlias
 
 from ...constants import IntEnum, IntFlag
@@ -31,6 +32,201 @@ ptr_CUstream: TypeAlias = POINTER(CUstream)
 ptr_CUevent: TypeAlias = POINTER(CUevent)
 
 CUstreamCallback:TypeAlias = CFUNCTYPE(None, CUstream, c_uint, c_void_p)
+
+
+# ---------- arrays and texture objects ----------
+#
+# Handles for device-side images. An array is the storage (a tiled 2D buffer the
+# hardware can sample); a texture object wraps an array together with the sampling
+# rules (filtering, addressing, normalisation) that a kernel reads through tex2D.
+
+CUarray = c_void_p
+CUtexObject = c_uint64
+CUsurfObject = c_uint64
+
+ptr_CUarray: TypeAlias = POINTER(CUarray)
+ptr_CUtexObject: TypeAlias = POINTER(CUtexObject)
+
+
+class CUarray_format(IntEnum):
+    """Element format stored in an array."""
+    CU_AD_FORMAT_UNSIGNED_INT8  = 0x01
+    CU_AD_FORMAT_UNSIGNED_INT16 = 0x02
+    CU_AD_FORMAT_UNSIGNED_INT32 = 0x03
+    CU_AD_FORMAT_SIGNED_INT8    = 0x08
+    CU_AD_FORMAT_SIGNED_INT16   = 0x09
+    CU_AD_FORMAT_SIGNED_INT32   = 0x0A
+    CU_AD_FORMAT_HALF           = 0x10
+    CU_AD_FORMAT_FLOAT          = 0x20
+
+
+class CUarray_height_align(IntEnum):
+    CU_ARRAY_HEIGHT_ALIGN_NONE   = 0
+    CU_ARRAY_HEIGHT_ALIGN_16     = 16
+    CU_ARRAY_HEIGHT_ALIGN_32     = 32
+    CU_ARRAY_HEIGHT_ALIGN_64     = 64
+    CU_ARRAY_HEIGHT_ALIGN_128    = 128
+
+
+class CU_ARRAY_DESC(Structure):
+    """Array layout, as returned by cuArrayGetDescriptor.
+
+    Mirrors CUDA_ARRAY_DESCRIPTOR_v2 from cuda.h: two size_t dimensions followed by
+    the format and channel count. Declaring Width/Height as c_uint would shift
+    Format by 8 bytes and hand the driver garbage.
+    """
+    _fields_ = [
+        ("Width", c_size_t),
+        ("Height", c_size_t),
+        ("Format", c_uint),
+        ("NumChannels", c_uint),
+    ]
+
+
+# The CUDA headers name it CUDA_ARRAY_DESCRIPTOR; both spellings appear in docs.
+CUDA_ARRAY_DESCRIPTOR = CU_ARRAY_DESC
+
+
+class CUDA_ARRAY3D_DESCRIPTOR(Structure):
+    """3D array layout, mirroring CUDA_ARRAY3D_DESCRIPTOR_v2 from cuda.h."""
+    _fields_ = [
+        ("Width", c_size_t),
+        ("Height", c_size_t),
+        ("Depth", c_size_t),
+        ("Format", c_uint),
+        ("NumChannels", c_uint),
+        ("Flags", c_uint),
+    ]
+
+
+class CUmemorytype(IntEnum):
+    CU_MEMORYTYPE_HOST                = 0x01
+    CU_MEMORYTYPE_DEVICE              = 0x02
+    CU_MEMORYTYPE_ARRAY               = 0x03
+    CU_MEMORYTYPE_UNIFIED             = 0x04
+
+
+class CUDA_MEMCPY2D(Structure):
+    """2D copy descriptor used by cuMemcpy2D to move image rows in and out of an array.
+
+    Which source/destination pair is used is chosen by the srcMemoryType and
+    dstMemoryType fields.
+    """
+    _fields_ = [
+        ("srcXInBytes", c_size_t),
+        ("srcY", c_size_t),
+        ("srcMemoryType", c_uint),
+        ("srcHost", c_void_p),
+        ("srcDevice", CUdeviceptr),
+        ("srcArray", CUarray),
+        ("srcPitch", c_size_t),
+        ("dstXInBytes", c_size_t),
+        ("dstY", c_size_t),
+        ("dstMemoryType", c_uint),
+        ("dstHost", c_void_p),
+        ("dstDevice", CUdeviceptr),
+        ("dstArray", CUarray),
+        ("dstPitch", c_size_t),
+        ("WidthInBytes", c_size_t),
+        ("Height", c_size_t),
+    ]
+
+
+class _CUDA_RESOURCE_DESC_ARRAY(Structure):
+    _fields_ = [
+        ("hArray", CUarray),
+        ("Format", c_uint),
+        ("NumChannels", c_uint),
+        ("Flags", c_uint),
+    ]
+
+
+class _CUDA_RESOURCE_DESC_RES_UNION(_ctypes.Union):
+    """The 64-byte union that follows resType in CUDA_RESOURCE_DESC."""
+    _fields_ = [
+        ("array", _CUDA_RESOURCE_DESC_ARRAY),
+        ("reserved", c_void_p * 8),
+    ]
+
+
+class _CUDA_RESOURCE_DESC_HEAD(Structure):
+    """resType plus its alignment padding; the union starts 8 bytes in."""
+    _fields_ = [
+        ("resType", c_uint),
+        ("_pad", c_uint),
+    ]
+
+
+class CUDA_RESOURCE_DESC(Structure):
+    """Describes where a texture's storage lives. Only the array form is modelled
+    here, which is what the Array class produces.
+
+    The tail is a union of every resource kind; it is declared at its real size so
+    the driver reads the fields at the offsets it expects. resType occupies 8 bytes
+    once aligned, giving the 72-byte total the header specifies.
+    """
+    _fields_ = [
+        ("resType", c_uint),
+        ("_pad", c_uint),
+        ("res", _CUDA_RESOURCE_DESC_RES_UNION),
+    ]
+
+
+class CUDA_TEXTURE_DESC(Structure):
+    """Sampling rules for a texture object.
+
+    The layout matches the header exactly (64 bytes); the driver reads every field
+    by offset, so a missing member would shift the ones after it.
+    """
+    _fields_ = [
+        ("addressMode", c_uint * 3),
+        ("filterMode", c_uint),
+        ("flags", c_uint),
+        ("maxAnisotropy", c_uint),
+        ("mipmapFilterMode", c_uint),
+        ("maxMipLevelBias", c_float),
+        ("minMipmapLevelClamp", c_float),
+        ("maxMipmapLevelClamp", c_float),
+        ("_reserved", c_uint * 6),
+    ]
+
+
+class CUresourcetype(IntEnum):
+    CU_RESOURCE_TYPE_ARRAY           = 0x00
+    CU_RESOURCE_TYPE_MIPMAPPED_ARRAY = 0x01
+    CU_RESOURCE_TYPE_LINEAR          = 0x02
+    CU_RESOURCE_TYPE_PITCH2D         = 0x03
+
+
+class CUaddress_mode(IntEnum):
+    CU_TR_ADDRESS_MODE_WRAP   = 0
+    CU_TR_ADDRESS_MODE_CLAMP  = 1
+    CU_TR_ADDRESS_MODE_MIRROR = 2
+
+
+class CUfilter_mode(IntEnum):
+    CU_TR_FILTER_MODE_POINT  = 0
+    CU_TR_FILTER_MODE_LINEAR = 1
+
+
+CU_TRSF_READ_AS_INTEGER     = 0x01
+CU_TRSF_NORMALIZED_COORDINATES = 0x02
+
+
+class CUDA_RESOURCE_VIEW_DESC(Structure):
+    """Optional view onto an existing resource; passing NULL (the usual case) makes
+    the texture see the whole array in its own format."""
+    _fields_ = [
+        ("format", c_uint),
+        ("width", c_size_t),
+        ("height", c_size_t),
+        ("depth", c_size_t),
+        ("firstMipmapLevel", c_uint),
+        ("lastMipmapLevel", c_uint),
+        ("firstLayer", c_uint),
+        ("lastLayer", c_uint),
+        ("_reserved", c_uint * 16),
+    ]
 
 
 class CUresult(IntEnum):

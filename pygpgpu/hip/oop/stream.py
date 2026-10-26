@@ -9,6 +9,7 @@ from .hipobject import HIPObject
 from .event import Event
 from ..driver import CUstream, CUstreamCallback
 from ..driver import HIP, HIPInfo, hipError
+from ...utils import settle_future
 
 
 class Stream(HIPObject):
@@ -75,10 +76,13 @@ class Stream(HIPObject):
         future:Union[asyncio.Future, futures.Future] = future_type()
 
         def on_completed(stream:Stream, error_code:int):
+            # Runs on a driver thread; settle_future hands the completion to the
+            # event loop so a bare `await future` wakes up.
             if error_code != hipError.SUCCESS:
-                future.set_exception(RuntimeError(str(error_code) + ": " + HIPInfo.error_codes[error_code]))
+                settle_future(future, RuntimeError(
+                    str(error_code) + ": " + HIPInfo.error_codes[error_code]))
             else:
-                future.set_result(None)
+                settle_future(future)
         
         if self.finished:
             on_completed(self, self.status)

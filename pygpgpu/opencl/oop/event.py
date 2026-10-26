@@ -20,6 +20,8 @@ from ..driver import (
     ErrorCode
 )
 
+from ...utils import settle_future
+
 if TYPE_CHECKING:
     from .context import Context
 
@@ -94,10 +96,12 @@ class Event(CLObject):
                 error_messages.append(event.error_message)
 
             if not copied_events:
+                # Runs on a driver thread; settle_future hands the completion to
+                # the event loop so a bare `await future` wakes up.
                 if not error_messages:
-                    future.set_result(None)
+                    settle_future(future)
                 else:
-                    future.set_exception(RuntimeError("\n\n".join(error_messages)))
+                    settle_future(future, RuntimeError("\n\n".join(error_messages)))
 
         if not events:
             future.set_result(None)

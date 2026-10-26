@@ -148,4 +148,4 @@ class MemObject(CUObject):
     @override
     @staticmethod
     def _release_func()->Any:
-        return CUDA.cuMemFree
+        return CUDA.cuMemFree_v2

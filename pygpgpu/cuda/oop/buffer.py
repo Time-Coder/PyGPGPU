@@ -19,7 +19,7 @@ class Buffer(MemObject):
     def __init__(self, size:int):
         buffer_id = CUdeviceptr(0)
         ptr_buffer_id = pointer(buffer_id)
-        CUDA.cuMemAlloc(ptr_buffer_id, size)
+        CUDA.cuMemAlloc_v2(ptr_buffer_id, size)
         MemObject.__init__(self, buffer_id, None, None, size)
 
     @override
@@ -30,7 +30,7 @@ class Buffer(MemObject):
         if host_ptr is None:
             host_ptr = self._host_ptr
 
-        CUDA.cuMemcpyHtoDAsync(CUdeviceptr(self.id.value + self._byte_offset(origin)), host_ptr, region, stream.id)
+        CUDA.cuMemcpyHtoDAsync_v2(CUdeviceptr(self.id.value + self._byte_offset(origin)), host_ptr, region, stream.id)
         return stream.record_event()
 
     @override
@@ -41,7 +41,7 @@ class Buffer(MemObject):
         if host_ptr is None:
             host_ptr = self._host_ptr
 
-        CUDA.cuMemcpyDtoHAsync(host_ptr, CUdeviceptr(self.id.value + self._byte_offset(origin)), region, stream.id)
+        CUDA.cuMemcpyDtoHAsync_v2(host_ptr, CUdeviceptr(self.id.value + self._byte_offset(origin)), region, stream.id)
         return stream.record_event()
 
     @override

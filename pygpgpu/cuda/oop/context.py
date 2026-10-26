@@ -49,7 +49,10 @@ class Context(CUObject):
 
         context_id = CUcontext()
         ptr_context_id = pointer(context_id)
-        CUDA.cuCtxCreate(ptr_context_id, flags, device.id)
+        # cuCtxCreate_v2, not the 1.0-era cuCtxCreate: the legacy symbol yields a
+        # context on which cuArrayCreate fails with CUDA_ERROR_INVALID_CONTEXT,
+        # which would make the Array/TextureObject support unusable.
+        CUDA.cuCtxCreate_v2(ptr_context_id, flags, device.id)
         CUObject.__init__(self, context_id)
 
     @staticmethod
@@ -241,18 +244,18 @@ class Context(CUObject):
         CUDA.cuCtxSetCurrent(self.id)
 
     def push_current(self):
-        CUDA.cuCtxPushCurrent(self.id)
+        CUDA.cuCtxPushCurrent_v2(self.id)
 
     @staticmethod
     def pop_current()->Context:
         context_id = CUcontext()
         ptr_context_id = pointer(context_id)
-        CUDA.cuCtxPopCurrent(ptr_context_id)
+        CUDA.cuCtxPopCurrent_v2(ptr_context_id)
         return Context.instance(context_id)
 
     def sync(self)->None:
         self.make_current()
-        CUDA.cuCtxSynchronize()
+        CUDA.cuCtxSynchronize_v2()
 
     def wait_event(self, event:Event)->None:
         CUDA.cuCtxWaitEvent(self.id, event.id)
@@ -389,4 +392,4 @@ class Context(CUObject):
     @staticmethod
     @override
     def _release_func()->Any:
-        return CUDA.cuCtxDestroy
+        return CUDA.cuCtxDestroy_v2

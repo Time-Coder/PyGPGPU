@@ -4,6 +4,7 @@ import hashlib
 import re
 import os
 import pickle
+import asyncio
 from functools import lru_cache
 from collections.abc import Iterable
 from typing import Union, Any, Tuple, Optional, List
@@ -394,6 +395,30 @@ def get_print_info() -> bool:
             if isinstance(value, type) and vars(value).get("print_info", False):
                 return True
     return False
+
+
+def settle_future(future:Any, error:Optional[BaseException]=None) -> None:
+    """Complete an asyncio or concurrent future from any thread.
+
+    Driver completion callbacks run on a driver thread, not on the event loop's.
+    Setting the result directly does not wake a loop that is blocked in
+    ``select()``, so a plain ``await`` on such a future hangs even though the work
+    finished -- only ``asyncio.wait_for`` appeared to work, because it wraps the
+    future in a Task whose completion re-schedules the loop. Scheduling the
+    completion through the loop keeps a bare await responsive.
+    """
+    if isinstance(future, asyncio.Future):
+        loop = future.get_loop()
+        if loop.is_running():
+            if error is None:
+                loop.call_soon_threadsafe(future.set_result, None)
+            else:
+                loop.call_soon_threadsafe(future.set_exception, error)
+            return
+    if error is None:
+        future.set_result(None)
+    else:
+        future.set_exception(error)
 
 
 def set_print_info(enabled:bool) -> None:
