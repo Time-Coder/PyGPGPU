@@ -1,5 +1,5 @@
 from __future__ import annotations
-from ctypes import pointer, c_uint, c_void_p, cast, POINTER, py_object
+from ctypes import pointer, c_uint, c_void_p
 from typing import Union, Callable, Set, Any
 from typing_extensions import override
 import asyncio
@@ -14,10 +14,6 @@ from ..driver import HIP, HIPInfo, hipError
 class Stream(HIPObject):
 
     def __init__(self, flags:int=0):
-        self._py_obj = py_object(self)
-        self._ptr_py_obj = pointer(self._py_obj)
-        self._user_data = cast(self._ptr_py_obj, c_void_p)
-
         self._flags:int = flags
         self._on_completed_callbacks:Set[Callable[[Stream, int], None]] = set()
         # Set while a launch owns the stream; the Context pool only hands out
@@ -30,6 +26,10 @@ class Stream(HIPObject):
         ptr_stream_id = pointer(stream_id)
         HIP.hipStreamCreate(ptr_stream_id, flags)
         HIPObject.__init__(self, stream_id)
+        # Resolved through the weak registry rather than a py_object(self), which
+        # would make the object reference itself and only be freed by the cyclic
+        # collector (see the CUDA Stream for the full explanation).
+        self._user_data = self._callback_data()
 
     @staticmethod
     def legacy()->Stream:
@@ -40,14 +40,12 @@ class Stream(HIPObject):
         creating a stream per call.
         """
         stream = Stream.__new__(Stream)
-        stream._py_obj = py_object(stream)
-        stream._ptr_py_obj = pointer(stream._py_obj)
-        stream._user_data = cast(stream._ptr_py_obj, c_void_p)
         stream._flags = 0
         stream._on_completed_callbacks = set()
         stream.busy = True
         stream._legacy = True
         HIPObject.__init__(stream, CUstream(0))
+        stream._user_data = stream._callback_data()
         return stream
 
     @property
@@ -100,7 +98,10 @@ class Stream(HIPObject):
     @CUstreamCallback
     def _callback(stream_id:CUstream, error_code:c_uint, user_data:c_void_p):
         error_code = int(error_code)
-        self:Stream = cast(user_data, POINTER(py_object)).contents.value
+        self:Stream = HIPObject._from_callback(user_data)
+        if self is None:
+            # The wrapper was collected while the callback was still queued.
+            return
         for on_completed in list(self._on_completed_callbacks):
             on_completed(self, error_code)
             self._on_completed_callbacks.remove(on_completed)

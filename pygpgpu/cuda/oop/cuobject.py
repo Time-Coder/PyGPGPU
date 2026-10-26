@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ctypes import c_int, c_void_p, pointer
+from ctypes import c_int, c_size_t, c_void_p, cast, pointer, POINTER
 from typing import Dict, Any, Union, TYPE_CHECKING
 from abc import ABC, abstractmethod
 import weakref
@@ -15,6 +15,37 @@ if TYPE_CHECKING:
 class CUObject(ABC):
 
     _instances = weakref.WeakValueDictionary()
+
+    # Registry that lets a native callback find the object it was registered for
+    # without the object referencing itself.
+    #
+    # Callbacks receive a void* the driver carries back verbatim. Storing a
+    # ctypes.py_object(self) there would work, but py_object holds a strong
+    # reference, so the object formed a reference cycle with itself and could
+    # only be reclaimed by the cyclic collector -- a stream stayed alive long
+    # after its last use, which is what made streams pile up. Storing id(self)
+    # instead and resolving it through this weak registry keeps the address
+    # stable for the driver while leaving the reference weak, so the object dies
+    # as soon as nothing else holds it.
+    _callback_targets:weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+    def _callback_data(self) -> c_void_p:
+        """The void* to hand a driver callback; resolves back via _from_callback."""
+        ident = id(self)
+        CUObject._callback_targets[ident] = self
+        # The driver only carries the pointer, so its value is what matters; a
+        # one-element buffer gives it a real address to point at.
+        self._callback_ident = c_size_t(ident)
+        return cast(pointer(self._callback_ident), c_void_p)
+
+    @classmethod
+    def _from_callback(cls, user_data:c_void_p):
+        """Resolve the object a callback was registered for, or None if it is gone."""
+        try:
+            ident = cast(user_data, POINTER(c_size_t)).contents.value
+        except Exception:
+            return None
+        return cls._callback_targets.get(ident)
 
     def __init__(self, id:Union[int, c_void_p]):
         self._id:Union[int, c_void_p] = id

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from ctypes import pointer, c_uint, c_void_p, cast, POINTER, py_object
+from ctypes import pointer, c_uint, c_void_p
 from typing import Union, Callable, Set, Any
 from typing_extensions import override
 import asyncio
@@ -13,10 +13,6 @@ from ..driver import CUstream, CUDA, CUstream_flags, CUevent_wait_flags, CUresul
 class Stream(CUObject):
 
     def __init__(self, flags:CUstream_flags=CUstream_flags.CU_STREAM_DEFAULT):
-        self._py_obj = py_object(self)
-        self._ptr_py_obj = pointer(self._py_obj)
-        self._user_data = cast(self._ptr_py_obj, c_void_p)
-
         self._flags:CUstream_flags = flags
         self._on_completed_callbacks:Set[Callable[[Stream, CUresult], None]] = set()
         # Set while a launch owns the stream; the Context pool only hands out
@@ -30,6 +26,10 @@ class Stream(CUObject):
         ptr_stream_id = pointer(stream_id)
         CUDA.cuStreamCreate(ptr_stream_id, flags)
         CUObject.__init__(self, stream_id)
+        # Resolved through CUObject._callback_targets rather than a py_object(self),
+        # which would make this object reference itself and only be freed by the
+        # cyclic collector (see CUObject._callback_data).
+        self._user_data = self._callback_data()
 
     @staticmethod
     def legacy()->Stream:
@@ -40,14 +40,12 @@ class Stream(CUObject):
         wants: sequential execution without creating a stream per call.
         """
         stream = Stream.__new__(Stream)
-        stream._py_obj = py_object(stream)
-        stream._ptr_py_obj = pointer(stream._py_obj)
-        stream._user_data = cast(stream._ptr_py_obj, c_void_p)
         stream._flags = CUstream_flags.CU_STREAM_DEFAULT
         stream._on_completed_callbacks = set()
         stream.busy = True
         stream._legacy = True
         CUObject.__init__(stream, CUstream(0))
+        stream._user_data = stream._callback_data()
         # CUObject._release skips a null id, so the NULL stream is never destroyed
         # even if this wrapper is collected; no finalizer override is needed.
         return stream
@@ -102,7 +100,11 @@ class Stream(CUObject):
     @CUstreamCallback
     def _callback(stream_id:CUstream, error_code:c_uint, user_data:c_void_p):
         error_code = CUresult(error_code)
-        self:Stream = cast(user_data, POINTER(py_object)).contents.value
+        self:Stream = CUObject._from_callback(user_data)
+        if self is None:
+            # The wrapper was collected while the callback was still queued; there
+            # is nothing left to notify.
+            return
         for on_completed in list(self._on_completed_callbacks):
             on_completed(self, error_code)
             self._on_completed_callbacks.remove(on_completed)

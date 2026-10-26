@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ctypes import c_void_p, sizeof, _SimpleCData, Structure, c_size_t, pointer, c_char
+from ctypes import c_void_p, sizeof, _SimpleCData, Structure, c_size_t, cast, pointer, POINTER, c_char
 from typing import Dict, Any
 from typing_extensions import get_args, get_origin
 from abc import ABC, abstractmethod
@@ -10,6 +10,31 @@ from ..driver import IntEnum, IntFlag, cl_bool, cl_uint, CLInfo
 
 
 class CLObject(ABC):
+
+    # Registry that lets a native callback find the object it was registered for
+    # without the object referencing itself. Storing a ctypes.py_object(self) in
+    # the driver's user_data works, but py_object holds a strong reference, so the
+    # object formed a cycle with itself and was only reclaimed by the cyclic
+    # collector -- delaying clReleaseEvent well past its last use. id(self) plus
+    # this weak registry keeps the address stable for the driver while leaving the
+    # reference weak.
+    _callback_targets:weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+    def _callback_data(self) -> c_void_p:
+        """The void* to hand a driver callback; resolves back via _from_callback."""
+        ident = id(self)
+        CLObject._callback_targets[ident] = self
+        self._callback_ident = c_size_t(ident)
+        return cast(pointer(self._callback_ident), c_void_p)
+
+    @classmethod
+    def _from_callback(cls, user_data:c_void_p):
+        """Resolve the object a callback was registered for, or None if it is gone."""
+        try:
+            ident = cast(user_data, POINTER(c_size_t)).contents.value
+        except Exception:
+            return None
+        return cls._callback_targets.get(ident)
 
     def __init__(self, id:c_void_p):
         if isinstance(id, int):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .clobject import CLObject
-from ctypes import pointer, c_void_p, cast, POINTER, py_object
+from ctypes import pointer, c_void_p
 import concurrent.futures
 import asyncio
 from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, Set, Any
@@ -29,19 +29,19 @@ class Event(CLObject):
     __retained_events:Set[Event] = set()
 
     def __init__(self, context:Context, event_id:Optional[cl_event]=None, func:Optional[CL.Func]=None):
-        self._py_obj = py_object(self)
-        self._ptr_py_obj = pointer(self._py_obj)
-        self._user_data = cast(self._ptr_py_obj, c_void_p)
-
         error_code = cl_int(0)
         self._context:Context = context
         self._is_user_event:bool = False
         self._func:Optional[CL.Func] = func
         if not event_id:
-            event_id = CL.clCreateUserEvent(context, pointer(error_code))
+            event_id = CL.clCreateUserEvent(context.id, pointer(error_code))
             self._is_user_event:bool = True
 
         CLObject.__init__(self, event_id)
+        # Resolved through CLObject._callback_targets rather than py_object(self),
+        # which would make this object reference itself and only be freed by the
+        # cyclic collector (see CLObject._callback_data).
+        self._user_data = self._callback_data()
         Event.__retained_events.add(self)
 
         self.on_status_changed_callbacks:List[Callable[[Event, Union[cl_command_execution_status, ErrorCode]], None]] = []
@@ -158,13 +158,11 @@ class Event(CLObject):
         else:
             status = ErrorCode(event_command_status)
         
-        try:
-            self:Event = cast(user_data, POINTER(py_object)).contents.value
-        except:
-            print("Event", event_id, "error", user_data)
-
-        if not isinstance(self, Event):
-            raise RuntimeError("invalid event")
+        self:Event = CLObject._from_callback(user_data)
+        if self is None or not isinstance(self, Event):
+            # The wrapper was collected while the callback was still queued, or the
+            # user data did not resolve to an Event; nothing to notify.
+            return
         
         for on_status_changed in self.on_status_changed_callbacks:
             on_status_changed(self, status)
