@@ -9,15 +9,17 @@ array plus its sampling rules). PyGPGPU exposes both through the context:
     texture = ctx.create_texture(array, normalized=True)
 
 The texture is then passed to a kernel as an opaque handle and sampled with
-``tex2D<float>(tex, x, y)``. Coordinates are pixel indices when the texture is
-created with ``normalized=True``, which keeps the kernel arithmetic the same as
-for any other integer pixel loop.
+``tex2D<float>(tex, u, v)``. With ``normalized=True`` a pixel centre maps to
+``((x + 0.5) / width, (y + 0.5) / height)``, which is how CUDA sampling is usually
+written.
 
-Note: this example needs a driver whose cuTexObjectCreate works under the running
-interpreter. On the machine this was developed on, CUDA 13.4 accepts roughly nine
-out of ten texture creations under CPython 3.14 and none at all under CPython
-3.7; the array APIs themselves work on both. The example reports a clear message
-rather than a bare traceback when the driver refuses.
+Order matters on the driver this was developed against (CUDA 13.4): once a module
+containing ``tex2D`` has been loaded into the process, every later
+``cuTexObjectCreate`` fails with CUDA_ERROR_INVALID_VALUE, while a module without
+``tex2D`` leaves it working. So the images and textures are built *before* the
+kernel module is imported, which this example does. ``Context.create_texture``
+also retries a refusal by rebuilding the image, which covers the separate
+cold-start refusals but cannot recover after a tex2D module has loaded.
 
 Run:
     python examples/11_texture2d.py
