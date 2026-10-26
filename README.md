@@ -137,7 +137,7 @@ saxpy["opencl"][(len(x), 256)].async_call(x, y, out, 2.0)
 
 The result is only safe to read from the future: the output arrays are written back by the completion callback, so touching them before the future resolves races with the transfer. `submit` and `async_call` differ only in the future type (`concurrent.futures.Future` vs `asyncio.Future`).
 
-One caveat on the CUDA and HIP backends: every launch creates a stream that is only released when the Python object is garbage-collected, so a long run of launches accumulates streams. In practice a `gc.collect()` reclaims them, and the OpenCL backend is unaffected. Prefer the OpenCL backend for heavy asynchronous workloads until that is reworked.
+One caveat on the CUDA and HIP backends: a launch needs a stream, and streams are pooled rather than created per call. Blocking calls on the main thread ride the backend's default (NULL) stream and allocate nothing; blocking calls on other threads each cache a stream, held in a least-recently-used table capped at 16 per context, so spawning and joining many threads cannot accumulate streams. Asynchronous launches draw from a separate pool of at most 16 non-blocking streams: when all of them are in flight, `submit`/`async_call` returns immediately and finishes on a worker thread once a stream frees up, while a blocking call simply waits. A stream cached by a thread whose context has since gone away is dropped rather than reused, because a CUDA/HIP stream belongs to the context of the thread that created it. The OpenCL backend is unaffected.
 
 ### The pure-Python backend
 

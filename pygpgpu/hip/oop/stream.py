@@ -20,11 +20,35 @@ class Stream(HIPObject):
 
         self._flags:int = flags
         self._on_completed_callbacks:Set[Callable[[Stream, int], None]] = set()
+        # Set while a launch owns the stream; the Context pool only hands out
+        # streams whose flag is clear and only destroys idle ones.
+        self.busy:bool = False
+        # The legacy NULL stream is not created (and must not be destroyed).
+        self._legacy:bool = False
 
         stream_id = CUstream()
         ptr_stream_id = pointer(stream_id)
         HIP.hipStreamCreate(ptr_stream_id, flags)
         HIPObject.__init__(self, stream_id)
+
+    @staticmethod
+    def legacy()->Stream:
+        """Wrap the legacy NULL stream, which is HIP's default stream (id 0).
+
+        Launches on it are implicitly ordered with every other blocking stream,
+        which is what a synchronous call wants: sequential execution without
+        creating a stream per call.
+        """
+        stream = Stream.__new__(Stream)
+        stream._py_obj = py_object(stream)
+        stream._ptr_py_obj = pointer(stream._py_obj)
+        stream._user_data = cast(stream._ptr_py_obj, c_void_p)
+        stream._flags = 0
+        stream._on_completed_callbacks = set()
+        stream.busy = True
+        stream._legacy = True
+        HIPObject.__init__(stream, CUstream(0))
+        return stream
 
     @property
     def flags(self)->int:

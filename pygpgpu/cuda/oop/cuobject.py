@@ -133,5 +133,13 @@ class CUObject(ABC):
     def _release(cls, obj_id:Union[c_void_p, int]):
         release_func = cls._release_func()
         if obj_id and release_func is not None:
-            release_func(obj_id)
+            # Destruction runs from weakref.finalize as well, where raising is
+            # pointless: the interpreter only prints the error and carries on. A
+            # handle can legitimately be dead by then -- a stream cached for a
+            # thread whose CUDA context has since been destroyed, for instance --
+            # so a failed destroy is swallowed rather than reported.
+            try:
+                release_func(obj_id)
+            except BaseException:
+                pass
         

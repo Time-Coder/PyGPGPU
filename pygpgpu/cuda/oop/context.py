@@ -1,15 +1,25 @@
 from __future__ import annotations
+import threading
+from collections import OrderedDict
 from ctypes import pointer, c_uint, c_size_t
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from typing_extensions import override
 
 from .cuobject import CUObject
 from .event import Event
-from ..driver import CUDA, CUctx_flags, CUcontext, CUfunc_cache, CUlimit
+from ..driver import CUDA, CUctx_flags, CUcontext, CUfunc_cache, CUlimit, CUstream_flags
 
 if TYPE_CHECKING:
     from .device import Device
     from .buffer import Buffer
+    from .stream import Stream
+
+
+# Upper bound on the streams a Context keeps alive. Synchronous calls share one
+# cached stream per thread and asynchronous calls draw from a separate pool of
+# non-blocking streams; capping both keeps a process that creates and drops
+# threads (or keeps launching asynchronously) from growing streams forever.
+STREAM_POOL_SIZE:int = 16
 
 
 class Context(CUObject):
@@ -19,6 +29,23 @@ class Context(CUObject):
         self._flags:CUctx_flags = flags
         self._api_version:int = 0
         self._buffers:Dict[int, List[Buffer]] = {}
+
+        # Synchronous streams: one per thread, evicted least-recently-used once the
+        # pool is full. Keyed by thread id; the value pairs the stream with the
+        # thread that created it, because a stream may only be reused by that same
+        # thread (a CUDA context is thread-local). The main thread does not take a
+        # slot -- it runs on CUDA's legacy NULL stream, whose implicit ordering is
+        # what sequential code wants.
+        self._sync_streams:OrderedDict[int, Tuple[Stream, threading.Thread]] = OrderedDict()
+        self._legacy_stream:Optional[Stream] = None
+
+        # Asynchronous streams must not use the NULL stream: a blocking stream
+        # would serialize behind it and defeat the point of launching without
+        # waiting, so the pool is created with CU_STREAM_NON_BLOCKING. Each entry
+        # pairs the stream with its creating thread for the same reason as above.
+        self._async_streams:List[Tuple[Stream, threading.Thread]] = []
+        self._async_slots = threading.Semaphore(STREAM_POOL_SIZE)
+        self._stream_lock = threading.RLock()
 
         context_id = CUcontext()
         ptr_context_id = pointer(context_id)
@@ -46,6 +73,128 @@ class Context(CUObject):
 
         available_buffer.use()
         return available_buffer
+
+    # ---------- stream pools ----------
+
+    def get_sync_stream(self)->Stream:
+        """The stream a blocking call should use.
+
+        The main thread gets CUDA's legacy NULL stream, which is never created and
+        never destroyed. Other threads share a least-recently-used cache keyed by
+        thread id, capped at STREAM_POOL_SIZE: without the cache a program that
+        keeps spawning and joining threads would leak one stream per thread, and
+        without the cap the cache itself would grow without bound.
+
+        A cached stream is only reused by the thread that created it. A CUDA
+        context is thread-local, and a cuStream belongs to the context current on
+        the thread that created it, so handing one to a different thread fails
+        with CUDA_ERROR_INVALID_HANDLE. Thread ids can be recycled, so an entry
+        whose id was taken over by a new thread is rebuilt rather than reused.
+        """
+        if threading.current_thread() is threading.main_thread():
+            with self._stream_lock:
+                self.make_current()
+                if self._legacy_stream is None:
+                    from .stream import Stream
+                    self._legacy_stream = Stream.legacy()
+                return self._legacy_stream
+
+        ident = threading.get_ident()
+        victims:List[Stream] = []
+        with self._stream_lock:
+            self.make_current()
+
+            entry = self._sync_streams.get(ident)
+            if entry is not None:
+                stream, owner = entry
+                if owner is threading.current_thread() and not stream.busy:
+                    self._sync_streams.move_to_end(ident)
+                    stream.busy = True
+                    return stream
+                # A recycled thread id or a stream still in flight: drop it and
+                # build a fresh one for this thread.
+                del self._sync_streams[ident]
+                if not stream.busy:
+                    victims.append(stream)
+
+            from .stream import Stream
+            stream = Stream()
+            stream.busy = True
+            self._sync_streams[ident] = (stream, threading.current_thread())
+
+            # Evict the least-recently-used idle stream. A busy one is running a
+            # kernel and must not be destroyed; if every entry is busy, real
+            # concurrency exceeds the pool size and this new stream simply stays
+            # out of the cache rather than evicting live work.
+            while len(self._sync_streams) > STREAM_POOL_SIZE:
+                evicted = False
+                for victim_ident, (victim, _owner) in self._sync_streams.items():
+                    if victim_ident == ident:
+                        continue
+                    if not victim.busy:
+                        del self._sync_streams[victim_ident]
+                        victims.append(victim)
+                        evicted = True
+                        break
+                if not evicted:
+                    del self._sync_streams[ident]
+                    break
+
+        # Destroy outside the lock: cuStreamDestroy may block on the driver.
+        # A stream cached by a thread whose context has since been destroyed is a
+        # dead handle, so a failed destroy is expected and ignored.
+        for victim in victims:
+            try:
+                victim._release(victim.id)
+            except BaseException:
+                pass
+
+        return stream
+
+    def release_sync_stream(self, stream:Stream)->None:
+        """Return a synchronous stream to the cache (the NULL stream is kept)."""
+        if stream is self._legacy_stream:
+            return
+        with self._stream_lock:
+            stream.busy = False
+
+    def get_async_stream(self, blocking:bool=True)->Optional[Stream]:
+        """Take a non-blocking stream from the asynchronous pool.
+
+        ``blocking`` selects what a caller does when all STREAM_POOL_SIZE streams
+        are in flight: a thread that is willing to wait blocks here, while an
+        asynchronous launch asks with ``blocking=False`` and waits on its own
+        worker instead of stalling the caller. Returns None when
+        ``blocking=False`` and no stream is free.
+        """
+        if blocking:
+            self._async_slots.acquire()
+        elif not self._async_slots.acquire(blocking=False):
+            return None
+
+        with self._stream_lock:
+            # See get_sync_stream: a context is thread-local, and a stream belongs to
+            # the context of the thread that created it, so only the creating thread
+            # may pick it up again.
+            self.make_current()
+
+            current = threading.current_thread()
+            for stream, owner in self._async_streams:
+                if not stream.busy and owner is current:
+                    stream.busy = True
+                    return stream
+
+            from .stream import Stream
+            stream = Stream(CUstream_flags.CU_STREAM_NON_BLOCKING)
+            stream.busy = True
+            self._async_streams.append((stream, current))
+            return stream
+
+    def release_async_stream(self, stream:Stream)->None:
+        """Return a non-blocking stream to the pool and free its slot."""
+        with self._stream_lock:
+            stream.busy = False
+        self._async_slots.release()
 
     def create_buffer(self, size:int=0, flags:Any=None)->Buffer:
         """Aligns with the gnp ndarray._to_device interface (flags are only recorded under CUDA)."""

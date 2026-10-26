@@ -3,6 +3,7 @@ from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_
 from functools import partial
 import concurrent.futures
 import asyncio
+import threading
 from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional
 from typing_extensions import override
 
@@ -25,6 +26,54 @@ from ...utils import detect_work_size, join_with_and, local_size_for_global, dev
 if TYPE_CHECKING:
     from .program import Program
     from .context import Context
+
+
+_async_executor:Optional[concurrent.futures.ThreadPoolExecutor] = None
+_async_executor_lock = threading.Lock()
+
+
+def _async_workers()->concurrent.futures.ThreadPoolExecutor:
+    """Lazily create the worker pool that finishes asynchronous launches.
+
+    A launch that finds every pooled stream busy is completed here instead of on
+    the caller's thread, so submit()/async_call() never block the caller.
+    """
+    global _async_executor
+    with _async_executor_lock:
+        if _async_executor is None:
+            _async_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="pygpgpu-hip")
+        return _async_executor
+
+
+def _set_future_error(future:Any, error:BaseException)->None:
+    """Deliver an exception to an asyncio or concurrent future from any thread."""
+    if isinstance(future, asyncio.Future):
+        loop = future.get_loop()
+        if loop.is_running():
+            loop.call_soon_threadsafe(future.set_exception, error)
+            return
+    future.set_exception(error)
+
+
+def _deliver(future:Any, pending:concurrent.futures.Future)->Optional[BaseException]:
+    """Move a completed stream future onto the caller's future; return any error."""
+    try:
+        error = pending.exception()
+    except BaseException as caught:
+        error = caught
+    if error is None:
+        if isinstance(future, asyncio.Future):
+            loop = future.get_loop()
+            if loop.is_running():
+                loop.call_soon_threadsafe(future.set_result, None)
+            else:
+                future.set_result(None)
+        else:
+            future.set_result(None)
+    else:
+        _set_future_error(future, error)
+    return error
 
 
 class Kernel(HIPObject):
@@ -79,19 +128,93 @@ class Kernel(HIPObject):
         return self
 
     def __call__(self, *args, **kwargs)->None:
-        stream = self._call(args, kwargs)
-        stream.sync()
+        stream = self._call(args, kwargs, async_launch=False)
+        try:
+            stream.sync()
+        finally:
+            # Nothing can be queued after the sync, so the stream is idle.
+            self._release_stream(stream, async_launch=False)
 
     def submit(self, *args, **kwargs)->concurrent.futures.Future:
-        stream = self._call(args, kwargs)
-        return stream.create_future(concurrent.futures.Future)
-    
-    def async_call(self, *args, **kwargs)->asyncio.Future:
-        stream = self._call(args, kwargs)
-        return stream.create_future(asyncio.Future)
+        return self._launch_async(args, kwargs, concurrent.futures.Future)
 
-    def _call(self, args, kwargs)->Stream:
-        stream, grid_dims, block_dims, value_ptrs = self.__before_call(args, kwargs)
+    def async_call(self, *args, **kwargs)->asyncio.Future:
+        return self._launch_async(args, kwargs, asyncio.Future)
+
+    def _launch_async(self, args, kwargs, future_type:type):
+        """Launch without waiting, drawing from the asynchronous stream pool.
+
+        When every pooled stream is busy this returns a pending future at once and
+        performs the launch on a worker thread once a stream frees up, so the
+        caller never blocks.
+        """
+        future = future_type()
+        context = self._program.context
+        stream = context.get_async_stream(blocking=False)
+
+        if stream is None:
+            _async_workers().submit(self._launch_when_free, future, args, kwargs, future_type)
+            return future
+
+        try:
+            self._launch_on(stream, args, kwargs)
+        except BaseException as error:
+            self._release_stream(stream, async_launch=True)
+            future.set_exception(error)
+            return future
+
+        self._attach_completion(stream, future, future_type)
+        return future
+
+    def _launch_when_free(self, future, args, kwargs, future_type:type)->None:
+        """Worker-thread half of an asynchronous launch that had to wait."""
+        context = self._program.context
+        try:
+            stream = context.get_async_stream(blocking=True)
+        except BaseException as error:
+            _set_future_error(future, error)
+            return
+
+        try:
+            self._launch_on(stream, args, kwargs)
+        except BaseException as error:
+            self._release_stream(stream, async_launch=True)
+            _set_future_error(future, error)
+            return
+
+        self._attach_completion(stream, future, future_type)
+
+    def _attach_completion(self, stream:Stream, future:Any, future_type:type)->None:
+        """Mirror the stream's completion onto ``future`` and return the stream."""
+        def relay(pending:concurrent.futures.Future)->None:
+            _deliver(future, pending)
+            self._release_stream(stream, async_launch=True)
+
+        stream.create_future(future_type).add_done_callback(relay)
+
+    def _launch_on(self, stream:Stream, args, kwargs)->None:
+        """Bind the arguments and enqueue the launch on an already-taken stream."""
+        grid_dims, block_dims, value_ptrs = self.__prepare_call(args, kwargs, stream)
+        HIP.hipModuleLaunchKernel(
+            self.id,
+            grid_dims[0], grid_dims[1], grid_dims[2],
+            block_dims[0], block_dims[1], block_dims[2],
+            0, stream.id, value_ptrs, None
+        )
+        if HIP.print_info:
+            print(f"launch HIP {self} on {stream.device} with grid_dim={tuple(grid_dims)}, block_dim={tuple(block_dims)}", flush=True)
+
+        self.__after_call(stream)
+
+    def _release_stream(self, stream:Stream, async_launch:bool)->None:
+        context = self._program.context
+        if async_launch:
+            context.release_async_stream(stream)
+        else:
+            context.release_sync_stream(stream)
+
+    def _call(self, args, kwargs, async_launch:bool=False)->Stream:
+        stream, grid_dims, block_dims, value_ptrs = self.__before_call(args, kwargs, async_launch)
         HIP.hipModuleLaunchKernel(
             self.id,
             grid_dims[0], grid_dims[1], grid_dims[2],
@@ -105,7 +228,18 @@ class Kernel(HIPObject):
 
         return stream
 
-    def __before_call(self, args, kwargs):
+    def __before_call(self, args, kwargs, async_launch:bool=False):
+        context = self._program.context
+        if async_launch:
+            stream = context.get_async_stream(blocking=True)
+        else:
+            stream = context.get_sync_stream()
+
+        grid_dims, block_dims, value_ptrs = self.__prepare_call(args, kwargs, stream)
+        return stream, grid_dims, block_dims, value_ptrs
+
+    def __prepare_call(self, args, kwargs, stream:Stream):
+        """Bind arguments to ``stream`` and resolve the launch geometry."""
         global_work_size = self._grid_dims
         local_work_size = self._block_dims
 
@@ -113,8 +247,6 @@ class Kernel(HIPObject):
         self._block_dims = None
 
         used_kwargs = self.__check_args(args, kwargs)
-
-        stream = Stream()
 
         value_ptrs = (c_void_p * len(self._args))()
         i = 0
@@ -137,7 +269,7 @@ class Kernel(HIPObject):
         local_work_size = tuple(local_work_size) + (1,) * (3 - len(local_work_size))
         global_work_size = (c_size_t * 3)(*global_work_size)
         local_work_size = (c_size_t * 3)(*local_work_size)
-        return stream, global_work_size, local_work_size, value_ptrs
+        return global_work_size, local_work_size, value_ptrs
 
     @staticmethod
     def __copy_to_host(arg_value:Union[np.ndarray, List[Any]], buffer:MemObject):

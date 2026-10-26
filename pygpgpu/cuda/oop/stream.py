@@ -19,11 +19,38 @@ class Stream(CUObject):
 
         self._flags:CUstream_flags = flags
         self._on_completed_callbacks:Set[Callable[[Stream, CUresult], None]] = set()
+        # Set while a launch owns the stream; the Context pool only hands out
+        # streams whose flag is clear and only destroys idle ones.
+        self.busy:bool = False
+        # The legacy NULL stream is not created (and must not be destroyed); it is
+        # tracked so the pool can treat it like any other stream.
+        self._legacy:bool = False
 
         stream_id = CUstream()
         ptr_stream_id = pointer(stream_id)
         CUDA.cuStreamCreate(ptr_stream_id, flags)
         CUObject.__init__(self, stream_id)
+
+    @staticmethod
+    def legacy()->Stream:
+        """Wrap the legacy NULL stream, which is CUDA's default stream (id 0).
+
+        Every launch on it is implicitly ordered with every other stream that is
+        not CU_STREAM_NON_BLOCKING, which is exactly what a synchronous call
+        wants: sequential execution without creating a stream per call.
+        """
+        stream = Stream.__new__(Stream)
+        stream._py_obj = py_object(stream)
+        stream._ptr_py_obj = pointer(stream._py_obj)
+        stream._user_data = cast(stream._ptr_py_obj, c_void_p)
+        stream._flags = CUstream_flags.CU_STREAM_DEFAULT
+        stream._on_completed_callbacks = set()
+        stream.busy = True
+        stream._legacy = True
+        CUObject.__init__(stream, CUstream(0))
+        # CUObject._release skips a null id, so the NULL stream is never destroyed
+        # even if this wrapper is collected; no finalizer override is needed.
+        return stream
 
     @property
     def flags(self)->CUstream_flags:
