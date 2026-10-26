@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from .device import Device
     from .buffer import Buffer
     from .stream import Stream
+    from .array import Array
+    from .texture import TextureObject
 
 
 # Upper bound on the streams a Context keeps alive. Synchronous calls share one
@@ -61,6 +63,21 @@ class Context(CUObject):
         ptr_context_id = pointer(context_id)
         CUDA.cuCtxGetCurrent(ptr_context_id)
         return Context.instance(context_id)
+
+    def create_array(self, width:int, height:int, dtype:Any=None, num_channels:int=1)->Array:
+        """Allocate a 2D device-side image (the CUDA counterpart of image2d_t)."""
+        import numpy as np
+        from .array import Array
+
+        self.make_current()
+        return Array(width, height, np.float32 if dtype is None else dtype, num_channels)
+
+    def create_texture(self, array:Array, **options:Any)->TextureObject:
+        """Build a sampled view over ``array`` for use as a kernel argument."""
+        from .texture import TextureObject
+
+        self.make_current()
+        return TextureObject(array, **options)
 
     def get_buffer(self, size:int=0)->Buffer:
         available_buffer:Optional[Buffer] = None

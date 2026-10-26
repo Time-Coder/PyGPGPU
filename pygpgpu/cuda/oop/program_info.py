@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from typing import Tuple, Any, Dict, List, Optional
 
 import numpy as np
@@ -81,6 +81,12 @@ class ArgInfo(VarInfo):
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str
+        # A texture handle is neither a numpy array nor a scalar: it is an opaque
+        # object the kernel samples through tex2D, so it is accepted as-is. The
+        # backend validates the handle itself when the argument is bound.
+        from .texture import TextureObject
+        if isinstance(value, TextureObject):
+            return
         if self.is_ptr:
             if not isinstance(value, np.ndarray):
                 raise TypeError(f"{self.parent.signature()}'s argument '{self.name}' must be np.ndarray, got {value.__class__.__name__}.")

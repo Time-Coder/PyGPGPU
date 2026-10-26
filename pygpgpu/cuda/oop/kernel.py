@@ -1,5 +1,5 @@
 from __future__ import annotations
-from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_p, cast
+from ctypes import c_size_t, c_uint64, pointer, sizeof, Structure, byref, memmove, c_void_p, cast
 from functools import partial
 import concurrent.futures
 import asyncio
@@ -26,6 +26,17 @@ from ...utils import detect_work_size, join_with_and, local_size_for_global, dev
 if TYPE_CHECKING:
     from .program import Program
     from .context import Context
+
+
+def _handle_types()->tuple:
+    """The oop classes whose instances are passed to a kernel as opaque handles.
+
+    Imported lazily so that importing this module does not pull in the image
+    support (and its driver tables) for users who never touch textures.
+    """
+    from .texture import TextureObject
+
+    return (TextureObject,)
 
 
 _async_executor:Optional[concurrent.futures.ThreadPoolExecutor] = None
@@ -441,8 +452,16 @@ class Kernel(CUObject):
 
     def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any, bound:Dict[str, Any])->Any:
         arg_type_str = arg_info.type_str        
-        arg_type_str = arg_info.type_str
         base_type_str = arg_info.base_type_str
+
+        # A texture (or surface) handle is passed by value as an opaque 64-bit
+        # object, which the kernel samples through tex2D. cuLaunchKernel expects a
+        # pointer to each argument's value, so the handle is stored on the call's
+        # binding dict (keeping it alive for the launch) and its address returned.
+        if isinstance(value, _handle_types()):
+            handle = c_uint64(value.id.value if hasattr(value.id, "value") else value.id)
+            bound[arg_info.name] = (None, value, handle)
+            return pointer(handle)
 
         if base_type_str in CUInfo.basic_types or base_type_str in self._program.structs or base_type_str in CUInfo.vec_types:
             if base_type_str in CUInfo.basic_types:

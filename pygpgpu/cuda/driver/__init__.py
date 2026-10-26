@@ -31,7 +31,25 @@ from .cutypes import (
     CUevent_wait_flags,
     ptr_float,
     CUevent,
-    CUstreamCallback
+    CUstreamCallback,
+    CUarray,
+    ptr_CUarray,
+    CUtexObject,
+    CUsurfObject,
+    CUarray_format,
+    CU_ARRAY_DESC,
+    CUDA_ARRAY_DESCRIPTOR,
+    CUDA_ARRAY3D_DESCRIPTOR,
+    CUDA_MEMCPY2D,
+    CUDA_RESOURCE_DESC,
+    CUDA_TEXTURE_DESC,
+    CUDA_RESOURCE_VIEW_DESC,
+    CUmemorytype,
+    CUresourcetype,
+    CUaddress_mode,
+    CUfilter_mode,
+    CU_TRSF_READ_AS_INTEGER,
+    CU_TRSF_NORMALIZED_COORDINATES
 )
 from .nvrtc import NVRTC
 from .nvrtcinfo import NVRTCInfo

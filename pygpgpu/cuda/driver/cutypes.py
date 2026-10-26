@@ -161,22 +161,25 @@ class CUDA_RESOURCE_DESC(Structure):
     """Describes where a texture's storage lives. Only the array form is modelled
     here, which is what the Array class produces.
 
-    The tail is a union of every resource kind; it is declared at its real size so
-    the driver reads the fields at the offsets it expects. resType occupies 8 bytes
-    once aligned, giving the 72-byte total the header specifies.
+    Mirrors CUDA_RESOURCE_DESC_v1 from cuda.h: resType, an 64-byte union of the
+    resource kinds, then a trailing flags word that must be zero. Omitting that
+    trailing field makes the driver reject the descriptor with INVALID_VALUE.
     """
     _fields_ = [
         ("resType", c_uint),
         ("_pad", c_uint),
         ("res", _CUDA_RESOURCE_DESC_RES_UNION),
+        ("flags", c_uint),
+        ("_pad2", c_uint),
     ]
 
 
 class CUDA_TEXTURE_DESC(Structure):
     """Sampling rules for a texture object.
 
-    The layout matches the header exactly (64 bytes); the driver reads every field
-    by offset, so a missing member would shift the ones after it.
+    Field order and trailing padding follow CUDA_TEXTURE_DESC_v1 from cuda.h:
+    after the mipmap clamps come borderColor[4] and reserved[12]. The driver reads
+    every member by offset, so the tail cannot be shortened.
     """
     _fields_ = [
         ("addressMode", c_uint * 3),
@@ -184,10 +187,11 @@ class CUDA_TEXTURE_DESC(Structure):
         ("flags", c_uint),
         ("maxAnisotropy", c_uint),
         ("mipmapFilterMode", c_uint),
-        ("maxMipLevelBias", c_float),
+        ("mipmapLevelBias", c_float),
         ("minMipmapLevelClamp", c_float),
         ("maxMipmapLevelClamp", c_float),
-        ("_reserved", c_uint * 6),
+        ("borderColor", c_float * 4),
+        ("reserved", c_int * 12),
     ]
 
 
