@@ -68,6 +68,18 @@ class GPUNamespace:
 gpu = GPUNamespace()
 
 
+def tex2D(texture:Any, u:Any, v:Any)->Any:
+    """Sample a CUDA texture at normalized coordinates, inside a @kernel body.
+
+    The translator rewrites a call to this into ``tex2D<float>(texture, u, v)``.
+    Sampling happens on the device, so calling it on the host has no meaning and
+    this body exists only to give the name something to bind to.
+    """
+    raise PyKernelSyntaxError(
+        "tex2D() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
 # ---------- mapping metadata used at translation time ----------
 
 # Index builtins: (gpu name, opencl name, cuda expression template); dim argument must be an integer literal

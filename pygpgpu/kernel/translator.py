@@ -242,7 +242,16 @@ def infer_ctype(value:Any)->Any:
         return "int"
     if isinstance(value, (float, np.floating)):
         return "float"
-    raise PyKernelSyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays and int/float/bool scalars are supported)")
+    if _is_device_handle(value):
+        # A texture (or surface) object reaches the device as an opaque 64-bit
+        # handle, which the kernel samples through tex2D.
+        return "cudaTextureObject_t"
+    raise PyKernelSyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays, int/float/bool scalars and texture handles are supported)")
+
+
+def _is_device_handle(value:Any)->bool:
+    """True for the oop objects passed to a kernel by opaque handle."""
+    return type(value).__name__ in ("TextureObject", "SurfaceObject")
 
 def type_sig(types:List[Any])->str:
     parts:List[str] = []
@@ -1247,6 +1256,9 @@ class FunctionTranslator:
             if name in _vec_registry():
                 return self._emit_vec_constructor(name, args, node)
 
+            if name == "tex2D":
+                return self._emit_tex2d(args, node)
+
             target:Any = self.resolve_global(name)
             if callable(target):
                 # vector math functions in pygpgpu.vec_types.funcs share name and semantics with gpu.* builtins
@@ -1273,6 +1285,24 @@ class FunctionTranslator:
             self._error(f"unsupported method call: .{func.attr}", node)
 
         self._error("unsupported call expression", node)
+
+    def _emit_tex2d(self, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+        """Translate ``tex2D(handle, u, v)`` into the backend's sampling call.
+
+        Only the CUDA backend has texture objects; OpenCL passes an image and a
+        sampler separately, and the HIP backend reuses CUDA code generation but has
+        no texture support here, so both reject the call rather than emitting
+        something with the wrong semantics.
+        """
+        if self.backend != "cuda":
+            self._error("tex2D() is only available on the cuda backend", node)
+        if len(args) != 3:
+            self._error("tex2D(handle, u, v) takes exactly 3 arguments", node)
+
+        handle_code = args[0][0]
+        u_code = args[1][0]
+        v_code = args[2][0]
+        return "tex2D<float>(%s, %s, %s)" % (handle_code, u_code, v_code), "float"
 
     def _emit_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         if name == "abs":

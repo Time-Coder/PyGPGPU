@@ -57,6 +57,10 @@ class VarInfo:
     
     @property
     def need_read_back(self)->bool:
+        # A texture handle is an opaque object, not memory the kernel writes into,
+        # so it never takes part in the upload/read-back flow.
+        if self.base_type_str == "cudaTextureObject_t":
+            return False
         return (self.is_ptr and bool(self.kernel_flags & KernelFlags.Writed))
     
     def use_buffer(self, stream:Stream, data:np.ndarray)->Tuple[Buffer, Optional[Event]]:

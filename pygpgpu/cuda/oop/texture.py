@@ -41,6 +41,12 @@ class TextureObject(CUObject):
     outside the image behave (address mode) and how samples are filtered (point or
     linear). Unlike OpenCL, where the sampler is a separate kernel argument, CUDA
     bakes the sampler into the texture object, so the kernel takes a single handle.
+
+    Create every texture before loading a module that samples one. On the driver
+    this was developed against, once a module containing tex2D has been loaded,
+    every later cuTexObjectCreate fails with CUDA_ERROR_INVALID_VALUE, while a
+    module without tex2D leaves creation working. Sampling with a texture built
+    earlier continues to work normally.
     """
 
     def __init__(self, array:Array, normalized:bool=True,

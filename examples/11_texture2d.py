@@ -1,4 +1,4 @@
-"""11_texture2d.py -- sample a 2D image in a CUDA kernel with tex2D.
+﻿"""11_texture2d.py -- sample a 2D image in a CUDA kernel with tex2D.
 
 An OpenCL kernel takes an ``image2d_t`` and a sampler; CUDA splits that into an
 *array* (the storage the texture hardware reads) and a *texture object* (the
@@ -32,6 +32,7 @@ import tempfile
 import numpy as np
 
 from pygpgpu import kernel
+from pygpgpu.kernel import tex2D
 from pygpgpu import cuimport
 from pygpgpu.cuda.driver import CUDA
 from pygpgpu.cuda.oop.context import Context
@@ -74,6 +75,14 @@ __global__ void sample_2d(cudaTextureObject_t tex, float *out, int w, int h)
 def warm(x, out, a):
     for i in range(out.shape[0]):
         out[i] = x[i] * a
+
+
+@kernel
+def sample_python(tex, out, width, height):
+    """The same sampling as ``sample_flat``, written as a Python kernel."""
+    for y in range(height):
+        for x in range(width):
+            out[y * width + x] = tex2D(tex, (x + 0.5) / width, (y + 0.5) / height)
 
 
 def main():
@@ -121,10 +130,18 @@ def main():
                                                   np.int32(width), np.int32(height))
     print("2D grid, block/thread   :", bool(np.array_equal(out_b, scaled)))
 
+    # The same sampling from a @kernel body: the translator turns tex2D into the
+    # device call, so a Python kernel takes the handle exactly like the .cu one.
+    out_c = np.zeros(width * height, dtype=np.float32)
+    sample_python["cuda"](texture_a, out_c, np.int32(width), np.int32(height))
+    print("python @kernel, tex2D   :", bool(
+        np.array_equal(out_c.reshape(height, width), ramp)))
+
     print("sample of row 0         :", out_a[0][:6])
 
 
 if __name__ == "__main__":
     main()
+
 
 

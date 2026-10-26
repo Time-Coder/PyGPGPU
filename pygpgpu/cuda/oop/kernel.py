@@ -411,6 +411,11 @@ class Kernel(CUObject):
         max_shape = None
         for arg in self._arg_list:
             if arg.need_read_back:
+                if arg.mem_obj is None:
+                    # A texture handle carries no buffer; it is skipped rather than
+                    # dereferenced (it never reports need_read_back, so this is only
+                    # a guard against a future argument kind that does).
+                    continue
                 arg_shape = (arg.mem_obj.data.shape if arg.mem_obj.data is not None else arg.mem_obj.shape)
                 if ((
                         arg.base_type_str in CUInfo.vec_types and
