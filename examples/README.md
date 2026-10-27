@@ -22,7 +22,7 @@ matching the rest of the repository.
 | File | What it covers |
 |---|---|
 | [01_basic_kernel.py](01_basic_kernel.py) | The basics of `@kernel`: SAXPY, automatic work size, switching backend/device with brackets |
-| [02_backend_device_selection.py](02_backend_device_selection.py) | `available_devices()` / `get_device()` and the device-selection syntax |
+| [02_backend_device_selection.py](02_backend_device_selection.py) | `list_devices()` / `get_device()` and the device-selection syntax |
 | [03_nd_loop_and_class_method.py](03_nd_loop_and_class_method.py) | Multi-dimensional `np.ndindex`/`np.ndenumerate`, plus class methods and static methods; helpers reached through a name: another method of the same class, a static method of any class, a module function |
 | [04_vector_types.py](04_vector_types.py) | Vector types (float4/...), swizzles, and the dual-sided function library `pygpgpu.funcs` |
 | [05_gnp_zero_copy_and_atomics.py](05_gnp_zero_copy_and_atomics.py) | Zero-copy with device-resident `gnp` arrays, atomic histograms, and local-memory reduction |
@@ -71,5 +71,5 @@ Importing the `pygpgpu` top level needs no GPU runtime at all (`climport`/`cuimp
 are lazy). But **importing a backend subpackage** (`pygpgpu.cuda` / `pygpgpu.hip`) initializes
 that runtime immediately: a missing `nvcuda.dll` / `amdhip64.dll` raises right away. So on a
 machine without a given runtime, only run the examples that use the default backend or OpenCL;
-`02` and `08` are the exceptions — they probe through `available_devices()` and adapt to
+`02` and `08` are the exceptions — they probe through `list_devices()` and adapt to
 whatever runtimes exist, so they never fail because a backend is missing.

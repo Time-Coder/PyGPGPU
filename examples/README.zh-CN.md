@@ -21,7 +21,7 @@
 | 文件 | 覆盖内容 |
 |---|---|
 | [01_basic_kernel.py](01_basic_kernel.py) | `@kernel` 最基础用法: SAXPY, 自动 work size, 中括号切后端/设备 |
-| [02_backend_device_selection.py](02_backend_device_selection.py) | `available_devices()` / `get_device()` 与设备选择语法 |
+| [02_backend_device_selection.py](02_backend_device_selection.py) | `list_devices()` / `get_device()` 与设备选择语法 |
 | [03_nd_loop_and_class_method.py](03_nd_loop_and_class_method.py) | 多维 `np.ndindex`/`np.ndenumerate` 与类方法/静态方法; 以及按名字调用辅助函数: 同一个类的另一个方法、任意类的静态方法、模块函数 |
 | [04_vector_types.py](04_vector_types.py) | 向量类型(float4/...)、swizzle、双面函数库 `pygpgpu.funcs` |
 | [05_gnp_zero_copy_and_atomics.py](05_gnp_zero_copy_and_atomics.py) | `gnp` 设备驻留数组零拷贝、原子操作直方图与本地内存归约 |
@@ -56,4 +56,4 @@ kernel 有两种方式声明自己的迭代域, 自动 work size 需要其中之
 是延迟加载的)。但**导入后端子包**(`pygpgpu.cuda` / `pygpgpu.hip`)会立即
 初始化对应运行时: 缺 `nvcuda.dll` / `amdhip64.dll` 就直接抛错。因此不在
 运行时的机器上, 请只跑那些在默认后端或 OpenCL 上的示例; 只有 `02`/`08`
-会通过 `available_devices()` 主动探测并按运行时存在性适配, 不会因缺后端失败。
+会通过 `list_devices()` 主动探测并按运行时存在性适配, 不会因缺后端失败。

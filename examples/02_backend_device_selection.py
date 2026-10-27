@@ -2,7 +2,7 @@
 
 The `@kernel` brackets and these two helpers all accept the same
 "backend:device" syntax:
-- `available_devices()` lists every usable "backend:device" string (in default
+- `list_devices()` lists every usable "backend:device" string (in default
   backend order, backends missing at runtime are skipped); the numbering
   matches the order pure-numeric selectors see;
 - `get_device(sel)` returns the matching Device object (each backend's existing
@@ -15,7 +15,7 @@ Run:
 """
 import numpy as np
 
-from pygpgpu import kernel, available_devices, get_device, DEFAULT_BACKEND_ORDER
+from pygpgpu import kernel, list_devices, get_device, DEFAULT_BACKEND_ORDER
 
 # This @kernel specifies neither backend nor device; it only demonstrates
 # device resolution.
@@ -28,7 +28,7 @@ def one_fill(out):
 def main():
     print("Default backend probe order:", DEFAULT_BACKEND_ORDER)
 
-    sel = available_devices()
+    sel = list_devices()
     print("Available devices:", sel)
 
     if not sel:

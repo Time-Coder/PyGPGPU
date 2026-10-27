@@ -4,7 +4,7 @@ The top level aggregates the commonly used public API so you do not have to
 remember subpackage names::
 
     from pygpgpu import kernel, gpu, float4             # @kernel / device builtins / vector types
-    from pygpgpu import available_devices, get_device
+    from pygpgpu import list_devices, get_device
     from pygpgpu import climport, cuimport, hipimport    # import hooks for handwritten .cl/.cu/.hip files
 
 Subpackage paths (pygpgpu.kernel / pygpgpu.vec_types / pygpgpu.opencl / ...)
@@ -31,6 +31,7 @@ from .kernel import (
     PyKernel,
     PyKernelSyntaxError,
     available_devices,
+    list_devices,
     get_device,
     gpu,
     kernel,
@@ -106,7 +107,7 @@ from .utils import get_print_info, set_print_info  # noqa: E402  (needs to follo
 __all__ = [
     # kernel
     "kernel", "gpu", "PyKernel", "PyKernelSyntaxError", "DEFAULT_BACKEND_ORDER",
-    "available_devices", "get_device",
+    "list_devices", "get_device", "available_devices",
     # images
     "Image",
     # logging

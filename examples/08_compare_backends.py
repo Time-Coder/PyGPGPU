@@ -1,7 +1,7 @@
 """08_compare_backends.py -- speed of one kernel across OpenCL / CUDA / HIP.
 
 Do not hardcode assumptions about the environment: first probe what backends
-and how many devices this machine really has with `available_devices()`, and
+and how many devices this machine really has with `list_devices()`, and
 only run the backends that actually exist. Repeat a few times and report the
 timing for every device.
 
@@ -24,7 +24,7 @@ Typical output shape:
 import time
 import numpy as np
 
-from pygpgpu import kernel, available_devices, get_device
+from pygpgpu import kernel, list_devices, get_device
 
 N = 4 * 1024 * 1024          # data size
 REPEATS = 8                  # repeats per device (median is taken)
@@ -38,7 +38,7 @@ def saxpy(x, y, out, alpha):
 
 
 def main():
-    sel = available_devices()
+    sel = list_devices()
     if not sel:
         print("This machine has no usable GPU backend.")
         return

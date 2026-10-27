@@ -71,7 +71,7 @@ Every commonly used API is importable straight from the `pygpgpu` top level — 
 
 ```python
 from pygpgpu import kernel, gpu, funcs, float4       # @kernel / device builtins / dual-sided funcs / vector types
-from pygpgpu import available_devices, get_device
+from pygpgpu import list_devices, get_device
 from pygpgpu import climport, cuimport, hipimport    # import hooks for handwritten .cl/.cu/.hip files
 ```
 
@@ -450,9 +450,9 @@ Three forms of device identifier inside the brackets (same on every backend):
 Helpers:
 
 ```python
-from pygpgpu import available_devices, get_device
+from pygpgpu import list_devices, get_device
 
-available_devices()          # every available "backend:device" string, e.g. ['cuda:0', 'hip:0', 'opencl:0']
+list_devices()          # every available "backend:device" string, e.g. ['cuda:0', 'hip:0', 'opencl:0']
 dev = get_device("cuda:0")   # the Device object of that backend, directly
 ```
 

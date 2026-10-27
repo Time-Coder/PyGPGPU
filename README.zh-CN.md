@@ -71,7 +71,7 @@ Python ≥ 3.7。GPU 运行时按需自备(任一即可):
 
 ```python
 from pygpgpu import kernel, gpu, funcs, float4       # @kernel / 设备内建 / 双面函数库 / 向量类型
-from pygpgpu import available_devices, get_device
+from pygpgpu import list_devices, get_device
 from pygpgpu import climport, cuimport, hipimport    # 手写 .cl/.cu/.hip 文件的 import 钩子
 ```
 
@@ -443,9 +443,9 @@ apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
 辅助函数:
 
 ```python
-from pygpgpu import available_devices, get_device
+from pygpgpu import list_devices, get_device
 
-available_devices()          # 所有可用 "后端:设备" 字符串, 如 ['cuda:0', 'hip:0', 'opencl:0']
+list_devices()          # 所有可用 "后端:设备" 字符串, 如 ['cuda:0', 'hip:0', 'opencl:0']
 dev = get_device("cuda:0")   # 直接取对应后端的 Device 对象
 ```
 

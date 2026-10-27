@@ -159,7 +159,7 @@ def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
     return matches[index], matches[index].name
 
 
-def available_devices()->List[str]:
+def list_devices()->List[str]:
     """List all available "backend:device" selector strings, ordered by DEFAULT_BACKEND_ORDER.
 
     Returns a list like ["cuda:0", "hip:0", "opencl:0", "opencl:1", ...]; the numbering
@@ -175,6 +175,10 @@ def available_devices()->List[str]:
         for i in range(len(devices)):
             selectors.append(f"{backend}:{i}")
     return selectors
+
+
+# The name this function had before; kept so existing call sites keep working.
+available_devices = list_devices
 
 
 def get_device(selector:str)->Any:
