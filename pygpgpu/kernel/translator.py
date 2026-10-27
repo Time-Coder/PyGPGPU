@@ -1030,16 +1030,19 @@ class FunctionTranslator:
             self._handle_local_declaration(node)
             return
 
-        # Tuple unpacking/swap: a, b = b, a
+        # Tuple unpacking/swap: a, b = b, a -- also when an item is an array element,
+        # as in the idiomatic swap a[i], b[i] = b[i], a[i].
         if isinstance(target, ast.Tuple):
             if not isinstance(node.value, ast.Tuple) or len(target.elts) != len(node.value.elts):
                 self._error("tuple assignment requires matching tuples on both sides", node)
-            if not all(isinstance(t, ast.Name) for t in target.elts):
-                self._error("tuple assignment targets must be plain variables", node)
+            if not all(isinstance(t, (ast.Name, ast.Subscript)) for t in target.elts):
+                self._error(
+                    "tuple assignment targets must be plain variables or array elements",
+                    node)
 
             values:List[Tuple[str, Any]] = [self._visit_expression(v) for v in node.value.elts]
-            temps:List[str] = []
-            for i, (code, t) in enumerate(values):
+            temps:List[Tuple[str, Any]] = []
+            for code, t in values:
                 if is_ptr(t):
                     self._error("cannot swap array parameters", node)
                 self._tmp_counter += 1
@@ -1049,6 +1052,13 @@ class FunctionTranslator:
                 temps.append((tmp, t))
 
             for (tmp, t), target_item in zip(temps, target.elts):
+                if isinstance(target_item, ast.Subscript):
+                    # Evaluate the destination after every right-hand side has been
+                    # captured, so a swap really reads both values first.
+                    code, _ = self._visit_array_target(target_item.value)
+                    index_code, _ = self._visit_subscript_index(target_item)
+                    self._emit(f"{code}[{index_code}] = {tmp};")
+                    continue
                 name:str = target_item.id
                 existing:Any = self._lookup(name)
                 if existing is not None and is_ptr(existing):
@@ -1533,7 +1543,13 @@ class FunctionTranslator:
             else:
                 self._emit(f"{target_code} = floor(({target_t})({target_code}) / ({target_t})({value_code}));")
         elif name == "Pow":
-            self._error("**= is not supported, use pow()", node)
+            # There is no **= in C; the power is a function call, so the store is
+            # written explicitly. An integer target would change type under python's
+            # rules, which a C variable cannot do, so only floats are accepted.
+            if is_int(target_t) and is_int(value_t):
+                self._error("integer **= changes type (use float operands or pow())", node)
+            self._emit(f"{target_code} = ({target_t})pow(({target_t})({target_code}), "
+                       f"({target_t})({value_code}));")
         elif name in ("LShift", "RShift", "BitOr", "BitAnd", "BitXor", "Add", "Sub", "Mult", "Mod"):
             symbol:str = {"LShift": "<<", "RShift": ">>", "BitOr": "|", "BitAnd": "&", "BitXor": "^",
                           "Add": "+", "Sub": "-", "Mult": "*", "Mod": "%"}[name]
@@ -2028,7 +2044,12 @@ class FunctionTranslator:
     def _visit_call(self, node:ast.Call)->Tuple[str, Any]:
         func:ast.expr = node.func
         if node.keywords:
-            self._error("keyword arguments are not supported in kernel code", node)
+            # A helper may be called with keywords; nothing below needs to know, so the
+            # call is rewritten to positional order first, using the callee's signature.
+            # Builtins and gpu.* take positional arguments only, so they keep refusing.
+            node = self._reorder_keywords(node)
+            if node.keywords:
+                self._error("keyword arguments are not supported for this call", node)
 
         if isinstance(func, ast.Name):
             name:str = func.id
@@ -2043,6 +2064,9 @@ class FunctionTranslator:
 
             if name in ("abs", "min", "max", "round"):
                 return self._emit_builtin(name, args, node)
+
+            if name == "len":
+                return self._emit_len(args, node)
 
             if name in _vec_registry():
                 return self._emit_vec_constructor(name, args, node)
@@ -2211,14 +2235,104 @@ class FunctionTranslator:
             return f"{'min' if name == 'min' else 'max'}(({t})({lcode}), ({t})({rcode}))", t
 
         if name == "round":
-            if len(args) != 1:
-                self._error("round() takes exactly 1 argument", node)
+            if len(args) not in (1, 2):
+                self._error("round() takes 1 or 2 arguments", node)
             code, t = args[0]
+            if len(args) == 2:
+                # round(x, digits) with a constant digit count: python rounds the value,
+                # not the digits it prints, so this scales, rounds and unscales.
+                digits = node.args[1]
+                if not (isinstance(digits, ast.Constant)
+                        and isinstance(digits.value, int)):
+                    self._error(
+                        "round() digits must be a constant integer: the scale factor is "
+                        "a literal in the generated code", node)
+                scale = 10.0 ** int(digits.value)
+                inner = f"((float)({code}))"
+                return (f"(({t})rint({inner} * {scale}f) / {scale}f)"
+                        if is_float(t) else f"({code})"), t
             if is_float(t):
                 return f"((int)rint(({t})({code})))", "int"
             return f"({code})", t
 
         self._error(f"unsupported builtin: {name}", node)
+
+    def _emit_len(self, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+        """``len(array)`` -> the array's extent along its only axis.
+
+        A kernel works on one-dimensional arrays and its extents arrive as int
+        parameters, so the length is already known: recovering it here keeps
+        ``for i in range(len(a))`` written the way it would be in Python.
+        """
+        if len(args) != 1:
+            self._error("len() takes exactly 1 argument", node)
+        code, t = args[0]
+        if not is_ptr(t):
+            self._error("len() takes an array argument", node)
+        holder = node.args[0]
+        if not isinstance(holder, ast.Name):
+            self._error("len() takes an array parameter name", node)
+        return self._shape_var(holder.id, 0), "int"
+
+    def _reorder_keywords(self, node:ast.Call)->ast.Call:
+        """Rewrite a call with keyword arguments into positional order.
+
+        Only a plain-python helper has a signature to bind against; anything else
+        (builtin, gpu.*, vector constructor) keeps its keywords so the caller can
+        report them. Defaults are filled in, matching what the host does for a kernel
+        call, so the device function always receives one value per parameter.
+        """
+        func:ast.expr = node.func
+        target:Any = None
+        if isinstance(func, ast.Name):
+            target = self.resolve_global(func.id)
+            if not callable(target) or getattr(target, "is_pykernel", False):
+                return node
+        elif (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+              and not (self.self_param and func.value.id == self.self_param)):
+            module:Any = self.resolve_global(func.value.id)
+            target = getattr(module, func.attr, None)
+            if not callable(target):
+                return node
+        else:
+            return node
+
+        try:
+            signature = inspect.signature(target)
+        except (TypeError, ValueError):
+            return node
+
+        positional:List[ast.expr] = list(node.args)
+        supplied:Dict[str, ast.expr] = {}
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                return node
+            supplied[keyword.arg] = keyword.value
+
+        ordered:List[ast.expr] = []
+        for index, (name, parameter) in enumerate(signature.parameters.items()):
+            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+                continue
+            if index < len(positional):
+                if name in supplied:
+                    self._error(
+                        "the argument '%s' is given both positionally and by keyword"
+                        % name, node)
+                ordered.append(positional[index])
+            elif name in supplied:
+                ordered.append(supplied[name])
+            elif parameter.default is not parameter.empty:
+                ordered.append(ast.Constant(value=parameter.default))
+            else:
+                self._error("missing required argument '%s'" % name, node)
+
+        unknown = set(supplied) - set(signature.parameters)
+        if unknown:
+            self._error(
+                "unknown keyword argument%s: %s"
+                % ("" if len(unknown) == 1 else "s", ", ".join(sorted(unknown))), node)
+
+        return ast.Call(func=node.func, args=ordered, keywords=[])
 
     def _emit_math_call(self, attr:str, args:List[Tuple[str, Any]], node:ast.Call, module_name:str="math")->Tuple[str, Any]:
         if attr not in _MATH_FUNCS:
