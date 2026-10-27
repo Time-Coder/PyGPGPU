@@ -490,10 +490,14 @@ class FunctionTranslator:
                  resolve_global:Callable[[str], Any], device_cache:Dict[Any, Any],
                  is_kernel:bool=False, self_param:str="",
                  self_attr_types:Optional[Dict[str, Any]]=None,
-                 self_owner:Optional[type]=None):
+                 self_owner:Optional[type]=None, launch_backend:Optional[str]=None):
         self.func:Callable = func
         self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
         self.backend:str = backend
+        # The backend the kernel is actually launched on. hip reuses cuda code generation, so
+        # backend is "cuda" for a hip kernel; decisions that depend on the runtime rather than
+        # on the generated syntax (for example whether device printf is safe) must use this.
+        self.launch_backend:str = (launch_backend or backend)
         self.resolve_global:Callable[[str], Any] = resolve_global
         self.device_cache:Dict[Any, Any] = device_cache
         self.is_kernel:bool = is_kernel
@@ -1203,7 +1207,9 @@ class FunctionTranslator:
         machine) once a kernel with this many printf call sites is launched, and debug
         output is not worth crashing the machine over. Use OpenCL or CUDA for printing.
         """
-        if self.backend == "hip":
+        # launch_backend, not backend: a hip kernel goes through cuda code generation, so
+        # self.backend is "cuda" there and only the runtime tells the two apart.
+        if self.launch_backend == "hip":
             self._error(
                 "print() is not supported on the hip backend: launching a kernel with the "
                 "generated printf call sites makes the driver drop the device on this "
@@ -1797,6 +1803,26 @@ class FunctionTranslator:
         index_code, _ = self._visit_subscript_index(node)
         return f"{base_code}[{index_code}]", base_t
 
+    def _reject_hip_image(self, node:ast.expr, writing:bool)->None:
+        """Refuse an image on the HIP backend with the reason, not a compile error.
+
+        HIP reuses CUDA code generation, so an image parameter is emitted as a
+        texture/surface pair and the device would fail to compile. Beyond that, the
+        device may have no texture hardware at all: on the tested ROCm 7.2 Windows
+        build with an integrated Radeon, hipTexObjectCreate reports "Texture not
+        supported on the device". Either way a clear message here is better than a
+        compiler diagnostic about an undeclared type.
+        """
+        if self.launch_backend != "hip":
+            return
+        action = "write" if writing else "read"
+        self._error(
+            "the hip backend does not support images (%s): HIP reuses CUDA code "
+            "generation, which has no texture object type, and hipTexObjectCreate is "
+            "rejected with \"operation not supported\" on hardware without texture "
+            "support. Use the cuda, opencl or python backend for image kernels."
+            % action, node)
+
     def _emit_image_read(self, image_code:str, image_t:Any, node:ast.Subscript)->Tuple[str, Any]:
         """Translate ``img[x, y]`` into the sampling call of the current backend.
 
@@ -1806,6 +1832,7 @@ class FunctionTranslator:
         coordinate, OpenCL needs int2 for the former and float2 for the latter, so
         the coordinate type decides which form is emitted.
         """
+        self._reject_hip_image(node, writing=False)
         channels:int = image_channels(image_t)
         scalar:str = image_scalar(image_t)
 
@@ -1897,6 +1924,7 @@ class FunctionTranslator:
         fractional subscript is rejected rather than silently rounded, because there
         is no filtering rule for a store.
         """
+        self._reject_hip_image(target, writing=True)
         channels:int = image_channels(image_t)
         scalar:str = image_scalar(image_t)
 
@@ -2682,7 +2710,7 @@ class FunctionTranslator:
             callee:FunctionTranslator = FunctionTranslator(
                 raw_func, param_types, self.backend, self.resolve_global, self.device_cache,
                 is_kernel=False, self_param=self_param, self_attr_types=self_types,
-                self_owner=self.self_owner)
+                self_owner=self.self_owner, launch_backend=self.launch_backend)
             callee.translate()
             c_name:str = self._device_func_name(raw_func, param_types)
             entry = {

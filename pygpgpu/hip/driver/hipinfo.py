@@ -7,8 +7,8 @@ from ctypes import (
 
 from .hiptypes import (
     CUdeviceptr, CUmodule, CUfunction, CUstream, CUevent,
-    ptr_CUmodule, ptr_CUfunction, ptr_CUdeviceptr, ptr_CUstream, ptr_CUevent,
-    CUstreamCallback
+    CUarray, CUtexObject, ptr_CUmodule, ptr_CUfunction, ptr_CUdeviceptr, ptr_CUstream, ptr_CUevent,
+    ptr_CUarray, ptr_CUtexObject, CUstreamCallback
 )
 
 
@@ -130,6 +130,47 @@ func_signatures = {
 
     "hipGetErrorString": {"args": {"error": c_int}, "restype": c_char_p},
     "hipGetLastError": {"args": {}, "restype": c_int},
+
+    # ---------- arrays, for reading an image as a texture ----------
+    #
+    # Only the reading path is bound: ROCm exports no hipSurfObjectCreate, so there is
+    # no host object to store an image through. hipTexObjectCreate and the array
+    # entry points mirror the CUDA driver API field for field.
+
+    # hipError_t hipArrayCreate(hipArray_t* pHandle, const CUDA_ARRAY_DESCRIPTOR* pAllocateArray)
+    "hipArrayCreate": {"args": {"pHandle": ptr_CUarray, "pAllocateArray": c_void_p},
+                       "restype": c_int},
+    # hipError_t hipArray3DCreate(hipArray_t* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray)
+    "hipArray3DCreate": {"args": {"pHandle": ptr_CUarray, "pAllocateArray": c_void_p},
+                         "restype": c_int},
+    "hipArrayDestroy": {"args": {"array": CUarray}, "restype": c_int},
+    "hipArrayGetInfo": {"args": {"pFormat": c_void_p, "pExtent": c_void_p,
+                                 "pFlags": POINTER(c_uint), "array": CUarray},
+                        "restype": c_int},
+
+    # hipError_t hipTexObjectCreate(hipTextureObject_t* pTexObject,
+    #                               const HIP_RESOURCE_DESC* pResDesc,
+    #                               const HIP_TEXTURE_DESC* pTexDesc,
+    #                               const HIP_RESOURCE_VIEW_DESC* pResViewDesc)
+    "hipTexObjectCreate": {"args": {"pTexObject": ptr_CUtexObject,
+                                    "pResDesc": c_void_p, "pTexDesc": c_void_p,
+                                    "pResViewDesc": c_void_p},
+                           "restype": c_int},
+    "hipTexObjectDestroy": {"args": {"texObject": CUtexObject}, "restype": c_int},
+
+    # hipError_t hipMemcpy2D(void* dst, size_t dpitch, const void* src, size_t spitch,
+    #                        size_t width, size_t height, hipMemcpyKind kind)
+    "hipMemcpy2D": {"args": {"dst": c_void_p, "dpitch": c_size_t, "src": c_void_p,
+                             "spitch": c_size_t, "width": c_size_t,
+                             "height": c_size_t, "kind": c_int},
+                    "restype": c_int},
+    "hipMemcpy3D": {"args": {"p": c_void_p}, "restype": c_int},
+    "hipMemcpy2DAsync": {"args": {"dst": c_void_p, "dpitch": c_size_t,
+                                  "src": c_void_p, "spitch": c_size_t,
+                                  "width": c_size_t, "height": c_size_t,
+                                  "kind": c_int, "stream": CUstream},
+                         "restype": c_int},
+    "hipMemcpy3DAsync": {"args": {"p": c_void_p, "stream": CUstream}, "restype": c_int},
 }
 
 

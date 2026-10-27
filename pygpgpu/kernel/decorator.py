@@ -622,7 +622,7 @@ class PyKernel:
             self.raw_func, list(arg_types) + list(self_types), codegen_backend,
             self._resolve_global, device_cache, is_kernel=True,
             self_param=self._self_param, self_attr_types=self_attr_types,
-            self_owner=owner)
+            self_owner=owner, launch_backend=backend)
         translator.translate()
         kernel_code:str = translator.render_kernel(c_name)
 

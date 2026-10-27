@@ -28,6 +28,11 @@ Sampling rules are fixed for the whole image, so a kernel needs no sampler argum
 
     Image(..., filter="linear", address="clamp")
 
+The HIP backend is the exception: it reuses CUDA code generation, which has no texture
+object type, and hardware without texture support rejects hipTexObjectCreate outright,
+so an image parameter there raises a PyKernelSyntaxError saying so. This example uses
+the python, cuda and opencl backends.
+
 Run:
     python examples/13_image.py
 """
