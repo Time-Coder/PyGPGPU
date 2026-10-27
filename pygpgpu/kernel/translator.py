@@ -1230,17 +1230,14 @@ class FunctionTranslator:
                 "generated printf call sites makes the driver drop the device on this "
                 "runtime. Run the kernel with the opencl or cuda backend to see its output, "
                 "or write results into an array and inspect them on the host", call)
-        if call.keywords:
-            names:str = ", ".join(sorted(keyword.arg or "**" for keyword in call.keywords))
-            self._error(
-                f"print() inside a kernel does not support the keyword argument(s) {names}: "
-                f"sep/end/file change the printed text in ways a device printf cannot "
-                f"follow. Use positional arguments, or several print() calls", call)
+        # sep/end are fixed text, so both can be folded into the format string. file and
+        # flush are not translated: there is only one device output stream.
+        separator, terminator = self._print_sep_end(call)
 
         pieces:List[Tuple[str, str, Any]] = []
         for index, argument in enumerate(call.args):
             if index:
-                pieces.append(("text", " ", None))
+                pieces.append(("text", separator, None))
             pieces.extend(self._print_argument(argument))
 
         # The digit-count code for a real argument has to run before the switch that picks
@@ -1248,7 +1245,45 @@ class FunctionTranslator:
         leaves:List[Tuple[str, List[str]]] = [("", [])]
         selectors:List[Tuple[str, int]] = []
         self._expand_print_pieces(pieces, leaves, selectors)
-        self._emit_print_leaves(leaves, selectors, call)
+        self._emit_print_leaves(leaves, selectors, call, terminator)
+
+    def _print_sep_end(self, call:ast.Call)->Tuple[str, str]:
+        """The separator and terminator a print() call asks for.
+
+        Both become part of the format string, which has to be a compile-time constant on
+        the device (OpenCL rejects a computed format), so they must be string literals.
+        ``file`` and ``flush`` are refused: a kernel has one output stream and nothing to
+        flush.
+        """
+        separator:str = " "
+        terminator:str = "\n"
+        for keyword in call.keywords:
+            if keyword.arg is None:
+                self._error(
+                    "print() does not accept **kwargs: the printed text must be fixed in "
+                    "the device code", call)
+            if keyword.arg == "file":
+                self._error(
+                    "print(file=...) is not supported in a kernel: device printf writes to "
+                    "the backend's own output stream", call)
+            if keyword.arg == "flush":
+                self._error(
+                    "print(flush=...) has no meaning in a kernel: device output is "
+                    "drained when the launch completes", call)
+            if keyword.arg not in ("sep", "end"):
+                self._error(
+                    f"print() got an unexpected keyword argument '{keyword.arg}'; only sep "
+                    f"and end are supported", call)
+            if not (isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)):
+                self._error(
+                    f"print({keyword.arg}=...) must be a string literal: the format string "
+                    f"is fixed in the device code, so it cannot be computed", call)
+            if keyword.arg == "sep":
+                separator = keyword.value.value
+            else:
+                terminator = keyword.value.value
+        return separator, terminator
 
     def _print_argument(self, node:ast.expr)->List[Tuple[str, str, Any]]:
         """Split one print() argument into pieces.
@@ -1482,7 +1517,8 @@ class FunctionTranslator:
         return f"_pd{n}", exponent_base + max_digits
 
     def _emit_print_leaves(self, leaves:List[Tuple[str, List[str]]],
-                           selectors:List[Tuple[str, int]], node:ast.Call)->None:
+                           selectors:List[Tuple[str, int]], node:ast.Call,
+                           terminator:str="\n")->None:
         """Emit the leaves as printfs selected by the mixed-radix leaf index."""
         if len(leaves) > PRINT_MAX_LINES:
             self._error(
@@ -1490,8 +1526,9 @@ class FunctionTranslator:
                 f"{PRINT_MAX_LINES} a kernel allows: too many booleans or floats in one "
                 f"line. Split the text over several print() calls", node)
 
+        tail:str = self._c_string_text(terminator)
         if len(leaves) == 1 and not selectors:
-            format_text:str = leaves[0][0] + "\\n"
+            format_text:str = leaves[0][0] + tail
             self._emit('printf("%s"%s);' % (format_text, (", " + ", ".join(leaves[0][1])) if leaves[0][1] else ""))
             return
 
@@ -1502,7 +1539,8 @@ class FunctionTranslator:
         cases:List[str] = []
         for position, (format_text, args) in enumerate(leaves):
             arguments:str = (", " + ", ".join(args)) if args else ""
-            cases.append('case %d: printf("%s\\n"%s); break;' % (position, format_text, arguments))
+            cases.append('case %d: printf("%s%s"%s); break;'
+                         % (position, format_text, tail, arguments))
         cases.append("default: break;")
         self._emit(f"switch ((int){index}) {{ {' '.join(cases)} }}")
 
