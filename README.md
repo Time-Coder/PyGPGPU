@@ -445,6 +445,7 @@ Three forms of device identifier inside the brackets (same on every backend):
 |---|---|
 | `"0"`, `"1"` | index in the backend's device list (OpenCL uses flat numbering across platforms) |
 | `"gfx1036"`, `"geforce"` | case-insensitive substring match on name/vendor/**architecture name** |
+| `"amd"`, `"nvidia"`, `"intel"` | vendor shorthand: matched against the vendor string the driver reports, so `opencl:amd` finds a device whose vendor is spelled out as `Advanced Micro Devices, Inc.` |
 | `"geforce:1"` | when a name matches several devices, take the n-th one |
 
 Helpers:

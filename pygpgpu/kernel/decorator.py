@@ -123,6 +123,39 @@ def _parse_work_item(item:Any)->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[
     raise TypeError("work size bracket must be n, (global,), or (global, local); use None for auto")
 
 
+# Vendor spellings people reach for, mapped to a substring of the vendor string the
+# drivers actually report. "amd" is the common case: the OpenCL vendor string is
+# "Advanced Micro Devices, Inc.", which does not contain the abbreviation, so a plain
+# substring match for "amd" would never find an AMD device.
+_VENDOR_ALIASES:Dict[str, str] = {
+    "amd": "advanced micro devices",
+    "nvidia": "nvidia",
+    "intel": "intel",
+    "apple": "apple",
+    "qualcomm": "qualcomm",
+    "arm": "arm",
+    "pocl": "pocl",
+}
+
+
+def _device_match_keys(sel:str, device:Any)->bool:
+    """Does this device answer to the selector?
+
+    A selector matches by substring against the device's name, vendor and arch, plus a
+    small table of vendor aliases so a short, commonly written vendor name works even
+    when the driver reports the full company name.
+    """
+    low:str = sel.lower()
+    vendor:str = (getattr(device, "vendor", "") or "").lower()
+    arch:str = (getattr(device, "arch", "") or "").lower()
+
+    if low in device.name.lower() or low in vendor or low in arch:
+        return True
+
+    alias:Optional[str] = _VENDOR_ALIASES.get(low)
+    return alias is not None and alias in vendor
+
+
 def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
     """Resolve a device within a backend: None/index/name substring ("name:ordinal" disambiguates); returns (device object, cache key)."""
     devices:List[Any] = _backend_devices(backend)
@@ -147,10 +180,7 @@ def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
             raise ValueError(f"device index {i} out of range (0..{len(devices)-1}) for backend '{backend}'")
         return devices[i], devices[i].name
 
-    low:str = sel.lower()
-    matches:List[Any] = [d for d in devices
-                         if low in d.name.lower() or low in getattr(d, "vendor", "").lower()
-                         or low in getattr(d, "arch", "").lower()]
+    matches:List[Any] = [d for d in devices if _device_match_keys(sel, d)]
     if not matches:
         raise ValueError(
             f"no {backend} device matches '{device_sel}'; available: " + ", ".join(d.name for d in devices))

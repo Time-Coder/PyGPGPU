@@ -438,6 +438,7 @@ apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
 |---|---|
 | `"0"`, `"1"` | 后端设备列表编号(OpenCL 跨平台扁平编号) |
 | `"gfx1036"`, `"geforce"` | 名称/厂商/**架构名**子串匹配(不区分大小写) |
+| `"amd"`、`"nvidia"`、`"intel"` | 厂商简称: 与驱动上报的厂商字符串匹配, 因此 `opencl:amd` 能找到厂商写作 `Advanced Micro Devices, Inc.` 的设备 |
 | `"geforce:1"` | 名称匹配多个时取第 n 个 |
 
 辅助函数:
