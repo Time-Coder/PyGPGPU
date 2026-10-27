@@ -29,7 +29,6 @@ import pygf  # noqa: F401  (applies the numpy.array patch on import)
 from .kernel import (
     DEFAULT_BACKEND_ORDER,
     PyKernel,
-    PyKernelSyntaxError,
     available_devices,
     get_default_device,
     list_devices,
@@ -108,7 +107,7 @@ from .utils import get_print_info, set_print_info  # noqa: E402  (needs to follo
 
 __all__ = [
     # kernel
-    "kernel", "gpu", "PyKernel", "PyKernelSyntaxError", "DEFAULT_BACKEND_ORDER",
+    "kernel", "gpu", "PyKernel", "DEFAULT_BACKEND_ORDER",
     "list_devices", "get_device", "available_devices",
     "set_default_device", "get_default_device",
     # images

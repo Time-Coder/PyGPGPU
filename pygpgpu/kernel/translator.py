@@ -28,10 +28,33 @@ def get_dedented_source(func:Callable)->str:
     try:
         source:str = inspect.getsource(func)
     except OSError as e:
-        raise PyKernelSyntaxError(f"cannot read source of {getattr(func, '__name__', '<function>')}: {e}") from e
+        raise SyntaxError(f"cannot read source of {getattr(func, '__name__', '<function>')}: {e}") from e
     lines:List[str] = source.split("\n")
     start:int = next((i for i, line in enumerate(lines) if line.lstrip().startswith("def ")), 0)
     return textwrap.dedent("\n".join(lines[start:]))
+
+
+def _trimmed_source(func:Callable)->str:
+    """The text the translator parses: decorators dropped, dedented."""
+    return get_dedented_source(func)
+
+
+def _source_first_line(func:Callable)->int:
+    """The file line the parsed copy's line 1 came from.
+
+    ``get_dedented_source`` keeps everything from the ``def`` line on and drops the
+    decorators above it, so the copy's line 1 is the ``def`` line. ``getsourcelines`` starts
+    at the first decorator, which can be several lines earlier, so the skipped decorator
+    lines have to be added back; using its number directly would report every error a few
+    lines too high.
+    """
+    try:
+        lines, first_decorator = inspect.getsourcelines(func)
+    except (OSError, TypeError):
+        return 1
+    offset = next((i for i, line in enumerate(lines)
+                   if line.lstrip().startswith("def ")), 0)
+    return int(first_decorator) + offset
 
 
 def _get_attr(obj:Any, name:str, default:Any=None)->Any:
@@ -221,14 +244,66 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
             attrs.append(node.attr)
 
 
-class PyKernelSyntaxError(SyntaxError):
-    """Python kernel source contains syntax the backend cannot represent."""
+def _syntax_error(message:str, node:Optional[ast.AST]=None,
+                  filename:str="<kernel>",
+                  source:Optional[str]=None,
+                  first_line:int=1)->SyntaxError:
+    """Build a plain :class:`SyntaxError` positioned at kernel source the backend rejects.
 
-    def __init__(self, message:str, node:Optional[ast.AST]=None, filename:str="<kernel>"):
-        lineno:int = (getattr(node, "lineno", 0) if node is not None else 0)
-        super().__init__(f"{message} (line {lineno})" if lineno else message)
-        self.node = node
-        self.filename = filename
+    Callers ``raise`` the result ``from None``, so the traceback shows only the user's own
+    frame and CPython's familiar rendering: the file, the line number, the offending source
+    line and a caret under the column.
+
+    The translator parses a *dedented copy* of the function with its decorator line removed,
+    so an AST ``lineno`` counts from that copy. ``first_line`` converts it back to the line
+    in the user's file; the copy's line 1 is the decorator line.
+    """
+    lineno:int = getattr(node, "lineno", 0) if node is not None else 0
+    column:int = getattr(node, "col_offset", 0) if node is not None else 0
+    end_column:Optional[int] = getattr(node, "end_col_offset", None) if node is not None else None
+
+    # lineno in the parsed copy -> line in the user's file (the copy starts at the decorator).
+    file_lineno:Optional[int] = (first_line + lineno - 1) if lineno else None
+
+    text:Optional[str] = None
+    # Prefer the user's own file: the parsed copy is dedented and has no decorator, so its
+    # line text would show the wrong indentation and the caret would sit off by that much.
+    if filename and filename not in ("<kernel>", "<string>"):
+        try:
+            with open(filename, encoding="utf-8") as handle:
+                file_lines = handle.read().splitlines()
+        except OSError:
+            file_lines = []
+    else:
+        file_lines = []
+
+    if file_lines:
+        if file_lineno is not None and 0 < file_lineno <= len(file_lines):
+            text = file_lines[file_lineno - 1]
+            # Columns come from the dedented copy; add back the indentation it removed. The
+            # same shift applies to the node's end column.
+            if source and lineno and 0 < lineno <= len(source.splitlines()):
+                shift = max(len(text) - len(source.splitlines()[lineno - 1]), 0)
+                column += shift
+                if end_column is not None:
+                    end_column += shift
+    elif source and lineno:
+        lines = source.splitlines()
+        if 0 < lineno <= len(lines):
+            text = lines[lineno - 1]
+
+    details:Tuple[Any, ...] = (
+        filename if filename else "<kernel>",
+        file_lineno,
+        (column + 1) if text is not None else None,
+        text,
+    )
+    error = SyntaxError(message, details)
+    if end_column is not None and text is not None:
+        # A column range makes CPython underline the whole span instead of one caret.
+        error.end_lineno = file_lineno
+        error.end_offset = end_column + 1
+    return error
 
 
 INT_TYPES:Set[str] = {"bool", "char", "uchar", "short", "ushort", "int", "uint", "long", "ulong"}
@@ -243,6 +318,17 @@ DTYPE_MAP:Dict[str, str] = {
 }
 
 PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string means a scalar
+
+# The internal type names use OpenCL's spellings, because one generator serves every backend.
+# CUDA C does not define uchar/ushort/uint/ulong (NVRTC rejects them; char/short/int/long
+# and the full unsigned forms are fine), so the CUDA path writes those out in full. HIP
+# compiles through CUDA generation too and its clang accepts the same full spellings.
+_CUDA_TYPE_NAMES:Dict[str, str] = {
+    "uchar": "unsigned char",
+    "ushort": "unsigned short",
+    "uint": "unsigned int",
+    "ulong": "unsigned long long",
+}
 
 # An image parameter is ("image", channels, scalar type): its storage is opaque to
 # the kernel, which only ever samples or stores through it.
@@ -391,9 +477,9 @@ def image_scalar(t:Any)->str:
 
 def promote(t1:Any, t2:Any)->Any:
     if is_ptr(t1) or is_ptr(t2):
-        raise PyKernelSyntaxError("cannot mix arrays with scalars in arithmetic")
+        raise SyntaxError("cannot mix arrays with scalars in arithmetic") from None
     if is_vec(t1) or is_vec(t2):
-        raise PyKernelSyntaxError("vector arithmetic is handled separately")
+        raise SyntaxError("vector arithmetic is handled separately") from None
     if "double" in (t1, t2):
         return "double"
     if is_float(t1) or is_float(t2):
@@ -414,15 +500,15 @@ def infer_ctype(value:Any)->Any:
     if isinstance(value, Image):
         channel_type = DTYPE_MAP.get(value.dtype.name)
         if channel_type is None:
-            raise PyKernelSyntaxError(
+            raise SyntaxError(
                 "Image of dtype %s cannot be sampled: unsupported element type"
-                % value.dtype.name)
+                % value.dtype.name) from None
         return (IMAGE, value.channels, channel_type)
 
     if isinstance(value, np.void):
         vec_name:str = dtype_to_vec.get(value.dtype)
         if vec_name is None:
-            raise PyKernelSyntaxError(f"unsupported numpy structured scalar: {value.dtype}")
+            raise SyntaxError(f"unsupported numpy structured scalar: {value.dtype}") from None
         return vec_name
 
     for vec_name, cls in registry.items():
@@ -434,9 +520,9 @@ def infer_ctype(value:Any)->Any:
             vec_name = dtype_to_vec.get(value.dtype)
             if vec_name is not None:
                 return (PTR, vec_name)
-            raise PyKernelSyntaxError(f"unsupported numpy structured dtype: {value.dtype}")
+            raise SyntaxError(f"unsupported numpy structured dtype: {value.dtype}") from None
         if value.dtype.name not in DTYPE_MAP:
-            raise PyKernelSyntaxError(f"unsupported numpy dtype: {value.dtype.name}")
+            raise SyntaxError(f"unsupported numpy dtype: {value.dtype.name}") from None
         return (PTR, DTYPE_MAP[value.dtype.name])
     if isinstance(value, (bool, np.bool_)):
         return "bool"
@@ -448,7 +534,7 @@ def infer_ctype(value:Any)->Any:
         # A texture or surface reaches the device as an opaque 64-bit handle, which
         # the kernel reads through tex2D or writes through surf2Dwrite.
         return _handle_device_type(value)
-    raise PyKernelSyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays, int/float/bool scalars and texture handles are supported)")
+    raise SyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays, int/float/bool scalars and texture handles are supported)") from None
 
 
 # surf*Dread/write address the first axis in bytes, and float elements are 4.
@@ -509,12 +595,16 @@ class FunctionTranslator:
         self.self_owner:Optional[type] = self_owner
 
         try:
-            tree:ast.Module = _parse_kernel_source(self._trim_source())
+            # The dedented copy starts at the decorator line, so remember where that was in
+            # the user's file: error line numbers are reported against the file, not the copy.
+            self.first_line:int = _source_first_line(func)
+            self.source_text:str = _trimmed_source(func)
+            tree:ast.Module = _parse_kernel_source(self.source_text)
             if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
-                raise PyKernelSyntaxError("decorated object must be a plain function")
+                raise SyntaxError("decorated object must be a plain function") from None
             self.tree:ast.FunctionDef = tree.body[0]
         except SyntaxError as e:
-            raise PyKernelSyntaxError(f"cannot parse function source: {e}") from e
+            raise SyntaxError(f"cannot parse function source: {e}") from None
 
         self.params:List[Tuple[str, Any]] = []
         self.shapes_used:List[Tuple[str, int]] = []
@@ -547,7 +637,7 @@ class FunctionTranslator:
 
         args:List[ast.arg] = self.tree.args.args
         if self.tree.args.vararg or self.tree.args.kwarg or self.tree.args.kwonlyargs:
-            raise PyKernelSyntaxError("*args/**kwargs/keyword-only args are not supported", self.tree.args)
+            raise SyntaxError("*args/**kwargs/keyword-only args are not supported", self.tree.args) from None
         # Default values are accepted: a kernel argument is always supplied by the
         # caller, so a default is a convenience for reading the signature rather than
         # something the device code has to represent.
@@ -555,7 +645,7 @@ class FunctionTranslator:
             args = args[1:]
         expected:int = len(args) + len(self.self_attr_types)
         if expected != len(param_types):
-            raise PyKernelSyntaxError(f"{func.__name__}() takes {expected} device arguments but {len(param_types)} types were given")
+            raise SyntaxError(f"{func.__name__}() takes {expected} device arguments but {len(param_types)} types were given") from None
 
         scope:Dict[str, Any] = {}
         for arg, t in zip(args, param_types):
@@ -581,8 +671,13 @@ class FunctionTranslator:
 
     def _error(self, message:str, node:Optional[ast.AST]=None)->NoReturn:
         """Raise a translation error. Declared NoReturn so callers can rely on it not
-        falling through (the checker then stops treating each call site as nullable)."""
-        raise PyKernelSyntaxError(message, node, self.filename)
+        falling through (the checker then stops treating each call site as nullable).
+
+        ``from None`` suppresses the chain: the translator's own frames are an implementation
+        detail, and what matters is the position drawn from the user's file.
+        """
+        raise _syntax_error(message, node, self.filename, self.source_text,
+                            self.first_line) from None
 
     def _emit(self, line:str)->None:
         self.lines.append("    " * self._indent + line)
@@ -921,6 +1016,16 @@ class FunctionTranslator:
                 code, _ = self._visit_expression(node.value)
                 if code:
                     self._emit(f"{code};")
+        elif isinstance(node, ast.AnnAssign):
+            # `x: float = 0.0` is ordinary Python. The annotation has no device meaning --
+            # the type comes from the assigned value, as it does for every other name -- so
+            # it is dropped and the statement becomes a plain assignment. A bare `x: float`
+            # declares nothing, which a kernel has no use for, so it is ignored the way a
+            # docstring is.
+            if node.value is not None:
+                self._visit_assign(ast.Assign(targets=[node.target], value=node.value,
+                                              lineno=node.lineno,
+                                              col_offset=node.col_offset))
         elif isinstance(node, ast.Break):
             self._emit("break;")
         elif isinstance(node, ast.Continue):
@@ -1048,7 +1153,7 @@ class FunctionTranslator:
                 self._tmp_counter += 1
                 tmp:str = f"_swap{self._tmp_counter}"
                 self._define(tmp, t, node)
-                self._emit(f"{t} {tmp} = {code};")
+                self._emit(f"{self._device_type(t)} {tmp} = {code};")
                 temps.append((tmp, t))
 
             for (tmp, t), target_item in zip(temps, target.elts):
@@ -1065,7 +1170,7 @@ class FunctionTranslator:
                     self._error(f"cannot assign to array parameter '{name}'", node)
                 is_new:bool = (existing is None)
                 self._define(name, t, node)
-                decl:str = (f"{t} " if is_new else "")
+                decl:str = (f"{self._device_type(t)} " if is_new else "")
                 self._emit(f"{decl}{name} = {tmp};")
             return
         code, t = self._visit_expression(node.value)
@@ -1080,7 +1185,7 @@ class FunctionTranslator:
             self._define(target.id, t, node)
             decl:str = ""
             if is_new:
-                decl = {"bool": "bool ", "float": "float ", "double": "double "}.get(t, f"{t} ")
+                decl = self._device_type(t) + " "
             self._emit(f"{decl}{target.id} = {code};")
         elif isinstance(target, ast.Subscript):
             base_code, base_t = self._visit_array_target(target.value)
@@ -2860,7 +2965,9 @@ class FunctionTranslator:
         if entry is not None:
             if entry["status"] == "in_progress":
                 self._error(f"recursive call detected: '{name}'", node)
-            return f"{entry['c_name']}({', '.join(call_codes)})", entry["return_type"]
+            argument_codes:List[str] = call_codes + list(entry.get("shape_codes") or [])
+            return (f"{entry['c_name']}({', '.join(argument_codes)})",
+                    entry["return_type"])
 
         self.device_cache[sig_key] = {"status": "in_progress"}
         try:
@@ -2870,11 +2977,22 @@ class FunctionTranslator:
                 self_owner=self.self_owner, launch_backend=self.launch_backend)
             callee.translate()
             c_name:str = self._device_func_name(raw_func, param_types)
+            # A helper that indexes a multi-dimensional array needs that array's extents, and
+            # they are parameters, not part of the pointer. They are appended to the helper's
+            # signature and passed from the caller's own_ shape variables, which the kernel
+            # already receives.
+            shape_params:List[Tuple[str, int]] = list(callee.shapes_used)
+            for array_name, dim in shape_params:
+                if (array_name, dim) not in self.shapes_used:
+                    self.shapes_used.append((array_name, dim))
+            shape_codes:List[str] = [self._shape_var(array_name, dim)
+                                     for array_name, dim in shape_params]
             entry = {
                 "status": "done",
                 "c_name": c_name,
                 "return_type": callee.return_type,
-                "code": callee.render_device(c_name),
+                "code": callee.render_device(c_name, shape_params),
+                "shape_codes": shape_codes,
             }
             self.device_cache[sig_key] = entry
         except Exception:
@@ -2888,7 +3006,8 @@ class FunctionTranslator:
                 f"'{name}' uses an image parameter from a device helper, which is not "
                 f"supported: sample or store the image in the kernel body instead", node)
 
-        return f"{entry['c_name']}({', '.join(call_codes)})", entry["return_type"]
+        argument_codes:List[str] = call_codes + list(entry.get("shape_codes") or [])
+        return (f"{entry['c_name']}({', '.join(argument_codes)})", entry["return_type"])
 
     def _emit_self_method_call(self, kind:str, target:Any, attr:str,
                                args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
@@ -2918,28 +3037,48 @@ class FunctionTranslator:
         """The storage qualifier a device function needs on this backend."""
         return "__device__ " if self.backend == "cuda" else ""
 
-    def render_device(self, c_name:str)->str:
+    def render_device(self, c_name:str,
+                      shape_params:Optional[List[Tuple[str, int]]]=None)->str:
+        """Render a device function.
+
+        ``shape_params`` are the (array, dimension) extents this helper indexes. They travel
+        as extra int parameters, because a pointer carries no extents and the helper's
+        multi-dimensional subscripting needs them.
+        """
         params:List[str] = []
         for name, t in self.params:
             if is_ptr(t):
-                params.append(f"{t[1]}* {name}")
+                params.append(f"{self._device_type(t[1])}* {name}")
             else:
-                params.append(f"{t} {name}")
+                params.append(f"{self._device_type(t)} {name}")
+        for array_name, dim in (shape_params or []):
+            params.append(f"const int {self._shape_var(array_name, dim)}")
         ret:str = (self.return_type or "void")
-        header:str = f"{self._device_qualifier()}{ret} {c_name}({', '.join(params)})"
+        header:str = f"{self._device_qualifier()}{self._device_type(ret)} {c_name}({', '.join(params)})"
         body:str = "\n".join(self.lines)
         return f"{header} {{\n{body}\n}}"
+
+    def _device_type(self, t:str)->str:
+        """The backend's spelling of a scalar type name.
+
+        The translator's internal names follow OpenCL (uchar, ushort, uint, ulong). CUDA
+        C does not define those four, so the CUDA path -- which HIP shares -- writes the
+        full C form instead.
+        """
+        if self.backend == "opencl":
+            return t
+        return _CUDA_TYPE_NAMES.get(t, t)
 
     def render_kernel(self, c_name:str)->str:
         params:List[str] = []
         for name, t in self.params:
             if is_ptr(t):
                 qualifier:str = ("__global " if self.backend == "opencl" else "")
-                params.append(f"{qualifier}{t[1]}* {name}")
+                params.append(f"{qualifier}{self._device_type(t[1])}* {name}")
             elif is_image(t):
                 params.append(f"{self._image_param_type(name, t)} {name}")
             else:
-                params.append(f"{t} {name}")
+                params.append(f"{self._device_type(t)} {name}")
         for array_name, dim in self.shapes_used:
             params.append(f"const int {self._shape_var(array_name, dim)}")
         # OpenCL sampling takes the sampler as a kernel argument; one per sampled

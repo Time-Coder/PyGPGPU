@@ -25,11 +25,6 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 
 
-class PyKernelSyntaxError(SyntaxError):
-    """Error type carried by the builtins module itself (a lazy import would cycle with translator)."""
-
-
-
 # The python backend installs one frame per thread for the duration of a kernel call.
 # It lives here (rather than in python_backend.py) so attribute access on `gpu` can find
 # it without importing the backend, which would cycle back through the translator.
@@ -62,10 +57,9 @@ class GPUNamespace:
             return frame.builtin(name)
 
         def _not_callable(*args, **kwargs)->None:
-            from .translator import PyKernelSyntaxError
-            raise PyKernelSyntaxError(
+                        raise SyntaxError(
                 f"gpu.{name} is only available inside a @kernel function body "
-                f"(it maps to a device builtin, not a host function)")
+                f"(it maps to a device builtin, not a host function)") from None
         return _not_callable
 
 
@@ -78,9 +72,9 @@ def tex1D(texture:Any, u:Any)->Any:
     The translator rewrites the call into ``tex1D<float>(texture, u)``. Sampling runs
     on the device, so this body only gives the name something to bind to.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "tex1D() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 def tex2D(texture:Any, u:Any, v:Any)->Any:
@@ -89,9 +83,9 @@ def tex2D(texture:Any, u:Any, v:Any)->Any:
     The translator rewrites the call into ``tex2D<float>(texture, u, v)``. Sampling
     runs on the device, so this body only gives the name something to bind to.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "tex2D() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 def tex3D(texture:Any, u:Any, v:Any, w:Any)->Any:
@@ -101,9 +95,9 @@ def tex3D(texture:Any, u:Any, v:Any, w:Any)->Any:
     Sampling runs on the device, so this body only gives the name something to bind
     to.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "tex3D() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 def surf1Dread(surface:Any, x:Any)->Any:
@@ -111,9 +105,9 @@ def surf1Dread(surface:Any, x:Any)->Any:
 
     The translator rewrites the call into ``surf1Dread<float>(surface, x)``.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "surf1Dread() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 def surf1Dwrite(surface:Any, value:Any, x:Any)->Any:
@@ -121,9 +115,9 @@ def surf1Dwrite(surface:Any, value:Any, x:Any)->Any:
 
     The translator rewrites the call into ``surf1Dwrite<float>(value, surface, x)``.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "surf1Dwrite() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 def surf3Dread(surface:Any, x:Any, y:Any, z:Any)->Any:
@@ -131,9 +125,9 @@ def surf3Dread(surface:Any, x:Any, y:Any, z:Any)->Any:
 
     The translator rewrites the call into ``surf3Dread<float>(surface, x, y, z)``.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "surf3Dread() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 def surf3Dwrite(surface:Any, value:Any, x:Any, y:Any, z:Any)->Any:
@@ -141,9 +135,9 @@ def surf3Dwrite(surface:Any, value:Any, x:Any, y:Any, z:Any)->Any:
 
     The translator rewrites the call into ``surf3Dwrite<float>(value, surface, x, y, z)``.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "surf3Dwrite() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 def surf2Dread(surface:Any, x:Any, y:Any)->Any:
@@ -151,9 +145,9 @@ def surf2Dread(surface:Any, x:Any, y:Any)->Any:
 
     The translator rewrites the call into ``surf2Dread<float>(surface, x, y)``.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "surf2Dread() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 def surf2Dwrite(surface:Any, value:Any, x:Any, y:Any)->Any:
@@ -161,9 +155,9 @@ def surf2Dwrite(surface:Any, value:Any, x:Any, y:Any)->Any:
 
     The translator rewrites the call into ``surf2Dwrite<float>(value, surface, x, y)``.
     """
-    raise PyKernelSyntaxError(
+    raise SyntaxError(
         "surf2Dwrite() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host")
+        "cannot be called on the host") from None
 
 
 # ---------- mapping metadata used at translation time ----------

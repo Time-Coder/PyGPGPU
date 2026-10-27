@@ -42,7 +42,7 @@ image and a 4-pixel RGBA row cannot be confused:
 
 The HIP backend is the exception: it reuses CUDA code generation, which has no texture
 object type, and hardware without texture support rejects hipTexObjectCreate outright,
-so an image parameter there raises a PyKernelSyntaxError saying so. This example uses
+so an image parameter there raises a SyntaxError saying so. This example uses
 the python, cuda and opencl backends.
 
 Run:

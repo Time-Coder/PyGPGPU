@@ -46,7 +46,7 @@ from .builtins import (
     get_host_frame,
     set_host_frame,
 )
-from .translator import PyKernelSyntaxError, _parse_kernel_source, get_dedented_source
+from .translator import _parse_kernel_source, get_dedented_source
 from ..utils import local_size_for_global
 from ..vec_types import funcs as VEC_FUNCS
 
@@ -322,27 +322,27 @@ class PythonFrame:
         if hasattr(VEC_FUNCS, name):
             # The dual-sided library: its host implementation is the same function.
             return getattr(VEC_FUNCS, name)
-        raise PyKernelSyntaxError(
+        raise SyntaxError(
             f"gpu.{name} is not supported by the python backend: it has no host-side "
             f"implementation (supported: the indexing builtins, atomics, gpu.barrier, "
-            f"gpu.work_size and the vector math functions)")
+            f"gpu.work_size and the vector math functions)") from None
 
     # ----- indexing builtins -----
 
     def _dim(self, name: str, dim: Any) -> int:
         if not isinstance(dim, int) or isinstance(dim, bool) or dim not in (0, 1, 2):
-            raise PyKernelSyntaxError(f"gpu.{name}(dim) requires a dimension of 0, 1 or 2")
+            raise SyntaxError(f"gpu.{name}(dim) requires a dimension of 0, 1 or 2") from None
         return dim
 
     def _index(self, name: str, dim: Any) -> int:
         d: int = self._dim(name, dim)
         needs_item: bool = name in ("get_global_id", "get_local_id", "get_group_id")
         if needs_item and self.coords is None:
-            raise PyKernelSyntaxError(
+            raise SyntaxError(
                 f"gpu.{name}({d}) has no meaning in a serial python run: the python "
                 f"backend executes a magic-loop kernel as one plain call, so there is no "
                 f"current work item. Use the loop variable instead (the magic loop gives "
-                f"the same index).")
+                f"the same index).") from None
         if self.coords is not None and d >= len(self.coords):
             raise ValueError(
                 f"gpu.{name}({d}) is out of range: this launch has {len(self.coords)} "
@@ -401,9 +401,9 @@ class PythonFrame:
         return None
 
     def _local(self, *args: Any) -> Any:
-        raise PyKernelSyntaxError(
+        raise SyntaxError(
             "gpu.local() is not supported by the python backend: local (shared) memory is "
-            "shared by the work items of one group, which a serial run cannot emulate")
+            "shared by the work items of one group, which a serial run cannot emulate") from None
 
     def _work_size(self, *args: Any) -> None:
         """Host-side declaration only: the launch shape is derived by the caller."""

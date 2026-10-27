@@ -13,7 +13,6 @@ from ..utils import local_size_for_global, detect_work_size, device_limits
 from .python_backend import PythonKernel
 from .translator import (
     FunctionTranslator,
-    PyKernelSyntaxError,
     infer_ctype,
     scan_self_attrs,
     short_hash,
@@ -376,8 +375,59 @@ def _bind_arguments(func:Callable, args:Tuple[Any, ...],
     return tuple(ordered)
 
 
+def _caller_traceback(traceback:Any)->Any:
+    """The first frame of ``traceback`` that is not inside this package."""
+    if traceback is None:
+        return None
+    package_dir:str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    prefix:str = package_dir + os.sep
+    cursor:Any = traceback
+    while cursor is not None:
+        filename:str = cursor.tb_frame.f_code.co_filename
+        # `-c`, stdin and exec'd code use a pseudo-filename that abspath() would resolve
+        # against the working directory, which can itself sit under the package.
+        pseudo:bool = filename.startswith("<") and filename.endswith(">")
+        if pseudo or not os.path.abspath(filename).startswith(prefix):
+            return cursor
+        cursor = cursor.tb_next
+    return None
+
+
+def _user_frame_syntax_error(error:SyntaxError)->SyntaxError:
+    """Drop the library frames from a SyntaxError raised while translating a kernel.
+
+    Kept for callers that want a trimmed chain rather than an empty one; the launch path
+    itself clears the traceback (see _translate_errors), because a re-raise always prepends
+    the frame doing the re-raising.
+    """
+    traceback = error.__traceback__
+    if traceback is None:
+        return error
+
+    package_root:str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    package_prefix:str = package_root + os.sep
+
+    keep:Any = None
+    cursor:Any = traceback
+    while cursor is not None:
+        filename:str = cursor.tb_frame.f_code.co_filename
+        # `-c`, stdin and exec'd code report a pseudo-filename that abspath() would resolve
+        # against the working directory -- which can sit under the package; those frames are
+        # the caller's, not the library's.
+        pseudo:bool = filename.startswith("<") and filename.endswith(">")
+        if pseudo or not os.path.abspath(filename).startswith(package_prefix):
+            keep = cursor
+            break
+        cursor = cursor.tb_next
+    if keep is None:
+        return error
+    error.__traceback__ = keep
+    return error
+
+
 class _KernelCall:
     """Bracket-configuration form: k["cuda"][(64, 8)](args) / k[(64, 8)]["cuda"](args), any order."""
+
     def __init__(self, kernel:"PyKernel", instance:Any,
                  backend:Optional[str]=None, device:Optional[str]=None,
                  global_size:Optional[Tuple[int, ...]]=None, local_size:Optional[Tuple[int, ...]]=None):
@@ -418,7 +468,6 @@ class _KernelCall:
                                                     skip_first=self._kernel._is_method)
         return self._kernel._invoke(
             instance, call_args, self._backend, self._device, self._global_size, self._local_size)
-
     def _launch(self, launch:str, args:Tuple[Any, ...],
                 kwargs:Optional[Dict[str, Any]]=None)->Any:
         """Shared body of the three launch styles, honouring the bracket selectors."""
@@ -497,7 +546,7 @@ class PyKernel:
 
     def __init__(self, func:Callable, backend:str, explicit_backend:bool=False):
         if isinstance(func, classmethod):
-            raise PyKernelSyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)")
+            raise SyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)") from None
         if isinstance(func, staticmethod):
             func = func.__func__
 
@@ -585,6 +634,21 @@ class PyKernel:
                 backend_sel:Optional[str], device_sel:Optional[str],
                 global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
                 launch:str = "call")->Any:
+        try:
+            return self._invoke_inner(instance, args, backend_sel, device_sel,
+                                      global_size, local_size, launch)
+        except SyntaxError as caught:
+            # Trim to the caller's frame and re-raise with that traceback. CPython prepends one
+            # frame for the re-raise itself, which is why the exception carries the caller's
+            # line rather than this one: the syntax rendering uses the fields on the
+            # exception, not the chain.
+            caller = _caller_traceback(caught.__traceback__)
+            raise caught.with_traceback(caller) from None
+
+    def _invoke_inner(self, instance:Any, args:Tuple[Any, ...],
+                      backend_sel:Optional[str], device_sel:Optional[str],
+                      global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
+                      launch:str = "call")->Any:
         if backend_sel is not None:
             backend:str = backend_sel
         elif getattr(self, "_explicit_backend", False):
@@ -620,14 +684,14 @@ class PyKernel:
             self_attrs = scan_self_attrs(self.raw_func, self._self_param, owner)
             for name in self_attrs:
                 if not hasattr(instance, name):
-                    raise PyKernelSyntaxError(
+                    raise SyntaxError(
                         f"instance of {owner.__name__} has no attribute '{name}' "
-                        f"required by kernel {self.__name__}")
+                        f"required by kernel {self.__name__}") from None
                 value:Any = getattr(instance, name)
                 if callable(value) and not isinstance(value, np.ndarray):
-                    raise PyKernelSyntaxError(
+                    raise SyntaxError(
                         f"self.{name} is a function, not a value: a function cannot be passed "
-                        f"to a device (call it as self.{name}(...) instead)")
+                        f"to a device (call it as self.{name}(...) instead)") from None
                 self_values.append(value)
 
         arg_types:List[Any] = [infer_ctype(a) for a in args]
@@ -635,8 +699,8 @@ class PyKernel:
         for name, value in zip(self_attrs, self_values):
             try:
                 self_types.append(infer_ctype(value))
-            except PyKernelSyntaxError as e:
-                raise PyKernelSyntaxError(f"self.{name}: {e}") from None
+            except SyntaxError as e:
+                raise SyntaxError(f"self.{name}: {e}") from None
 
         sig:str = type_sig(arg_types + self_types)
         cache_key:str = f"{backend}|{device_key}|{sig}"
@@ -793,9 +857,9 @@ class PyKernel:
             for t in list(arg_types) + list(self_types):
                 base:str = (t[1] if isinstance(t, tuple) else t)
                 if base == "half":
-                    raise PyKernelSyntaxError(
+                    raise SyntaxError(
                         "fp16 (np.float16) arguments are not supported on the cuda backend: "
-                        "NVRTC on this machine cannot resolve cuda_fp16.h; use np.float32 instead")
+                        "NVRTC on this machine cannot resolve cuda_fp16.h; use np.float32 instead") from None
 
         c_name:str = self._c_kernel_name(sig, backend)
         device_cache:Dict[Any, Any] = {}

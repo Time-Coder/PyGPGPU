@@ -14,9 +14,26 @@ from .event import Event
 
 class VarInfo:
 
+    # The CUDA path writes unsigned types in their full C spelling (NVRTC does not define
+    # uchar/ushort/uint/ulong), while the driver tables are keyed by the OpenCL-style short
+    # names. Mapping here keeps every downstream lookup working on one spelling.
+    _TYPE_ALIASES:Dict[str, str] = {
+        "unsigned char": "uchar",
+        "unsigned short": "ushort",
+        "unsigned int": "uint",
+        "unsigned long long": "ulong",
+        "unsigned long": "ulong",
+    }
+
     def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], type_qualifiers: List[str], kernel_flags:Optional[KernelFlags]=None):
         self.name = name
-        self.type_str = type_str
+        # Normalise the spelling while keeping any trailing pointer marker.
+        stripped:str = type_str.strip()
+        pointer:str = ""
+        if stripped.endswith("*"):
+            stripped = stripped[:-1].rstrip()
+            pointer = "*"
+        self.type_str = self._TYPE_ALIASES.get(stripped, stripped) + pointer
         self.array_shape = array_shape
         self.type_qualifiers = type_qualifiers
         self.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed) if kernel_flags is None else kernel_flags
