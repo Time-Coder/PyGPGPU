@@ -1,27 +1,20 @@
 """11_texture2d.py -- sample a 2D image in a CUDA kernel with tex2D.
 
-An OpenCL kernel takes an ``image2d_t`` and a sampler; CUDA splits that into an
-*array* (the storage the texture hardware reads) and a *texture object* (the array
-plus its sampling rules). PyGPGPU folds both into one call:
+The image class is named as it appears in kernel code, and is constructed from
+whatever the host already has -- a file path, a numpy array, or just a shape:
 
-    texture = Devices[0].default_context.texture(image)
+    texture = texture2d_t("photo.png")      # read with imageio
+    texture = texture2d_t(numpy_image)      # (height, width[, channels])
+    texture = texture2d_t(shape=(h, w))     # allocate, fill later
 
-``image`` is a numpy array shaped ``(height, width)`` or ``(height, width,
-channels)``; its dtype and channel count carry over to the device image. Pass the
-texture to a kernel like any other argument and sample it with ``tex2D(tex, u, v)``.
-With ``normalized=True`` (the default) a pixel centre maps to
+Pass it to a kernel like any other argument; the backend binds it to whichever
+device and context the launch uses, so nothing here mentions either:
+
+    kernel["cuda"](texture, out, width, height)
+
+A kernel samples it with ``tex2D(tex, u, v)``, or ``tex2D<float>`` in C. With
+``normalized=True`` (the default) a pixel centre maps to
 ``((x + 0.5) / width, (y + 0.5) / height)``.
-
-Keep the pieces separately when the image is needed for other work too:
-
-    array = ctx.create_array(width, height, np.float32)
-    array.set_data(image)
-    texture = ctx.create_texture(array)
-
-One ordering rule applies on the driver this was developed against (CUDA 13.4):
-once a module containing ``tex2D`` has been loaded, no further texture object can be
-created, so build every texture before importing such a module. Textures built
-earlier keep sampling correctly, which is what this example does.
 
 Run:
     python examples/11_texture2d.py
@@ -35,8 +28,7 @@ import numpy as np
 
 from pygpgpu import kernel, cuimport
 from pygpgpu.kernel import tex2D
-from pygpgpu.cuda.driver import CUDA
-from pygpgpu.cuda.oop import Devices
+from pygpgpu.cuda.driver import CUDA, texture2d_t
 
 CUDA.print_info = False
 
@@ -82,14 +74,11 @@ def main():
     ramp = np.arange(width * height, dtype=np.float32).reshape(height, width)
     trailing = ramp * 2.0 + 5.0
 
-    context = Devices[0].default_context
-
-    # Build both textures before the module below is imported.
-    texture_a = context.texture(ramp)
-    texture_b = context.texture(trailing)
-
-    print("array upload/read-back  :", bool(
-        np.array_equal(texture_a.array.to_numpy(), ramp)))
+    # Build the images before anything else runs: binding needs a current CUDA
+    # context, and constructing one here is what establishes it.
+    texture_a = texture2d_t(ramp)
+    texture_b = texture2d_t(trailing)
+    print("images                  :", texture_a, "and", texture_b)
 
     folder = tempfile.mkdtemp()
     with open(os.path.join(folder, "texture2d.cu"), "w") as handle:
@@ -111,7 +100,7 @@ def main():
     print("2D grid, block/thread   :", bool(np.array_equal(out_b, trailing)))
 
     # The same sampling from a @kernel body: the translator turns tex2D into the
-    # device call, so a Python kernel takes the handle exactly like the .cu one.
+    # device call, so a Python kernel takes the image exactly like the .cu one.
     out_c = np.zeros(width * height, dtype=np.float32)
     sample_python["cuda"](texture_a, out_c, np.int32(width), np.int32(height))
     print("python @kernel, tex2D   :", bool(

@@ -89,7 +89,8 @@ class ArgInfo(VarInfo):
         # object the kernel samples through tex2D, so it is accepted as-is. The
         # backend validates the handle itself when the argument is bound.
         from .texture import TextureObject
-        if isinstance(value, TextureObject):
+        from ..driver import texture2d_t
+        if isinstance(value, (TextureObject, texture2d_t)):
             return
         if self.is_ptr:
             if not isinstance(value, np.ndarray):

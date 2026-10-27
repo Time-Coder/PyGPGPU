@@ -14,7 +14,8 @@ from ..driver import (
     CUDA,
     CUInfo,
     CUfunction,
-    CUresult
+    CUresult,
+    texture2d_t
 )
 from .cuobject import CUObject
 from .program_info import ArgInfo
@@ -459,6 +460,12 @@ class Kernel(CUObject):
         arg_type_str = arg_info.type_str        
         base_type_str = arg_info.base_type_str
 
+        # A texture2d_t is a host-side description with no context of its own; the
+        # kernel binds it here, where the context is known, and keeps the resulting
+        # objects alive for the launch.
+        if isinstance(value, texture2d_t):
+            value = self._bind_image(value)
+
         # A texture (or surface) handle is passed by value as an opaque 64-bit
         # object, which the kernel samples through tex2D. cuLaunchKernel expects a
         # pointer to each argument's value, so the handle is stored on the call's
@@ -467,7 +474,6 @@ class Kernel(CUObject):
             handle = c_uint64(value.id.value if hasattr(value.id, "value") else value.id)
             bound[arg_info.name] = (None, value, handle)
             return pointer(handle)
-
         if base_type_str in CUInfo.basic_types or base_type_str in self._program.structs or base_type_str in CUInfo.vec_types:
             if base_type_str in CUInfo.basic_types:
                 content_type = CUInfo.basic_types[base_type_str]
@@ -527,6 +533,40 @@ class Kernel(CUObject):
                 return pointer(c_void_p(buffer.id.value))
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
+
+    def _bind_image(self, image:texture2d_t)->Any:
+        """Turn a host-side image description into a device texture for this launch.
+
+        ``texture2d_t`` deliberately carries no context, so the binding happens here,
+        where the kernel knows which context it runs in. A description that was bound
+        earlier (see ``texture2d_t.bind``) returns the texture it already holds.
+        """
+        texture = image.bind()
+        if texture is None:
+            from .context import Context
+
+            context = Context.current()
+            if context is None:
+                raise RuntimeError(
+                    "no CUDA context is current; launching the kernel normally "
+                    "establishes one")
+
+            array = context.create_array(image.width, image.height,
+                                         image.dtype, image.channels)
+            if image.image is not None:
+                array.set_data(image.image)
+
+            options:Dict[str, Any] = {"normalized": image.normalized}
+            if image.address_mode is not None:
+                options["address_mode"] = image.address_mode
+            if image.filter_mode is not None:
+                options["filter_mode"] = image.filter_mode
+
+            texture = context.create_texture(array, **options)
+            # Keep both alive alongside the description the caller passed in, so a
+            # second launch reuses them instead of allocating again.
+            image._device = (array, texture)
+        return texture
 
     def _is_vec3_arg(self, arg_info:ArgInfo)->bool:
         base:str = arg_info.base_type_str

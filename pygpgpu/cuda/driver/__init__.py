@@ -51,6 +51,7 @@ from .cutypes import (
     CU_TRSF_READ_AS_INTEGER,
     CU_TRSF_NORMALIZED_COORDINATES
 )
+from .texture2d_t import texture2d_t
 from .nvrtc import NVRTC
 from .nvrtcinfo import NVRTCInfo
 from .nvrtctypes import (
