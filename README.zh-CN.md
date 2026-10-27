@@ -489,6 +489,7 @@ set_print_info(True)       # 恢复详细输出(默认)
 - kernel 里的 `print()` 逐个参数处理 `True`/`False`、整数、浮点数与向量, 不接受 `sep`/`end`/`file` 关键字参数, 也不能直接打印数组(请打印某个元素)。含大量浮点数的一行会展开成一个按位数选择的 `switch`, 特别长的一行会触达代码体积保护, 请拆成多次调用。HIP 后端直接拒绝 `print()`: 在被测运行时上, 这类 kernel 会让驱动丢失设备;
 - 向量比较/swizzle 写、三元以上嵌套等按跨后端一致性优先做了限制(报错信息会给出替代写法);
 - HIP 后端不支持 `Image`: HIP 复用 CUDA 代码生成, 其中没有纹理对象类型, 并且在不支持纹理的硬件上 `hipTexObjectCreate` 会被拒绝(返回 "operation not supported", 例如 ROCm 7.2 Windows 下的集成 Radeon)。翻译器会抛出指明后端的 `PyKernelSyntaxError`; 图像 kernel 请使用 cuda、opencl 或 python;
+- `@kernel` 函数上的类型注解会被接受但忽略: 设备类型来自调用时的实参, 因为同一个 kernel 会按实参类型签名分别特化。注解供编辑器与类型检查器使用, 不参与翻译;
 - fp16 (`np.float16`) 参数在 CUDA/HIP 后端不可用(建议 float32);
 - HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用;
 - 纯 Python 后端(`k["python"]`)不模拟 `gpu.local`(组内共享内存), 它是串行执行的, 没有并行工作项的概念。

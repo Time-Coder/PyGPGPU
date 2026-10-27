@@ -556,8 +556,10 @@ class FunctionTranslator:
 
         scope:Dict[str, Any] = {}
         for arg, t in zip(args, param_types):
-            if arg.annotation is not None:
-                raise PyKernelSyntaxError("type annotations are not needed, remove them", arg)
+            # Annotations are accepted but ignored: the device type comes from the
+            # actual argument at call time (see infer_ctype), because one kernel is
+            # specialized per argument-type signature. Keeping them lets the same
+            # function be read by editors and type checkers.
             scope[arg.arg] = t
             self.params.append((arg.arg, t))
         # self.xxx attributes -> extra device parameters _self_xxx, filled from the instance at call time
