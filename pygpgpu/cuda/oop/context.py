@@ -181,6 +181,50 @@ class Context(CUObject):
                                        surface=True)
         return SurfaceObject(target)
 
+    def create_image(self, image:Any, writable:bool=False)->Any:
+        """Bind a backend-neutral :class:`pygpgpu.Image` to this CUDA context.
+
+        The device needs different objects depending on how the kernel uses the
+        image: reading samples a texture object, writing needs a surface object,
+        and a kernel that does both needs the array created with the surface flag.
+        ``writable`` comes from the kernel's read/write analysis.
+
+        Returns ``(array, texture, surface)`` with the unused entries None; the
+        caller keeps them alive for the launch.
+        """
+        from .array import Array
+        from .surface import SurfaceObject
+        from ..driver import CUaddress_mode, CUfilter_mode
+
+        self.make_current()
+
+        array = Array(image.width, image.height, image.depth, image.dtype,
+                      image.channels, surface=bool(writable))
+        if image.data is not None:
+            array.set_data(image.data)
+
+        texture:Optional[Any] = None
+        surface:Optional[Any] = None
+
+        if writable:
+            surface = SurfaceObject(array)
+        else:
+            filter_mode = (CUfilter_mode.CU_TR_FILTER_MODE_LINEAR
+                           if image.filter == "linear"
+                           else CUfilter_mode.CU_TR_FILTER_MODE_POINT)
+            address_mode = {
+                "clamp": CUaddress_mode.CU_TR_ADDRESS_MODE_CLAMP,
+                "wrap": CUaddress_mode.CU_TR_ADDRESS_MODE_WRAP,
+                "mirror": CUaddress_mode.CU_TR_ADDRESS_MODE_MIRROR,
+            }[image.address]
+            # Coordinates are texel-space (see pygpgpu.image), so the texture is
+            # built without coordinate normalization and the device sees the same
+            # numbers the host path uses.
+            texture = self.create_texture(array, normalized=False,
+                                          filter_mode=filter_mode,
+                                          address_mode=address_mode)
+        return array, texture, surface
+
     def get_buffer(self, size:int=0)->Buffer:
         available_buffer:Optional[Buffer] = None
         for buffer in self._buffers.get(size, []):

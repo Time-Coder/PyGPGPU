@@ -7,6 +7,9 @@
   in the body are collected automatically and passed as extra device
   arguments, read from the instance at call time. Static methods work with
   either decorator order.
+- Helpers may be reached through a name: a static method of any class
+  (`Model.double`, `Other.scale`) or another method of the same class
+  (`self.clamp`), whose own `self.xxx` reads become kernel arguments too.
 
 Run:
     python examples/03_nd_loop_and_class_method.py
@@ -56,6 +59,30 @@ class Model:
             out[i] = x[i] * self.weights[i] + self.bias
 
 
+class Activations:
+    @staticmethod
+    def double(v):
+        """A static method of another class: no receiver, so it is a plain helper."""
+        return v * 2.0
+
+
+class Layer:
+    """Helpers reached through a name, including another method of the same class."""
+
+    def __init__(self, scale):
+        self.scale = scale
+
+    def clamp01(self, v):
+        """An instance method used as a helper: self.scale becomes a kernel argument."""
+        return min(max(v, 0.0), self.scale)
+
+    @kernel
+    def run(self, x, out):
+        """Calls self.clamp01 (same class) and Activations.double (another class, static)."""
+        for i in range(out.shape[0]):
+            out[i] = self.clamp01(Activations.double(x[i]))
+
+
 @kernel
 def static_double(x, out):
     """staticmethod can be decorated too (in either decorator order)."""
@@ -96,6 +123,17 @@ def main():
     static_double(x, z)
     assert np.allclose(z, x * 2)
     print("static_double OK")
+
+    # Helpers reached through a name: self.clamp01 (same class) calls
+    # Activations.double (a static method of another class); self.scale of
+    # clamp01 is uploaded as a kernel argument like any other attribute.
+    layer = Layer(np.float32(1.5))
+    x2 = np.array([-1.0, 0.5, 1.0, 4.0], dtype=np.float32)
+    y2 = np.zeros(4, dtype=np.float32)
+    layer.run(x2, y2)
+    expected = np.minimum(np.maximum(x2 * 2.0, 0.0), 1.5)
+    assert np.allclose(y2, expected), (y2, expected)
+    print("Layer.run (self method + other-class static) OK:", y2.tolist())
 
 
 if __name__ == "__main__":

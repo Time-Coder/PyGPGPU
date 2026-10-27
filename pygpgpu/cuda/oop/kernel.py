@@ -462,6 +462,21 @@ class Kernel(CUObject):
         arg_type_str = arg_info.type_str        
         base_type_str = arg_info.base_type_str
 
+        # A backend-neutral Image was bound before compilation (see
+        # PyKernel._bind_images); pick the view this argument's type needs.
+        from ...image import Image as _Image
+        if isinstance(value, _Image):
+            array, texture, surface = value.bind_cuda()
+            written = (base_type_str == "cudaSurfaceObject_t") or arg_info.need_read_back
+            handle = surface if written else texture
+            handle_value = c_uint64(handle.id.value if hasattr(handle.id, "value")
+                                    else handle.id)
+            # Note which backend touched the image last, so Image.read() reads it back
+            # from the right device.
+            value._last_backend = "cuda"
+            bound[arg_info.name] = (None, value, (array, texture, surface, handle_value))
+            return pointer(handle_value)
+
         # A cudaTextureObject_t is a host-side description with no context of its own; the
         # kernel binds it here, where the context is known, and keeps the resulting
         # objects alive for the launch.

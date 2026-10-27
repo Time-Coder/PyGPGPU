@@ -51,6 +51,12 @@ from .vec_types import (
 )
 from .vec_types import funcs          # dual-purpose function library: runs on the host, translates to device builtins inside @kernel
 
+# ---------- Top-level export: the backend-neutral image type ----------
+# Kernels index an Image like an array (src[y, x]); the subscript is translated into
+# each backend's sampling call, and the python backend runs the host implementation
+# in image.py, so one kernel yields the same numbers everywhere.
+from .image import Image
+
 
 # ---------- Top-level exports: import hooks for handwritten kernel files ----------
 
@@ -101,6 +107,8 @@ __all__ = [
     # kernel
     "kernel", "gpu", "PyKernel", "PyKernelSyntaxError", "DEFAULT_BACKEND_ORDER",
     "available_devices", "get_device",
+    # images
+    "Image",
     # logging
     "set_print_info",
     # vec_types

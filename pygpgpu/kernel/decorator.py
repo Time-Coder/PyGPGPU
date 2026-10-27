@@ -284,7 +284,9 @@ class PyKernel:
 
     Decorating class methods is supported: self is dropped during translation, self.xxx attribute
     references in the method body become extra parameters _self_xxx, filled from the instance at call
-    time; staticmethod is supported too (either decoration order).
+    time; staticmethod is supported too (either decoration order). A method may also call other
+    methods of its own class (self.helper(...)), a static method of any class, or a module function;
+    the attributes those helpers read become kernel arguments as well.
 
     Backend/device/work size are given with brackets at call time (same style as handwritten kernels);
     0, 1 or 2 brackets may be used, in any order::
@@ -311,7 +313,10 @@ class PyKernel:
         arg_names:List[str] = list(func.__code__.co_varnames[:func.__code__.co_argcount])
         self._is_method:bool = bool(arg_names and arg_names[0] == "self")
         self._self_param:str = (arg_names[0] if self._is_method else "")
-        self._self_attrs:List[str] = (scan_self_attrs(func, self._self_param) if self._is_method else [])
+        # A decorated body may read self.<attr> or call self.<helper>(...), and only the
+        # latter can tell a method from a value -- which needs the instance's class, known
+        # at call time rather than now. The attribute set is therefore collected in
+        # _invoke; the decoration-time body scan this used to cache is gone.
 
         self._cache:Dict[str, Tuple[Any, List[Tuple[int, int]], List[Tuple[int, int]], List[int]]] = {}
         # The python backend executes the body as-is, so there is nothing to specialize or
@@ -383,23 +388,32 @@ class PyKernel:
         device_max_group, device_max_items = device_limits(device_obj)
 
         self_values:List[Any] = []
+        self_attrs:List[str] = []
+        owner:Optional[type] = None
         if self._is_method:
             if instance is None:
                 raise TypeError(f"{self.__name__}() requires an instance")
-            for name in self._self_attrs:
+            # The decorated body was scanned at decoration time, before the class
+            # existed, so self.<helper> could only look like data. Scan again now
+            # that the instance is here: calling a self-method makes the attributes
+            # *it* reads kernel arguments too, recursively.
+            owner = type(instance)
+            self_attrs = scan_self_attrs(self.raw_func, self._self_param, owner)
+            for name in self_attrs:
                 if not hasattr(instance, name):
                     raise PyKernelSyntaxError(
-                        f"instance of {type(instance).__name__} has no attribute '{name}' "
+                        f"instance of {owner.__name__} has no attribute '{name}' "
                         f"required by kernel {self.__name__}")
                 value:Any = getattr(instance, name)
                 if callable(value) and not isinstance(value, np.ndarray):
                     raise PyKernelSyntaxError(
-                        f"self.{name} is a method; calling self.{name}() inside a kernel is not supported")
+                        f"self.{name} is a function, not a value: a function cannot be passed "
+                        f"to a device (call it as self.{name}(...) instead)")
                 self_values.append(value)
 
         arg_types:List[Any] = [infer_ctype(a) for a in args]
         self_types:List[Any] = []
-        for name, value in zip(self._self_attrs, self_values):
+        for name, value in zip(self_attrs, self_values):
             try:
                 self_types.append(infer_ctype(value))
             except PyKernelSyntaxError as e:
@@ -409,12 +423,21 @@ class PyKernel:
         cache_key:str = f"{backend}|{device_key}|{sig}"
         entry = self._cache.get(cache_key)
         if entry is None:
-            entry = self._compile(args, arg_types, self_types, sig, backend, device_obj)
+            # Create the device objects for any Image before compiling. On the driver
+            # this was developed against, loading a module that contains texture or
+            # surface calls makes every later texture/surface creation fail, so an
+            # image bound after compilation would never get its device storage.
+            self._bind_images(full_values=args, backend=backend)
+            entry = self._compile(args, arg_types, self_types, self_attrs, owner, sig, backend, device_obj)
             self._cache[cache_key] = entry
-        kernel_obj, shape_sources, work_size_dims, local_sizes, uses_global_id = entry
+        kernel_obj, shape_sources, work_size_dims, local_sizes, uses_global_id, image_samplers = entry
 
         full:List[Any] = list(args) + list(self_values)
         launch_args:List[Any] = self._build_launch_args(full, arg_types + self_types, shape_sources)
+        if backend == "opencl":
+            # A sampler per sampled image, in the order the signature declares them.
+            for param_index in image_samplers:
+                launch_args.append(_image_sampler(full[param_index]))
         if backend == "opencl":
             # cuda local memory is a static __shared__ declaration; only opencl needs the byte size passed
             for local_bytes in local_sizes:
@@ -524,7 +547,28 @@ class PyKernel:
     def _c_kernel_name(self, sig:str, backend:str)->str:
         return f"pyk_{self.__name__}_{short_hash(sig + '_' + backend)}"
 
-    def _compile(self, args:List[Any], arg_types:List[Any], self_types:List[Any], sig:str,
+    def _bind_images(self, full_values:Any, backend:str)->None:
+        """Create the device objects for every Image argument, before compilation.
+
+        Each backend decides what an image becomes (a texture for reading, a surface
+        for writing); the objects are cached on the Image so later launches reuse
+        them. Only CUDA needs this ahead of compilation; OpenCL images are created
+        per launch without that ordering constraint.
+        """
+        from ..image import Image
+
+        for value in full_values:
+            if not isinstance(value, Image):
+                continue
+            binding = value._bindings.get(backend)
+            if binding is not None:
+                continue
+            if backend == "cuda":
+                value.bind_cuda()
+            # opencl binds at launch time; nothing to do here
+
+    def _compile(self, args:List[Any], arg_types:List[Any], self_types:List[Any],
+                 self_attrs:List[str], owner:Optional[type], sig:str,
                  backend:str, device_obj:Any)->Tuple[Any, List[str]]:
         if backend in ("cuda", "hip"):
             for t in list(arg_types) + list(self_types):
@@ -536,14 +580,15 @@ class PyKernel:
 
         c_name:str = self._c_kernel_name(sig, backend)
         device_cache:Dict[Any, Any] = {}
-        self_attr_types:Dict[str, Any] = dict(zip(self._self_attrs, self_types))
+        self_attr_types:Dict[str, Any] = dict(zip(self_attrs, self_types))
 
         # hip accepts CUDA syntax (threadIdx/atomicAdd/make_float4 etc.), so codegen goes through cuda
         codegen_backend:str = ("cuda" if backend == "hip" else backend)
         translator:FunctionTranslator = FunctionTranslator(
             self.raw_func, list(arg_types) + list(self_types), codegen_backend,
             self._resolve_global, device_cache, is_kernel=True,
-            self_param=self._self_param, self_attr_types=self_attr_types)
+            self_param=self._self_param, self_attr_types=self_attr_types,
+            self_owner=owner)
         translator.translate()
         kernel_code:str = translator.render_kernel(c_name)
 
@@ -576,7 +621,11 @@ class PyKernel:
                                       "int": 4, "uint": 4, "long": 8, "ulong": 8,
                                       "float": 4, "double": 8}
         local_sizes:List[int] = [ctype_sizes.get(ctype, 4) * count for _, ctype, count in translator.local_buffers]
-        return kernel, shape_sources, work_size_dims, local_sizes, translator.uses_global_id
+        # Images an OpenCL kernel samples need a sampler argument each; record which
+        # parameter supplies the sampler so the launch can append it.
+        image_samplers:List[int] = [param_index[name]
+                                    for name in sorted(translator.required_image_samplers)]
+        return kernel, shape_sources, work_size_dims, local_sizes, translator.uses_global_id, image_samplers
 
     def _cache_dir(self, backend:str)->str:
         source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
@@ -628,6 +677,34 @@ class PyKernel:
 
     def __repr__(self)->str:
         return f"PyKernel({self.__name__}, backend={self.backend})"
+
+
+def _image_sampler(image:Any)->Any:
+    """The OpenCL sampler matching an Image's sampling rules.
+
+    OpenCL takes the sampler as a kernel argument while CUDA bakes it into the
+    texture object, so this is where the backend-neutral filter/address strings turn
+    into an ``sampler_t``.
+    """
+    from ..opencl.driver import (
+        cl_addressing_mode,
+        cl_filter_mode,
+        sampler_t,
+    )
+
+    filter_mode = (cl_filter_mode.CL_FILTER_LINEAR
+                   if image.filter == "linear"
+                   else cl_filter_mode.CL_FILTER_NEAREST)
+    address_mode = {
+        "clamp": cl_addressing_mode.CL_ADDRESS_CLAMP_TO_EDGE,
+        "wrap": cl_addressing_mode.CL_ADDRESS_REPEAT,
+        "mirror": cl_addressing_mode.CL_ADDRESS_MIRRORED_REPEAT,
+    }[image.address]
+
+    # Coordinates are texel-space, matching CUDA and the host path.
+    return sampler_t(normalized_coords=False,
+                     addressing_mode=address_mode,
+                     filter_mode=filter_mode)
 
 
 def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:
@@ -686,6 +763,8 @@ def kernel(func:Optional[Callable]=None, *, backend:Optional[str]=None):
     - The outermost `for i in range(<array parameter>.shape[0])` loop is the work-item loop;
       the work size is taken automatically from that array's first dimension;
     - plain python functions called by the kernel are translated into device functions (monomorphized per argument types);
+    - helpers may be reached by name: a bare module-level name, `module.func(...)`, `SomeClass.static_method(...)`,
+      `self.static_method(...)`, or `self.other_method(...)` for another method of the same class;
     - math.* and abs/min/max/round map to device builtins;
     - unsupported syntax raises SyntaxError.
     """

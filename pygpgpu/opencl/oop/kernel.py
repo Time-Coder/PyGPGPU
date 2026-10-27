@@ -283,7 +283,7 @@ class Kernel(CLObject):
 
         if global_work_size is None or local_work_size is None:
             if global_work_size is None:
-                global_work_size, local_work_size = self.__detect_work_size(used_device)
+                global_work_size, local_work_size = self.__detect_work_size(used_device, bound)
             else:
                 # when only global is specified, derive local from the given global (must divide evenly)
                 max_group, max_items = device_limits(used_device)
@@ -416,33 +416,50 @@ class Kernel(CLObject):
 
         return used_kwargs
     
-    def __detect_work_size(self, device:Device):
+    def __detect_work_size(self, device:Device, bound:Dict[str, Any]):
         max_shape = None
         for arg in self._arg_list:
-            if arg.need_read_back:
-                arg_shape = (arg.mem_obj.data.shape if arg.mem_obj.data is not None else arg.mem_obj.shape)
-                if ((
-                        arg.base_type_str in CLInfo.vec_types and
-                        len(arg_shape) >= 2 and
-                        arg_shape[-1] == CLInfo.vec_types[arg.base_type_str].component_count()
-                    ) or (
-                        len(arg_shape) == 3 and isinstance(arg.mem_obj, image2d)
-                    )
-                ):
-                    arg_shape = arg_shape[:-1]
+            if not arg.need_read_back:
+                continue
+            # The shape comes from this call's binding: argument bindings are per call
+            # since launches stopped sharing state between threads, and ArgInfo no
+            # longer carries a mem_obj to read a shape from.
+            entry = bound.get(arg.name)
+            if entry is None:
+                continue
+            mem_obj:Optional[MemObject] = entry[0]
+            if mem_obj is None:
+                # Local-memory slots and image handles carry no buffer; an image pair
+                # still knows its shape, everything else has nothing to contribute.
+                arg_shape:Optional[Tuple[int, ...]] = getattr(entry[1], "shape", None)
+                if arg_shape is None:
+                    continue
+                arg_shape = tuple(arg_shape)
+            else:
+                arg_shape = (mem_obj.data.shape if mem_obj.data is not None else mem_obj.shape)
 
-                if not arg_shape:
-                    arg_shape = (1,)
-                    
-                if max_shape is None:
-                    max_shape = arg_shape
-                elif len(arg_shape) > len(max_shape):
-                    max_shape = arg_shape
-                elif len(arg_shape) == len(max_shape):
-                    for n1, n2 in zip(arg_shape, max_shape):
-                        if n1 > n2:
-                            max_shape = arg_shape
-                            break
+            if ((
+                    arg.base_type_str in CLInfo.vec_types and
+                    len(arg_shape) >= 2 and
+                    arg_shape[-1] == CLInfo.vec_types[arg.base_type_str].component_count()
+                ) or (
+                    len(arg_shape) == 3 and isinstance(mem_obj, image2d)
+                )
+            ):
+                arg_shape = arg_shape[:-1]
+
+            if not arg_shape:
+                arg_shape = (1,)
+                
+            if max_shape is None:
+                max_shape = arg_shape
+            elif len(arg_shape) > len(max_shape):
+                max_shape = arg_shape
+            elif len(arg_shape) == len(max_shape):
+                for n1, n2 in zip(arg_shape, max_shape):
+                    if n1 > n2:
+                        max_shape = arg_shape
+                        break
 
         if max_shape is None:
             # no argument needs read-back so there is no usable shape; degrade to a single element
@@ -572,16 +589,30 @@ class Kernel(CLObject):
                     bound[arg_info.name] = (buffer, value, used_value)
         elif arg_type_str in CLInfo.image_types:
             image_type = CLInfo.image_types[arg_type_str]
+            # A backend-neutral Image becomes the descriptor this backend binds, with
+            # its channel count and element type taken from the image itself.
+            from ...image import Image as _Image
+            original_image:Any = value if isinstance(value, _Image) else None
+            if original_image is not None:
+                value = image_type(
+                    (original_image.data if original_image.data is not None
+                     else np.zeros(original_image.shape, original_image.dtype)),
+                    dtype=original_image.dtype)
             if not isinstance(value, (np.ndarray, image_type)):
-                raise TypeError(f"type of argument '{arg_info.name}' must be {image_type.__name__} or np.ndarray, got {value.__class__.__name__}.")
-            
+                raise TypeError(f"type of argument '{arg_info.name}' must be {image_type.__name__}, np.ndarray or Image, got {value.__class__.__name__}.")
+
             used_value = value
             if isinstance(value, np.ndarray):
                 used_value = image_type(value)
-            
+
             image, event = arg_info.use_image(cmd_queue, used_value)
             CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(image.id))
             bound[arg_info.name] = (image, value, used_value)
+            if original_image is not None:
+                # Record where the result lives so Image.read() can fetch it, and note
+                # which backend wrote it last.
+                original_image._bindings["opencl"] = (image, cmd_queue)
+                original_image._last_backend = "opencl"
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
 

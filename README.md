@@ -27,7 +27,7 @@ No C code to write, no build system to configure; the first call translates, com
 ## Features
 
 - **`@kernel` decorator** — decorate a Python function directly (class methods and static methods included); at call time it is specialized per argument type, translated to backend source and compiled (monomorphization).
-- **Plain-Python helper functions** — a helper called from a kernel needs no decorator and no type annotations: it is translated into a device function and monomorphized from the call site, recursively for helpers that call helpers.
+- **Plain-Python helper functions** — a helper called from a kernel needs no decorator and no type annotations: it is translated into a device function and monomorphized from the call site, recursively for helpers that call helpers. The same holds for helpers reached through a name: `module.func(...)`, `SomeClass.static_method(...)`, `self.static_method(...)`, and `self.other_method(...)` between methods of one class.
 - **All three backends in one process** — the bracket chooses the backend per call, so a single process (and even a single kernel object) can mix OpenCL, CUDA and HIP; each backend/device pair is specialized and cached separately.
 - **Pure-Python backend** — `k["python"]` runs the same `@kernel` body in the interpreter, serially on the CPU: no GPU, no compiler, no runtime. Useful for testing, for small inputs and as a reference for what the GPU semantics mean.
 - **Handwritten kernel file import** — `.cl` / `.cu` / `.hip` files import like Python modules: kernels and struct types become module attributes, and a `.pyi` type stub is generated automatically.
@@ -106,7 +106,7 @@ def histogram(data, counts):
     gpu.atomic_add(counts, data[i], 1)    # atomics, results read back automatically
 ```
 
-Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/comparison/bit ops, `math.*` and `np.*` math functions, class methods (`self.xxx` attributes become arguments automatically), static methods. Unsupported syntax raises a `SyntaxError` carrying the line number.
+Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/comparison/bit ops, `math.*` and `np.*` math functions, class methods (`self.xxx` attributes become arguments automatically), static methods, and calling helpers through a name — a module-level function, `module.func(...)`, `SomeClass.static_method(...)`, and `self.method(...)` for another method of the same class. Unsupported syntax raises a `SyntaxError` carrying the line number.
 
 A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `gpu.get_global_id`, declare `gpu.work_size(x)` — that statement is host-side only, erased by the translator, and contributes all of `x`'s dimensions. A `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
 
@@ -237,6 +237,38 @@ m = Model()
 m.apply(x, out)                     # self.weights/self.lr are passed as kernel arguments
 m.apply["cuda"](x, out)             # brackets still available
 ```
+
+### Calling helpers by name
+
+A kernel can call a helper written as ordinary Python. Besides a module-level function called by its bare name, a helper can be reached through a name:
+
+```python
+import mylib
+
+def soften(v):                      # module-level helper
+    return v * 0.5
+
+class Model:
+    def __init__(self):
+        self.level = 1.0            # read by gain(), so it becomes a kernel argument
+
+    @staticmethod
+    def scale(v):                   # static method: no receiver
+        return v * 3.0
+
+    def gain(self):                 # instance method: reads self.level
+        return self.level + 1.0
+
+    @kernel
+    def apply(self, x, out):
+        for i in range(out.shape[0]):
+            out[i] = soften(x[i]) * self.scale(x[i]) + self.gain() + mylib.bias(x[i])
+```
+
+- `self.method(...)` calls another method of the same class. It is translated like any helper, except that the attributes *it* reads (`self.level` above) become kernel arguments too — recursively, through nested helper calls.
+- `SomeClass.static_method(...)` and `self.static_method(...)` work for static methods of any class; they need no receiver.
+- `module.func(...)` works for a plain function reached through a module object.
+- Not supported from device code: calling a `@kernel`-decorated method, a `classmethod` (there is no `cls` on a device), or a method of *another instance* — a device function has no object model, so pass that object's arrays as explicit kernel arguments instead. Attributes cannot be written back either (`self.x = ...` is rejected; write into an array element).
 
 ### Copy optimization
 
@@ -466,8 +498,7 @@ set_print_info(True)       # verbose again (the default)
 - the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used;
 - the pure-Python backend (`k["python"]`) does not emulate `gpu.local` (group-shared memory): it runs serially and has no parallel work items to share it.
 
-On CUDA, the array APIs (`Array` upload/read-back through `cuMemcpy2D`) work on every supported interpreter, but `TextureObject` depends on the driver accepting `cuTexObjectCreate` under that interpreter. On the machine this was developed on (driver 13.4), ten fresh attempts succeeded ten times under CPython 3.14 and zero times under CPython 3.7, with byte-identical descriptors and the same GPU, so tex2D sampling is usable on 3.14 and unavailable on 3.7 there. `examples/11_texture2d.py` reports this instead of raising, and the sampling results it does produce are bit-exact.
-
+On CUDA, the array APIs (`Array` upload/read-back through `cuMemcpy2D`) work on every supported interpreter. `cuSurfObjectCreate` and `cuTexObjectCreate` occasionally return `CUDA_ERROR_INVALID_VALUE` on a descriptor that is byte-for-byte valid; the failures cluster in the first few calls of a process and then stop. Measured on the machine this was developed on (driver 13.4, RTX 4070): about one in a hundred creations fails, retrying an already-failed descriptor does not recover it, and a fresh descriptor for a newly created array usually does. Because an `Image` binds one surface and one texture per launch, a scenario that launches several image kernels in one process can therefore lose a few launches. The `python` and OpenCL backends are unaffected: OpenCL images are created per launch on a code path that has not shown the failure, and the `python` backend touches no device at all. `examples/11_texture2d.py` reports a driver refusal instead of raising.
 ## License
 
 MIT

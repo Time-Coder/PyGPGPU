@@ -23,7 +23,7 @@ matching the rest of the repository.
 |---|---|
 | [01_basic_kernel.py](01_basic_kernel.py) | The basics of `@kernel`: SAXPY, automatic work size, switching backend/device with brackets |
 | [02_backend_device_selection.py](02_backend_device_selection.py) | `available_devices()` / `get_device()` and the device-selection syntax |
-| [03_nd_loop_and_class_method.py](03_nd_loop_and_class_method.py) | Multi-dimensional `np.ndindex`/`np.ndenumerate`, plus class methods and static methods |
+| [03_nd_loop_and_class_method.py](03_nd_loop_and_class_method.py) | Multi-dimensional `np.ndindex`/`np.ndenumerate`, plus class methods and static methods; helpers reached through a name: another method of the same class, a static method of any class, a module function |
 | [04_vector_types.py](04_vector_types.py) | Vector types (float4/...), swizzles, and the dual-sided function library `pygpgpu.funcs` |
 | [05_gnp_zero_copy_and_atomics.py](05_gnp_zero_copy_and_atomics.py) | Zero-copy with device-resident `gnp` arrays, atomic histograms, and local-memory reduction |
 | [06_handwritten_kernels.py](06_handwritten_kernels.py) | Importing handwritten `.cl`/`.cu`/`.hip` files like Python modules |
@@ -33,6 +33,7 @@ matching the rest of the repository.
 | [10_async_launch.py](10_async_launch.py) | Non-blocking launches of a `@kernel` function: `submit` / `async_call` |
 | [11_python_backend.py](11_python_backend.py) | The pure-Python backend: `k["python"]`, magic loop vs gid-style, plus `submit`/`async_call` |
 | [12_print_in_kernel.py](12_print_in_kernel.py) | `print()` inside a kernel: translated to device `printf` with python's exact rendering |
+| [13_image.py](13_image.py) | One backend-neutral `Image` type: a kernel indexes it like an array (`src[y, x]`), translated into `tex2D`/`surf2Dwrite` on CUDA and `read_imagef`/`write_imagef` on OpenCL, and executed by a host implementation on the `python` backend so all three agree element for element |
 
 `@kernel` function bodies accept a docstring (the leading string literal is ignored by the
 translator and never reaches the generated GPU source), so writing explanations inside a

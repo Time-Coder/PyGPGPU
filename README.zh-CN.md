@@ -27,7 +27,7 @@ saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运�
 ## 特性
 
 - **`@kernel` 装饰器** —— 直接装饰 Python 函数(含类方法/静态方法), 调用时按实参类型翻译为后端源码并编译(单态化);
-- **普通 Python 子函数** —— kernel 里调用的子函数不需要任何装饰器、不需要类型标注: 它会被翻译成设备函数, 并在调用点按实参类型单态化; 子函数继续调子函数也支持(递归展开)。
+- **普通 Python 子函数** —— kernel 里调用的子函数不需要任何装饰器、不需要类型标注: 它会被翻译成设备函数, 并在调用点按实参类型单态化; 子函数继续调子函数也支持(递归展开)。经由名字取得的子函数同样支持: `module.func(...)`、`SomeClass.static_method(...)`、`self.static_method(...)`, 以及同一个类里 `self.other_method(...)` 这种实例方法互调。
 - **同一进程内三后端并存** —— 由中括号在每次调用时选择后端, 所以一个进程(甚至同一个 kernel 对象)可以混用 OpenCL / CUDA / HIP; 每个 "后端 + 设备" 组合单独单态化并缓存。
 - **纯 Python 后端** —— `k["python"]` 用解释器运行同一份 `@kernel` 函数体, 在 CPU 上串行执行: 不需要 GPU、不需要编译器、不需要任何运行时; 适合测试、小规模数据和作为 GPU 语义的参照实现。
 - **手写 kernel 文件 import** —— `.cl` / `.cu` / `.hip` 文件像 Python 模块一样 `import`, kernel 与 struct 类型成为模块属性, 自动生成 `.pyi` 类型提示;
@@ -106,7 +106,7 @@ def histogram(data, counts):
     gpu.atomic_add(counts, data[i], 1)    # 原子操作, 结果自动回读
 ```
 
-支持的能力: 标量/数组/向量参数, if/while/for-range, 算术/比较/位运算, `math.*` 与 `np.*` 数学函数, 类方法(`self.xxx` 属性自动转为参数), 静态方法。不支持的语法抛出带行号的 `SyntaxError`。
+支持的能力: 标量/数组/向量参数, if/while/for-range, 算术/比较/位运算, `math.*` 与 `np.*` 数学函数, 类方法(`self.xxx` 属性自动转为参数), 静态方法, 以及按名字调用辅助函数 —— 模块级函数、`module.func(...)`、`SomeClass.static_method(...)`, 以及同一个类里 `self.method(...)` 这种实例方法互调。不支持的语法抛出带行号的 `SyntaxError`。
 
 kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `gpu.get_global_id` 的写法里声明 `gpu.work_size(x)` —— 这条语句只在 host 侧生效, 会被翻译器擦除, 并贡献 `x` 的全部维度。用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
 
@@ -236,6 +236,38 @@ m = Model()
 m.apply(x, out)                     # self.weights/self.lr 自动作为 kernel 参数传入
 m.apply["cuda"](x, out)             # 中括号照常可用
 ```
+
+### 按名字调用辅助函数
+
+kernel 可以调用用普通 Python 写的辅助函数。除了直接用裸名字调模块级函数, 辅助函数也可以经由名字取得:
+
+```python
+import mylib
+
+def soften(v):                      # 模块级辅助函数
+    return v * 0.5
+
+class Model:
+    def __init__(self):
+        self.level = 1.0            # 被 gain() 读取, 所以会成为 kernel 参数
+
+    @staticmethod
+    def scale(v):                   # 静态方法: 没有接收者
+        return v * 3.0
+
+    def gain(self):                 # 实例方法: 读取 self.level
+        return self.level + 1.0
+
+    @kernel
+    def apply(self, x, out):
+        for i in range(out.shape[0]):
+            out[i] = soften(x[i]) * self.scale(x[i]) + self.gain() + mylib.bias(x[i])
+```
+
+- `self.method(...)` 调用同一个类的另一个方法。它和其他辅助函数一样被翻译, 区别只在于**它**读取的 `self` 属性(上面例子里的 `self.level`)也会成为 kernel 参数 —— 嵌套调用会递归收集。
+- `SomeClass.static_method(...)` 和 `self.static_method(...)` 可用于任意类的静态方法, 不需要接收者。
+- `module.func(...)` 可用于经由模块对象取到的普通函数。
+- 设备端不支持: 调用 `@kernel` 装饰的方法、`classmethod`(设备上没有 `cls`)、以及**其它实例**的方法 —— 设备函数没有对象模型, 请把那个对象的数组作为显式 kernel 参数传进来。属性也不能写回(`self.x = ...` 会被拒绝, 请写成数组元素)。
 
 ### 拷贝优化
 
@@ -459,8 +491,7 @@ set_print_info(True)       # 恢复详细输出(默认)
 - HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用;
 - 纯 Python 后端(`k["python"]`)不模拟 `gpu.local`(组内共享内存), 它是串行执行的, 没有并行工作项的概念。
 
-在 CUDA 上, 数组 API(`Array` 通过 `cuMemcpy2D` 上传与回读)在所有受支持的解释器上都可用, 但 `TextureObject` 取决于驱动是否在该解释器下接受 `cuTexObjectCreate`。在开发这一功能所用的机器上(驱动 13.4), 十次全新尝试在 CPython 3.14 下十次成功, 在 CPython 3.7 下十次全部失败; 描述符字节完全一致、GPU 相同。因此该机器上 tex2D 采样在 3.14 可用、在 3.7 不可用。`examples/11_texture2d.py` 遇到这种情况会给出说明而不是直接抛异常, 且能够产出的采样结果都是位精确的。
-
+在 CUDA 上，数组 API（`Array` 的 `cuMemcpy2D` 上传/回读）在每个受支持的解释器上都正常。`cuSurfObjectCreate` 与 `cuTexObjectCreate` 偶尔会对一份逐字节合法的描述符返回 `CUDA_ERROR_INVALID_VALUE`；失败集中在进程最初若干次调用，之后不再出现。在开发此项目的机器上实测（驱动 13.4，RTX 4070）：约每一百次创建失败一次，对已失败的描述符重试无法挽回，而为新建数组重新构造描述符通常可以。由于一个 `Image` 每次 launch 需要绑定一个 surface 和一个 texture，同一进程内连续启动多个图像 kernel 的场景可能损失若干次 launch。`python` 与 OpenCL 后端不受影响：OpenCL 的图像在每次 launch 时创建，其代码路径未出现过该失败，而 `python` 后端完全不接触设备。`examples/11_texture2d.py` 在驱动拒绝时报出原因而不是抛异常。
 ## License
 
 MIT

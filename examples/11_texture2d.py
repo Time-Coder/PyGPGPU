@@ -22,9 +22,11 @@ A texture object is read-only by nature -- CUDA separates the two object kinds
 precisely so a sampler cannot be stored through -- while a surface is readable and
 writable, and the kernel's read/write analysis decides which copies happen.
 
-Build every image before loading a module that samples or writes one: the driver
-this was developed against stops accepting new texture and surface objects once such
-a module is in the process.
+Build every image before launching any kernel that samples or writes one. The driver
+does not normally object to creating a texture or surface after a module has loaded,
+but cuSurfObjectCreate/cuTexObjectCreate occasionally reject a valid descriptor in the
+first few calls of a process, and building the images up front keeps that out of the
+launch path where it would be seen as a launch failure.
 
 Run:
     python examples/11_texture2d.py

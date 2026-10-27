@@ -33,9 +33,14 @@ class imagend_t(ABC):
         self.data = data
         if data is None:
             self._shape = shape
-            self._dtype = dtype
+            # Callers pass either a dtype instance or a type like np.float32; both
+            # have to end up as an instance, because the size maths needs .itemsize
+            # and a bare type has no such attribute.
+            self._dtype = np.dtype(dtype)
             self._size = product(shape) * self._dtype.itemsize
             self._update_format()
+        else:
+            self._dtype = np.dtype(self._dtype)
 
         self.flags = flags
     

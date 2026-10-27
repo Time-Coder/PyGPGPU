@@ -22,7 +22,7 @@
 |---|---|
 | [01_basic_kernel.py](01_basic_kernel.py) | `@kernel` 最基础用法: SAXPY, 自动 work size, 中括号切后端/设备 |
 | [02_backend_device_selection.py](02_backend_device_selection.py) | `available_devices()` / `get_device()` 与设备选择语法 |
-| [03_nd_loop_and_class_method.py](03_nd_loop_and_class_method.py) | 多维 `np.ndindex`/`np.ndenumerate` 与类方法/静态方法 |
+| [03_nd_loop_and_class_method.py](03_nd_loop_and_class_method.py) | 多维 `np.ndindex`/`np.ndenumerate` 与类方法/静态方法; 以及按名字调用辅助函数: 同一个类的另一个方法、任意类的静态方法、模块函数 |
 | [04_vector_types.py](04_vector_types.py) | 向量类型(float4/...)、swizzle、双面函数库 `pygpgpu.funcs` |
 | [05_gnp_zero_copy_and_atomics.py](05_gnp_zero_copy_and_atomics.py) | `gnp` 设备驻留数组零拷贝、原子操作直方图与本地内存归约 |
 | [06_handwritten_kernels.py](06_handwritten_kernels.py) | 手写 `.cl`/`.cu`/`.hip` 文件像 Python 模块一样 `import` |
@@ -32,6 +32,7 @@
 | [10_async_launch.py](10_async_launch.py) | 装饰后 kernel 的非阻塞启动: `submit` / `async_call` |
 | [11_python_backend.py](11_python_backend.py) | 纯 Python 后端: `k["python"]`、魔法循环与 gid 写法、`submit`/`async_call` |
 | [12_print_in_kernel.py](12_print_in_kernel.py) | kernel 里的 `print()`: 自动翻译成设备端 `printf`, 输出与 Python 完全一致的文本 |
+| [13_image.py](13_image.py) | 与后端无关的 `Image` 类型: kernel 里像数组一样下标(`src[y, x]`), 在 CUDA 上翻译为 `tex2D`/`surf2Dwrite`, 在 OpenCL 上翻译为 `read_imagef`/`write_imagef`, 在 `python` 后端由宿主实现执行, 三者结果逐元素一致 |
 
 `@kernel` 函数体支持 docstring(第一行的字符串字面量会被翻译器自动忽略,
 不会进入生成的 GPU 源码), 所以可以放心在装饰函数里写说明文字。

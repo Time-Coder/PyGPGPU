@@ -105,18 +105,120 @@ def _parse_kernel_source(source:str)->ast.Module:
     return _normalize_ast_legacy_nodes(ast.parse(source, mode="exec"))
 
 
-def scan_self_attrs(func:Callable, self_param:str)->List[str]:
-    """Collect the self.xxx attribute names referenced in the method body (in first-occurrence order)."""
+def _class_attr(owner:Optional[type], name:str)->Any:
+    """The raw class-dictionary entry for ``owner.name``, or ``_MISSING`` when absent.
+
+    Static methods never appear in an instance dictionary, so the raw entry is the only
+    way to tell a ``staticmethod`` from the plain function it unwraps to on access.
+    """
+    if owner is None:
+        return _MISSING
+    for klass in getattr(owner, "__mro__", ()):
+        if name in getattr(klass, "__dict__", {}):
+            return klass.__dict__[name]
+    return _MISSING
+
+
+_MISSING:Any = object()
+
+
+def self_attr_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
+    """Classify what ``self.name`` refers to on the kernel's own class.
+
+    Returns ``(kind, target)`` where kind is one of:
+
+    - ``"method"``: a plain function defined on the class, i.e. a device helper that
+      also receives the kernel's self attributes (as extra parameters);
+    - ``"staticmethod"``: a staticmethod, i.e. a plain device function with no receiver;
+    - ``"classmethod"``: rejected, ``cls`` semantics do not exist on a device;
+    - ``"kernel"``: a ``@kernel``-decorated method, rejected (kernels are launched from
+      the host, never called from device code);
+    - ``"data"``: an instance or class data attribute (array, scalar, property, ...).
+
+    ``owner`` is None at decoration time, before the class exists; every member is then
+    reported as data, which matches the decoration-time body scan that reads members as
+    values.
+    """
+    if owner is None:
+        return "data", None
+    raw:Any = _class_attr(owner, name)
+    if isinstance(raw, staticmethod):
+        func:Any = raw.__func__
+        return ("kernel" if getattr(func, "is_pykernel", False) else "staticmethod"), func
+    if isinstance(raw, classmethod):
+        return "classmethod", raw.__func__
+    if getattr(raw, "is_pykernel", False):
+        return "kernel", raw
+    if inspect.isfunction(raw):
+        return "method", raw
+    return "data", (None if raw is _MISSING else raw)
+
+
+def _self_member_call_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
+    """Classify ``self.name(...)``: what the attribute read yields, then called.
+
+    A staticmethod read through an instance is a plain function, so a call site has to
+    reach the underlying function; a plain function the instance carries (assigned in
+    __init__) is reached through the instance too, and both are receiver-less device
+    calls.
+    """
+    kind:str
+    target:Any
+    kind, target = self_attr_kind(owner, name)
+    if kind == "data" and owner is not None:
+        attribute:Any = inspect.getattr_static(owner, name, _MISSING)
+        if isinstance(attribute, staticmethod):
+            func:Any = attribute.__func__
+            return ("kernel" if getattr(func, "is_pykernel", False) else "staticmethod"), func
+        if inspect.isfunction(attribute):
+            return "method", attribute
+    return kind, target
+
+
+def scan_self_attrs(func:Callable, self_param:str, owner:Optional[type]=None)->List[str]:
+    """Collect the self.xxx data attribute names the method (and its helpers) reference.
+
+    A member read as a value becomes a kernel argument. With ``owner`` given, a method
+    called as ``self.helper(...)`` is followed instead: the helper's own ``self.xxx``
+    references then count too, recursively, so nested helpers keep working and every
+    attribute they need is uploaded with the kernel. ``owner`` is None at decoration
+    time (the class does not exist yet), where only the decorated body itself is read.
+    """
     if not self_param:
         return []
-    tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
-    func_def:ast.FunctionDef = tree.body[0]
     attrs:List[str] = []
-    for node in ast.walk(func_def):
-        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                and node.value.id == self_param and node.attr not in attrs):
-            attrs.append(node.attr)
+    _collect_self_attrs(func, self_param, owner, attrs, set())
     return attrs
+
+
+def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
+                        attrs:List[str], visited:Set[Any])->None:
+    """Walk one method body, recursing into the self-methods it calls."""
+    if func in visited:
+        return
+    visited.add(func)
+    tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+    called:Set[str] = {node.func.attr for node in ast.walk(tree)
+                       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                       and isinstance(node.func.value, ast.Name)
+                       and node.func.value.id == self_param}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == self_param):
+            continue
+        kind:str
+        target:Any
+        kind, target = _self_member_call_kind(owner, node.attr)
+        if node.attr in called:
+            # A member that is called is not data, so it needs no kernel argument. An
+            # instance method's own self.xxx reads do, so follow it; anything else
+            # (a staticmethod, a @kernel method, a classmethod) is decided at the
+            # call site, where a clear error can name the reason.
+            if kind == "method":
+                _collect_self_attrs(target, self_param, owner, attrs, visited)
+            continue
+        if node.attr not in attrs:
+            attrs.append(node.attr)
 
 
 class PyKernelSyntaxError(SyntaxError):
@@ -141,6 +243,10 @@ DTYPE_MAP:Dict[str, str] = {
 }
 
 PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string means a scalar
+
+# An image parameter is ("image", channels, scalar type): its storage is opaque to
+# the kernel, which only ever samples or stores through it.
+IMAGE = "image"
 
 _C_FIELD_TYPES:Dict[Any, str] = {}
 
@@ -272,6 +378,17 @@ def is_float(t:Any)->bool:
 def is_ptr(t:Any)->bool:
     return isinstance(t, tuple) and len(t) == 2 and t[0] == PTR
 
+def is_image(t:Any)->bool:
+    """True for the marker a backend-neutral Image argument gets."""
+    return isinstance(t, tuple) and len(t) == 3 and t[0] == IMAGE
+
+def image_channels(t:Any)->int:
+    return int(t[1])
+
+def image_scalar(t:Any)->str:
+    """The C scalar type of one image channel."""
+    return t[2]
+
 def promote(t1:Any, t2:Any)->Any:
     if is_ptr(t1) or is_ptr(t2):
         raise PyKernelSyntaxError("cannot mix arrays with scalars in arithmetic")
@@ -290,6 +407,17 @@ def infer_ctype(value:Any)->Any:
     """Actual call argument -> C type."""
     registry:Dict[str, Any] = _vec_registry()
     dtype_to_vec:Dict[Any, str] = {cls.numpy_dtype(): name for name, cls in registry.items()}
+
+    # A backend-neutral Image is opaque storage: the kernel only samples or stores
+    # through it, so the parameter carries its channel count and scalar type.
+    from ..image import Image
+    if isinstance(value, Image):
+        channel_type = DTYPE_MAP.get(value.dtype.name)
+        if channel_type is None:
+            raise PyKernelSyntaxError(
+                "Image of dtype %s cannot be sampled: unsupported element type"
+                % value.dtype.name)
+        return (IMAGE, value.channels, channel_type)
 
     if isinstance(value, np.void):
         vec_name:str = dtype_to_vec.get(value.dtype)
@@ -361,7 +489,8 @@ class FunctionTranslator:
     def __init__(self, func:Callable, param_types:List[Any], backend:str,
                  resolve_global:Callable[[str], Any], device_cache:Dict[Any, Any],
                  is_kernel:bool=False, self_param:str="",
-                 self_attr_types:Optional[Dict[str, Any]]=None):
+                 self_attr_types:Optional[Dict[str, Any]]=None,
+                 self_owner:Optional[type]=None):
         self.func:Callable = func
         self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
         self.backend:str = backend
@@ -370,6 +499,10 @@ class FunctionTranslator:
         self.is_kernel:bool = is_kernel
         self.self_param:str = self_param
         self.self_attr_types:Dict[str, Any] = dict(self_attr_types or {})
+        # The class the translated method belongs to, for deciding whether `self.name`
+        # is a data attribute, an instance method, or a staticmethod. None for the
+        # decoration-time body scan, where the class does not exist yet.
+        self.self_owner:Optional[type] = self_owner
 
         try:
             tree:ast.Module = _parse_kernel_source(self._trim_source())
@@ -393,6 +526,13 @@ class FunctionTranslator:
         # Set once a magic loop is detected: it fixes the iteration domain, so an explicit
         # gpu.work_size(...) declaration would be redundant.
         self.magic_loop_present:bool = False
+        # Image parameters that an OpenCL kernel samples. Each one needs a sampler
+        # constant emitted next to the kernel, and the host side builds one sampler
+        # per image, so this set drives that generation.
+        self.required_image_samplers:Set[str] = set()
+        # Image parameters a CUDA kernel stores into: those need a surface handle,
+        # which is a separate device object from the texture.
+        self.required_image_surfaces:Set[str] = set()
         self.atomic_targets:Set[str] = set()
         self._tmp_counter:int = 0
         self.local_buffers:List[Tuple[str, str, int]] = []
@@ -560,7 +700,13 @@ class FunctionTranslator:
             elif (self.self_param and isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
                     and arg.value.id == self.self_param):
                 param = f"_self_{arg.attr}"
-        if not param or not is_ptr(self._lookup(param)):
+        if not param:
+            return None
+        holder_type:Any = self._lookup(param)
+        # An array contributes its extents as pointer parameters; an image carries
+        # its extents in its own descriptor, which the backend knows at launch. Both
+        # can define the iteration domain of a magic loop.
+        if not (is_ptr(holder_type) or is_image(holder_type)):
             return None
         return form, param, iter_node.func.value.id
 
@@ -919,6 +1065,9 @@ class FunctionTranslator:
             self._emit(f"{decl}{target.id} = {code};")
         elif isinstance(target, ast.Subscript):
             base_code, base_t = self._visit_array_target(target.value)
+            if is_image(base_t):
+                self._emit_image_write(base_code, base_t, target, code)
+                return
             index_code, _ = self._visit_subscript_index(target)
             self._emit(f"{base_code}[{index_code}] = {code};")
         else:
@@ -1400,8 +1549,12 @@ class FunctionTranslator:
 
     def _visit_array_target(self, node:ast.expr)->Tuple[str, Any]:
         code, t = self._visit_expression(node)
+        if is_image(t):
+            # An image keeps its own marker: indexing it means sampling, not
+            # pointer arithmetic, so the caller decides from the marker.
+            return code, t
         if not is_ptr(t):
-            self._error("only array (numpy) arguments can be indexed", node)
+            self._error("only array (numpy) and image arguments can be indexed", node)
         return code, t[1]
 
     def _visit_subscript_index(self, node:ast.Subscript)->Tuple[str, Any]:
@@ -1639,13 +1792,181 @@ class FunctionTranslator:
             self._error("only `<array>.shape[<constant>]` is supported", node)
 
         base_code, base_t = self._visit_array_target(value)
+        if is_image(base_t):
+            return self._emit_image_read(base_code, base_t, node)
         index_code, _ = self._visit_subscript_index(node)
         return f"{base_code}[{index_code}]", base_t
+
+    def _emit_image_read(self, image_code:str, image_t:Any, node:ast.Subscript)->Tuple[str, Any]:
+        """Translate ``img[x, y]`` into the sampling call of the current backend.
+
+        Coordinates are texel space, as :mod:`pygpgpu.image` documents: an integer
+        coordinate names a texel and samples its centre, while a fractional one
+        addresses a position between texels. CUDA expresses both with a float
+        coordinate, OpenCL needs int2 for the former and float2 for the latter, so
+        the coordinate type decides which form is emitted.
+        """
+        channels:int = image_channels(image_t)
+        scalar:str = image_scalar(image_t)
+
+        indices = self._image_indices(node)
+        if channels not in (1, 4):
+            self._error(
+                "sampling an image of %d channels is not supported: use 1 or 4"
+                % channels, node)
+
+        if self.backend == "opencl":
+            # OpenCL takes a float coordinate for interpolation, and an integer
+            # coordinate means the texel boundary rather than its centre -- which a
+            # linear sampler blends across, unlike CUDA where an integer subscript
+            # lands on the centre. Both integer and fractional subscripts are
+            # therefore emitted as float coordinates, with integers moved to +0.5 so
+            # every backend samples the same position.
+            parts = []
+            for code, t in indices:
+                if is_int(t):
+                    parts.append("((float)(%s) + 0.5f)" % code)
+                else:
+                    parts.append("((float)(%s))" % code)
+            coord_code = "((float%d)(%s))" % (len(parts), ", ".join(parts))
+            sampler = self._image_sampler(image_code)
+            call = "read_image%s(%s, %s, %s)" % (
+                {"float": "f", "int": "i", "uint": "ui"}[scalar],
+                image_code, sampler, coord_code)
+        else:
+            # CUDA: a float coordinate; integer subscripts land on the texel centre.
+            parts = []
+            for code, t in indices:
+                if is_int(t):
+                    parts.append("((float)(%s) + 0.5f)" % code)
+                else:
+                    parts.append("((float)(%s))" % code)
+            if scalar == "float":
+                call = "tex%dD<float>(%s, %s)" % (
+                    len(parts), image_code, ", ".join(parts))
+            else:
+                self._error(
+                    "sampling a %s image is not supported on cuda: only float images "
+                    "can be sampled" % scalar, node)
+
+        if channels == 4:
+            if self.backend == "opencl":
+                return "(%s).xyzw" % call, self._image_vec_type(scalar, 4)
+            return call, self._image_vec_type(scalar, 4)
+        if self.backend == "opencl":
+            # read_imagef returns a vector; single-channel takes .x
+            return "(%s).x" % call, scalar
+        return call, scalar
+
+    def _image_indices(self, node:ast.Subscript)->List[Tuple[str, Any]]:
+        """Compile an image subscript into (x, y, z) order.
+
+        A kernel writes ``img[y, x]`` because that mirrors the host array's row-major
+        shape, while every sampling call takes (x, y) -- so the compiled coordinates
+        are reversed here, exactly like an array subscript's flattening reverses them.
+        """
+        index:ast.expr = node.slice
+        items = list(index.elts) if isinstance(index, ast.Tuple) else [index]
+        compiled = [self._visit_expression(item) for item in items]
+        return list(reversed(compiled))
+
+    def _image_vec_type(self, scalar:str, channels:int)->str:
+        return "%s%d" % (scalar, channels)
+
+    def _image_param_type(self, name:str, image_t:Any)->str:
+        """The declaration type of an image parameter on the current backend.
+
+        CUDA reads through a texture object and writes through a surface object, so
+        the parameter's type follows how the kernel uses it. OpenCL uses one image
+        type for both directions, with a qualifier saying which.
+        """
+        if self.backend == "opencl":
+            written:bool = name in self.required_image_surfaces
+            qualifier:str = "__write_only" if written else "__read_only"
+            return f"{qualifier} image2d_t"
+
+        if name in self.required_image_surfaces:
+            return "cudaSurfaceObject_t"
+        return "cudaTextureObject_t"
+
+    def _emit_image_write(self, image_code:str, image_t:Any,
+                          target:ast.Subscript, value_code:str)->None:
+        """Translate ``img[x, y] = v`` into the store call of the current backend.
+
+        A write names one texel, so the coordinate is always integral here: a
+        fractional subscript is rejected rather than silently rounded, because there
+        is no filtering rule for a store.
+        """
+        channels:int = image_channels(image_t)
+        scalar:str = image_scalar(image_t)
+
+        # Record the parameter as a write target: the parameter's declared type
+        # depends on it, and the host side needs a surface rather than a texture.
+        self.required_image_surfaces.add(image_code)
+
+        indices = self._image_indices(target)
+        for _, t in indices:
+            if not is_int(t):
+                self._error(
+                    "an image store needs integer coordinates: a fractional "
+                    "coordinate has no texel to write", target)
+
+        if self.backend == "opencl":
+            coord_code = "((int%d)(%s))" % (len(indices),
+                                            ", ".join(c for c, _ in indices))
+            if channels == 1:
+                packed = "((float4)(%s))" % value_code
+            else:
+                packed = "((float4)(%s))" % value_code
+            self._emit("write_image%s(%s, %s, %s);" % (
+                {"float": "f", "int": "i", "uint": "ui"}[scalar],
+                image_code, coord_code, packed))
+            return
+
+        # CUDA: a surface store. Its first axis is addressed in bytes, so the x
+        # coordinate is scaled by the element size.
+        coords = [c for c, _ in indices]
+        element_bytes = 4
+        x_code = "((%s) * %d)" % (coords[0], element_bytes)
+        rest = coords[1:]
+        if channels == 1:
+            self._emit("surf%dDwrite<%s>(%s, %s, %s);" % (
+                len(coords), scalar, value_code, image_code,
+                ", ".join([x_code] + rest)))
+        else:
+            self._emit("surf%dDwrite<vec%d>(%s, %s, %s);" % (
+                len(coords), channels, value_code, image_code,
+                ", ".join([x_code] + rest)))
+
+    def _surface_name(self, image_code:str)->str:
+        return "__surface_for_%s" % image_code
+
+    def _image_sampler(self, image_code:str)->str:
+        """The sampler argument an OpenCL image read needs.
+
+        The sampler is fixed per image, so it is emitted as a constant at translation
+        time rather than passed as another kernel parameter -- that keeps the kernel
+        signature identical to the CUDA one.
+        """
+        self.required_image_samplers.add(image_code)
+        return self._sampler_name(image_code)
+
+    def _sampler_name(self, image_code:str)->str:
+        return "__sampler_for_%s" % image_code
 
     def _visit_attribute(self, node:ast.Attribute)->Tuple[str, Any]:
         # self.xxx -> extra parameter _self_xxx
         if (self.self_param and isinstance(node.value, ast.Name) and node.value.id == self.self_param):
             if node.attr not in self.self_attr_types:
+                kind:str
+                _target:Any
+                kind, _target = _self_member_call_kind(self.self_owner, node.attr)
+                if kind in ("method", "staticmethod"):
+                    # A helper of the kernel's own class: call it instead of reading it,
+                    # which is the one supported form (a function value has no device type).
+                    self._error(
+                        f"self.{node.attr} is a function; call it as self.{node.attr}(...) "
+                        f"instead of reading it", node)
                 self._error(
                     f"self.{node.attr} was not discovered on this kernel "
                     f"(discovered attributes: {', '.join(self.self_attr_types) or 'none'})", node)
@@ -1710,9 +2031,15 @@ class FunctionTranslator:
 
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             if self.self_param and func.value.id == self.self_param:
+                kind:str
+                target:Any
+                kind, target = _self_member_call_kind(self.self_owner, func.attr)
+                if kind in ("method", "staticmethod"):
+                    args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                    return self._emit_self_method_call(kind, target, func.attr, args, node)
                 self._error(
-                    f"calling self.{func.attr}() inside a kernel is not supported; "
-                    f"extract the logic into a plain function and call it by name", node)
+                    f"calling self.{func.attr}() from device code is not supported: "
+                    f"self.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
             module:Any = self.resolve_global(func.value.id)
             if module is GPU_BUILTINS:
                 args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
@@ -1723,6 +2050,23 @@ class FunctionTranslator:
             if module is math or module is np:
                 args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
                 return self._emit_math_call(func.attr, args, node, module_name=func.value.id)
+            if isinstance(module, type):
+                # Class.static_method(...): a class name is not a device value, so the
+                # only reachable form is a staticmethod, resolved to its plain function.
+                kind, target = self_attr_kind(module, func.attr)
+                if kind in ("staticmethod", "method"):
+                    # A plain function taken off its class is just a function; the
+                    # receiver of "method" stays an explicit first argument.
+                    args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                    return self._emit_device_call(func.attr, target, args, node)
+                self._error(
+                    f"cannot call {func.value.id}.{func.attr}() from device code: "
+                    f"only static methods of a class are usable there, and "
+                    f"{func.value.id}.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
+            if callable(getattr(module, func.attr, None)):
+                # module.function(...): a plain helper reached through its module.
+                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                return self._emit_device_call(func.attr, getattr(module, func.attr), args, node)
             self._error(f"unsupported method call: .{func.attr}", node)
 
         self._error("unsupported call expression", node)
@@ -2310,25 +2654,37 @@ class FunctionTranslator:
             self._error(f"gpu.cross() requires a 3 or 4 component vector, got {vec}")
         return f"{maker}({inner})"
 
-    def _emit_device_call(self, name:str, target:Any, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+    def _emit_device_call(self, name:str, target:Any, args:List[Tuple[str, Any]], node:ast.Call,
+                          self_param:str="")->Tuple[str, Any]:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
         if is_kernel_ref:
             self._error(f"'{name}' is a @kernel function and cannot be called from device code; use a plain python function instead", node)
 
-        sig_key:Tuple[Callable, Tuple[Any, ...]] = (raw_func, tuple(t for _, t in args))
+        # A helper that is a method of the kernel's own class keeps the same receiver:
+        # its self.xxx references become extra _self_xxx parameters appended after the
+        # caller's, and the call site passes them through in that order.
+        self_types:Dict[str, Any] = (self.self_attr_types if self_param else {})
+        call_codes:List[str] = [c for c, _ in args]
+        if self_param:
+            call_codes.extend(f"_self_{attr}" for attr in self_types)
+        param_types:List[Any] = ([t for _, t in args] + list(self_types.values()))
+
+        sig_key:Tuple[Callable, Tuple[Any, ...]] = (raw_func, tuple(param_types))
         entry:Optional[Dict[str, Any]] = self.device_cache.get(sig_key)
         if entry is not None:
             if entry["status"] == "in_progress":
                 self._error(f"recursive call detected: '{name}'", node)
-            return f"{entry['c_name']}({', '.join(c for c, _ in args)})", entry["return_type"]
+            return f"{entry['c_name']}({', '.join(call_codes)})", entry["return_type"]
 
         self.device_cache[sig_key] = {"status": "in_progress"}
         try:
             callee:FunctionTranslator = FunctionTranslator(
-                raw_func, [t for _, t in args], self.backend, self.resolve_global, self.device_cache, is_kernel=False)
+                raw_func, param_types, self.backend, self.resolve_global, self.device_cache,
+                is_kernel=False, self_param=self_param, self_attr_types=self_types,
+                self_owner=self.self_owner)
             callee.translate()
-            c_name:str = self._device_func_name(raw_func, [t for _, t in args])
+            c_name:str = self._device_func_name(raw_func, param_types)
             entry = {
                 "status": "done",
                 "c_name": c_name,
@@ -2340,7 +2696,33 @@ class FunctionTranslator:
             self.device_cache.pop(sig_key, None)
             raise
 
-        return f"{entry['c_name']}({', '.join(c for c, _ in args)})", entry["return_type"]
+        # Device code has no shared state or atomics-free write-back for images, so an
+        # image a helper samples or stores into has to be declared by the kernel itself.
+        if callee.required_image_samplers or callee.required_image_surfaces:
+            self._error(
+                f"'{name}' uses an image parameter from a device helper, which is not "
+                f"supported: sample or store the image in the kernel body instead", node)
+
+        return f"{entry['c_name']}({', '.join(call_codes)})", entry["return_type"]
+
+    def _emit_self_method_call(self, kind:str, target:Any, attr:str,
+                               args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+        """Call self.<attr>(...) where the member is a method of the kernel's own class."""
+        if getattr(target, "is_pykernel", False):
+            self._error(
+                f"self.{attr} is a @kernel method and cannot be called from device code; "
+                f"move the shared logic into a plain method or function", node)
+        return self._emit_device_call(attr, target, args, node,
+                                      self_param=self.self_param if kind == "method" else "")
+
+    def _why_not_callable(self, kind:str, name:str)->str:
+        """Explain why a self.xxx member cannot be called, for the error message."""
+        if kind == "classmethod":
+            return "a classmethod (cls has no meaning on a device)"
+        if kind == "kernel":
+            return "a @kernel method (kernels are launched from the host, not called from device code)"
+        return ("not a method or static method of the class; only those, and module-level "
+                "functions, can be called from device code")
 
     def _device_func_name(self, func:Callable, types:List[Any])->str:
         module_file:str = getattr(getattr(func, "__code__", None), "co_filename", "")
@@ -2369,10 +2751,18 @@ class FunctionTranslator:
             if is_ptr(t):
                 qualifier:str = ("__global " if self.backend == "opencl" else "")
                 params.append(f"{qualifier}{t[1]}* {name}")
+            elif is_image(t):
+                params.append(f"{self._image_param_type(name, t)} {name}")
             else:
                 params.append(f"{t} {name}")
         for array_name, dim in self.shapes_used:
             params.append(f"const int {self._shape_var(array_name, dim)}")
+        # OpenCL sampling takes the sampler as a kernel argument; one per sampled
+        # image, right after that image. The host binds a matching sampler per image,
+        # so the Python-visible signature stays (image) only.
+        if self.backend == "opencl":
+            for image_name in sorted(self.required_image_samplers):
+                params.append(f"const sampler_t {self._sampler_name(image_name)}")
         for lc_name, lc_type, _ in self.local_buffers:
             if self.backend == "opencl":
                 params.append(f"__local {lc_type}* {lc_name}")
