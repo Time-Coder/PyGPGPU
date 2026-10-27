@@ -15,7 +15,8 @@ from ..driver import (
     CUInfo,
     CUfunction,
     CUresult,
-    cudaTextureObject_t
+    cudaTextureObject_t,
+    cudaSurfaceObject_t
 )
 from .cuobject import CUObject
 from .program_info import ArgInfo
@@ -36,8 +37,9 @@ def _handle_types()->tuple:
     support (and its driver tables) for users who never touch textures.
     """
     from .texture import TextureObject
+    from .surface import SurfaceObject
 
-    return (TextureObject,)
+    return (TextureObject, SurfaceObject)
 
 
 _async_executor:Optional[concurrent.futures.ThreadPoolExecutor] = None
@@ -463,7 +465,7 @@ class Kernel(CUObject):
         # A cudaTextureObject_t is a host-side description with no context of its own; the
         # kernel binds it here, where the context is known, and keeps the resulting
         # objects alive for the launch.
-        if isinstance(value, cudaTextureObject_t):
+        if isinstance(value, (cudaTextureObject_t, cudaSurfaceObject_t)):
             value = self._bind_image(value)
 
         # A texture (or surface) handle is passed by value as an opaque 64-bit
@@ -534,38 +536,50 @@ class Kernel(CUObject):
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
 
-    def _bind_image(self, image:cudaTextureObject_t)->Any:
-        """Turn a host-side image description into a device texture for this launch.
+    def _bind_image(self, image:Any)->Any:
+        """Turn a host-side image description into a device object for this launch.
 
-        ``cudaTextureObject_t`` deliberately carries no context, so the binding happens here,
-        where the kernel knows which context it runs in. A description that was bound
-        earlier (see ``cudaTextureObject_t.bind``) returns the texture it already holds.
+        The ``cudaTextureObject_t`` / ``cudaSurfaceObject_t`` descriptions carry no
+        context, so binding happens here, where the kernel knows which context it
+        runs in. A description bound earlier (see its ``bind``) returns what it
+        already holds, so repeated launches reuse the same device storage.
         """
-        texture = image.bind()
-        if texture is None:
-            from .context import Context
+        bound = image.bind()
+        if bound is not None:
+            return bound
 
-            context = Context.current()
-            if context is None:
-                raise RuntimeError(
-                    "no CUDA context is current; launching the kernel normally "
-                    "establishes one")
+        from .context import Context
 
-            array = context.create_array(image.width, image.height,
-                                         image.dtype, image.channels)
+        context = Context.current()
+        if context is None:
+            raise RuntimeError(
+                "no CUDA context is current; launching the kernel normally "
+                "establishes one")
+
+        if isinstance(image, cudaSurfaceObject_t):
+            surface = context.create_surface(image.shape)
+            # The surface owns an array created with the surface flag; seed it from
+            # the host image when one was supplied.
             if image.image is not None:
-                array.set_data(image.image)
+                surface.array.set_data(image.image)
+            image._device = (surface.array, surface)
+            return surface
 
-            options:Dict[str, Any] = {"normalized": image.normalized}
-            if image.address_mode is not None:
-                options["address_mode"] = image.address_mode
-            if image.filter_mode is not None:
-                options["filter_mode"] = image.filter_mode
+        array = context.create_array(image.width, image.height, 1,
+                                     image.dtype, image.channels)
+        if image.image is not None:
+            array.set_data(image.image)
 
-            texture = context.create_texture(array, **options)
-            # Keep both alive alongside the description the caller passed in, so a
-            # second launch reuses them instead of allocating again.
-            image._device = (array, texture)
+        options:Dict[str, Any] = {"normalized": image.normalized}
+        if image.address_mode is not None:
+            options["address_mode"] = image.address_mode
+        if image.filter_mode is not None:
+            options["filter_mode"] = image.filter_mode
+
+        texture = context.create_texture(array, **options)
+        # Keep both alive alongside the description the caller passed in, so a
+        # second launch reuses them instead of allocating again.
+        image._device = (array, texture)
         return texture
 
     def _is_vec3_arg(self, arg_info:ArgInfo)->bool:

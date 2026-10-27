@@ -243,15 +243,29 @@ def infer_ctype(value:Any)->Any:
     if isinstance(value, (float, np.floating)):
         return "float"
     if _is_device_handle(value):
-        # A texture (or surface) object reaches the device as an opaque 64-bit
-        # handle, which the kernel samples through tex2D.
-        return "cudaTextureObject_t"
+        # A texture or surface reaches the device as an opaque 64-bit handle, which
+        # the kernel reads through tex2D or writes through surf2Dwrite.
+        return _handle_device_type(value)
     raise PyKernelSyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays, int/float/bool scalars and texture handles are supported)")
 
 
+# surf*Dread/write address the first axis in bytes, and float elements are 4.
+_SURFACE_ELEMENT_BYTES = 4
+
+TEXTURE_HANDLE_TYPES = ("TextureObject", "cudaTextureObject_t")
+SURFACE_HANDLE_TYPES = ("SurfaceObject", "cudaSurfaceObject_t")
+
+
 def _is_device_handle(value:Any)->bool:
-    """True for the oop objects passed to a kernel by opaque handle."""
-    return type(value).__name__ in ("TextureObject", "SurfaceObject", "cudaTextureObject_t")
+    """True for the objects a kernel receives as an opaque texture or surface handle."""
+    return type(value).__name__ in TEXTURE_HANDLE_TYPES + SURFACE_HANDLE_TYPES
+
+
+def _handle_device_type(value:Any)->str:
+    """The device-side type name a handle argument takes in a kernel signature."""
+    if type(value).__name__ in SURFACE_HANDLE_TYPES:
+        return "cudaSurfaceObject_t"
+    return "cudaTextureObject_t"
 
 def type_sig(types:List[Any])->str:
     parts:List[str] = []
@@ -1256,8 +1270,12 @@ class FunctionTranslator:
             if name in _vec_registry():
                 return self._emit_vec_constructor(name, args, node)
 
-            if name == "tex2D":
+            if name in ("tex1D", "tex2D", "tex3D"):
                 return self._emit_tex2d(args, node)
+
+            if name in ("surf1Dread", "surf1Dwrite", "surf2Dread", "surf2Dwrite",
+                        "surf3Dread", "surf3Dwrite"):
+                return self._emit_surf(args, node, name)
 
             target:Any = self.resolve_global(name)
             if callable(target):
@@ -1287,22 +1305,78 @@ class FunctionTranslator:
         self._error("unsupported call expression", node)
 
     def _emit_tex2d(self, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
-        """Translate ``tex2D(handle, u, v)`` into the backend's sampling call.
+        """Translate a texture read into the CUDA sampling call.
 
-        Only the CUDA backend has texture objects; OpenCL passes an image and a
+        The device names the call after the number of texture dimensions, so
+        ``tex1D(tex, u)``, ``tex2D(tex, u, v)`` and ``tex3D(tex, u, v, w)`` map
+        straight through, keeping the Python side spelled exactly like kernel code.
+        Only the CUDA backend has texture objects: OpenCL takes an image and a
         sampler separately, and the HIP backend reuses CUDA code generation but has
         no texture support here, so both reject the call rather than emitting
-        something with the wrong semantics.
+        something with different semantics.
+        """
+        name = node.func.id if isinstance(node.func, ast.Name) else "tex"
+        if self.backend != "cuda":
+            self._error("%s() is only available on the cuda backend" % name, node)
+
+        coordinates = len(args) - 1
+        if coordinates not in (1, 2, 3):
+            self._error(
+                "%s(handle, ...) takes 1, 2 or 3 coordinates after the handle"
+                % name, node)
+
+        expected = "tex%dD" % coordinates
+        if name != expected:
+            self._error(
+                "%s() takes %d coordinate(s) but was given %d; use %s"
+                % (name, 1 if name == "tex1D" else (2 if name == "tex2D" else 3),
+                   coordinates, expected), node)
+
+        parts = [arg[0] for arg in args[1:]]
+        return "tex%dD<float>(%s)" % (coordinates, ", ".join([args[0][0]] + parts)), "float"
+
+    def _emit_surf(self, args:List[Tuple[str, Any]], node:ast.Call, name:str)->Tuple[str, Any]:
+        """Translate a surface read or write into the CUDA call.
+
+        CUDA names the surface functions after their dimensionality, and the write
+        form takes the value first: ``surf2Dwrite(value, surface, x, y)``. The Python
+        side keeps CUDA's argument order so a kernel reads the same either way.
         """
         if self.backend != "cuda":
-            self._error("tex2D() is only available on the cuda backend", node)
-        if len(args) != 3:
-            self._error("tex2D(handle, u, v) takes exactly 3 arguments", node)
+            self._error("%s() is only available on the cuda backend" % name, node)
 
-        handle_code = args[0][0]
-        u_code = args[1][0]
-        v_code = args[2][0]
-        return "tex2D<float>(%s, %s, %s)" % (handle_code, u_code, v_code), "float"
+        writing = name.endswith("write")
+        dimensions = int(name[4])
+        # Read: (surface, c0..cN). Write: (surface, value, c0..cN).
+        required = dimensions + (2 if writing else 1)
+        if len(args) != required:
+            self._error(
+                "%s() takes %d arguments (%s)" % (
+                    name, required,
+                    "surface, value, then one coordinate per dimension" if writing
+                    else "surface, then one coordinate per dimension"), node)
+
+        # CUDA addresses the first axis of a surface in BYTES, so an element index
+        # has to be scaled by the element size. The other axes count elements.
+        stride = _SURFACE_ELEMENT_BYTES
+
+        if writing:
+            # CUDA's write form takes the value first: surf2Dwrite(value, surface, x, y).
+            surface_code = args[0][0]
+            value_code = args[1][0]
+            coords = [arg[0] for arg in args[2:]]
+            x_code = "((%s) * %d)" % (coords[0], stride)
+            rest = coords[1:]
+            emitted = "%s<float>(%s, %s)" % (
+                name, value_code,
+                ", ".join([surface_code, x_code] + rest))
+            return emitted, "void"
+
+        coords = [arg[0] for arg in args[1:]]
+        x_code = "((%s) * %d)" % (coords[0], stride)
+        rest = coords[1:]
+        return ("%s<float>(%s)" % (name, ", ".join([args[0][0], x_code] + rest)),
+                "float")
 
     def _emit_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         if name == "abs":

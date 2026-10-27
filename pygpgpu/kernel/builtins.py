@@ -68,15 +68,57 @@ class GPUNamespace:
 gpu = GPUNamespace()
 
 
-def tex2D(texture:Any, u:Any, v:Any)->Any:
-    """Sample a CUDA texture at normalized coordinates, inside a @kernel body.
+def tex1D(texture:Any, u:Any)->Any:
+    """Sample a 1D CUDA texture at a normalized coordinate, inside a @kernel body.
 
-    The translator rewrites a call to this into ``tex2D<float>(texture, u, v)``.
-    Sampling happens on the device, so calling it on the host has no meaning and
-    this body exists only to give the name something to bind to.
+    The translator rewrites the call into ``tex1D<float>(texture, u)``. Sampling runs
+    on the device, so this body only gives the name something to bind to.
+    """
+    raise PyKernelSyntaxError(
+        "tex1D() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
+def tex2D(texture:Any, u:Any, v:Any)->Any:
+    """Sample a 2D CUDA texture at normalized coordinates, inside a @kernel body.
+
+    The translator rewrites the call into ``tex2D<float>(texture, u, v)``. Sampling
+    runs on the device, so this body only gives the name something to bind to.
     """
     raise PyKernelSyntaxError(
         "tex2D() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
+def tex3D(texture:Any, u:Any, v:Any, w:Any)->Any:
+    """Sample a 3D CUDA texture at normalized coordinates, inside a @kernel body.
+
+    The translator rewrites the call into ``tex3D<float>(texture, u, v, w)``.
+    Sampling runs on the device, so this body only gives the name something to bind
+    to.
+    """
+    raise PyKernelSyntaxError(
+        "tex3D() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
+def surf2Dread(surface:Any, x:Any, y:Any)->Any:
+    """Read one element of a 2D CUDA surface, inside a @kernel body.
+
+    The translator rewrites the call into ``surf2Dread<float>(surface, x, y)``.
+    """
+    raise PyKernelSyntaxError(
+        "surf2Dread() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
+def surf2Dwrite(surface:Any, value:Any, x:Any, y:Any)->Any:
+    """Write one element of a 2D CUDA surface, inside a @kernel body.
+
+    The translator rewrites the call into ``surf2Dwrite<float>(value, surface, x, y)``.
+    """
+    raise PyKernelSyntaxError(
+        "surf2Dwrite() is a device builtin: it is translated inside a @kernel body and "
         "cannot be called on the host")
 
 

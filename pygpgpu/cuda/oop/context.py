@@ -10,6 +10,8 @@ from .event import Event
 from ..driver import CUDA, CUctx_flags, CUcontext, CUfunc_cache, CUlimit, CUstream_flags
 
 if TYPE_CHECKING:
+    from .surface import SurfaceObject
+
     from .device import Device
     from .buffer import Buffer
     from .stream import Stream
@@ -69,13 +71,55 @@ class Context(CUObject):
         CUDA.cuCtxGetCurrent(ptr_context_id)
         return Context.instance(context_id)
 
-    def create_array(self, width:int, height:int, dtype:Any=None, num_channels:int=1)->Array:
-        """Allocate a 2D device-side image (the CUDA counterpart of image2d_t)."""
+    def create_array(self, width:int, height:int=1, depth:int=1,
+                     dtype:Any=None, num_channels:int=1,
+                     surface:bool=False)->Array:
+        """Allocate a device-side image: 1D, 2D or 3D depending on the dimensions.
+
+        ``surface=True`` marks the storage writable, which a SurfaceObject requires
+        before it can bind to it.
+        """
         import numpy as np
         from .array import Array
 
         self.make_current()
-        return Array(width, height, np.float32 if dtype is None else dtype, num_channels)
+        return Array(width, height, depth, np.float32 if dtype is None else dtype,
+                     num_channels, surface)
+
+    def create_surface(self, array_or_shape:Any, **options:Any)->SurfaceObject:
+        """Build a writable view for a kernel to store through.
+
+        Pass either an array created with ``surface=True``, or a numpy image /
+        (height, width) shape, in which case the storage is created here:
+
+            surface = ctx.create_surface(np.zeros((8, 16), np.float32))
+        """
+        import numpy as np
+        from .array import Array
+        from .surface import SurfaceObject
+
+        self.make_current()
+        target:Array
+        if isinstance(array_or_shape, Array):
+            target = array_or_shape
+        else:
+            shape = array_or_shape
+            if isinstance(shape, np.ndarray):
+                image = shape if shape.flags["C_CONTIGUOUS"] else np.ascontiguousarray(shape)
+                height, width = image.shape[0], image.shape[1]
+                channels = image.shape[2] if image.ndim == 3 else 1
+                target = self.create_array(width, height, 1, image.dtype, channels,
+                                           surface=True)
+                target.set_data(image)
+            else:
+                if len(shape) < 2:
+                    raise ValueError("shape must be (height, width[, channels])")
+                height, width = int(shape[0]), int(shape[1])
+                channels = int(shape[2]) if len(shape) > 2 else 1
+                dtype = options.pop("dtype", np.float32)
+                target = self.create_array(width, height, 1, dtype, channels,
+                                           surface=True)
+        return SurfaceObject(target)
 
     def create_texture(self, array:Array, **options:Any)->TextureObject:
         """Build a sampled view over ``array`` for use as a kernel argument.
@@ -95,8 +139,9 @@ class Context(CUObject):
 
         contents = array.to_numpy()
         for _ in range(TEXTURE_RETRY_ATTEMPTS):
-            replacement = self.create_array(array.width, array.height, array.dtype,
-                                             array.num_channels)
+            replacement = self.create_array(array.width, array.height, array.depth,
+                                             array.dtype, array.num_channels,
+                                             array.is_surface)
             replacement.set_data(contents)
             try:
                 texture = TextureObject(replacement, **options)

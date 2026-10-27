@@ -8,6 +8,19 @@ import imageio.v3 as iio
 from ...constants import KernelFlags
 
 
+def _split_channels(shape:Tuple[int, ...])->Tuple[Tuple[int, ...], int]:
+    """Split a trailing channel axis from a shape.
+
+    A last axis of 1, 2 or 4 is a channel count, matching what CUDA arrays accept.
+    Anything else is spatial, so an image of shape (8, 16, 3) is 2D with 3 channels
+    while (8, 16, 7) would be rejected as an unsupported channel count only when it
+    was meant as channels -- which is why the spatial reading is tried first.
+    """
+    if len(shape) > 1 and shape[-1] in (1, 2, 4):
+        return tuple(shape[:-1]), int(shape[-1])
+    return tuple(shape), 1
+
+
 class cudaTextureObject_t:
     """A 2D image to sample in a kernel, named exactly as the device type.
 
@@ -49,32 +62,42 @@ class cudaTextureObject_t:
             data = iio.imread(data)
 
         if data is not None:
-            image = np.asarray(data)
-            if image.ndim not in (2, 3):
-                raise ValueError(
-                    "cudaTextureObject_t expects a (height, width) or "
-                    "(height, width, channels) image, got %d dimensions" % image.ndim)
-            if image.ndim == 3 and image.shape[2] not in (1, 2, 4):
-                raise ValueError(
-                    "cudaTextureObject_t supports 1, 2 or 4 channels per pixel, got %d"
-                    % image.shape[2])
+            image = np.asarray(data, dtype=None)
             if not image.flags["C_CONTIGUOUS"]:
                 image = np.ascontiguousarray(image)
+            # A trailing axis of size 1, 2 or 4 is read as channels; anything else
+            # means the array is purely spatial (1D, 2D or 3D).
+            spatial, self._channels = _split_channels(image.shape)
+            if len(spatial) == 1:
+                self._width, self._height, self._depth = spatial[0], 1, 1
+            elif len(spatial) == 2:
+                self._height, self._width = spatial
+                self._depth = 1
+            elif len(spatial) == 3:
+                self._depth, self._height, self._width = spatial
+            else:
+                raise ValueError(
+                    "cudaTextureObject_t expects a 1D, 2D or 3D image, optionally with "
+                    "1, 2 or 4 channels, got shape %s" % (image.shape,))
             self._image:Optional[np.ndarray] = image
-            self._height:int = image.shape[0]
-            self._width:int = image.shape[1]
-            self._channels:int = image.shape[2] if image.ndim == 3 else 1
             self._dtype:np.dtype = image.dtype
         elif shape is None:
             raise ValueError(
-                "cudaTextureObject_t needs either an image or a (height, width) shape")
+                "cudaTextureObject_t needs either an image or a (width[, height"
+                "[, depth]]) shape")
         else:
-            if len(shape) < 2:
+            spatial, self._channels = _split_channels(tuple(int(v) for v in shape))
+            if len(spatial) == 1:
+                self._width, self._height, self._depth = spatial[0], 1, 1
+            elif len(spatial) == 2:
+                self._height, self._width = spatial
+                self._depth = 1
+            elif len(spatial) == 3:
+                self._depth, self._height, self._width = spatial
+            else:
                 raise ValueError(
-                    "cudaTextureObject_t shape must be (height, width[, channels])")
-            self._height = int(shape[0])
-            self._width = int(shape[1])
-            self._channels = int(shape[2]) if len(shape) > 2 else 1
+                    "cudaTextureObject_t shape must have 1, 2 or 3 dimensions, "
+                    "optionally plus channels")
             self._dtype = np.dtype(dtype)
             self._image = None
 
@@ -90,12 +113,28 @@ class cudaTextureObject_t:
         return self._image
 
     @property
-    def shape(self)->Tuple[int, int]:
-        return (self._height, self._width)
+    def shape(self)->Tuple[int, ...]:
+        if self._depth > 1:
+            return (self._depth, self._height, self._width)
+        if self._height > 1:
+            return (self._height, self._width)
+        return (self._width,)
+
+    @property
+    def ndim(self)->int:
+        if self._depth > 1:
+            return 3
+        if self._height > 1:
+            return 2
+        return 1
 
     @property
     def height(self)->int:
         return self._height
+
+    @property
+    def depth(self)->int:
+        return self._depth
 
     @property
     def width(self)->int:
@@ -158,7 +197,7 @@ class cudaTextureObject_t:
         if context is None:
             return None
 
-        array = context.create_array(self._width, self._height,
+        array = context.create_array(self._width, self._height, self._depth,
                                      self._dtype, self._channels)
         if self._image is not None:
             array.set_data(self._image)
@@ -174,5 +213,7 @@ class cudaTextureObject_t:
         return texture
 
     def __repr__(self)->str:
-        return "cudaTextureObject_t(%dx%d, %d channel(s), %s)" % (
-            self._width, self._height, self._channels, self._dtype)
+        return "cudaTextureObject_t(%s, %d channel(s), %s)" % (
+            "x".join(str(v) for v in self.shape[:self.ndim]).replace(
+                str(self._width), str(self._width)),
+            self._channels, self._dtype)

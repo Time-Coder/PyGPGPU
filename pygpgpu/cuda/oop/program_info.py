@@ -48,19 +48,32 @@ class VarInfo:
                 return base_type_str
     
     @property
-    def readonly(self)->bool:
-        return ("const" in self.type_qualifiers)
-    
-    @property
     def writeonly(self)->bool:
         return False
     
     @property
+    def readonly(self)->bool:
+        """A texture is read-only by definition; a surface follows the analysis.
+
+        CUDA separates the two object kinds precisely so that a sampler and a
+        write target are distinguishable: a texture object can only be sampled, while
+        a surface object exists to be written. Declaring a texture read-only here
+        means the static analysis never has to infer it, and a surface keeps whatever
+        read/write verdict the analysis reaches for its uses in the kernel body.
+        """
+        if self.base_type_str == "cudaTextureObject_t":
+            return True
+        return ("const" in self.type_qualifiers)
+
+    @property
     def need_read_back(self)->bool:
-        # A texture handle is an opaque object, not memory the kernel writes into,
-        # so it never takes part in the upload/read-back flow.
+        # A texture is an opaque read-only object, not memory the kernel writes into,
+        # so it never takes part in the upload/read-back flow. A surface can be
+        # written, so it keeps the usual rule.
         if self.base_type_str == "cudaTextureObject_t":
             return False
+        if self.base_type_str == "cudaSurfaceObject_t":
+            return bool(self.kernel_flags & KernelFlags.Writed)
         return (self.is_ptr and bool(self.kernel_flags & KernelFlags.Writed))
     
     def use_buffer(self, stream:Stream, data:np.ndarray)->Tuple[Buffer, Optional[Event]]:
@@ -85,12 +98,14 @@ class ArgInfo(VarInfo):
     
     def check_type(self, value:Any)->None:
         base_type_str = self.base_type_str
-        # A texture handle is neither a numpy array nor a scalar: it is an opaque
-        # object the kernel samples through tex2D, so it is accepted as-is. The
+        # A texture or surface handle is neither a numpy array nor a scalar: it is an
+        # opaque object the kernel reads or writes, so it is accepted as-is. The
         # backend validates the handle itself when the argument is bound.
         from .texture import TextureObject
-        from ..driver import cudaTextureObject_t
-        if isinstance(value, (TextureObject, cudaTextureObject_t)):
+        from .surface import SurfaceObject
+        from ..driver import cudaTextureObject_t, cudaSurfaceObject_t
+        if isinstance(value, (TextureObject, cudaTextureObject_t,
+                              SurfaceObject, cudaSurfaceObject_t)):
             return
         if self.is_ptr:
             if not isinstance(value, np.ndarray):

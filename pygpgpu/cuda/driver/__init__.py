@@ -32,14 +32,12 @@ from .cutypes import (
     ptr_float,
     CUevent,
     CUstreamCallback,
-    CUarray,
     ptr_CUarray,
     CUtexObject,
     CUsurfObject,
     CUarray_format,
     CU_ARRAY_DESC,
     CUDA_ARRAY_DESCRIPTOR,
-    CUDA_ARRAY3D_DESCRIPTOR,
     CUDA_MEMCPY2D,
     CUDA_RESOURCE_DESC,
     CUDA_TEXTURE_DESC,
@@ -49,9 +47,14 @@ from .cutypes import (
     CUaddress_mode,
     CUfilter_mode,
     CU_TRSF_READ_AS_INTEGER,
-    CU_TRSF_NORMALIZED_COORDINATES
+    CU_TRSF_NORMALIZED_COORDINATES,
+    CUDA_MEMCPY3D,
+    CUDA_ARRAY3D_DESCRIPTOR,
+    CUarray,
+    CUDA_ARRAY_FLAG_SURFACE_LDST
 )
 from .cudaTextureObject_t import cudaTextureObject_t
+from .cudaSurfaceObject_t import cudaSurfaceObject_t
 from .nvrtc import NVRTC
 from .nvrtcinfo import NVRTCInfo
 from .nvrtctypes import (

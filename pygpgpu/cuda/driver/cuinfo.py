@@ -12,7 +12,8 @@ from .cutypes import (
     CUstream,
     CUfunction, CUevent, CUstreamCallback,
     CUarray, CUtexObject, CU_ARRAY_DESC, CUDA_MEMCPY2D, CUDA_RESOURCE_DESC,
-    CUDA_TEXTURE_DESC, CUDA_RESOURCE_VIEW_DESC
+    CUDA_TEXTURE_DESC, CUDA_RESOURCE_VIEW_DESC, CUDA_MEMCPY3D,
+    CUDA_ARRAY3D_DESCRIPTOR, CUsurfObject
 )
 
 from .vec_types import (
@@ -384,6 +385,58 @@ class CUInfo:
             "args": {
                 "pCopy": POINTER(CUDA_MEMCPY2D),
                 "hStream": CUstream
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemcpy3D_v2(const CUDA_MEMCPY3D* pCopy)
+        "cuMemcpy3D_v2": {
+            "args": {
+                "pCopy": POINTER(CUDA_MEMCPY3D)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemcpy3DAsync_v2(const CUDA_MEMCPY3D* pCopy, CUstream hStream)
+        "cuMemcpy3DAsync_v2": {
+            "args": {
+                "pCopy": POINTER(CUDA_MEMCPY3D),
+                "hStream": CUstream
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuArray3DCreate_v2(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray)
+        "cuArray3DCreate_v2": {
+            "args": {
+                "pHandle": POINTER(CUarray),
+                "pAllocateArray": POINTER(CUDA_ARRAY3D_DESCRIPTOR)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuArray3DGetDescriptor_v2(CUDA_ARRAY3D_DESCRIPTOR* pArrayDescriptor, CUarray hArray)
+        "cuArray3DGetDescriptor_v2": {
+            "args": {
+                "pArrayDescriptor": POINTER(CUDA_ARRAY3D_DESCRIPTOR),
+                "hArray": CUarray
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuSurfObjectCreate(CUsurfObject* pSurfObject, const CUDA_RESOURCE_DESC* pResDesc)
+        "cuSurfObjectCreate": {
+            "args": {
+                "pSurfObject": POINTER(CUsurfObject),
+                "pResDesc": POINTER(CUDA_RESOURCE_DESC)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuSurfObjectDestroy(CUsurfObject surfObject)
+        "cuSurfObjectDestroy": {
+            "args": {
+                "surfObject": CUsurfObject
             },
             "restype": c_int
         },
