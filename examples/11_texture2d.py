@@ -1,25 +1,27 @@
-﻿"""11_texture2d.py -- sample a 2D image in a CUDA kernel with tex2D.
+"""11_texture2d.py -- sample a 2D image in a CUDA kernel with tex2D.
 
 An OpenCL kernel takes an ``image2d_t`` and a sampler; CUDA splits that into an
-*array* (the storage the texture hardware reads) and a *texture object* (the
-array plus its sampling rules). PyGPGPU exposes both through the context:
+*array* (the storage the texture hardware reads) and a *texture object* (the array
+plus its sampling rules). PyGPGPU folds both into one call:
+
+    texture = Devices[0].default_context.texture(image)
+
+``image`` is a numpy array shaped ``(height, width)`` or ``(height, width,
+channels)``; its dtype and channel count carry over to the device image. Pass the
+texture to a kernel like any other argument and sample it with ``tex2D(tex, u, v)``.
+With ``normalized=True`` (the default) a pixel centre maps to
+``((x + 0.5) / width, (y + 0.5) / height)``.
+
+Keep the pieces separately when the image is needed for other work too:
 
     array = ctx.create_array(width, height, np.float32)
-    array.set_data(host_image)
-    texture = ctx.create_texture(array, normalized=True)
+    array.set_data(image)
+    texture = ctx.create_texture(array)
 
-The texture is then passed to a kernel as an opaque handle and sampled with
-``tex2D<float>(tex, u, v)``. With ``normalized=True`` a pixel centre maps to
-``((x + 0.5) / width, (y + 0.5) / height)``, which is how CUDA sampling is usually
-written.
-
-Order matters on the driver this was developed against (CUDA 13.4): once a module
-containing ``tex2D`` has been loaded into the process, every later
-``cuTexObjectCreate`` fails with CUDA_ERROR_INVALID_VALUE, while a module without
-``tex2D`` leaves it working. So the images and textures are built *before* the
-kernel module is imported, which this example does. ``Context.create_texture``
-also retries a refusal by rebuilding the image, which covers the separate
-cold-start refusals but cannot recover after a tex2D module has loaded.
+One ordering rule applies on the driver this was developed against (CUDA 13.4):
+once a module containing ``tex2D`` has been loaded, no further texture object can be
+created, so build every texture before importing such a module. Textures built
+earlier keep sampling correctly, which is what this example does.
 
 Run:
     python examples/11_texture2d.py
@@ -31,18 +33,14 @@ import tempfile
 
 import numpy as np
 
-from pygpgpu import kernel
+from pygpgpu import kernel, cuimport
 from pygpgpu.kernel import tex2D
-from pygpgpu import cuimport
 from pygpgpu.cuda.driver import CUDA
-from pygpgpu.cuda.oop.context import Context
+from pygpgpu.cuda.oop import Devices
 
 CUDA.print_info = False
 
-# A handwritten kernel: the texture analogue of the .cl examples. The texture is
-# created with normalized coordinates, so each pixel centre maps to
-# ((x + 0.5) / w, (y + 0.5) / h); with point sampling that returns the pixel the
-# thread is responsible for.
+# A handwritten kernel: the texture analogue of the .cl examples.
 SOURCE = """
 typedef unsigned long long cudaTextureObject_t;
 
@@ -72,12 +70,6 @@ __global__ void sample_2d(cudaTextureObject_t tex, float *out, int w, int h)
 
 
 @kernel
-def warm(x, out, a):
-    for i in range(out.shape[0]):
-        out[i] = x[i] * a
-
-
-@kernel
 def sample_python(tex, out, width, height):
     """The same sampling as ``sample_flat``, written as a Python kernel."""
     for y in range(height):
@@ -86,30 +78,18 @@ def sample_python(tex, out, width, height):
 
 
 def main():
-    # A launch first, so the CUDA context exists.
-    warmup = np.random.rand(1024).astype(np.float32)
-    warm["cuda"](warmup, np.zeros_like(warmup), 2.0)
-
-    context = Context.current()
     width, height = 16, 8
-
     ramp = np.arange(width * height, dtype=np.float32).reshape(height, width)
-    scaled = ramp * 2.0 + 5.0
+    trailing = ramp * 2.0 + 5.0
 
-    array_a = context.create_array(width, height, np.float32)
-    array_a.set_data(ramp)
-    print("array upload/read-back  :", bool(np.array_equal(array_a.to_numpy(), ramp)))
+    context = Devices[0].default_context
 
-    try:
-        texture_a = context.create_texture(array_a, normalized=True)
-    except BaseException as error:
-        print("this driver/interpreter combination refuses cuTexObjectCreate")
-        print("(%s); the array APIs above still work" % type(error).__name__)
-        return
+    # Build both textures before the module below is imported.
+    texture_a = context.texture(ramp)
+    texture_b = context.texture(trailing)
 
-    array_b = context.create_array(width, height, np.float32)
-    array_b.set_data(scaled)
-    texture_b = context.create_texture(array_b, normalized=True)
+    print("array upload/read-back  :", bool(
+        np.array_equal(texture_a.array.to_numpy(), ramp)))
 
     folder = tempfile.mkdtemp()
     with open(os.path.join(folder, "texture2d.cu"), "w") as handle:
@@ -128,7 +108,7 @@ def main():
     out_b = np.zeros((height, width), dtype=np.float32)
     kernels.sample_2d[((width, height), (16, 8))](texture_b, out_b,
                                                   np.int32(width), np.int32(height))
-    print("2D grid, block/thread   :", bool(np.array_equal(out_b, scaled)))
+    print("2D grid, block/thread   :", bool(np.array_equal(out_b, trailing)))
 
     # The same sampling from a @kernel body: the translator turns tex2D into the
     # device call, so a Python kernel takes the handle exactly like the .cu one.
@@ -142,6 +122,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-

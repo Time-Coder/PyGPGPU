@@ -26,7 +26,7 @@ STREAM_POOL_SIZE:int = 16
 # How many times create_texture rebuilds an image before giving up. The driver
 # rejects texture creation intermittently, and a refused array stays refused, so
 # each attempt allocates a replacement rather than retrying the same handle.
-TEXTURE_RETRY_ATTEMPTS:int = 24
+TEXTURE_RETRY_ATTEMPTS:int = 40
 
 
 class Context(CUObject):
@@ -80,12 +80,10 @@ class Context(CUObject):
     def create_texture(self, array:Array, **options:Any)->TextureObject:
         """Build a sampled view over ``array`` for use as a kernel argument.
 
-        On the tested machine the driver intermittently rejects texture creation with
-        CUDA_ERROR_INVALID_VALUE and accepts a later request, and rejecting an array
-        seems to stick to that array: retrying the same handle kept failing while a
-        freshly allocated one succeeded. So a refusal is answered by re-creating the
-        image from the array's contents and building a texture over the new handle,
-        which the caller never sees.
+        A refusal is retried by rebuilding the image from the array's contents: the
+        driver drops refusals once it accepts one, and a freshly allocated image
+        tends to be the one it accepts. The caller gets a texture that owns the
+        replacement, so the retry is invisible from outside.
         """
         from .texture import TextureObject
 
@@ -97,19 +95,44 @@ class Context(CUObject):
 
         contents = array.to_numpy()
         for _ in range(TEXTURE_RETRY_ATTEMPTS):
-            fresh = self.create_array(array.width, array.height, array.dtype,
-                                      array.num_channels)
-            fresh.set_data(contents)
+            replacement = self.create_array(array.width, array.height, array.dtype,
+                                             array.num_channels)
+            replacement.set_data(contents)
             try:
-                texture = TextureObject(fresh, **options)
+                texture = TextureObject(replacement, **options)
             except BaseException as error:
                 last_error = error
                 continue
-            # Hand the caller an object that keeps the replacement image alive.
-            texture._array = fresh
+            texture._array = replacement
             return texture
 
         raise last_error
+
+    def texture(self, data:Any, **options:Any)->TextureObject:
+        """Upload a host image and return a texture that samples it.
+
+        The short form of ``create_texture(create_array(...))`` for the common case
+        where the image is a numpy array nothing else needs:
+
+            texture = Devices[0].default_context.texture(image)
+            kernel["cuda"](texture, out, width, height)
+
+        ``data`` is interpreted as ``(height, width)`` or ``(height, width,
+        channels)``; its dtype and channel count carry over to the device image.
+        """
+        import numpy as np
+
+        image = np.asarray(data)
+        if image.ndim not in (2, 3):
+            raise ValueError(
+                "texture() expects a (height, width) or (height, width, channels) "
+                "image, got %d dimensions" % image.ndim)
+
+        height, width = image.shape[0], image.shape[1]
+        channels = image.shape[2] if image.ndim == 3 else 1
+        array = self.create_array(width, height, image.dtype, channels)
+        array.set_data(image)
+        return self.create_texture(array, **options)
 
     def get_buffer(self, size:int=0)->Buffer:
         available_buffer:Optional[Buffer] = None
@@ -442,3 +465,4 @@ class Context(CUObject):
     @override
     def _release_func()->Any:
         return CUDA.cuCtxDestroy_v2
+
