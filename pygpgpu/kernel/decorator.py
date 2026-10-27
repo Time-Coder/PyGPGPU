@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import os
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -35,6 +36,108 @@ DEFAULT_BACKEND_ORDER:Tuple[str, ...] = ("cuda", "hip", "opencl")
 
 _probed_backend:Optional[str] = None
 
+# The selector list a bracketed-less call walks, set by set_default_device(). None means
+# "use DEFAULT_BACKEND_ORDER". Each entry is (backend, device-or-None).
+_default_devices:Optional[List[Tuple[Optional[str], Optional[str]]]] = None
+_default_device_lock = threading.Lock()
+
+
+def set_default_device(*selectors:str)->None:
+    """Choose what a kernel call without a bracket runs on, in order of preference.
+
+    ``set_default_device("opencl:cpu", "cuda")`` makes a plain ``k(...)`` try the CPU
+    OpenCL device first and fall back to cuda when that is unusable. Entries are the same
+    selector strings the brackets accept -- ``"backend"``, ``"backend:device"`` or a bare
+    device name -- and each is tried until one resolves.
+
+    Called with no arguments it restores the built-in order (``cuda -> hip -> opencl``).
+
+    A kernel decorated with an explicit ``@kernel(backend=...)`` keeps that backend and is
+    unaffected; this only decides what an unspecified call means. The list is read at call
+    time, so it applies to kernels that were already decorated.
+    """
+    global _default_devices
+    if not selectors:
+        with _default_device_lock:
+            _default_devices = None
+        return
+
+    parsed:List[Tuple[Optional[str], Optional[str]]] = []
+    for selector in selectors:
+        if not isinstance(selector, str):
+            raise TypeError(
+                "set_default_device() takes selector strings like 'opencl:cpu', got %s"
+                % type(selector).__name__)
+        backend, device = _parse_selector(selector)
+        if backend is None and device is None:
+            raise ValueError("empty device selector")
+        parsed.append((backend, device))
+
+    with _default_device_lock:
+        _default_devices = parsed
+
+
+def get_default_device()->List[str]:
+    """The selector list an unspecified kernel call currently walks."""
+    with _default_device_lock:
+        entries = _default_devices
+    if entries is None:
+        return list(DEFAULT_BACKEND_ORDER)
+    return [("%s:%s" % (backend, device)) if backend and device
+            else (backend or device or "")
+            for backend, device in entries]
+
+
+def _entry_usable(backend:Optional[str], device:Optional[str])->Optional[Tuple[str, Optional[str]]]:
+    """Resolve one default entry to a (backend, device) pair, or None if unusable.
+
+    A backend-less entry (a bare device name) is looked up across the standard order, so
+    ``set_default_device("gfx1036")`` finds it whichever backend owns it.
+    """
+    candidates:List[str] = [backend] if backend is not None else list(DEFAULT_BACKEND_ORDER)
+    for candidate in candidates:
+        if _probe_backend(candidate) is None:
+            continue
+        if device is None:
+            return candidate, None
+        try:
+            _resolve_device(candidate, device)
+        except Exception:
+            continue
+        return candidate, device
+    return None
+
+
+def _default_target()->Tuple[str, Optional[str]]:
+    """The backend (and device) a call without a bracket should use.
+
+    Walks the configured list first, then the built-in order; the result is cached only
+    while the configuration is unchanged, because set_default_device() may change it at
+    any time.
+    """
+    global _probed_backend
+    with _default_device_lock:
+        entries = _default_devices
+    if entries is not None:
+        for backend, device in entries:
+            resolved = _entry_usable(backend, device)
+            if resolved is not None:
+                return resolved
+        raise RuntimeError(
+            "none of the devices set by set_default_device() is usable: %s. "
+            "Check the names against list_devices(), or call set_default_device() with "
+            "no arguments to restore the built-in order."
+            % ", ".join(get_default_device()))
+
+    if _probed_backend is None:
+        for backend in DEFAULT_BACKEND_ORDER:
+            if _probe_backend(backend) is not None:
+                _probed_backend = backend
+                break
+        else:
+            _probed_backend = "opencl"
+    return _probed_backend, None
+
 
 def _backend_devices(backend:str)->List[Any]:
     """Enumerate the backend's device list (order = numbering used by plain-numeric selectors); raises when the runtime is missing."""
@@ -64,16 +167,8 @@ def _probe_backend(backend:str)->Optional[str]:
 
 
 def _default_backend()->str:
-    """Probe the first usable backend per DEFAULT_BACKEND_ORDER; the result is cached in-process."""
-    global _probed_backend
-    if _probed_backend is None:
-        for backend in DEFAULT_BACKEND_ORDER:
-            if _probe_backend(backend) is not None:
-                _probed_backend = backend
-                break
-        else:
-            _probed_backend = "opencl"
-    return _probed_backend
+    """The backend an unspecified call uses, honouring set_default_device()."""
+    return _default_target()[0]
 
 
 def _parse_selector(sel:str)->Tuple[Optional[str], Optional[str]]:
@@ -400,7 +495,7 @@ class PyKernel:
         k["cuda"][(64, 8)](a, out)      # combined, any order
     """
 
-    def __init__(self, func:Callable, backend:str):
+    def __init__(self, func:Callable, backend:str, explicit_backend:bool=False):
         if isinstance(func, classmethod):
             raise PyKernelSyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)")
         if isinstance(func, staticmethod):
@@ -408,6 +503,9 @@ class PyKernel:
 
         self.raw_func:Callable = func
         self.backend:str = backend
+        # True when the decorator named a backend, so set_default_device() must not
+        # override it. A backend chosen by probing is only a snapshot, not a binding.
+        self._explicit_backend:bool = explicit_backend
         self.is_pykernel:bool = True
         self.__name__:str = func.__name__
         self.__doc__:str = func.__doc__ or ""
@@ -487,7 +585,20 @@ class PyKernel:
                 backend_sel:Optional[str], device_sel:Optional[str],
                 global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
                 launch:str = "call")->Any:
-        backend:str = (backend_sel or self.backend)
+        if backend_sel is not None:
+            backend:str = backend_sel
+        elif getattr(self, "_explicit_backend", False):
+            # Decorated as @kernel(backend=...): that backend wins over any default.
+            backend = self.backend
+        else:
+            # No bracket and no explicit backend: consult set_default_device(), read now
+            # rather than at decoration time so a later call takes effect.
+            backend, default_device = _default_target()
+            if device_sel is None:
+                device_sel = default_device
+        # Record what this call actually used, so `k.backend` describes the last launch
+        # rather than the snapshot taken when the decorator ran.
+        self.backend = backend
         if backend == "python":
             return self._invoke_python(instance, args, device_sel, global_size, local_size, launch)
         device_obj:Any
@@ -877,7 +988,11 @@ def kernel(func:Optional[Callable]=None, *, backend:Optional[str]=None):
     - unsupported syntax raises SyntaxError.
     """
     def decorator(f:Callable)->PyKernel:
-        return PyKernel(f, backend or _default_backend())
+        if backend is not None:
+            return PyKernel(f, backend, explicit_backend=True)
+        # No backend named: the call-time default decides, so this snapshot is only used
+        # for reporting until set_default_device() (or a bracket) has a say.
+        return PyKernel(f, _default_backend(), explicit_backend=False)
 
     if func is not None:
         return decorator(func)

@@ -31,10 +31,12 @@ from .kernel import (
     PyKernel,
     PyKernelSyntaxError,
     available_devices,
+    get_default_device,
     list_devices,
     get_device,
     gpu,
     kernel,
+    set_default_device,
 )
 
 # ---------- Top-level exports: public API of vec_types ----------
@@ -108,6 +110,7 @@ __all__ = [
     # kernel
     "kernel", "gpu", "PyKernel", "PyKernelSyntaxError", "DEFAULT_BACKEND_ORDER",
     "list_devices", "get_device", "available_devices",
+    "set_default_device", "get_default_device",
     # images
     "Image",
     # logging

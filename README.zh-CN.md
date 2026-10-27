@@ -9,7 +9,7 @@ import numpy as np
 from pygpgpu import kernel
 
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float) -> None:
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]
 
@@ -27,7 +27,7 @@ saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运�
 ## 特性
 
 - **`@kernel` 装饰器** —— 直接装饰 Python 函数(含类方法/静态方法), 调用时按实参类型翻译为后端源码并编译(单态化);
-- **普通 Python 子函数** —— kernel 里调用的子函数不需要任何装饰器、不需要类型标注: 它会被翻译成设备函数, 并在调用点按实参类型单态化; 子函数继续调子函数也支持(递归展开)。经由名字取得的子函数同样支持: `module.func(...)`、`SomeClass.static_method(...)`、`self.static_method(...)`, 以及同一个类里 `self.other_method(...)` 这种实例方法互调。
+- **普通 Python 子函数** —— kernel 里调用的子函数不需要任何装饰器, 类型注解也是可选的: 它会被翻译成设备函数, 并在调用点按实参类型单态化; 子函数继续调子函数也支持(递归展开)。经由名字取得的子函数同样支持: `module.func(...)`、`SomeClass.static_method(...)`、`self.static_method(...)`, 以及同一个类里 `self.other_method(...)` 这种实例方法互调。
 - **同一进程内三后端并存** —— 由中括号在每次调用时选择后端, 所以一个进程(甚至同一个 kernel 对象)可以混用 OpenCL / CUDA / HIP; 每个 "后端 + 设备" 组合单独单态化并缓存。
 - **纯 Python 后端** —— `k["python"]` 用解释器运行同一份 `@kernel` 函数体, 在 CPU 上串行执行: 不需要 GPU、不需要编译器、不需要任何运行时; 适合测试、小规模数据和作为 GPU 语义的参照实现。
 - **手写 kernel 文件 import** —— `.cl` / `.cu` / `.hip` 文件像 Python 模块一样 `import`, kernel 与 struct 类型成为模块属性, 自动生成 `.pyi` 类型提示;
@@ -86,27 +86,29 @@ import math
 import numpy as np
 from pygpgpu import kernel, gpu, funcs, float4
 
-def norm2(v):
+def norm2(v: float4) -> float:
     return funcs.dot(v, v)
 
 @kernel
-def normalize_all(vecs, out):
+def normalize_all(vecs: np.ndarray, out: np.ndarray) -> None:
     for i, v in enumerate(vecs):          # 一维: 索引 + float4 值快照
         out[i] = funcs.normalize(v)       # 设备端逐分量展开
 
 @kernel
-def matrix_scale(m, out, k):
+def matrix_scale(m: np.ndarray, out: np.ndarray, k: float) -> None:
     for y, x in np.ndindex(out.shape):    # 二维 NDRange
         out[y, x] = m[y, x] * k
 
 @kernel(backend="cuda")
-def histogram(data, counts):
+def histogram(data: np.ndarray, counts: np.ndarray) -> None:
     gpu.work_size(data)                   # gid 写法需要声明迭代域
     i = gpu.get_global_id(0)
     gpu.atomic_add(counts, data[i], 1)    # 原子操作, 结果自动回读
 ```
 
 支持的能力: 标量/数组/向量参数, if/while/for-range, 算术/比较/位运算, `math.*` 与 `np.*` 数学函数, 类方法(`self.xxx` 属性自动转为参数), 静态方法, 以及按名字调用辅助函数 —— 模块级函数、`module.func(...)`、`SomeClass.static_method(...)`, 以及同一个类里 `self.method(...)` 这种实例方法互调。不支持的语法抛出带行号的 `SyntaxError`。
+
+类型注解是可选项: 本 README 里的代码片段带上注解只为便于阅读, 设备端类型来自调用时的实参, 所以同样的代码不写注解也能跑(`self` 不是 kernel 参数, 给它加注解没有任何影响)。
 
 kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `gpu.get_global_id` 的写法里声明 `gpu.work_size(x)` —— 这条语句只在 host 侧生效, 会被翻译器擦除, 并贡献 `x` 的全部维度。用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
 
@@ -116,7 +118,7 @@ kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for 
 
 ```python
 @kernel
-def inspect(a, out):
+def inspect(a: np.ndarray, out: np.ndarray) -> None:
     for i in range(out.shape[0]):
         print("i =", i, "a[i] =", a[i], "ok =", a[i] > 0, "v =", float2(a[i], a[i] * 2))
         out[i] = a[i]
@@ -141,7 +143,7 @@ import asyncio
 from pygpgpu import kernel
 
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float) -> None:
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]
 
@@ -167,7 +169,7 @@ saxpy["opencl"][(len(x), 256)].async_call(x, y, out, 2.0)
 
 ```python
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float) -> None:
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]
 
@@ -223,12 +225,12 @@ struct 定义自动映射为 ctypes 类型; kernel 旁自动生成 `.pyi`, IDE �
 
 ```python
 class Model:
-    def __init__(self):
+    def __init__(self) -> None:
         self.weights = np.random.rand(1024).astype(np.float32)
         self.lr = 0.01
 
     @kernel
-    def apply(self, x, out):
+    def apply(self, x: np.ndarray, out: np.ndarray) -> None:
         for i in range(out.shape[0]):
             out[i] = x[i] * self.weights[i] + self.lr
 
@@ -244,22 +246,22 @@ kernel 可以调用用普通 Python 写的辅助函数。除了直接用裸名�
 ```python
 import mylib
 
-def soften(v):                      # 模块级辅助函数
+def soften(v: float) -> float:            # 模块级辅助函数
     return v * 0.5
 
 class Model:
-    def __init__(self):
+    def __init__(self) -> None:
         self.level = 1.0            # 被 gain() 读取, 所以会成为 kernel 参数
 
     @staticmethod
-    def scale(v):                   # 静态方法: 没有接收者
+    def scale(v: float) -> float:         # 静态方法: 没有接收者
         return v * 3.0
 
-    def gain(self):                 # 实例方法: 读取 self.level
+    def gain(self) -> float:              # 实例方法: 读取 self.level
         return self.level + 1.0
 
     @kernel
-    def apply(self, x, out):
+    def apply(self, x: np.ndarray, out: np.ndarray) -> None:
         for i in range(out.shape[0]):
             out[i] = soften(x[i]) * self.scale(x[i]) + self.gain() + mylib.bias(x[i])
 ```
@@ -275,7 +277,7 @@ kernel 对每个指针参数做函数体级静态分析(`points[i] = ...` 写、
 
 ```python
 @kernel
-def k(a, b, out):
+def k(a: np.ndarray, b: np.ndarray, out: np.ndarray) -> None:
     for i in range(out.shape[0]):
         out[i] = a[i] + b[i] * 2.0   # a 只读, b 只读, out 只写
 # 运行时: a/b 上传后跳过回读, out 跳过上传只回读
@@ -296,7 +298,7 @@ def k(a, b, out):
 ```python
 from pygpgpu import kernel
 
-def square(v):                          # 普通 Python: 不加装饰器, 不写类型标注
+def square(v):                          # 普通 Python: 不需要装饰器, 也不需要写类型标注
     return v * v
 
 def clamp01(v):
@@ -310,7 +312,7 @@ def weight(v):                          # 子函数里还能继续调子函数
     return clamp01(square(v)) * 0.5 + 0.25
 
 @kernel
-def apply_all(x, out):
+def apply_all(x: np.ndarray, out: np.ndarray) -> None:
     for i in range(out.shape[0]):       # 循环上界就是 work size
         out[i] = weight(x[i])
 
@@ -388,7 +390,7 @@ wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
 | | PyGPGPU | Taichi | Numba | Warp |
 |---|---|---|---|---|
 | 输入数据 | numpy 数组直接用 | 包进 `ti.field`, 手动 `from_numpy`/`to_numpy` | 手动 `cuda.to_device` + `copy_to_host` | 包进 `wp.array` |
-| 子函数 | **普通 Python——不加装饰器、不写类型标注** | `@ti.func` + 标注参数 | `@cuda.jit(device=True)` | `@wp.func` + 标注参数 |
+| 子函数 | **普通 Python——不需要装饰器, 注解可选** | `@ti.func` + 标注参数 | `@cuda.jit(device=True)` | `@wp.func` + 标注参数 |
 | 同进程多后端 | **三个都能用, 可自由混用** | 只有一个, 由 `ti.init(arch=...)` 固定 | 仅 CUDA | 仅 CUDA |
 | 启动规模 | 由循环上界推导(或 `gpu.work_size(x)` / 中括号) | 由 `range` 推导 | block × thread 手算, 外加守卫 | 显式传 `dim=` |
 | 边界守卫 | 自动生成 | 自动生成 | 自己写 | 自己写 |
@@ -406,7 +408,7 @@ Taichi 在 `ti.init(arch=...)` 那一刻就把后端固定了; Numba 和 Warp �
 
 ```python
 @kernel
-def apply_all(x, out):
+def apply_all(x: np.ndarray, out: np.ndarray) -> None:
     for i in range(out.shape[0]):
         out[i] = square(x[i]) + 1.0
 
@@ -449,6 +451,26 @@ from pygpgpu import list_devices, get_device
 list_devices()          # 所有可用 "后端:设备" 字符串, 如 ['cuda:0', 'hip:0', 'opencl:0']
 dev = get_device("cuda:0")   # 直接取对应后端的 Device 对象
 ```
+
+### 选择默认设备
+
+没有中括号的调用会按 `cuda -> hip -> opencl` 使用第一个可用后端。`set_default_device()`
+可以替换这个顺序:
+
+```python
+from pygpgpu import kernel, set_default_device
+
+set_default_device("opencl:cpu", "cuda")     # 先试 CPU 设备, 不可用则回退到 cuda
+k(x, out)                                    # 无中括号: 按该列表依次尝试
+
+set_default_device("gfx1036")                # 只写设备名: 会在各后端中查找
+set_default_device("cuda", "opencl:0")
+set_default_device()                         # 不传参数: 恢复内置顺序
+```
+
+使用与中括号相同的选择器写法, 逐项尝试直到某一项可用, 不可用的项会被跳过。该列表在
+调用时读取, 因此对调用之前装饰的 kernel 同样生效; `get_default_device()` 返回当前列表。
+用 `@kernel(backend=...)` 显式指定后端的 kernel 不受影响。
 
 ## 缓存
 

@@ -9,7 +9,7 @@ import numpy as np
 from pygpgpu import kernel
 
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float) -> None:
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]
 
@@ -27,7 +27,7 @@ No C code to write, no build system to configure; the first call translates, com
 ## Features
 
 - **`@kernel` decorator** — decorate a Python function directly (class methods and static methods included); at call time it is specialized per argument type, translated to backend source and compiled (monomorphization).
-- **Plain-Python helper functions** — a helper called from a kernel needs no decorator and no type annotations: it is translated into a device function and monomorphized from the call site, recursively for helpers that call helpers. The same holds for helpers reached through a name: `module.func(...)`, `SomeClass.static_method(...)`, `self.static_method(...)`, and `self.other_method(...)` between methods of one class.
+- **Plain-Python helper functions** — a helper called from a kernel needs no decorator, and its annotations are optional: it is translated into a device function and monomorphized from the call site, recursively for helpers that call helpers. The same holds for helpers reached through a name: `module.func(...)`, `SomeClass.static_method(...)`, `self.static_method(...)`, and `self.other_method(...)` between methods of one class.
 - **All three backends in one process** — the bracket chooses the backend per call, so a single process (and even a single kernel object) can mix OpenCL, CUDA and HIP; each backend/device pair is specialized and cached separately.
 - **Pure-Python backend** — `k["python"]` runs the same `@kernel` body in the interpreter, serially on the CPU: no GPU, no compiler, no runtime. Useful for testing, for small inputs and as a reference for what the GPU semantics mean.
 - **Handwritten kernel file import** — `.cl` / `.cu` / `.hip` files import like Python modules: kernels and struct types become module attributes, and a `.pyi` type stub is generated automatically.
@@ -86,27 +86,29 @@ import math
 import numpy as np
 from pygpgpu import kernel, gpu, funcs, float4
 
-def norm2(v):
+def norm2(v: float4) -> float:
     return funcs.dot(v, v)
 
 @kernel
-def normalize_all(vecs, out):
+def normalize_all(vecs: np.ndarray, out: np.ndarray) -> None:
     for i, v in enumerate(vecs):          # 1D: index + float4 value snapshot
         out[i] = funcs.normalize(v)       # expanded component-wise on device
 
 @kernel
-def matrix_scale(m, out, k):
+def matrix_scale(m: np.ndarray, out: np.ndarray, k: float) -> None:
     for y, x in np.ndindex(out.shape):    # 2D NDRange
         out[y, x] = m[y, x] * k
 
 @kernel(backend="cuda")
-def histogram(data, counts):
+def histogram(data: np.ndarray, counts: np.ndarray) -> None:
     gpu.work_size(data)                   # iteration domain for a gid-style kernel
     i = gpu.get_global_id(0)
     gpu.atomic_add(counts, data[i], 1)    # atomics, results read back automatically
 ```
 
 Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/comparison/bit ops, `math.*` and `np.*` math functions, class methods (`self.xxx` attributes become arguments automatically), static methods, and calling helpers through a name — a module-level function, `module.func(...)`, `SomeClass.static_method(...)`, and `self.method(...)` for another method of the same class. Unsupported syntax raises a `SyntaxError` carrying the line number.
+
+Type annotations are optional: the snippets in this README carry them for readability, but the device types come from the arguments at call time, so the same code works unannotated (`self` is not a kernel argument, so annotating it changes nothing).
 
 A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `gpu.get_global_id`, declare `gpu.work_size(x)` — that statement is host-side only, erased by the translator, and contributes all of `x`'s dimensions. A `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
 
@@ -116,7 +118,7 @@ A kernel needs an iteration domain for its work size to be derived. Either use a
 
 ```python
 @kernel
-def inspect(a, out):
+def inspect(a: np.ndarray, out: np.ndarray) -> None:
     for i in range(out.shape[0]):
         print("i =", i, "a[i] =", a[i], "ok =", a[i] > 0, "v =", float2(a[i], a[i] * 2))
         out[i] = a[i]
@@ -141,7 +143,7 @@ import asyncio
 from pygpgpu import kernel
 
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float) -> None:
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]
 
@@ -167,7 +169,7 @@ A launch needs an execution channel, and every backend pools it rather than crea
 
 ```python
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float) -> None:
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]
 
@@ -224,12 +226,12 @@ Struct definitions map to ctypes types; a `.pyi` stub is generated next to the k
 
 ```python
 class Model:
-    def __init__(self):
+    def __init__(self) -> None:
         self.weights = np.random.rand(1024).astype(np.float32)
         self.lr = 0.01
 
     @kernel
-    def apply(self, x, out):
+    def apply(self, x: np.ndarray, out: np.ndarray) -> None:
         for i in range(out.shape[0]):
             out[i] = x[i] * self.weights[i] + self.lr
 
@@ -245,22 +247,22 @@ A kernel can call a helper written as ordinary Python. Besides a module-level fu
 ```python
 import mylib
 
-def soften(v):                      # module-level helper
+def soften(v: float) -> float:            # module-level helper
     return v * 0.5
 
 class Model:
-    def __init__(self):
+    def __init__(self) -> None:
         self.level = 1.0            # read by gain(), so it becomes a kernel argument
 
     @staticmethod
-    def scale(v):                   # static method: no receiver
+    def scale(v: float) -> float:         # static method: no receiver
         return v * 3.0
 
-    def gain(self):                 # instance method: reads self.level
+    def gain(self) -> float:              # instance method: reads self.level
         return self.level + 1.0
 
     @kernel
-    def apply(self, x, out):
+    def apply(self, x: np.ndarray, out: np.ndarray) -> None:
         for i in range(out.shape[0]):
             out[i] = soften(x[i]) * self.scale(x[i]) + self.gain() + mylib.bias(x[i])
 ```
@@ -276,7 +278,7 @@ Each pointer argument goes through function-body-level static analysis (`points[
 
 ```python
 @kernel
-def k(a, b, out):
+def k(a: np.ndarray, b: np.ndarray, out: np.ndarray) -> None:
     for i in range(out.shape[0]):
         out[i] = a[i] + b[i] * 2.0   # a read-only, b read-only, out write-only
 # at runtime: a/b skip the read-back after upload, out skips the upload and only reads back
@@ -299,7 +301,7 @@ functions need no decorator at all:
 ```python
 from pygpgpu import kernel
 
-def square(v):                          # plain Python: no decorator, no annotations
+def square(v):                          # plain Python: no decorator, no annotations needed
     return v * v
 
 def clamp01(v):
@@ -313,7 +315,7 @@ def weight(v):                          # helpers may call other helpers
     return clamp01(square(v)) * 0.5 + 0.25
 
 @kernel
-def apply_all(x, out):
+def apply_all(x: np.ndarray, out: np.ndarray) -> None:
     for i in range(out.shape[0]):       # loop bound = work size
         out[i] = weight(x[i])
 
@@ -393,7 +395,7 @@ wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
 | | PyGPGPU | Taichi | Numba | Warp |
 |---|---|---|---|---|
 | Input data | numpy arrays directly | wrap in `ti.field`, explicit `from_numpy`/`to_numpy` | `cuda.to_device` + `copy_to_host` by hand | wrap in `wp.array` |
-| Helper functions | **plain Python — no decorator, no annotations** | `@ti.func` + annotated args | `@cuda.jit(device=True)` | `@wp.func` + annotated args |
+| Helper functions | **plain Python — no decorator, annotations optional** | `@ti.func` + annotated args | `@cuda.jit(device=True)` | `@wp.func` + annotated args |
 | Backends in one process | **all three, mixed freely** | one, fixed by `ti.init(arch=...)` | CUDA only | CUDA only |
 | Launch size | inferred from the loop bound (or `gpu.work_size(x)` / a bracket) | inferred from `range` | blocks × threads by hand, plus a guard | pass `dim=` |
 | Bounds guard | emitted for you | emitted for you | you write it | you write it |
@@ -412,7 +414,7 @@ backend the machine has:
 
 ```python
 @kernel
-def apply_all(x, out):
+def apply_all(x: np.ndarray, out: np.ndarray) -> None:
     for i in range(out.shape[0]):
         out[i] = square(x[i]) + 1.0
 
@@ -456,6 +458,27 @@ from pygpgpu import list_devices, get_device
 list_devices()          # every available "backend:device" string, e.g. ['cuda:0', 'hip:0', 'opencl:0']
 dev = get_device("cuda:0")   # the Device object of that backend, directly
 ```
+
+### Choosing the default device
+
+A call without a bracket runs on the first usable backend in `cuda -> hip -> opencl`.
+`set_default_device()` replaces that order:
+
+```python
+from pygpgpu import kernel, set_default_device
+
+set_default_device("opencl:cpu", "cuda")     # try the CPU device, fall back to cuda
+k(x, out)                                    # no bracket: walks that list
+
+set_default_device("gfx1036")                # a bare device name: found on any backend
+set_default_device("cuda", "opencl:0")
+set_default_device()                         # no arguments: restore the built-in order
+```
+
+The same selector strings the brackets accept are used, and each entry is tried until one
+resolves; an unusable entry is skipped. The list is read at call time, so it also applies
+to kernels decorated before the call, and `get_default_device()` reports what it currently
+is. A kernel decorated with an explicit `@kernel(backend=...)` keeps that backend.
 
 ## Caching
 
