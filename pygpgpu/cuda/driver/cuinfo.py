@@ -230,6 +230,44 @@ class CUInfo:
             "restype": c_int
         },
 
+        # CUresult cuDevicePrimaryCtxRetain(CUcontext* pctx, CUdevice dev)
+        #
+        # The driver keeps one context per device that outlives any single Context object;
+        # retaining it is meant to be cheap, which is what makes reuse worthwhile. The
+        # release must balance every retain (cuDevicePrimaryCtxRelease_v2).
+        "cuDevicePrimaryCtxRetain": {
+            "args": {
+                "pctx": POINTER(CUcontext),
+                "dev": CUdevice
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev)
+        "cuDevicePrimaryCtxRelease_v2": {
+            "args": {"dev": CUdevice},
+            "restype": c_int
+        },
+
+        # CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int* flags, int* active)
+        "cuDevicePrimaryCtxGetState": {
+            "args": {
+                "dev": CUdevice,
+                "flags": POINTER(c_uint),
+                "active": POINTER(c_int)
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuDevicePrimaryCtxSetFlags_v2(CUdevice dev, unsigned int flags)
+        "cuDevicePrimaryCtxSetFlags_v2": {
+            "args": {
+                "dev": CUdevice,
+                "flags": c_uint
+            },
+            "restype": c_int
+        },
+
         # CUresult cuCtxDestroy(CUcontext ctx)
         "cuCtxDestroy": {
             "args": {

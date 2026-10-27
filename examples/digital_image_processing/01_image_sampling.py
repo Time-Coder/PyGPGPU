@@ -26,7 +26,7 @@ def down_sampling(src_image: np.ndarray, dest_image: np.ndarray, ratio: int):
         dest_image[i, j, k] = mean(src_image, i, j, k, ratio)
 
 start_time = time.perf_counter()
-down_sampling(src_image, dest_image, ratio)
+down_sampling["python"](src_image, dest_image, ratio)
 stop_time = time.perf_counter()
 time_elapsed = stop_time - start_time
 print(f"{time_elapsed:.2} s")
