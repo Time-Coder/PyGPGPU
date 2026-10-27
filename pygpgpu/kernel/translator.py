@@ -251,7 +251,7 @@ def infer_ctype(value:Any)->Any:
 
 def _is_device_handle(value:Any)->bool:
     """True for the oop objects passed to a kernel by opaque handle."""
-    return type(value).__name__ in ("TextureObject", "SurfaceObject", "texture2d_t")
+    return type(value).__name__ in ("TextureObject", "SurfaceObject", "cudaTextureObject_t")
 
 def type_sig(types:List[Any])->str:
     parts:List[str] = []

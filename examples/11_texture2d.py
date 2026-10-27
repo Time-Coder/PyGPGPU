@@ -3,9 +3,9 @@
 The image class is named as it appears in kernel code, and is constructed from
 whatever the host already has -- a file path, a numpy array, or just a shape:
 
-    texture = texture2d_t("photo.png")      # read with imageio
-    texture = texture2d_t(numpy_image)      # (height, width[, channels])
-    texture = texture2d_t(shape=(h, w))     # allocate, fill later
+    texture = cudaTextureObject_t("photo.png")      # read with imageio
+    texture = cudaTextureObject_t(numpy_image)      # (height, width[, channels])
+    texture = cudaTextureObject_t(shape=(h, w))     # allocate, fill later
 
 Pass it to a kernel like any other argument; the backend binds it to whichever
 device and context the launch uses, so nothing here mentions either:
@@ -28,7 +28,7 @@ import numpy as np
 
 from pygpgpu import kernel, cuimport
 from pygpgpu.kernel import tex2D
-from pygpgpu.cuda.driver import CUDA, texture2d_t
+from pygpgpu.cuda.driver import CUDA, cudaTextureObject_t
 
 CUDA.print_info = False
 
@@ -76,8 +76,8 @@ def main():
 
     # Build the images before anything else runs: binding needs a current CUDA
     # context, and constructing one here is what establishes it.
-    texture_a = texture2d_t(ramp)
-    texture_b = texture2d_t(trailing)
+    texture_a = cudaTextureObject_t(ramp)
+    texture_b = cudaTextureObject_t(trailing)
     print("images                  :", texture_a, "and", texture_b)
 
     folder = tempfile.mkdtemp()

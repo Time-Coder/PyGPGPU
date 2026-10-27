@@ -15,7 +15,7 @@ from ..driver import (
     CUInfo,
     CUfunction,
     CUresult,
-    texture2d_t
+    cudaTextureObject_t
 )
 from .cuobject import CUObject
 from .program_info import ArgInfo
@@ -460,10 +460,10 @@ class Kernel(CUObject):
         arg_type_str = arg_info.type_str        
         base_type_str = arg_info.base_type_str
 
-        # A texture2d_t is a host-side description with no context of its own; the
+        # A cudaTextureObject_t is a host-side description with no context of its own; the
         # kernel binds it here, where the context is known, and keeps the resulting
         # objects alive for the launch.
-        if isinstance(value, texture2d_t):
+        if isinstance(value, cudaTextureObject_t):
             value = self._bind_image(value)
 
         # A texture (or surface) handle is passed by value as an opaque 64-bit
@@ -534,12 +534,12 @@ class Kernel(CUObject):
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
 
-    def _bind_image(self, image:texture2d_t)->Any:
+    def _bind_image(self, image:cudaTextureObject_t)->Any:
         """Turn a host-side image description into a device texture for this launch.
 
-        ``texture2d_t`` deliberately carries no context, so the binding happens here,
+        ``cudaTextureObject_t`` deliberately carries no context, so the binding happens here,
         where the kernel knows which context it runs in. A description that was bound
-        earlier (see ``texture2d_t.bind``) returns the texture it already holds.
+        earlier (see ``cudaTextureObject_t.bind``) returns the texture it already holds.
         """
         texture = image.bind()
         if texture is None:
