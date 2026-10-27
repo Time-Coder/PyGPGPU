@@ -167,6 +167,11 @@ if errors:
 shared = Image(ramp.copy())
 for backend in backends:
     dst = Image(shape=(HEIGHT, WIDTH), dtype=np.float32)
-    copy_image[backend](shared, dst)
-    print("%-8s reuses the same Image object: %s"
-          % (backend, bool(np.allclose(np.asarray(dst.read()), ramp))))
+    try:
+        copy_image[backend](shared, dst)
+        print("%-8s reuses the same Image object: %s"
+              % (backend, bool(np.allclose(np.asarray(dst.read()), ramp))))
+    except BaseException as error:
+        # A driver refusal is reported, not raised: the point of this block is reuse,
+        # and the same limitation is already annotated in the table above.
+        print("%-8s could not be exercised: %s" % (backend, str(error)[:60]))

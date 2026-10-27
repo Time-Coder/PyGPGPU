@@ -490,6 +490,7 @@ set_print_info(True)       # 恢复详细输出(默认)
 - 向量比较/swizzle 写、三元以上嵌套等按跨后端一致性优先做了限制(报错信息会给出替代写法);
 - HIP 后端不支持 `Image`: HIP 复用 CUDA 代码生成, 其中没有纹理对象类型, 并且在不支持纹理的硬件上 `hipTexObjectCreate` 会被拒绝(返回 "operation not supported", 例如 ROCm 7.2 Windows 下的集成 Radeon)。翻译器会抛出指明后端的 `PyKernelSyntaxError`; 图像 kernel 请使用 cuda、opencl 或 python;
 - `@kernel` 函数上的类型注解会被接受但忽略: 设备类型来自调用时的实参, 因为同一个 kernel 会按实参类型签名分别特化。注解供编辑器与类型检查器使用, 不参与翻译;
+- `@kernel` 签名可以带默认值, 调用也可以用关键字传参: 启动前会先绑定为位置顺序, 并补上省略的默认值。`*args`、`**kwargs` 与仅限关键字参数仍不支持;
 - fp16 (`np.float16`) 参数在 CUDA/HIP 后端不可用(建议 float32);
 - HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用;
 - 纯 Python 后端(`k["python"]`)不模拟 `gpu.local`(组内共享内存), 它是串行执行的, 没有并行工作项的概念。

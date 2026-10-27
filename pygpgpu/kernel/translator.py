@@ -546,8 +546,11 @@ class FunctionTranslator:
         self.scopes:List[Dict[str, Any]] = []
 
         args:List[ast.arg] = self.tree.args.args
-        if self.tree.args.vararg or self.tree.args.kwarg or self.tree.args.kwonlyargs or self.tree.args.defaults:
-            raise PyKernelSyntaxError("*args/**kwargs/keyword-only args/defaults are not supported", self.tree.args)
+        if self.tree.args.vararg or self.tree.args.kwarg or self.tree.args.kwonlyargs:
+            raise PyKernelSyntaxError("*args/**kwargs/keyword-only args are not supported", self.tree.args)
+        # Default values are accepted: a kernel argument is always supplied by the
+        # caller, so a default is a convenience for reading the signature rather than
+        # something the device code has to represent.
         if self_param and args and args[0].arg == self_param:
             args = args[1:]
         expected:int = len(args) + len(self.self_attr_types)

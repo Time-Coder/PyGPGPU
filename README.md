@@ -497,6 +497,7 @@ set_print_info(True)       # verbose again (the default)
 - vector comparison, writing through a swizzle, and nesting beyond three operands are restricted in favour of cross-backend consistency (the error message suggests a workaround);
 - `Image` is unsupported on the HIP backend: HIP reuses CUDA code generation, which has no texture object type, and `hipTexObjectCreate` is rejected with "operation not supported" on hardware without texture support (an integrated Radeon under ROCm 7.2 Windows, for instance). The translator raises a `PyKernelSyntaxError` naming the backend; use cuda, opencl or python for image kernels;
 - type annotations on a `@kernel` function are accepted and ignored: the device type comes from the actual argument at call time, since one kernel is specialized per argument-type signature. Annotations are there for editors and type checkers, not for translation;
+- a `@kernel` signature may carry default values, and a call may pass arguments by keyword: the call is bound to positional order before launch, with omitted defaults filled in. `*args`, `**kwargs` and keyword-only parameters remain unsupported;
 - fp16 (`np.float16`) arguments are unavailable on the CUDA/HIP backends (use float32);
 - the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used;
 - the pure-Python backend (`k["python"]`) does not emulate `gpu.local` (group-shared memory): it runs serially and has no parallel work items to share it.

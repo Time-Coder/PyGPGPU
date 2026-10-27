@@ -226,9 +226,63 @@ def get_device(selector:str)->Any:
     return _resolve_device(backend, device_sel)[0]
 
 
+def _bind_arguments(func:Callable, args:Tuple[Any, ...],
+                    kwargs:Dict[str, Any],
+                    skip_first:bool=False)->Tuple[Any, ...]:
+    """Turn a call into the positional tuple the launch path expects.
+
+    A kernel is launched positionally: the argument order decides the device parameter
+    order, and the work size is read from a named argument. Accepting keywords here
+    keeps the call site looking like ordinary Python without pushing that bookkeeping
+    into the launch path. Omitted parameters with a default are filled in, so the launch
+    always sees one value per device parameter.
+
+    ``func`` is the undecorated function, so the signature is the author's own.
+    ``skip_first`` drops the leading parameter of a method, whose receiver is supplied
+    separately by the caller.
+    """
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        if kwargs:
+            raise TypeError(
+                "keyword arguments need a retrievable signature; call positionally") from None
+        return args
+
+    parameters = list(signature.parameters.items())
+    if skip_first and parameters:
+        parameters = parameters[1:]
+        signature = signature.replace(
+            parameters=[inspect.Parameter(name, parameter.kind,
+                                          default=parameter.default)
+                        for name, parameter in parameters])
+
+    try:
+        bound = signature.bind_partial(*args, **kwargs)
+    except TypeError as error:
+        raise TypeError(str(error)) from None
+
+    ordered:List[Any] = []
+    missing:List[str] = []
+    for name, parameter in signature.parameters.items():
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            continue
+        if name in bound.arguments:
+            ordered.append(bound.arguments[name])
+        elif parameter.default is not parameter.empty:
+            ordered.append(parameter.default)
+        else:
+            missing.append(name)
+
+    if missing:
+        raise TypeError(
+            "missing %d required argument%s: %s"
+            % (len(missing), "" if len(missing) == 1 else "s", ", ".join(missing)))
+    return tuple(ordered)
+
+
 class _KernelCall:
     """Bracket-configuration form: k["cuda"][(64, 8)](args) / k[(64, 8)]["cuda"](args), any order."""
-
     def __init__(self, kernel:"PyKernel", instance:Any,
                  backend:Optional[str]=None, device:Optional[str]=None,
                  global_size:Optional[Tuple[int, ...]]=None, local_size:Optional[Tuple[int, ...]]=None):
@@ -253,42 +307,48 @@ class _KernelCall:
             (global_size if global_size is not None else self._global_size),
             (local_size if local_size is not None else self._local_size))
 
-    def __call__(self, *args:Any)->Any:
+    def __call__(self, *args:Any, **kwargs:Any)->Any:
         instance:Any = self._instance
-        call_args:Tuple[Any, ...] = args
+        instance_arg:Optional[Any] = None
         if self._kernel._is_method and instance is None:
             # class form: Klass.method["cuda"](instance, args...)
             if not args:
                 raise TypeError(
                     f"{self._kernel.__name__}() is an instance method; pass the instance "
                     f"as the first argument")
-            instance = args[0]
-            call_args = args[1:]
+            instance_arg = args[0]
+            args = args[1:]
+            instance = instance_arg
+        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+                                                    skip_first=self._kernel._is_method)
         return self._kernel._invoke(
             instance, call_args, self._backend, self._device, self._global_size, self._local_size)
 
-    def _launch(self, launch:str, args:Tuple[Any, ...])->Any:
+    def _launch(self, launch:str, args:Tuple[Any, ...],
+                kwargs:Optional[Dict[str, Any]]=None)->Any:
         """Shared body of the three launch styles, honouring the bracket selectors."""
         instance:Any = self._instance
-        call_args:Tuple[Any, ...] = args
         if self._kernel._is_method and instance is None:
             if not args:
                 raise TypeError(
                     f"{self._kernel.__name__}() is an instance method; pass the instance "
                     f"as the first argument")
             instance = args[0]
-            call_args = args[1:]
+            args = args[1:]
+        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args,
+                                                    kwargs or {},
+                                                    skip_first=self._kernel._is_method)
         return self._kernel._invoke(
             instance, call_args, self._backend, self._device,
             self._global_size, self._local_size, launch=launch)
 
-    def submit(self, *args:Any)->concurrent.futures.Future:
+    def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
         """Non-blocking launch of the bracketed form, e.g. ``k["cuda"].submit(...)``."""
-        return self._launch("submit", args)
+        return self._launch("submit", args, kwargs)
 
-    def async_call(self, *args:Any)->asyncio.Future:
+    def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
         """Non-blocking asyncio launch of the bracketed form, e.g. ``k["cuda"].async_call(...)``."""
-        return self._launch("async", args)
+        return self._launch("async", args, kwargs)
 
 
 class _BoundKernelMethod:
@@ -301,16 +361,24 @@ class _BoundKernelMethod:
     def __getitem__(self, item:Any)->_KernelCall:
         return _KernelCall(self._kernel, self._instance)[item]
 
-    def __call__(self, *args:Any)->Any:
-        return self._kernel._invoke(self._instance, args, None, None, None, None)
+    def __call__(self, *args:Any, **kwargs:Any)->Any:
+        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+                                                    skip_first=True)
+        return self._kernel._invoke(self._instance, call_args, None, None, None, None)
 
-    def submit(self, *args:Any)->concurrent.futures.Future:
+    def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
         """Non-blocking launch: ``instance.kernel_method.submit(...)``."""
-        return self._kernel._invoke(self._instance, args, None, None, None, None, launch="submit")
+        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+                                                    skip_first=True)
+        return self._kernel._invoke(self._instance, call_args, None, None, None, None,
+                                    launch="submit")
 
-    def async_call(self, *args:Any)->asyncio.Future:
+    def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
         """Non-blocking asyncio launch: ``instance.kernel_method.async_call(...)``."""
-        return self._kernel._invoke(self._instance, args, None, None, None, None, launch="async")
+        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+                                                    skip_first=True)
+        return self._kernel._invoke(self._instance, call_args, None, None, None, None,
+                                    launch="async")
 
 
 class PyKernel:
@@ -367,16 +435,18 @@ class PyKernel:
     def __getitem__(self, item:Any)->_KernelCall:
         return _KernelCall(self, None)[item]
 
-    def __call__(self, *args:Any)->Any:
+    def __call__(self, *args:Any, **kwargs:Any)->Any:
         if self._is_method:
             if not args:
                 raise TypeError(
                     f"{self.__name__}() is an instance method; call it on an instance "
                     f"or pass the instance as the first argument")
-            return self._invoke(args[0], args[1:], None, None, None, None)
-        return self._invoke(None, args, None, None, None, None)
+            call_args:Tuple[Any, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
+            return self._invoke(args[0], call_args, None, None, None, None)
+        call_args = _bind_arguments(self.raw_func, args, kwargs)
+        return self._invoke(None, call_args, None, None, None, None)
 
-    def submit(self, *args:Any)->concurrent.futures.Future:
+    def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
         """Launch without waiting, returning a ``concurrent.futures.Future``.
 
         Same arguments and same backend/work-size selection as calling the kernel
@@ -391,10 +461,12 @@ class PyKernel:
                 raise TypeError(
                     f"{self.__name__}() is an instance method; call it on an instance "
                     f"or pass the instance as the first argument")
-            return self._invoke(args[0], args[1:], None, None, None, None, launch="submit")
-        return self._invoke(None, args, None, None, None, None, launch="submit")
+            call_args:Tuple[Any, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
+            return self._invoke(args[0], call_args, None, None, None, None, launch="submit")
+        call_args = _bind_arguments(self.raw_func, args, kwargs)
+        return self._invoke(None, call_args, None, None, None, None, launch="submit")
 
-    def async_call(self, *args:Any)->asyncio.Future:
+    def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
         """Launch without waiting, returning an ``asyncio.Future``.
 
         The asyncio counterpart of ``submit``; use ``await`` on the result. The
@@ -406,8 +478,10 @@ class PyKernel:
                 raise TypeError(
                     f"{self.__name__}() is an instance method; call it on an instance "
                     f"or pass the instance as the first argument")
-            return self._invoke(args[0], args[1:], None, None, None, None, launch="async")
-        return self._invoke(None, args, None, None, None, None, launch="async")
+            call_args:Tuple[Any, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
+            return self._invoke(args[0], call_args, None, None, None, None, launch="async")
+        call_args = _bind_arguments(self.raw_func, args, kwargs)
+        return self._invoke(None, call_args, None, None, None, None, launch="async")
 
     def _invoke(self, instance:Any, args:Tuple[Any, ...],
                 backend_sel:Optional[str], device_sel:Optional[str],
