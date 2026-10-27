@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pygpgpu"
-version = "0.2.0"
+version = "0.2.1"
 description = "Run Python functions as GPU kernels with the @kernel decorator (OpenCL / CUDA / HIP); handwritten .cl/.cu/.hip kernels import like Python modules"
 readme = "README.md"
 requires-python = ">=3.7"
