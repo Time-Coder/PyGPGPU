@@ -87,14 +87,14 @@ __global__ void fill(cudaSurfaceObject_t surf, int w, int h)
 
 
 @kernel
-def fill_surface1d(surf, width):
+def fill_surface1d(surf: cudaSurfaceObject_t, width: int):
     """Write a ramp into a 1D surface."""
     for x in range(width):
         surf1Dwrite(surf, x * 3.0, x)
 
 
 @kernel
-def fill_surface3d(surf, width, height, depth):
+def fill_surface3d(surf: cudaSurfaceObject_t, width: int, height: int, depth: int):
     """Write a ramp into a 3D surface."""
     for z in range(depth):
         for y in range(height):
@@ -103,7 +103,7 @@ def fill_surface3d(surf, width, height, depth):
 
 
 @kernel
-def read_surface3d(surf, out, width, height, depth):
+def read_surface3d(surf: cudaSurfaceObject_t, out: np.ndarray, width: int, height: int, depth: int):
     """Read a 3D surface back through surf3Dread."""
     for z in range(depth):
         for y in range(height):
@@ -112,7 +112,7 @@ def read_surface3d(surf, out, width, height, depth):
 
 
 @kernel
-def sample_python(tex, out, width, height):
+def sample_python(tex: cudaTextureObject_t, out: np.ndarray, width: int, height: int):
     """The same sampling as ``sample_flat``, written as a Python kernel."""
     for y in range(height):
         for x in range(width):
@@ -120,7 +120,7 @@ def sample_python(tex, out, width, height):
 
 
 @kernel
-def fill_python(surf, width, height):
+def fill_python(surf: cudaSurfaceObject_t, width: int, height: int):
     """Write a ramp into the surface from a Python kernel."""
     for y in range(height):
         for x in range(width):
@@ -128,7 +128,7 @@ def fill_python(surf, width, height):
 
 
 @kernel
-def read_python(surf, out, width, height):
+def read_python(surf: cudaSurfaceObject_t, out: np.ndarray, width: int, height: int):
     """Read the surface back through surf2Dread."""
     for y in range(height):
         for x in range(width):

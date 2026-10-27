@@ -26,14 +26,14 @@ from pygpgpu import kernel, gpu
 
 
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float):
     """Magic loop: the interpreter runs this once and the loop covers every element."""
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]
 
 
 @kernel
-def histogram(data, counts):
+def histogram(data: np.ndarray, counts: np.ndarray):
     """gid-style: the interpreter runs this once per index of data (gpu.work_size)."""
     gpu.work_size(data)
     i = gpu.get_global_id(0)

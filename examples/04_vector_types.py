@@ -19,14 +19,14 @@ from pygpgpu import kernel, funcs, float4
 
 
 @kernel
-def normalize_points(points, out):
+def normalize_points(points: np.ndarray, out: np.ndarray):
     """Normalize each row's 4-component vector: funcs.normalize -> device builtin."""
     for i, v in enumerate(points):
         out[i] = funcs.normalize(v)
 
 
 @kernel
-def swizzle_points(points, out):
+def swizzle_points(points: np.ndarray, out: np.ndarray):
     """Swizzle demo: reorder components to (x,w,z,y), scale by a scalar, then
     add a float4 instance."""
     for i in range(out.shape[0]):

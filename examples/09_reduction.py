@@ -42,7 +42,7 @@ def launch_size(n, local=256):
 
 
 @kernel
-def sum_atomic(x, out):
+def sum_atomic(x: np.ndarray, out: np.ndarray):
     """One atomic add per element: the simplest correct reduction."""
     gpu.work_size(x)  # declare the iteration domain; erased at translation
     i = gpu.get_global_id(0)
@@ -50,7 +50,7 @@ def sum_atomic(x, out):
 
 
 @kernel
-def sum_strided(x, out, n):
+def sum_strided(x: np.ndarray, out: np.ndarray, n: np.int32):
     """Each work item sums a strided slice into a register, then one atomic add.
 
     `range()` steps must be constant in a kernel, so the strided walk uses `while`.
@@ -74,7 +74,7 @@ GROUP = 256  # work items per group, matching the local buffer size below
 
 
 @kernel
-def sum_local_tree(x, out, n):
+def sum_local_tree(x: np.ndarray, out: np.ndarray, n: np.int32):
     """Tree reduction through local (shared) memory: log2(GROUP) steps per group."""
     gpu.work_size(x)
     g = gpu.get_group_id(0)

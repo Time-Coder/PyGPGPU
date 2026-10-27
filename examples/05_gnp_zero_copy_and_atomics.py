@@ -26,19 +26,19 @@ from pygpgpu import kernel, gpu
 
 
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float):
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]
 
 
 @kernel
-def add_inplace(x, c):
+def add_inplace(x: np.ndarray, c: float):
     for i in range(x.shape[0]):
         x[i] = x[i] + c
 
 
 @kernel
-def histogram(data, counts):
+def histogram(data: np.ndarray, counts: np.ndarray):
     # A gid-style kernel must declare its iteration domain explicitly (there is no magic
     # loop to read it from): `data` supplies the launch size, dimension by dimension.
     gpu.work_size(data)
@@ -50,7 +50,7 @@ GROUP_ITEMS = 1024  # elements per work group = 4 elements/thread * 256 threads
 
 
 @kernel
-def group_reduce(x, out):
+def group_reduce(x: np.ndarray, out: np.ndarray):
     """Reduction: each work group first reduces into local memory, then thread
     0 atomically adds the partial sum into the global out."""
     g = gpu.get_group_id(0)

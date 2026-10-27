@@ -43,21 +43,21 @@ from pygpgpu import Image, kernel
 
 
 @kernel
-def copy_image(src, dst):
+def copy_image(src: Image, dst: Image):
     """Integer subscripts: each output texel is the matching input texel."""
     for y, x in np.ndindex(dst.shape):
         dst[y, x] = src[y, x]
 
 
 @kernel
-def shift_image(src, dst):
+def shift_image(src: Image, dst: Image):
     """Fractional subscripts: sample a quarter texel into the next one."""
     for y, x in np.ndindex(dst.shape):
         dst[y, x] = src[y, x + 0.25]
 
 
 @kernel
-def convolve_image(src, dst):
+def convolve_image(src: Image, dst: Image):
     """A 3x3 box blur, exercising many samples per output texel."""
     for y, x in np.ndindex(dst.shape):
         total = 0.0

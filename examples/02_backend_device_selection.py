@@ -20,7 +20,7 @@ from pygpgpu import kernel, list_devices, get_device, DEFAULT_BACKEND_ORDER
 # This @kernel specifies neither backend nor device; it only demonstrates
 # device resolution.
 @kernel
-def one_fill(out):
+def one_fill(out: np.ndarray):
     for i in range(out.shape[0]):
         out[i] = 1
 

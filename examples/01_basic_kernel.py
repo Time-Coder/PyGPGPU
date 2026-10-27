@@ -16,7 +16,7 @@ from pygpgpu import kernel
 
 
 @kernel
-def saxpy(x, y, out, alpha):
+def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float):
     """SAXPY: out[i] = x[i] * alpha + y[i]."""
     for i in range(out.shape[0]):
         out[i] = x[i] * alpha + y[i]

@@ -20,21 +20,21 @@ from pygpgpu import kernel
 
 
 @kernel
-def matrix_add(m, out, k):
+def matrix_add(m: np.ndarray, out: np.ndarray, k: float):
     """Elementwise 2D add of a scalar: (y, x) maps one-to-one to a work-item."""
     for y, x in np.ndindex(out.shape):
         out[y, x] = m[y, x] + k
 
 
 @kernel
-def square_each(m, out):
+def square_each(m: np.ndarray, out: np.ndarray):
     """np.ndenumerate gives both index and value; each element writes its own slot (naturally parallel)."""
     for (y, x), v in np.ndenumerate(m):
         out[y, x] = v * v
 
 
 @kernel
-def row_sums(m, out):
+def row_sums(m: np.ndarray, out: np.ndarray):
     """Reduction example: the outer range gives one work-item per row, the
     inner range accumulates sequentially within the row."""
     for row in range(out.shape[0]):
@@ -53,7 +53,7 @@ class Model:
         self.bias = bias
 
     @kernel
-    def apply(self, x, out):
+    def apply(self, x: np.ndarray, out: np.ndarray):
         """self.weights / self.bias are collected and passed as device args."""
         for i in range(out.shape[0]):
             out[i] = x[i] * self.weights[i] + self.bias
@@ -77,14 +77,14 @@ class Layer:
         return min(max(v, 0.0), self.scale)
 
     @kernel
-    def run(self, x, out):
+    def run(self, x: np.ndarray, out: np.ndarray):
         """Calls self.clamp01 (same class) and Activations.double (another class, static)."""
         for i in range(out.shape[0]):
             out[i] = self.clamp01(Activations.double(x[i]))
 
 
 @kernel
-def static_double(x, out):
+def static_double(x: np.ndarray, out: np.ndarray):
     """staticmethod can be decorated too (in either decorator order)."""
     for i in range(out.shape[0]):
         out[i] = x[i] * 2

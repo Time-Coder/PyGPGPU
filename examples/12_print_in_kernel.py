@@ -30,7 +30,7 @@ from pygpgpu import kernel, float4
 
 
 @kernel
-def inspect(a, out):
+def inspect(a: np.ndarray, out: np.ndarray):
     """Print every element with its type-dependent rendering, then copy it through."""
     for i in range(out.shape[0]):
         print("i =", i, "a[i] =", a[i], "positive =", a[i] > 0.0)
@@ -38,7 +38,7 @@ def inspect(a, out):
 
 
 @kernel
-def inspect_vectors(vecs, out):
+def inspect_vectors(vecs: np.ndarray, out: np.ndarray):
     """A vector argument prints like its python repr."""
     for i in range(out.shape[0]):
         print("vec", i, "=", vecs[i])
