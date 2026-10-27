@@ -477,8 +477,23 @@ refused with a message asking for padding to 4, because RGB is not a device imag
 
 Coordinates follow CUDA's texel space: texel i spans [i, i+1), so an integer subscript
 samples that texel's centre and a fractional one addresses a position between texels,
-which a linear filter blends. `filter` is `point` or `linear`; `address` is `clamp`,
-`wrap` or `mirror`. Both are fixed for the whole image, so no kernel takes a sampler.
+which a linear filter blends. Both rules are fixed for the whole image, so no kernel
+takes a sampler, and both are given as enums (a plain string with the member's value
+still works):
+
+```python
+from pygpgpu import ImageFilter, ImageAddress
+
+Image(arr, filter=ImageFilter.LINEAR, address=ImageAddress.CLAMP)
+Image(arr, filter="linear")                       # same thing
+```
+
+`ImageFilter` is `POINT` or `LINEAR`. `ImageAddress` is `CLAMP`, `WRAP` or `MIRROR`, but
+only `CLAMP` is portable: launching an image with `WRAP` or `MIRROR` on the cuda or
+opencl backend raises, because the device samplers read the edge texel for those modes
+under texel-space coordinates (measured on every GPU available while developing this) and
+the result would differ from the `python` backend. The `python` backend implements all
+three, so a kernel that needs wrap or mirror can run there.
 
 The HIP backend refuses images: it reuses CUDA code generation, which has no texture
 object type, and the driver rejects `hipTexObjectCreate` on hardware without texture

@@ -24,9 +24,14 @@ filter interpolates:
     src[y, x]        integer: the texel itself
     src[y, x + 0.25] fractional: a quarter of the way into the next texel
 
-Sampling rules are fixed for the whole image, so a kernel needs no sampler argument:
+Sampling rules are fixed for the whole image, so a kernel needs no sampler argument, and
+both are enums (a string with the member value still works):
 
-    Image(..., filter="linear", address="clamp")
+    Image(..., filter=ImageFilter.LINEAR, address=ImageAddress.CLAMP)
+
+Only ImageAddress.CLAMP is portable: the device samplers read the edge texel for WRAP and
+MIRROR under texel-space coordinates, so a GPU launch with those raises rather than
+returning numbers that differ from the python backend.
 
 The channel count is a separate argument, never inferred from the shape, so a 4x4 grey
 image and a 4-pixel RGBA row cannot be confused:

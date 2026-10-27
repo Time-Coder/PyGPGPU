@@ -30,15 +30,70 @@ the GPU paths in agreement.
 """
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 
 
-# Filters and address modes are strings here so the class stays backend-neutral;
-# each backend maps them onto its own enumerations.
-FILTERS:Tuple[str, ...] = ("point", "linear")
-ADDRESS_MODES:Tuple[str, ...] = ("clamp", "wrap", "mirror")
+class StrEnum(str, Enum):
+    """A string-valued enum (the stdlib one is 3.11+, and this package supports 3.7).
+
+    Subclassing str keeps the members comparable with plain strings, so an existing
+    ``filter="linear"`` call site keeps working alongside ``filter=ImageFilter.LINEAR``.
+    """
+
+    def __str__(self)->str:
+        return str(self.value)
+
+    @classmethod
+    def parse(cls, value:Any, what:str)->"StrEnum":
+        """Accept a member, its value, or its name (case-insensitive)."""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            try:
+                return cls(value)
+            except ValueError:
+                pass
+            try:
+                return cls[value.strip().upper()]
+            except KeyError:
+                pass
+        options:str = ", ".join(member.value for member in cls)
+        raise ValueError("%s must be one of %s, got %r" % (what, options, value))
+
+
+# Sampling rules are enums so the class stays backend-neutral while the choices stay
+# discoverable. The names are the neutral ones: CUDA spells the filters POINT/LINEAR and
+# OpenCL spells them NEAREST/LINEAR, and the address modes differ just as much
+# (CLAMP_TO_EDGE vs CLAMP, REPEAT vs WRAP), so neither backend's vocabulary is used here.
+class ImageFilter(StrEnum):
+    """How a sample is computed from the texels around its coordinate."""
+
+    POINT = "point"      # the one texel the coordinate falls in
+    LINEAR = "linear"    # the neighbouring texel centres, blended by distance
+
+
+class ImageAddress(StrEnum):
+    """What a coordinate outside the image reads.
+
+    Only CLAMP is portable today. WRAP and MIRROR are implemented on the python backend
+    and have device objects that request them, but the GPU sampling paths read the edge
+    texel instead of wrapping: with texel-space coordinates the drivers ignore
+    CL_ADDRESS_REPEAT / CL_ADDRESS_MIRRORED_REPEAT and CU_TR_ADDRESS_MODE_WRAP /
+    _MIRROR (measured on the NVIDIA and AMD OpenCL devices and the CUDA device available
+    while developing this). Launching such an image on a GPU backend raises rather than
+    returning different numbers from the same kernel on the python backend.
+    """
+
+    CLAMP = "clamp"      # the nearest edge texel
+    WRAP = "wrap"        # continue from the opposite edge (python backend only)
+    MIRROR = "mirror"    # reflect back inside the image (python backend only)
+
+
+FILTERS:Tuple[str, ...] = tuple(member.value for member in ImageFilter)
+ADDRESS_MODES:Tuple[str, ...] = tuple(member.value for member in ImageAddress)
 
 # Channel counts an image may have. The device formats a sample can carry are 1, 2 or 4
 # wide; 3-channel data is rejected explicitly (see _normalise_channels) rather than being
@@ -75,15 +130,10 @@ class Image:
                  shape:Optional[Tuple[int, ...]]=None,
                  dtype:Any=np.float32,
                  channels:Optional[int]=None,
-                 filter:str="point",
-                 address:str="clamp"):
-        if filter not in FILTERS:
-            raise ValueError(
-                "filter must be one of %s, got %r" % (", ".join(FILTERS), filter))
-        if address not in ADDRESS_MODES:
-            raise ValueError(
-                "address must be one of %s, got %r"
-                % (", ".join(ADDRESS_MODES), address))
+                 filter:Union[ImageFilter, str]=ImageFilter.POINT,
+                 address:Union[ImageAddress, str]=ImageAddress.CLAMP):
+        self._filter:ImageFilter = ImageFilter.parse(filter, "filter")
+        self._address:ImageAddress = ImageAddress.parse(address, "address")
         self._channels:int = 1 if channels is None else _normalise_channels(channels)
         # Whether the caller named a channel axis at all. channels=None means every axis of
         # the given shape is spatial; an explicit value (even 1) makes the last axis the
@@ -112,8 +162,6 @@ class Image:
             self._dtype = np.dtype(dtype)
             self._data = None
 
-        self._filter:str = filter
-        self._address:str = address
         # Device bindings, keyed by backend name: one Image can be used by several.
         self._bindings:dict = {}
 
@@ -131,11 +179,11 @@ class Image:
     # ---------- description ----------
 
     @property
-    def filter(self)->str:
+    def filter(self)->ImageFilter:
         return self._filter
 
     @property
-    def address(self)->str:
+    def address(self)->ImageAddress:
         return self._address
 
     @property
@@ -257,7 +305,7 @@ class Image:
         per_axis = []
         for axis, value in enumerate(coords):
             limit = self._extents[axis]
-            if self._filter == "point":
+            if self._filter is ImageFilter.POINT:
                 per_axis.append([(1.0, self._clamp(int(np.floor(value)), limit))])
                 continue
 
@@ -287,9 +335,9 @@ class Image:
         """Apply the address mode to one axis."""
         if 0 <= texel < limit:
             return texel
-        if self._address == "clamp":
+        if self._address is ImageAddress.CLAMP:
             return 0 if texel < 0 else limit - 1
-        if self._address == "wrap":
+        if self._address is ImageAddress.WRAP:
             return texel % limit
         # mirror
         period = 2 * limit - 1 if limit > 1 else 1
@@ -365,13 +413,14 @@ class Image:
         # array that already has a surface is accepted.
         surface = SurfaceObject(array)
 
-        filter_mode = (CUfilter_mode.CU_TR_FILTER_MODE_LINEAR
-                       if self._filter == "linear"
-                       else CUfilter_mode.CU_TR_FILTER_MODE_POINT)
+        filter_mode = {
+            ImageFilter.POINT: CUfilter_mode.CU_TR_FILTER_MODE_POINT,
+            ImageFilter.LINEAR: CUfilter_mode.CU_TR_FILTER_MODE_LINEAR,
+        }[self._filter]
         address_mode = {
-            "clamp": CUaddress_mode.CU_TR_ADDRESS_MODE_CLAMP,
-            "wrap": CUaddress_mode.CU_TR_ADDRESS_MODE_WRAP,
-            "mirror": CUaddress_mode.CU_TR_ADDRESS_MODE_MIRROR,
+            ImageAddress.CLAMP: CUaddress_mode.CU_TR_ADDRESS_MODE_CLAMP,
+            ImageAddress.WRAP: CUaddress_mode.CU_TR_ADDRESS_MODE_WRAP,
+            ImageAddress.MIRROR: CUaddress_mode.CU_TR_ADDRESS_MODE_MIRROR,
         }[self._address]
 
         # Texel-space coordinates, so the device sees the numbers the host path uses.

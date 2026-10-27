@@ -594,6 +594,11 @@ class Kernel(CLObject):
             from ...image import Image as _Image
             original_image:Any = value if isinstance(value, _Image) else None
             if original_image is not None:
+                # Only CLAMP is portable, and the sampler is built during translation, so
+                # this repeats the check to fail with the same message if that path was
+                # skipped (a cached kernel, for instance).
+                from ...kernel.decorator import _check_image_address
+                _check_image_address(original_image, "opencl")
                 value = image_type(
                     (original_image.data if original_image.data is not None
                      else np.zeros(original_image.shape, original_image.dtype)),

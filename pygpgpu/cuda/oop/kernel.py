@@ -466,6 +466,11 @@ class Kernel(CUObject):
         # PyKernel._bind_images); pick the view this argument's type needs.
         from ...image import Image as _Image
         if isinstance(value, _Image):
+            # Only CLAMP is portable: the device samplers read the edge texel for wrap and
+            # mirror under texel-space coordinates, so refuse rather than launch a kernel
+            # whose numbers would not match the python backend.
+            from ...kernel.decorator import _check_image_address
+            _check_image_address(value, "cuda")
             array, texture, surface = value.bind_cuda()
             written = (base_type_str == "cudaSurfaceObject_t") or arg_info.need_read_back
             handle = surface if written else texture

@@ -58,7 +58,7 @@ from .vec_types import funcs          # dual-purpose function library: runs on t
 # Kernels index an Image like an array (src[y, x]); the subscript is translated into
 # each backend's sampling call, and the python backend runs the host implementation
 # in image.py, so one kernel yields the same numbers everywhere.
-from .image import Image
+from .image import Image, ImageAddress, ImageFilter
 
 
 # ---------- Top-level exports: import hooks for handwritten kernel files ----------
@@ -112,7 +112,7 @@ __all__ = [
     "list_devices", "get_device", "available_devices",
     "set_default_device", "get_default_device",
     # images
-    "Image",
+    "Image", "ImageFilter", "ImageAddress",
     # logging
     "set_print_info",
     # vec_types

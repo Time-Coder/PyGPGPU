@@ -467,8 +467,20 @@ Image(shape=(4, 4, 3), channels=2)         # 4x4x3 体素, 2 通道
 因为 RGB 不是设备图像格式。
 
 坐标遵循 CUDA 的纹元空间: 纹元 i 覆盖 [i, i+1), 因此整数下标取该纹元中心, 小数下标取纹元
-之间的位置, 由线性滤波插值。`filter` 可选 `point`/`linear`, `address` 可选 `clamp`/
-`wrap`/`mirror`。两者对整个图像固定, 因此 kernel 不需要 sampler 参数。
+之间的位置, 由线性滤波插值。两者对整个图像固定, 因此 kernel 不需要 sampler 参数; 并且都以枚举
+给出(直接传成员值的字符串同样可用):
+
+```python
+from pygpgpu import ImageFilter, ImageAddress
+
+Image(arr, filter=ImageFilter.LINEAR, address=ImageAddress.CLAMP)
+Image(arr, filter="linear")                       # 等价写法
+```
+
+`ImageFilter` 为 `POINT` 或 `LINEAR`。`ImageAddress` 为 `CLAMP`、`WRAP` 或 `MIRROR`, 但只有
+`CLAMP` 可移植: 在 cuda 或 opencl 后端上使用 `WRAP`/`MIRROR` 的图像会在启动时报错, 因为在
+纹元空间坐标下设备采样器对这两种模式只读取边缘纹元(在开发时所有可用 GPU 上实测), 结果会与
+`python` 后端不同。`python` 后端实现了全部三种模式, 需要环绕或镜像的 kernel 可以在那里运行。
 
 HIP 后端拒绝图像: 它复用 CUDA 代码生成, 其中没有纹理对象类型, 且在不支持纹理的硬件上
 驱动会拒绝 `hipTexObjectCreate`。
