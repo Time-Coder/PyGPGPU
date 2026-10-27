@@ -110,6 +110,28 @@ def histogram(data, counts):
 
 kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `gpu.get_global_id` 的写法里声明 `gpu.work_size(x)` —— 这条语句只在 host 侧生效, 会被翻译器擦除, 并贡献 `x` 的全部维度。用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
 
+### 在 kernel 里打印
+
+在 OpenCL 与 CUDA 后端上, kernel 函数体里的 `print()` 可以直接用: 它会被翻译成设备端 `printf`, 打印出与 Python 相同的那一行, 调试 kernel 不必再手写 C。
+
+```python
+@kernel
+def inspect(a, out):
+    for i in range(out.shape[0]):
+        print("i =", i, "a[i] =", a[i], "ok =", a[i] > 0, "v =", float2(a[i], a[i] * 2))
+        out[i] = a[i]
+```
+
+参数之间用一个空格分隔, 行末换行, 与 `print` 一致。每个值按 `str()` 的写法输出: bool 为 `True`/`False`, 整数为十进制, 浮点数为 Python 的最短往返形式(`2.0`、`0.1`、`1e+20`), 向量为 `float4(1.0, 2.0, 3.0, 4.0)`。`None` 打印为 `None`, 字面量字符串会变成固定文本。
+
+有三点需要注意:
+
+- 一行会展开成 **每个分支叶子一个 `printf`**, 由算出的下标选择。原因是设备上每个 printf 调用点都有自己的输出缓冲区, 而缓冲区是按调用点排空回收的: 一行若拆成多个 printf 调用, 打印出来会与其他工作项交错拼接。因此一个 bool 参数会让该行的 printf 数量翻倍(一个 `True`、一个 `False`), 一个浮点参数会乘以它的位数预算; 一行参数过多时会触发保护并提示拆成多次调用;
+- 行与行之间的顺序是设备的调度顺序, 而不是循环顺序, 因为工作项是并发执行的。每一行本身保持完整;
+- **HIP 后端不支持 `print()`**: 在被测的 ROCm 7.2 机器上, 启动带这些 printf 调用点的 kernel 会让 AMD 驱动丢失设备(随后 Windows 会重置显示驱动)。因此在为 HIP 编译时, kernel 体内的 `print()` 会直接报错: 想看输出请用 `opencl` 或 `cuda` 后端运行, 或者把结果写进数组再回到 host 查看。
+
+纯 Python 后端(`k["python"]`)无需翻译: 它的 `print` 就是普通内建函数, 因此关键字参数和打印数组在那里同样可用。
+
 ### 非阻塞启动
 
 装饰后的 kernel 与手写 kernel 一样提供 `submit` / `async_call`, 所以 `@kernel` 函数不用写任何 C 代码也能异步启动:
@@ -431,6 +453,7 @@ set_print_info(True)       # 恢复详细输出(默认)
 ## 已知限制
 
 - `@kernel` 不支持: 字符串/列表/字典、闭包、递归、kernel 返回值、多维 shape 动态索引;
+- kernel 里的 `print()` 逐个参数处理 `True`/`False`、整数、浮点数与向量, 不接受 `sep`/`end`/`file` 关键字参数, 也不能直接打印数组(请打印某个元素)。含大量浮点数的一行会展开成一个按位数选择的 `switch`, 特别长的一行会触达代码体积保护, 请拆成多次调用。HIP 后端直接拒绝 `print()`: 在被测运行时上, 这类 kernel 会让驱动丢失设备;
 - 向量比较/swizzle 写、三元以上嵌套等按跨后端一致性优先做了限制(报错信息会给出替代写法);
 - fp16 (`np.float16`) 参数在 CUDA/HIP 后端不可用(建议 float32);
 - HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用;

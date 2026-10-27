@@ -4,7 +4,7 @@ CUDA names the host objects after the device types, so a kernel signature and th
 call site use the same spelling:
 
     texture = cudaTextureObject_t(image)      # kernel reads through tex2D
-    surface = cudaSurfaceObject_t(shape=(h, w))  # kernel writes through surf2Dwrite
+    surface = cudaSurfaceObject_t(shape=(width, height))
 
 Both are built from what the host already has -- a file path, a numpy array, or just
 a shape -- and take an image of 1, 2 or 3 spatial dimensions, optionally with 1, 2 or
@@ -37,7 +37,8 @@ import tempfile
 import numpy as np
 
 from pygpgpu import kernel, cuimport
-from pygpgpu.kernel import surf2Dread, surf2Dwrite, tex2D
+from pygpgpu.kernel import (surf1Dwrite, surf2Dread, surf2Dwrite,
+                            surf3Dread, surf3Dwrite, tex2D)
 from pygpgpu.cuda.driver import CUDA, cudaSurfaceObject_t, cudaTextureObject_t
 
 CUDA.print_info = False
@@ -84,6 +85,31 @@ __global__ void fill(cudaSurfaceObject_t surf, int w, int h)
 
 
 @kernel
+def fill_surface1d(surf, width):
+    """Write a ramp into a 1D surface."""
+    for x in range(width):
+        surf1Dwrite(surf, x * 3.0, x)
+
+
+@kernel
+def fill_surface3d(surf, width, height, depth):
+    """Write a ramp into a 3D surface."""
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                surf3Dwrite(surf, ((z * height + y) * width + x) * 2.0, x, y, z)
+
+
+@kernel
+def read_surface3d(surf, out, width, height, depth):
+    """Read a 3D surface back through surf3Dread."""
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                out[(z * height + y) * width + x] = surf3Dread(surf, x, y, z)
+
+
+@kernel
 def sample_python(tex, out, width, height):
     """The same sampling as ``sample_flat``, written as a Python kernel."""
     for y in range(height):
@@ -123,10 +149,12 @@ def main():
 
     # A surface has to be created before a module using tex2D/surf2Dwrite loads as
     # well, since both are "new device texture object" calls to the driver.
-    surface = cudaSurfaceObject_t(shape=(height, width))
+    surface = cudaSurfaceObject_t(shape=(width, height))
+    surface1d = cudaSurfaceObject_t(shape=(64,))
+    surface3d = cudaSurfaceObject_t(shape=(width, height, depth))
 
     print("textures                :", texture_a, texture_3d)
-    print("surface                 :", surface)
+    print("surfaces                :", surface, surface1d, surface3d)
 
     folder = tempfile.mkdtemp()
     with open(os.path.join(folder, "texture2d.cu"), "w") as handle:
@@ -166,6 +194,24 @@ def main():
     read_python["cuda"](surface, out_s, np.int32(width), np.int32(height))
     print("surface read, surf2Dread:", bool(
         np.array_equal(out_s.reshape(height, width), expected)))
+
+    fill_surface1d["cuda"](surface1d, np.int32(64))
+    expect1d = np.arange(64, dtype=np.float32) * 3.0
+    print("1D surface, surf1Dwrite :", bool(
+        np.array_equal(surface1d.read(), expect1d)))
+
+    fill_surface3d["cuda"](surface3d, np.int32(width), np.int32(height),
+                          np.int32(depth))
+    expect3d = (np.arange(width * height * depth, dtype=np.float32) * 2.0).reshape(
+        depth, height, width)
+    print("3D surface, surf3Dwrite :", bool(
+        np.array_equal(surface3d.read(), expect3d)))
+
+    out_v3 = np.zeros(width * height * depth, dtype=np.float32)
+    read_surface3d["cuda"](surface3d, out_v3, np.int32(width), np.int32(height),
+                           np.int32(depth))
+    print("3D surface, surf3Dread  :", bool(
+        np.array_equal(out_v3.reshape(depth, height, width), expect3d)))
 
 
 if __name__ == "__main__":

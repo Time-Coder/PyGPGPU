@@ -6,19 +6,7 @@ import numpy as np
 import imageio.v3 as iio
 
 from ...constants import KernelFlags
-
-
-def _split_channels(shape:Tuple[int, ...])->Tuple[Tuple[int, ...], int]:
-    """Split a trailing channel axis from a shape.
-
-    A last axis of 1, 2 or 4 is a channel count, matching what CUDA arrays accept.
-    Anything else is spatial, so an image of shape (8, 16, 3) is 2D with 3 channels
-    while (8, 16, 7) would be rejected as an unsupported channel count only when it
-    was meant as channels -- which is why the spatial reading is tried first.
-    """
-    if len(shape) > 1 and shape[-1] in (1, 2, 4):
-        return tuple(shape[:-1]), int(shape[-1])
-    return tuple(shape), 1
+from .image_shape import extents_from_data, extents_from_shape, split_channels
 
 
 class cudaTextureObject_t:
@@ -67,18 +55,8 @@ class cudaTextureObject_t:
                 image = np.ascontiguousarray(image)
             # A trailing axis of size 1, 2 or 4 is read as channels; anything else
             # means the array is purely spatial (1D, 2D or 3D).
-            spatial, self._channels = _split_channels(image.shape)
-            if len(spatial) == 1:
-                self._width, self._height, self._depth = spatial[0], 1, 1
-            elif len(spatial) == 2:
-                self._height, self._width = spatial
-                self._depth = 1
-            elif len(spatial) == 3:
-                self._depth, self._height, self._width = spatial
-            else:
-                raise ValueError(
-                    "cudaTextureObject_t expects a 1D, 2D or 3D image, optionally with "
-                    "1, 2 or 4 channels, got shape %s" % (image.shape,))
+            self._channels = split_channels(image.shape)[1]
+            self._width, self._height, self._depth = extents_from_data(image.shape)
             self._image:Optional[np.ndarray] = image
             self._dtype:np.dtype = image.dtype
         elif shape is None:
@@ -86,18 +64,9 @@ class cudaTextureObject_t:
                 "cudaTextureObject_t needs either an image or a (width[, height"
                 "[, depth]]) shape")
         else:
-            spatial, self._channels = _split_channels(tuple(int(v) for v in shape))
-            if len(spatial) == 1:
-                self._width, self._height, self._depth = spatial[0], 1, 1
-            elif len(spatial) == 2:
-                self._height, self._width = spatial
-                self._depth = 1
-            elif len(spatial) == 3:
-                self._depth, self._height, self._width = spatial
-            else:
-                raise ValueError(
-                    "cudaTextureObject_t shape must have 1, 2 or 3 dimensions, "
-                    "optionally plus channels")
+            shape = tuple(int(v) for v in shape)
+            self._channels = split_channels(shape)[1]
+            self._width, self._height, self._depth = extents_from_shape(shape)
             self._dtype = np.dtype(dtype)
             self._image = None
 

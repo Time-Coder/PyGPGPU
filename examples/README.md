@@ -32,6 +32,7 @@ matching the rest of the repository.
 | [09_reduction.py](09_reduction.py) | Array-sum reduction: per-element atomics, strided private sums, and a local-memory tree reduction |
 | [10_async_launch.py](10_async_launch.py) | Non-blocking launches of a `@kernel` function: `submit` / `async_call` |
 | [11_python_backend.py](11_python_backend.py) | The pure-Python backend: `k["python"]`, magic loop vs gid-style, plus `submit`/`async_call` |
+| [12_print_in_kernel.py](12_print_in_kernel.py) | `print()` inside a kernel: translated to device `printf` with python's exact rendering |
 
 `@kernel` function bodies accept a docstring (the leading string literal is ignored by the
 translator and never reaches the generated GPU source), so writing explanations inside a

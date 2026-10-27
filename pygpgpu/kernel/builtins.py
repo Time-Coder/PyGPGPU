@@ -13,6 +13,10 @@ The translator recognizes calls on `gpu` and maps them to OpenCL/CUDA builtins p
 The `python` backend serves the same names from a thread-local frame instead: its
 interpreter runs the kernel body directly, so `gpu.get_global_id` and friends must
 report the work item the serial loop is currently emulating (see python_backend.py).
+
+Python's builtin ``print`` works inside a kernel body too: the translator turns it into
+device ``printf`` calls that print the same text (see ``FunctionTranslator._emit_print``).
+The `python` backend needs no translation there -- the interpreter prints as usual.
 """
 from __future__ import annotations
 
@@ -99,6 +103,46 @@ def tex3D(texture:Any, u:Any, v:Any, w:Any)->Any:
     """
     raise PyKernelSyntaxError(
         "tex3D() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
+def surf1Dread(surface:Any, x:Any)->Any:
+    """Read one element of a 1D CUDA surface, inside a @kernel body.
+
+    The translator rewrites the call into ``surf1Dread<float>(surface, x)``.
+    """
+    raise PyKernelSyntaxError(
+        "surf1Dread() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
+def surf1Dwrite(surface:Any, value:Any, x:Any)->Any:
+    """Write one element of a 1D CUDA surface, inside a @kernel body.
+
+    The translator rewrites the call into ``surf1Dwrite<float>(value, surface, x)``.
+    """
+    raise PyKernelSyntaxError(
+        "surf1Dwrite() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
+def surf3Dread(surface:Any, x:Any, y:Any, z:Any)->Any:
+    """Read one element of a 3D CUDA surface, inside a @kernel body.
+
+    The translator rewrites the call into ``surf3Dread<float>(surface, x, y, z)``.
+    """
+    raise PyKernelSyntaxError(
+        "surf3Dread() is a device builtin: it is translated inside a @kernel body and "
+        "cannot be called on the host")
+
+
+def surf3Dwrite(surface:Any, value:Any, x:Any, y:Any, z:Any)->Any:
+    """Write one element of a 3D CUDA surface, inside a @kernel body.
+
+    The translator rewrites the call into ``surf3Dwrite<float>(value, surface, x, y, z)``.
+    """
+    raise PyKernelSyntaxError(
+        "surf3Dwrite() is a device builtin: it is translated inside a @kernel body and "
         "cannot be called on the host")
 
 

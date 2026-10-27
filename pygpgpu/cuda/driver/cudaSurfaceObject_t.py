@@ -6,25 +6,28 @@ import numpy as np
 import imageio.v3 as iio
 
 from ...constants import KernelFlags
+from .image_shape import extents_from_data, extents_from_shape, split_channels
 
 
 class cudaSurfaceObject_t:
-    """A 2D image a kernel can write to, named exactly as the device type.
+    """A 1D, 2D or 3D image a kernel can write to, named exactly as the device type.
 
     A handwritten kernel takes ``cudaSurfaceObject_t`` and stores through
-    ``surf2Dwrite``; this is the host object that produces one:
+    ``surf1Dwrite`` / ``surf2Dwrite`` / ``surf3Dwrite``; this is the host object that
+    produces one:
 
         surface = cudaSurfaceObject_t(shape=(height, width))
         kernel["cuda"](surface, width, height)
         image = surface.read()          # bring the result back
 
-    It can also be built from an existing image to start from, and unlike a texture
-    it is readable and writable: the kernel's read/write analysis decides which
-    copies happen, so a surface written in one kernel can be read back here.
+    It accepts the same shapes as :class:`cudaTextureObject_t` -- one, two or three
+    spatial dimensions, optionally with 1, 2 or 4 channels -- and can be built from a
+    file path, a numpy array, or just a shape.
 
-    This is the CUDA analogue of OpenCL's ``image2d_t`` when the kernel has
-    write access. Storage is a device array created with the surface flag set, which
-    CUDA requires before a surface object can be bound to it.
+    Unlike a texture, which CUDA makes read-only, a surface is both readable and
+    writable, and the kernel's read/write analysis decides which copies happen.
+    Storage is a device array created with the surface flag set, which CUDA requires
+    before a surface object can bind to it.
     """
 
     def __init__(self, data:Union[str, np.ndarray, None]=None,
@@ -41,31 +44,20 @@ class cudaSurfaceObject_t:
 
         if data is not None:
             image = np.asarray(data)
-            if image.ndim not in (2, 3):
-                raise ValueError(
-                    "cudaSurfaceObject_t expects a (height, width) or "
-                    "(height, width, channels) image, got %d dimensions" % image.ndim)
-            if image.ndim == 3 and image.shape[2] not in (1, 2, 4):
-                raise ValueError(
-                    "cudaSurfaceObject_t supports 1, 2 or 4 channels per pixel, got %d"
-                    % image.shape[2])
             if not image.flags["C_CONTIGUOUS"]:
                 image = np.ascontiguousarray(image)
+            self._channels = split_channels(image.shape)[1]
+            self._width, self._height, self._depth = extents_from_data(image.shape)
             self._image:Optional[np.ndarray] = image
-            self._height:int = image.shape[0]
-            self._width:int = image.shape[1]
-            self._channels:int = image.shape[2] if image.ndim == 3 else 1
             self._dtype:np.dtype = image.dtype
         elif shape is None:
             raise ValueError(
-                "cudaSurfaceObject_t needs either an image or a (height, width) shape")
+                "cudaSurfaceObject_t needs either an image or a "
+                "(width[, height[, depth]]) shape")
         else:
-            if len(shape) < 2:
-                raise ValueError(
-                    "cudaSurfaceObject_t shape must be (height, width[, channels])")
-            self._height = int(shape[0])
-            self._width = int(shape[1])
-            self._channels = int(shape[2]) if len(shape) > 2 else 1
+            shape = tuple(int(v) for v in shape)
+            self._channels = split_channels(shape)[1]
+            self._width, self._height, self._depth = extents_from_shape(shape)
             self._dtype = np.dtype(dtype)
             self._image = None
 
@@ -77,8 +69,20 @@ class cudaSurfaceObject_t:
         return self._image
 
     @property
-    def shape(self)->Tuple[int, int]:
-        return (self._height, self._width)
+    def shape(self)->Tuple[int, ...]:
+        if self._depth > 1:
+            return (self._depth, self._height, self._width)
+        if self._height > 1:
+            return (self._height, self._width)
+        return (self._width,)
+
+    @property
+    def ndim(self)->int:
+        if self._depth > 1:
+            return 3
+        if self._height > 1:
+            return 2
+        return 1
 
     @property
     def height(self)->int:
@@ -87,6 +91,10 @@ class cudaSurfaceObject_t:
     @property
     def width(self)->int:
         return self._width
+
+    @property
+    def depth(self)->int:
+        return self._depth
 
     @property
     def channels(self)->int:
@@ -130,7 +138,7 @@ class cudaSurfaceObject_t:
         if context is None:
             return None
 
-        array = context.create_array(self._width, self._height, 1,
+        array = context.create_array(self._width, self._height, self._depth,
                                      self._dtype, self._channels, surface=True)
         if self._image is not None:
             array.set_data(self._image)
@@ -149,5 +157,5 @@ class cudaSurfaceObject_t:
         return surface.array.to_numpy()
 
     def __repr__(self)->str:
-        return "cudaSurfaceObject_t(%dx%d, %d channel(s), %s)" % (
-            self._width, self._height, self._channels, self._dtype)
+        return "cudaSurfaceObject_t(%s, %d channel(s), %s)" % (
+            "x".join(str(v) for v in self.shape), self._channels, self._dtype)

@@ -110,6 +110,28 @@ Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/compari
 
 A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `gpu.get_global_id`, declare `gpu.work_size(x)` — that statement is host-side only, erased by the translator, and contributes all of `x`'s dimensions. A `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
 
+### Printing from a kernel
+
+`print()` works inside a kernel on the OpenCL and CUDA backends: it is translated into device `printf` calls that write the same line Python would, so debugging a kernel needs no handwritten C.
+
+```python
+@kernel
+def inspect(a, out):
+    for i in range(out.shape[0]):
+        print("i =", i, "a[i] =", a[i], "ok =", a[i] > 0, "v =", float2(a[i], a[i] * 2))
+        out[i] = a[i]
+```
+
+Arguments are separated by one space and the line ends with a newline, exactly as `print` does. Values render the way `str()` renders them: `True`/`False` for bools, plain decimals for integers, Python's shortest round-trip form for floats (`2.0`, `0.1`, `1e+20`), and `float4(1.0, 2.0, 3.0, 4.0)` for vectors. `None` prints as `None`, and literal strings become fixed text.
+
+Three things to know:
+
+- a line is emitted as **one `printf` per branch leaf**, selected by a computed index, because each device printf call site has its own output buffer — devices drain those buffers call site by call site, so a line split across several printf calls would come back interleaved with other work items. A bool argument therefore doubles the number of printfs for its line (one for `True`, one for `False`) and a float multiplies it by its digit budget; an unusually busy line hits a guard that asks you to split it;
+- the order of the *lines* is the device's scheduling order, not the loop order, since work items run concurrently. A line as a whole stays intact; work items interleave between lines;
+- **the HIP backend is excluded**: launching a kernel that carries the generated printf call sites makes the AMD driver drop the device on the ROCm 7.2 machine this was tested on (a Windows display-driver reset follows). `@kernel` raises for a `print()` in a kernel body when it is being compiled for HIP, so run the kernel with the `opencl` or `cuda` backend to read its output, or write results into an array instead.
+
+The pure-Python backend (`k["python"]`) needs no translation: its `print` is the ordinary builtin, so keyword arguments and array printing work there too.
+
 ### Non-blocking launches
 
 A decorated kernel takes the same `submit` / `async_call` methods as a handwritten one, so a `@kernel` function can be launched and awaited without writing any C:
@@ -438,6 +460,7 @@ set_print_info(True)       # verbose again (the default)
 ## Known limitations
 
 - `@kernel` does not support: strings/lists/dicts, closures, recursion, kernel return values, dynamic multi-dimensional shape indexing;
+- `print()` inside a kernel prints one `True`/`False` pair, integer, real or vector at a time and takes no `sep`/`end`/`file` keywords; it also cannot print an array (print an element instead). A line containing many floats expands into a `switch` over their digit counts, so an extremely long line can hit the code-size guard and should be split into several calls. The HIP backend rejects `print()` outright: its driver drops the device on such kernels on the tested runtime;
 - vector comparison, writing through a swizzle, and nesting beyond three operands are restricted in favour of cross-backend consistency (the error message suggests a workaround);
 - fp16 (`np.float16`) arguments are unavailable on the CUDA/HIP backends (use float32);
 - the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used;

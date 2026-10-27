@@ -31,6 +31,7 @@
 | [09_reduction.py](09_reduction.py) | 数组求和归约: 逐元素原子、跨步私有累加、本地内存树形归约三种写法 |
 | [10_async_launch.py](10_async_launch.py) | 装饰后 kernel 的非阻塞启动: `submit` / `async_call` |
 | [11_python_backend.py](11_python_backend.py) | 纯 Python 后端: `k["python"]`、魔法循环与 gid 写法、`submit`/`async_call` |
+| [12_print_in_kernel.py](12_print_in_kernel.py) | kernel 里的 `print()`: 自动翻译成设备端 `printf`, 输出与 Python 完全一致的文本 |
 
 `@kernel` 函数体支持 docstring(第一行的字符串字面量会被翻译器自动忽略,
 不会进入生成的 GPU 源码), 所以可以放心在装饰函数里写说明文字。
