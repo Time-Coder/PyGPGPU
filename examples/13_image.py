@@ -28,6 +28,13 @@ Sampling rules are fixed for the whole image, so a kernel needs no sampler argum
 
     Image(..., filter="linear", address="clamp")
 
+The channel count is a separate argument, never inferred from the shape, so a 4x4 grey
+image and a 4-pixel RGBA row cannot be confused:
+
+    Image(np.zeros((4, 4)))                 # 4x4, one channel
+    Image(np.zeros((4, 4)), channels=4)     # 4x4, last axis is four channels
+    Image(shape=(4, 4))                     # allocate, fill later
+
 The HIP backend is the exception: it reuses CUDA code generation, which has no texture
 object type, and hardware without texture support rejects hipTexObjectCreate outright,
 so an image parameter there raises a PyKernelSyntaxError saying so. This example uses
@@ -39,7 +46,7 @@ Run:
 
 import numpy as np
 
-from pygpgpu import Image, kernel
+from pygpgpu import Image, kernel, list_devices
 
 
 @kernel
@@ -76,14 +83,12 @@ print("PyGPGPU images: one kernel, every backend")
 print("host image:", Image(ramp))
 print()
 
-# Which backends this machine has. The python one always works.
-backends = ["python"]
-for name in ("cuda", "opencl"):
-    try:
-        Image(np.zeros((2, 2), np.float32)).bind_cuda() if name == "cuda" else None
-    except BaseException:
-        pass
-    backends.append(name)
+# Which backends this machine has; the python one always works. Image support differs per
+# backend, so a failure is reported in the table below rather than raised.
+available = {selector.split(":")[0] for selector in list_devices()}
+backends = ["python"] + [name for name in ("cuda", "opencl") if name in available]
+print("backends under test:", ", ".join(backends))
+print()
 
 
 def run(backend, fn, image_filter, expected):

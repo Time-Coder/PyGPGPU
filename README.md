@@ -439,6 +439,51 @@ Where the others are ahead — worth knowing before you pick:
 This table was written from each project's documentation and the snippets above; their APIs move
 fast, so confirm against current docs before relying on a specific cell.
 
+### Images
+
+`Image` is one image type for every backend. A kernel indexes it like an array, and the
+subscript becomes `tex2D`/`surf2Dwrite` on CUDA, `read_imagef`/`write_imagef` on OpenCL,
+or a host implementation on the `python` backend, so one kernel gives the same numbers
+everywhere:
+
+```python
+from pygpgpu import Image, kernel
+
+@kernel
+def brighten(src, dst):
+    for y, x in np.ndindex(dst.shape):
+        dst[y, x] = src[y, x] * 0.5
+
+src = Image("photo.png", filter="linear")
+dst = Image(shape=(height, width), dtype=np.float32)
+
+brighten["cuda"](src, dst)      # or "opencl", or "python"
+out = dst.read()
+```
+
+Construct it from a path, an array or a shape. The channel count is a separate argument
+and is never inferred from the shape, so `(4, 4)` is a 4x4 grey image rather than a
+4-pixel RGBA row:
+
+```python
+Image(np.zeros((4, 4)))                    # 4x4, 1 channel
+Image(np.zeros((4, 4)), channels=4)        # 4x4, last axis is 4 channels
+Image(shape=(4, 4))                        # allocate 4x4, fill later
+Image(shape=(4, 4, 3), channels=2)         # 4x4x3 volume, 2 channels
+```
+
+Channels must be 1, 2 or 4 -- the widths a device sample can carry. `channels=3` is
+refused with a message asking for padding to 4, because RGB is not a device image format.
+
+Coordinates follow CUDA's texel space: texel i spans [i, i+1), so an integer subscript
+samples that texel's centre and a fractional one addresses a position between texels,
+which a linear filter blends. `filter` is `point` or `linear`; `address` is `clamp`,
+`wrap` or `mirror`. Both are fixed for the whole image, so no kernel takes a sampler.
+
+The HIP backend refuses images: it reuses CUDA code generation, which has no texture
+object type, and the driver rejects `hipTexObjectCreate` on hardware without texture
+support.
+
 ## Device selection
 
 Three forms of device identifier inside the brackets (same on every backend):

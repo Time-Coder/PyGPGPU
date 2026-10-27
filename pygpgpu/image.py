@@ -40,6 +40,11 @@ import numpy as np
 FILTERS:Tuple[str, ...] = ("point", "linear")
 ADDRESS_MODES:Tuple[str, ...] = ("clamp", "wrap", "mirror")
 
+# Channel counts an image may have. The device formats a sample can carry are 1, 2 or 4
+# wide; 3-channel data is rejected explicitly (see _normalise_channels) rather than being
+# guessed at, because no hardware format matches it without padding.
+CHANNELS:Tuple[int, ...] = (1, 2, 4)
+
 
 class Image:
     """A 1D, 2D or 3D image that kernels can read and write.
@@ -47,22 +52,29 @@ class Image:
     Construct it from a file path, a numpy array, or just a shape::
 
         Image("photo.png")                        # read with imageio
-        Image(numpy_image)                        # (height, width[, channels])
+        Image(numpy_image)                        # (height, width)
+        Image(numpy_image, channels=4)            # (height, width, 4)
         Image(shape=(width, height))              # allocate, fill later
+
+    The channel count is never inferred from the array shape: every axis of ``shape`` is a
+    spatial extent, and the trailing axis of ``data`` is a spatial extent too unless
+    ``channels`` says otherwise. That keeps a 4x4 grey image and a 4-pixel RGBA row from
+    being confused, which guessing used to do.
 
     Sampling rules are fixed for the whole image, so a kernel needs no sampler
     argument::
 
         Image(..., filter="linear", address="clamp")
 
-    The same object can be handed to a kernel on any backend. It is bound to a
-    device lazily, on first use, so one Image may serve a cuda launch and an opencl
-    launch in the same process.
+    The same object can be handed to a kernel on any backend. It is bound to a device
+    lazily, on first use, so one Image may serve a cuda launch and an opencl launch in
+    the same process.
     """
 
     def __init__(self, data:Union[str, np.ndarray, None]=None,
                  shape:Optional[Tuple[int, ...]]=None,
                  dtype:Any=np.float32,
+                 channels:Optional[int]=None,
                  filter:str="point",
                  address:str="clamp"):
         if filter not in FILTERS:
@@ -72,6 +84,11 @@ class Image:
             raise ValueError(
                 "address must be one of %s, got %r"
                 % (", ".join(ADDRESS_MODES), address))
+        self._channels:int = 1 if channels is None else _normalise_channels(channels)
+        # Whether the caller named a channel axis at all. channels=None means every axis of
+        # the given shape is spatial; an explicit value (even 1) makes the last axis the
+        # channel axis, so the two forms can never disagree about what a shape means.
+        self._channels_given:bool = channels is not None
 
         if isinstance(data, str):
             import imageio.v3 as iio
@@ -80,25 +97,18 @@ class Image:
 
         if data is not None:
             image = np.ascontiguousarray(np.asarray(data))
-            spatial, channels = _split_channels(image.shape)
-            if len(spatial) not in (1, 2, 3):
-                raise ValueError(
-                    "Image expects 1, 2 or 3 spatial dimensions, got shape %s"
-                    % (image.shape,))
+            spatial = _spatial_shape(image.shape, self._channels if self._channels_given
+                                     else None, "data")
             self._data:Optional[np.ndarray] = image
             self._extents:Tuple[int, int, int] = _extents(spatial)
-            self._channels:int = channels
             self._dtype:np.dtype = image.dtype
         elif shape is None:
             raise ValueError("Image needs either an image or a shape")
         else:
-            spatial, channels = _split_channels(tuple(int(v) for v in shape))
-            if len(spatial) not in (1, 2, 3):
-                raise ValueError(
-                    "Image shape must have 1, 2 or 3 dimensions, optionally plus "
-                    "channels, got %s" % (shape,))
+            spatial = _spatial_shape(tuple(int(v) for v in shape),
+                                     self._channels if self._channels_given else None,
+                                     "shape")
             self._extents = _extents(spatial)
-            self._channels = channels
             self._dtype = np.dtype(dtype)
             self._data = None
 
@@ -434,11 +444,54 @@ class Image:
     __str__ = __repr__
 
 
-def _split_channels(shape:Tuple[int, ...])->Tuple[Tuple[int, ...], int]:
-    """Split a trailing channel axis from a shape (1, 2 or 4 channels)."""
-    if len(shape) > 1 and shape[-1] in (1, 2, 4):
-        return tuple(shape[:-1]), int(shape[-1])
-    return tuple(shape), 1
+def _normalise_channels(channels:Any)->int:
+    """Validate a requested channel count."""
+    if isinstance(channels, bool) or not isinstance(channels, int):
+        raise TypeError(
+            "channels must be %s, got %s"
+            % (" or ".join(str(v) for v in CHANNELS), type(channels).__name__))
+    if channels == 3:
+        # No device image format is 3 channels wide: a sample is returned as a 1, 2 or 4
+        # component value, so RGB data has to be padded. Saying that is more useful than
+        # letting the caller discover it from a driver error.
+        raise ValueError(
+            "channels=3 is not a device image format: samples are 1, 2 or 4 components "
+            "wide. Pad the data to 4 channels and pass channels=4")
+    if channels not in CHANNELS:
+        raise ValueError(
+            "channels must be %s, got %d" % (" or ".join(str(v) for v in CHANNELS),
+                                             channels))
+    return channels
+
+
+def _spatial_shape(shape:Tuple[int, ...], channels:Any, what:str)->Tuple[int, ...]:
+    """Strip the trailing channel axis when channels was given, and validate the rank.
+
+    The channel count is never inferred: a trailing axis is a spatial extent unless the
+    caller says the array carries channel data. That is what keeps (4, 4) a 4x4 grey
+    image instead of a 4-pixel RGBA row, and (8, 16, 3) an RGB image instead of a volume.
+
+    ``channels=None`` means "not given": every axis is spatial. Passing any explicit value
+    -- including 1 -- makes the trailing axis the channel axis, so the two forms never
+    disagree about what a shape means.
+    """
+    if channels is not None:
+        if not shape or shape[-1] != channels:
+            raise ValueError(
+                "Image %s %s does not end with the %d channel(s) it was given; pass "
+                "channels=%d only for data whose last axis is the channel axis"
+                % (what, shape, channels, channels))
+        shape = shape[:-1]
+
+    if len(shape) not in (1, 2, 3):
+        raise ValueError(
+            "Image %s must have 1, 2 or 3 spatial dimensions%s, got %s"
+            % (what, " plus an optional channel axis" if channels is not None else "",
+               tuple(shape)))
+    if any(int(v) <= 0 for v in shape):
+        raise ValueError("Image %s must have positive extents, got %s"
+                         % (what, tuple(shape)))
+    return tuple(int(v) for v in shape)
 
 
 def _extents(spatial:Tuple[int, ...])->Tuple[int, int, int]:

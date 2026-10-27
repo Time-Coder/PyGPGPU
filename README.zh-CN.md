@@ -432,6 +432,47 @@ apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
 
 这张表依据各项目文档与上面的代码片段整理; 它们的 API 迭代很快, 依赖某一格之前请核对当前文档。
 
+### 图像
+
+`Image` 是所有后端共用的图像类型。kernel 里像数组一样下标, 该下标在 CUDA 上翻译为
+`tex2D`/`surf2Dwrite`, 在 OpenCL 上翻译为 `read_imagef`/`write_imagef`, 在 `python` 后端
+由宿主实现执行, 因此同一份 kernel 在各后端得到相同结果:
+
+```python
+from pygpgpu import Image, kernel
+
+@kernel
+def brighten(src, dst):
+    for y, x in np.ndindex(dst.shape):
+        dst[y, x] = src[y, x] * 0.5
+
+src = Image("photo.png", filter="linear")
+dst = Image(shape=(height, width), dtype=np.float32)
+
+brighten["cuda"](src, dst)      # 或 "opencl"、"python"
+out = dst.read()
+```
+
+可以从路径、数组或尺寸构造。通道数是独立参数, 不会从形状推断, 因此 `(4, 4)` 是 4x4 灰度图
+而不是 4 像素的 RGBA:
+
+```python
+Image(np.zeros((4, 4)))                    # 4x4, 1 通道
+Image(np.zeros((4, 4)), channels=4)        # 4x4, 末轴为 4 通道
+Image(shape=(4, 4))                        # 分配 4x4, 稍后填充
+Image(shape=(4, 4, 3), channels=2)         # 4x4x3 体素, 2 通道
+```
+
+通道数必须是 1、2 或 4——设备单次采样能承载的宽度。`channels=3` 会被拒绝并提示补齐到 4,
+因为 RGB 不是设备图像格式。
+
+坐标遵循 CUDA 的纹元空间: 纹元 i 覆盖 [i, i+1), 因此整数下标取该纹元中心, 小数下标取纹元
+之间的位置, 由线性滤波插值。`filter` 可选 `point`/`linear`, `address` 可选 `clamp`/
+`wrap`/`mirror`。两者对整个图像固定, 因此 kernel 不需要 sampler 参数。
+
+HIP 后端拒绝图像: 它复用 CUDA 代码生成, 其中没有纹理对象类型, 且在不支持纹理的硬件上
+驱动会拒绝 `hipTexObjectCreate`。
+
 ## 设备选择
 
 中括号里的设备标识三种形式(全部后端一致):
