@@ -25,6 +25,7 @@ from pygpgpu import (
     barrier,
     clamp,
     dot,
+    float3,
     get_global_id,
     kernel,
     local,
@@ -177,15 +178,15 @@ def calls_user_named_like_builtin(out: np.ndarray):
 
 
 @kernel
-def calls_imported_dot(x: np.ndarray, out: np.ndarray):
+def calls_imported_dot(vectors: np.ndarray, out: np.ndarray):
     for i in range(out.shape[0]):
-        out[i] = imported_dot(x[i], x[i])
+        out[i] = imported_dot(vectors[i], vectors[i])
 
 
 @kernel
-def calls_namespace_dot(x: np.ndarray, out: np.ndarray):
+def calls_namespace_dot(vectors: np.ndarray, out: np.ndarray):
     for i in range(out.shape[0]):
-        out[i] = dot(x[i], x[i])
+        out[i] = dot(vectors[i], vectors[i])
 
 
 def test_a_helper_sharing_a_builtin_name_stays_a_helper(runner):
@@ -203,13 +204,29 @@ def test_a_helper_sharing_a_work_item_builtin_name_stays_a_helper(runner):
 
 def test_a_builtin_imported_by_name_still_translates_as_the_builtin(runner):
     """The same function object, reached by `from ... import dot`, is the builtin."""
-    x = np.array([3.0, 4.0], dtype=np.float32)
+    vectors = np.array([float3(3.0, 4.0, 0.0), float3(1.0, 2.0, 2.0)])
     by_import = np.zeros(2, dtype=np.float32)
     by_namespace = np.zeros(2, dtype=np.float32)
-    runner(calls_imported_dot, x, by_import)
-    runner(calls_namespace_dot, x, by_namespace)
+    runner(calls_imported_dot, vectors, by_import)
+    runner(calls_namespace_dot, vectors, by_namespace)
     np.testing.assert_allclose(by_import, by_namespace)
-    np.testing.assert_allclose(by_import, x * x)
+    np.testing.assert_allclose(by_import, np.array([25.0, 9.0], dtype=np.float32))
+
+
+@kernel
+def calls_dot_on_scalars(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = dot(x[i], x[i])
+
+
+def test_dot_refuses_scalars(gpu_backend, runner):
+    """`dot` is a vector operation: pygf's host implementation refuses a scalar pair, so the
+    device must too, or one kernel would mean different things per backend."""
+    with pytest.raises(SyntaxError) as caught:
+        runner(calls_dot_on_scalars, np.array([3.0, 4.0], dtype=np.float32),
+               np.zeros(2, dtype=np.float32))
+    message = str(caught.value)
+    assert "vector" in message and "a * b" in message
 
 
 def test_the_lookup_is_by_object_identity():

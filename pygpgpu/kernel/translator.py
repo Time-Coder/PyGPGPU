@@ -4337,15 +4337,21 @@ class FunctionTranslator:
             if len(args) != 2:
                 self._error("gpu.dot(a, b) takes exactly 2 arguments", node)
             (lcode, lt), (rcode, rt) = args
-            if is_vec(lt) and is_vec(rt):
-                if lt != rt:
-                    self._error(f"gpu.dot() operands must have the same type, got {lt} and {rt}", node)
-                if self.backend == "opencl":
-                    return f"dot({lcode}, {rcode})", "float"
-                return self._emit_vec_dot(lcode, rcode, lt), "float"
-            if not (self._is_scalar(lt) and self._is_scalar(rt)):
-                self._error("gpu.dot() requires vectors or scalars", node)
-            return f"(({lcode}) * ({rcode}))", promote(lt, rt)
+            if not (is_vec(lt) and is_vec(rt)):
+                # GLSL and OpenCL define dot for vectors only, and pygf -- the host
+                # implementation of this same function -- refuses a scalar pair. Reducing it
+                # to a multiply here would make the two disagree about what `dot` means, so
+                # the scalar spelling is refused with the expression it stands for.
+                self._error(
+                    "dot() takes two vectors; for scalars write `a * b`. The device and the "
+                    "host interpreter share one implementation of the builtins, so a scalar "
+                    "form that only one side accepted would make a kernel mean different "
+                    "things per backend", node)
+            if lt != rt:
+                self._error(f"gpu.dot() operands must have the same type, got {lt} and {rt}", node)
+            if self.backend == "opencl":
+                return f"dot({lcode}, {rcode})", "float"
+            return self._emit_vec_dot(lcode, rcode, lt), "float"
 
         if name in ("cross", "normalize", "length", "distance"):
             return self._emit_vec_builtin(name, args, node)

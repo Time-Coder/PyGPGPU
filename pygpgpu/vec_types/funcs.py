@@ -1,19 +1,17 @@
 """Vector math functions, dual-sided: they run on the host and translate to device builtins.
 
-One implementation serves both sides. A function that pygf also publishes *is* pygf's object
-here -- not a copy -- because the translator recognizes a builtin by the identity of the
-callee, so two implementations of one name would leave whichever copy a kernel imported
-translated as an ordinary device helper, and its body has no device meaning.
+One implementation serves both sides, and where pygf publishes a function this module *is*
+pygf's object rather than a copy of it -- the translator recognizes a builtin by the identity
+of the callee, so a second implementation of one name would leave whichever copy a kernel
+imported translated as an ordinary device helper, and its body has no device meaning.
 
 What is left defined below is the set with no pygf counterpart: the OpenCL-only builtins
-(`mad24`/`mul24` are 24-bit, `hadd`/`rhadd` carry, the ordered comparisons are not GLSL), plus
-`dot`, whose host contract is wider than pygf's (a device `dot` on scalars is a multiply) and
-which is registered as an alias so both spellings still translate.
+(`mad24`/`mul24` are 24-bit, `hadd`/`rhadd` carry, the ordered comparisons are not GLSL).
 """
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional
 
 from .genVec import genVec
 
@@ -45,18 +43,6 @@ def _check_same_shape(a:Any, b:Any)->None:
             and len(a_components) != len(b_components)):
         raise ValueError(f"cannot operate on vectors with different dimensions: "
                          f"{len(a_components)} and {len(b_components)}")
-
-
-def dot(a:Any, b:Any)->Any:
-    _check_same_shape(a, b)
-    a_components, b_components = _components(a), _components(b)
-    if a_components is None and b_components is None:
-        return a * b
-    if a_components is None:
-        a_components = [a] * len(b_components)
-    if b_components is None:
-        b_components = [b] * len(a_components)
-    return float(sum(x * y for x, y in zip(a_components, b_components)))
 
 
 def mad(a:Any, b:Any, c:Any)->Any:
@@ -212,17 +198,15 @@ def mad24(a:Any, b:Any, c:Any)->Any:
 # imports `normalize` from pygf and one that imports it from pygpgpu have to reach the same
 # builtin, and the translator decides that by the identity of the callee. A second
 # implementation of one name leaves whichever copy the user imported translated as a device
-# helper, and its body (`length(x)`, a `_div` helper, ...) has no device meaning.
-#
-# `dot` is the one exception. pygf's refuses a scalar pair, while a device `dot` on scalars is
-# a multiply and callers here rely on that, so its body above stays and pygf's object is
-# registered beside it as an alias -- both spellings still translate.
+# helper, and its body (`length(x)`, a `_div` helper, ...) has no device meaning. There is no
+# exception left: every name below this comment that pygf also publishes *is* pygf's object.
 from pygf.funcs import (  # noqa: E402  (after the definitions it shadows)
     all,
     any,
     clamp,
     cross,
     distance,
+    dot,
     exp2,
     length,
     mix,
@@ -230,20 +214,3 @@ from pygf.funcs import (  # noqa: E402  (after the definitions it shadows)
     saturate,
     step,
 )
-from pygf.funcs import dot as _pygf_dot  # noqa: E402
-
-# (name, our implementation, pygf's) for the names whose host contract is wider than pygf's.
-_ALIASES:List[Tuple[str, Any, Any]] = [("dot", dot, _pygf_dot)]
-
-
-def _register_aliases() -> None:
-    """Hand the aliases to the builtin registry once it exists.
-
-    Called by `pygpgpu.kernel.builtins` at the end of its own import, which is the first
-    moment the registry can be built.
-    """
-    from ..kernel.builtin_registry import register_builtin_alias
-
-    for name, own, shared in _ALIASES:
-        register_builtin_alias(name, own)
-        register_builtin_alias(name, shared)
