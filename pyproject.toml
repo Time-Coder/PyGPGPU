@@ -65,7 +65,12 @@ dependencies = [
     # 0.1.9 lets `trunc` take a numpy scalar. The scalar math intrinsics below are pygf's
     # objects, and the `python` backend hands them numpy scalars read out of an array, which
     # `math.trunc` used to reject for want of `__trunc__`.
-    "pygf>=0.1.9",
+    # 0.2.0 keeps the meaning an alias carries through arithmetic (`point - point` is a
+    # `vector3f`, `point + vector` a `point3f`, a matrix times a position a position). The
+    # `python` backend runs a kernel body's host arithmetic unchanged, and the examples mix
+    # positions and directions, so pinning the release keeps the interpreter's result types
+    # matched to the documented ones instead of silently degrading to the base vector.
+    "pygf>=0.2.0",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",
