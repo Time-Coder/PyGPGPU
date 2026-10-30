@@ -6,6 +6,7 @@ __hipcache__
 *.egg-info
 .dsh-acl-recovery
 .ruff_cache
+.pytest_cache
 books
 
 # Packaging output. A stray build/ directory is not just clutter: it holds a second

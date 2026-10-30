@@ -1003,6 +1003,9 @@ class FunctionTranslator:
         # Generated quaternion device functions, keyed by (name, body) so one definition is
         # emitted however many call sites ask for it.
         self.quaternion_helpers:Dict[str, str] = {}
+        # The quaternion shims a generated source needs: (structure name, vector name) -> the
+        # quaternion dtype. The compile step turns each into a header file and an #include.
+        self.quaternion_includes:Dict[Tuple[str, str], np.dtype] = {}
         # The array whose whole shape a `np.ndindex(arr.shape)` loop iterates, when that is
         # how the domain was spelled: the launch checks its rank against the loop's names.
         self.nd_whole_shape_param:str = ""
@@ -3429,10 +3432,11 @@ class FunctionTranslator:
         def call(operation:str, dtype:np.dtype, args:str, result:Any,
                  vec_name:str = "") -> Tuple[str, Any]:
             name:str = structs_name(dtype)
-            function, body = quaternion.device_function(operation, name, dtype, vec_name,
-                                                        backend=self.backend)
-            self.quaternion_helpers[function] = body
-            return f"{function}({args})", result
+            # The arithmetic lives in a fixed header; a per-type shim names the generated
+            # structure for it. Record the shim, not a body: the compile step writes the files
+            # into the cache folder and the header is expanded by the preprocessor.
+            self._require_quaternion_header(name, dtype, vec_name or "float3")
+            return f"{name}_{operation}({args})", result
 
         if operator == "Mult":
             if left_quat is not None and right_quat is not None:
@@ -3461,17 +3465,11 @@ class FunctionTranslator:
             if structs_name(left_quat) != structs_name(right_quat):
                 self._error(
                     f"quaternion operands must have the same type, got {lt} and {rt}", node)
-            symbol:str = "+" if operator == "Add" else "-"
-            members:List[str] = list(quaternion.quat_member_names(left_quat) or ())
             name = structs_name(left_quat)
-            function:str = f"{name}_{'add' if operator == 'Add' else 'sub'}"
-            body:str = (
-                f"static {name} {function}({name} a, {name} b) {{\n"
-                f"    {name} r;\n"
-                + "".join(f"    r.{m} = a.{m} {symbol} b.{m};\n" for m in members)
-                + "    return r;\n}")
-            self.quaternion_helpers[function] = body
-            return f"{function}({left}, {right})", lt
+            # The header provides both `_add` and `_sub`; the shim is the same for either.
+            self._require_quaternion_header(name, left_quat, "float3")
+            suffix:str = "_add" if operator == "Add" else "_sub"
+            return f"{name}{suffix}({left}, {right})", lt
 
         return None
 
@@ -3953,6 +3951,11 @@ class FunctionTranslator:
 
     # ---------- calls ----------
 
+    def _require_quaternion_header(self, quat_name:str, dtype:np.dtype,
+                                   vector_name:str)->None:
+        """Record the shim a generated source needs to reach the quaternion header."""
+        self.quaternion_includes[(quat_name, vector_name)] = dtype
+
     def _emit_quaternion_call(self, node:ast.Call)->Optional[Tuple[str, Any]]:
         """`conjugate(q)` as the generated device function for the same meaning.
 
@@ -3989,10 +3992,8 @@ class FunctionTranslator:
             self._error(
                 f"conjugate() needs a quaternion, got {argument[1]}", node)
         type_name:str = structs_name(dtype)
-        function, body = quaternion.device_function("conjugate", type_name, dtype,
-                                                    backend=self.backend)
-        self.quaternion_helpers[function] = body
-        return f"{function}({argument[0]})", type_name
+        self._require_quaternion_header(type_name, dtype, "float3")
+        return f"{type_name}_conjugate({argument[0]})", type_name
 
     def _visit_call(self, node:ast.Call)->Tuple[str, Any]:
         func:ast.expr = node.func
@@ -5331,6 +5332,7 @@ class FunctionTranslator:
                 # A helper's body may use quaternion arithmetic too; its generated functions
                 # travel with the entry so the compile step can emit them once.
                 "quaternion_helpers": dict(callee.quaternion_helpers),
+                "quaternion_includes": dict(callee.quaternion_includes),
             }
             self.device_cache[sig_key] = entry
         except Exception:

@@ -1406,17 +1406,27 @@ class PyKernel:
         typedefs:str = (structs.render_structures(structure_dtypes, translator.backend)
                         if structure_dtypes else "")
 
-        # Quaternion arithmetic becomes generated device functions. They go after the type
-        # block (their bodies name the structure) and before any function that calls them.
-        # A device helper can use the arithmetic too, so its helpers are merged in.
-        all_quaternion_helpers:Dict[str, str] = dict(translator.quaternion_helpers)
+        # Quaternion arithmetic lives in a fixed header, copied into the cache folder beside
+        # the generated source. Each structure/vector pair also gets a small shim that names
+        # the generated type for the header; the source includes the shim, and the preprocessor
+        # folds both into the text before the backend compiler runs.
+        all_quaternion_includes:Dict[Tuple[str, str], Any] = dict(translator.quaternion_includes)
         for entry in device_cache.values():
-            all_quaternion_helpers.update(entry.get("quaternion_helpers") or {})
-        quaternion_helpers:str = "\n".join(all_quaternion_helpers.values())
+            all_quaternion_includes.update(entry.get("quaternion_includes") or {})
+        include_lines:str = ""
+        if all_quaternion_includes:
+            from . import quaternion as quaternion_header
+
+            shared:str = os.path.join(self._cache_dir(backend), "pygpgpu_headers")
+            include_lines = "\n".join(
+                quaternion_header.include_line(name, dtype, vector_name, backend, shared)
+                for (name, vector_name), dtype in sorted(all_quaternion_includes.items()))
 
         source:str = ("\n".join(dependency_codes) + "\n\n" + kernel_code) if dependency_codes else kernel_code
-        if quaternion_helpers:
-            source = quaternion_helpers + "\n" + source
+        if include_lines:
+            # The include has to come after the type block: the shim names a structure, and
+            # the header's functions take it by value.
+            source = include_lines + "\n" + source
         if typedefs:
             source = typedefs + "\n" + source
 

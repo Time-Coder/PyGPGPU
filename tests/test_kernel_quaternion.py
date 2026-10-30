@@ -165,16 +165,41 @@ def test_quaternion_conjugate(runner):
         [expected.w, expected.x, expected.y, expected.z], abs=1e-5)
 
 
-def test_the_generated_function_is_per_backend():
-    """A definition carries its backend's execution-space qualifier, so the cache has to be
-    keyed by the backend too -- handing a CUDA body to OpenCL (or the reverse) failed to
-    compile with a `__device__` the C dialect does not have."""
+def test_the_header_is_fixed_and_the_shim_names_the_type(tmp_path):
+    """The arithmetic is one fixed header; a per-type shim feeds it the generated C name.
+
+    A structure's C name is a content hash, so the header cannot spell it. The shim defines
+    the four macros and includes the header, and the generated source includes the shim --
+    the preprocessor folds both into the text before the backend compiler runs.
+    """
     from pygpgpu.kernel import quaternion
 
-    cu = quaternion.device_function("conjugate", "Q", np.dtype(quatf), backend="cuda")[1]
-    cl = quaternion.device_function("conjugate", "Q", np.dtype(quatf), backend="opencl")[1]
-    assert "__device__" in cu
-    assert "__device__" not in cl
+    line = quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "cuda",
+                                   str(tmp_path))
+    # The include names the shim inside the folder, because the generated source sits one
+    # level above it and a quoted include resolves relative to the including file.
+    assert line.startswith('#include "')
+    assert line.endswith('_cuda.h"')
+    header = (tmp_path / quaternion.HEADER_NAME).read_text(encoding="utf-8")
+    assert "PYGPGPU_QUAT_FN(_rotate)" in header
+    # Normalised by the quaternion's own magnitude, not the product's: getting this wrong
+    # showed up as a factor-of-three difference from the interpreter.
+    assert "sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z)" in header
+    shim = line.split('"')[1].split("/")[-1]
+    body = (tmp_path / shim).read_text(encoding="utf-8")
+    assert "#define PYGPGPU_QUAT_NAME _st_abc123" in body
+    assert "#define PYGPGPU_QUAT_QUAL __device__" in body
+
+
+def test_the_shim_has_no_device_qualifier_on_opencl(tmp_path):
+    from pygpgpu.kernel import quaternion
+
+    line = quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "opencl",
+                                   str(tmp_path))
+    shim = line.split('"')[1].split("/")[-1]
+    body = (tmp_path / shim).read_text(encoding="utf-8")
+    # OpenCL C has no execution-space annotation; `__device__` there does not compile.
+    assert "#define PYGPGPU_QUAT_QUAL \n" in body
 
 
 def test_a_non_quaternion_is_not_quaternion_arithmetic():
