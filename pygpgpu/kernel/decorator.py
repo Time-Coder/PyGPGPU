@@ -23,6 +23,7 @@ from .translator import (
     short_hash,
     type_sig,
 )
+from .objects import ObjectBinding, convert_object_arguments
 
 
 # ---------- bracket selector parsing ----------
@@ -889,6 +890,13 @@ class PyKernel:
                         f"to a device (call it as self.{name}(...) instead)") from None
                 self_values.append(value)
 
+        # An arbitrary python object becomes a synthesized structure before its type is
+        # inferred: the structure *is* the argument type, and every step after this sees the
+        # same `ctypes.Structure` a caller would have declared by hand. The binding records
+        # the pairing, so member writes travel back to the caller's object after the launch.
+        object_binding:ObjectBinding = ObjectBinding()
+        args = convert_object_arguments(self.raw_func, args, self._resolve_global,
+                                        self._self_param, object_binding)
         arg_types:List[Any] = [infer_ctype(a) for a in args]
         self_types:List[Any] = []
         for name, value in zip(self_attrs, self_values):
@@ -1091,6 +1099,8 @@ class PyKernel:
         result:Any = (self._finish_returns(return_state, returns, full, created)
                       if return_state else None)
         self._write_back_outer(outer_state)
+        if object_binding.written:
+            object_binding.write_back()
         return result
 
     # ---------- outer-scope variables ----------

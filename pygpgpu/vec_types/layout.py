@@ -341,11 +341,20 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
                 changed = True
             else:
                 if issubclass(field_type._type_, ctypes.Structure):
-                    device_type, _ = _pack_structure(field_type._type_(), backend)
-                    changed = True
+                    packed, packed_write_back = _pack_structure(field_type._type_(), backend)
+                    if packed_write_back is not None:
+                        device_type = type(packed)
+                        changed = True
         elif issubclass(field_type, ctypes.Structure):
-            device_type, _ = _pack_structure(field_type(), backend)
-            changed = True
+            packed, packed_write_back = _pack_structure(field_type(), backend)
+            if packed_write_back is not None:
+                # The nested layout differs (a vector inside it): the packed instance's class
+                # is the field's device type.
+                device_type = type(packed)
+            # When the nested layout is unchanged the original class is already right; using
+            # the packed *instance* here is what made ctypes answer "type of field 'inner'
+            # must be a C type" for a structure whose only members are scalars.
+            changed = changed or packed_write_back is not None
         members.append((field_name, device_type, field_type))
 
     if not changed:

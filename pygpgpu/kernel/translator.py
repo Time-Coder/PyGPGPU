@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple
 import numpy as np
 
 from .builtin_registry import builtin_name_of
+from .structs import dtype_for as structs_dtype_for, member_types as structs_member_types
 from .device_builtins import (
     ATOMIC_BUILTINS,
     GENERIC_BUILTINS,
@@ -2383,6 +2384,14 @@ class FunctionTranslator:
                 return
             index_code, _ = self._visit_subscript_index(target)
             self._emit(f"{base_code}[{index_code}] = {code};")
+        elif isinstance(target, ast.Attribute):
+            # `p.x = ...`: a C member store on a structure value, the write twin of the
+            # attribute read. The read/write analysis cannot attribute the field store to
+            # the caller's argument (it sees a member expression, not a subscript), so this
+            # path is only reached for synthesized object arguments, whose host side copies
+            # the final member values home after the launch.
+            target_code, target_t = self._visit_target(target)
+            self._emit(f"{target_code} = {code};")
         else:
             self._error(f"unsupported assignment target: {target.__class__.__name__}", node)
 
@@ -3084,6 +3093,40 @@ class FunctionTranslator:
             base_code, base_t = self._visit_array_target(target.value)
             index_code, _ = self._visit_subscript_index(target)
             return f"{base_code}[{index_code}]", base_t
+        if isinstance(target, ast.Attribute):
+            # `p.x = ...` on a structure value: a C member store. The read side already
+            # handles attribute access on structures; this is its write twin. A written
+            # object argument travels as a one-element record array, so the store goes
+            # through the element (`p[0].x = ...`), which is what makes it reach the host.
+            code:str
+            t:Any
+            code, t = self._visit_expression(target.value)
+            if isinstance(t, tuple) and is_ptr(t):
+                dtype:Any = structs_dtype_for(t[1])
+                if dtype is None:
+                    self._error(
+                        f"cannot assign to '{ast.unparse(target)}': {t[1]} is not a "
+                        f"structure the translator knows", target)
+                member_types:Dict[str, Any] = structs_member_types(dtype, self.backend)
+                if target.attr not in member_types:
+                    self._error(
+                        f"structure value has no member '{target.attr}' "
+                        f"(available: {', '.join(member_types)})", target)
+                # The static analysis sees a member expression, not a subscript, so it never
+                # marks the array as written; without this flag the host would not read the
+                # stores back. `atomic_targets` is exactly the force-writable channel.
+                self.atomic_targets.add(target.value.id)
+                return f"({code}[0]).{target.attr}", member_types[target.attr]
+            if is_vec(t) or not isinstance(t, str) or structs_dtype_for(t) is None:
+                self._error(
+                    f"cannot assign to '{ast.unparse(target)}': member stores need a "
+                    f"structure value, and {t} is not one", target)
+            member_types:Dict[str, Any] = structs_member_types(structs_dtype_for(t), self.backend)
+            if target.attr not in member_types:
+                self._error(
+                    f"structure value has no member '{target.attr}' "
+                    f"(available: {', '.join(member_types)})", target)
+            return f"({code}).{target.attr}", member_types[target.attr]
         self._error(f"unsupported assignment target: {target.__class__.__name__}", target)
 
     def _visit_array_target(self, node:ast.expr)->Tuple[str, Any]:
@@ -3648,6 +3691,18 @@ class FunctionTranslator:
         # vector, so a name reaching here is only a member if the base is a structure.
         from . import structs
 
+        if isinstance(base_t, tuple) and is_ptr(base_t):
+            # `p.x` on a written object argument: it travels as a one-element record array,
+            # so the member read goes through the element (`p[0].x`).
+            dtype:Optional[np.dtype] = structs.dtype_for(base_t[1])
+            if dtype is not None:
+                members:Dict[str, Any] = structs.member_types(dtype, self.backend)
+                if node.attr not in members:
+                    self._error(
+                        f"structure {base_t[1]} has no member '.{node.attr}' "
+                        f"(available: {', '.join(members)})", node)
+                return f"({base_code}[0]).{node.attr}", members[node.attr]
+
         if isinstance(base_t, str):
             dtype:Optional[np.dtype] = structs.dtype_for(base_t)
             if dtype is not None:
@@ -3822,6 +3877,9 @@ class FunctionTranslator:
         if kind == "staticmethod":
             args = [self._visit_expression(a) for a in node.args]
             return self._emit_device_call(func.attr, target, args, node)
+        print('METHOD-FAIL owner:', owner.__name__, 'id:', id(owner),
+              'has attr:', hasattr(owner, func.attr),
+              'file:', getattr(getattr(owner, func.attr, None), '__code__', None) and owner.__dict__.get(func.attr) is not None)
         self._error(
             f"cannot call '.{func.attr}()' on {owner.__name__}: it is "
             f"{self._why_not_callable(kind, func.attr)}", node)

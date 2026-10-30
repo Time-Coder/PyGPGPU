@@ -186,6 +186,20 @@ def declared_class(dtype:Any) -> Optional[type]:
     return _DECLARED.get(np.dtype(dtype)) if isinstance(dtype, (np.dtype, type)) else None
 
 
+def reregister_class(cls:Any) -> Optional[np.dtype]:
+    """Register `cls` for its dtype, replacing any class recorded earlier.
+
+    A synthesized structure is built per member set, and two member sets can produce
+    the same dtype with different methods. The later, richer class is the one a kernel
+    that calls a method needs to resolve against, so it replaces the earlier one
+    instead of losing to `setdefault`.
+    """
+    dtype:Optional[np.dtype] = register_class(cls)
+    if dtype is not None:
+        _DECLARED[np.dtype(dtype)] = cls
+    return dtype
+
+
 def _add_subscript_access(cls:Any) -> None:
     """Let a structure instance read a member by name (`s["i"]`), like a record element.
 
