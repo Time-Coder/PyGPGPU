@@ -771,11 +771,20 @@ _HOST_CREATION_FUNCTIONS:Set[str] = {
 # The statements a kernel body may execute on the host: assignments above the magic loop
 # whose right-hand side only builds data.
 def _creation_assignments(func:Callable)->List[ast.stmt]:
-    """The host-executed creation statements of a kernel body, in order.
+    """The statements the host runs before the launch, in body order.
 
-    The host runs exactly these before the launch, so the objects exist with the shape and
-    dtype numpy gives them. A magic loop is what defines "above" here: an assignment below
-    it would run once per work item, so it is not lifted out (the translator refuses it).
+    Two kinds are lifted out, both from **above** the magic loop:
+
+    * a **creation** (`arr = np.zeros(n)`) -- the object has to exist with the shape and
+      dtype numpy gives it, and a device has no way to make one;
+    * a plain **assignment** that a later creation reads (`n = 5` feeding `np.zeros(n)`) --
+      the host has to have the name in scope when it evaluates the creation.
+
+    The second kind is *also* still emitted as device code, because a work item reads it
+    too; the host evaluation is an extra, not a replacement. Everything else above the loop
+    is device code only. A magic loop is what defines "above" here: an assignment below it
+    would run once per work item, so it is not lifted out (the translator refuses a creation
+    there).
     """
     source:str = get_dedented_source(func)
     tree:ast.Module = _parse_kernel_source(source)
@@ -798,39 +807,125 @@ def _creation_assignments(func:Callable)->List[ast.stmt]:
         return (isinstance(node, ast.Name) and globalns.get(node.id) is np)
 
     def is_creation(node:ast.expr)->bool:
-        """True when this expression only *builds* data (and cannot run on the device)."""
-        if isinstance(node, ast.Constant):
-            return False
-        if isinstance(node, ast.Name):
-            return False
-        if isinstance(node, ast.Attribute):
-            return is_numpy(node.value)
-        if isinstance(node, ast.Call):
-            func_node:ast.expr = node.func
-            if not (isinstance(func_node, ast.Attribute) and is_numpy(func_node.value)):
-                return False
-            name:str = func_node.attr
-            if name in _NUMPY_DEVICE_TYPES or name in FunctionTranslator.RETURN_SLOT_TYPES:
-                # A scalar-type call builds a host value only when its arguments are
-                # constants; `np.float32(x[i])` is a device cast (see _emit_numpy_cast).
-                return all(isinstance(arg, ast.Constant) for arg in node.args)
-            if name not in _HOST_CREATION_FUNCTIONS and not name.endswith("_like"):
-                return False
-            # The arguments may be ordinary values (a shape, a count, an input array); what
-            # makes the statement host-only is the numpy constructor itself. Only a dtype
-            # argument has to be a type name, which is why it is not evaluated on the device.
-            return True
-        return False
+        return _is_creation_shape(node, is_numpy)
 
     del _builtins
+    # Which plain assignments a creation needs: the names a creation statement reads that
+    # are bound above the loop but are not themselves creations. Only those are lifted, so
+    # the host does not run unrelated device code -- and everything lifted here is still
+    # emitted for the work items as well.
+    creations:List[ast.stmt] = [
+        stmt for stmt in body[:magic_index]
+        if _creation_target_of(stmt) is not None and is_creation(_creation_target_of(stmt))]
+    needed:set = set()
+    for stmt in creations:
+        for node in ast.walk(stmt.value):
+            if isinstance(node, ast.Name):
+                needed.add(node.id)
+
+    bound_above:Dict[str, ast.stmt] = {}
+    for stmt in body[:magic_index]:
+        name:Optional[str] = _assigned_name_of(stmt)
+        if name is not None:
+            bound_above.setdefault(name, stmt)
+
+    creation_names:set = {_assigned_name_of(stmt) for stmt in creations}
+    # A fixed point, because a lifted assignment can depend on another lifted one:
+    # `a = 2; b = a * 2; c = np.zeros(b)` needs all three, and one pass over the creation's
+    # own names would stop at `b` and leave `a` undefined when the host runs it.
+    fitting:set = set()
+    changed:bool = True
+    while changed:
+        changed = False
+        for name in list(needed):
+            if name in fitting or name in creation_names:
+                continue
+            stmt:Optional[ast.stmt] = bound_above.get(name)
+            if stmt is None or stmt not in body[:magic_index]:
+                continue
+            if not _is_host_evaluable(stmt.value if stmt.value is not None else stmt):
+                continue
+            fitting.add(name)
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Name) and node.id not in fitting:
+                    needed.add(node.id)
+            changed = True
+
     chosen:List[ast.stmt] = []
     for stmt in body[:magic_index]:
         value:Optional[ast.expr] = _creation_target_of(stmt)
-        if value is None:
-            continue
-        if is_creation(value):
+        name:Optional[str] = _assigned_name_of(stmt)
+        if value is not None and is_creation(value):
+            chosen.append(stmt)
+        elif name is not None and name in fitting and name not in creation_names:
             chosen.append(stmt)
     return chosen
+
+
+def _is_host_evaluable(node:ast.expr)->bool:
+    """Whether a right-hand side can be computed by the interpreter, for a creation's need.
+
+    Only the forms that carry no device-only meaning: a literal, a plain name, attribute
+    access, and arithmetic over those. A call is excluded because it may name a device
+    helper whose body the host cannot run -- lifting it would either fail or, worse, run
+    something different from what the device computes.
+    """
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.Attribute):
+        return isinstance(node.value, (ast.Name, ast.Attribute))
+    if isinstance(node, ast.BinOp):
+        return _is_host_evaluable(node.left) and _is_host_evaluable(node.right)
+    if isinstance(node, ast.UnaryOp):
+        return _is_host_evaluable(node.operand)
+    if isinstance(node, ast.Subscript):
+        return _is_host_evaluable(node.value) and _is_host_evaluable(node.slice)
+    if isinstance(node, ast.Tuple):
+        return all(_is_host_evaluable(element) for element in node.elts)
+    return False
+
+
+def _is_creation_shape(node:ast.expr, is_numpy:Callable[[ast.expr], bool])->bool:
+    """True when this expression only *builds* data (and cannot run on the device).
+
+    The device has no numpy, so a constructor that allocates is host-only by definition.
+    A scalar-type call (`np.float32(...)`) is a creation only when its arguments are pure
+    constants, because `np.float32(x[i])` is a device cast instead.
+    """
+    if isinstance(node, ast.Constant):
+        return False
+    if isinstance(node, ast.Name):
+        return False
+    if isinstance(node, ast.Attribute):
+        return is_numpy(node.value)
+    if isinstance(node, ast.Call):
+        func_node:ast.expr = node.func
+        if not (isinstance(func_node, ast.Attribute) and is_numpy(func_node.value)):
+            return False
+        name:str = func_node.attr
+        if name in _NUMPY_DEVICE_TYPES or name in FunctionTranslator.RETURN_SLOT_TYPES:
+            return all(isinstance(arg, ast.Constant) for arg in node.args)
+        if name not in _HOST_CREATION_FUNCTIONS and not name.endswith("_like"):
+            return False
+        # The arguments may be ordinary values (a shape, a count, an input array); what
+        # makes the statement host-only is the numpy constructor itself. Only a dtype
+        # argument has to be a type name, which is why it is not evaluated on the device.
+        return True
+    return False
+
+
+def _is_creation_expression(node:ast.expr, func:Callable)->bool:
+    """Whether a right-hand side is a creation, answering for one expression alone.
+
+    The launcher needs this to tell a creation from a plain assignment it lifted for a
+    creation's sake: only the creation travels to the device as a parameter.
+    """
+    globalns:Dict[str, Any] = getattr(func, "__globals__", {})
+    return _is_creation_shape(
+        node, lambda candidate: isinstance(candidate, ast.Name)
+        and globalns.get(candidate.id) is np)
 
 
 def _creation_target_of(stmt:ast.stmt)->Optional[ast.expr]:

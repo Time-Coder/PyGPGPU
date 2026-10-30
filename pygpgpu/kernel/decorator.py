@@ -1725,7 +1725,8 @@ def _host_created_values(func:Any,
     Only the statements the translator recognises as pure creation are executed; everything
     else stays device code.
     """
-    from .translator import _assigned_name_of, _creation_assignments
+    from .translator import (_assigned_name_of, _creation_assignments,
+                            _creation_target_of, _is_creation_expression)
 
     values:Dict[str, Any] = {}
     names:List[str] = []
@@ -1749,18 +1750,24 @@ def _host_created_values(func:Any,
         except ValueError:
             pass
     for assignment in assignments:
-        expression:Any = compile(ast.Expression(body=assignment.value),
-                                 "<kernel creation>", "eval")
         target:Optional[str] = _assigned_name_of(assignment)
         if target is None:
             continue
         try:
-            value:Any = eval(expression, globalns, localns)  # noqa: S307 - the kernel source itself
+            value:Any = eval(  # noqa: S307 - the kernel source itself
+                compile(ast.Expression(body=assignment.value), "<kernel creation>", "eval"),
+                globalns, localns)
         except Exception:
             continue  # the translator reports the real problem, with a source position
-        values[target] = value
         localns[target] = value
-        names.append(target)
+        # Only a *creation* becomes a kernel parameter: its object has to reach the device.
+        # A plain assignment lifted for the creation's sake stays in the namespace alone --
+        # the work items compute it themselves, so shipping it would add an argument nothing
+        # reads (and shift every later launch argument by one).
+        if _creation_target_of(assignment) is not None and _is_creation_expression(
+                assignment.value, func):
+            values[target] = value
+            names.append(target)
     return values, names
 
 
