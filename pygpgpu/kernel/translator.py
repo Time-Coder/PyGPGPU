@@ -241,6 +241,13 @@ def _self_member_call_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
     return kind, target
 
 
+def structs_name(dtype:Any)->str:
+    """The device type name of a structure dtype, registered on the way."""
+    from .structs import register  # noqa: PLC0415
+
+    return register(dtype)
+
+
 def writes_receiver(func:Callable, self_param:str)->bool:
     """Whether a method body assigns to a member of its receiver (`self.x = ...`).
 
@@ -993,6 +1000,9 @@ class FunctionTranslator:
         # Structure dtypes a private array created in the body mentions: their typedefs
         # have to be emitted even though they are not parameters.
         self.private_structs:List[Any] = []
+        # Generated quaternion device functions, keyed by (name, body) so one definition is
+        # emitted however many call sites ask for it.
+        self.quaternion_helpers:Dict[str, str] = {}
         # The array whose whole shape a `np.ndindex(arr.shape)` loop iterates, when that is
         # how the domain was spelled: the launch checks its rank against the loop's names.
         self.nd_whole_shape_param:str = ""
@@ -3397,10 +3407,118 @@ class FunctionTranslator:
                 terms.append(f"({op}{left}.{c})" if infix else f"{op}({left}.{c})")
         return self._vec_maker(vec, ", ".join(terms))
 
+    def _emit_quaternion_binop(self, operator:str, left:str, lt:Any, right:str, rt:Any,
+                               node:ast.BinOp)->Optional[Tuple[str, Any]]:
+        """A quaternion operation, as a call to a generated device function.
+
+        `pygf` gives a quaternion three meanings: `q * q` composes two rotations, `q * v`
+        rotates a vector, and a scalar scales it. None is a C operator on a structure, so
+        each becomes a small device function (see `quaternion.py`) and the expression
+        becomes a call. Anything else is left to the caller, which refuses a structure
+        operand with an explanation.
+        """
+        from . import quaternion  # noqa: PLC0415
+
+        left_quat:Optional[np.dtype] = quaternion.is_quaternion(lt)
+        right_quat:Optional[np.dtype] = quaternion.is_quaternion(rt)
+        if left_quat is None and right_quat is None:
+            return None
+        if operator not in ("Add", "Sub", "Mult", "Div"):
+            return None
+
+        def call(operation:str, dtype:np.dtype, args:str, result:Any,
+                 vec_name:str = "") -> Tuple[str, Any]:
+            name:str = structs_name(dtype)
+            function, body = quaternion.device_function(operation, name, dtype, vec_name,
+                                                        backend=self.backend)
+            self.quaternion_helpers[function] = body
+            return f"{function}({args})", result
+
+        if operator == "Mult":
+            if left_quat is not None and right_quat is not None:
+                if structs_name(left_quat) != structs_name(right_quat):
+                    self._error(
+                        f"quaternion operands must have the same type, got {lt} and {rt}",
+                        node)
+                return call("mul", left_quat, f"{left}, {right}", lt)
+            if left_quat is not None and is_vec(rt):
+                return call("rotate", left_quat, f"{left}, {right}", rt, vec_name=rt)
+            if left_quat is not None and is_float(rt):
+                return call("scale", left_quat, f"{left}, {right}", lt)
+            if right_quat is not None and is_float(lt):
+                # `2.0 * q` multiplies the same way, and the scalar comes first in C.
+                return call("scale", right_quat, f"{right}, {left}", rt)
+            return None
+
+        if operator == "Div" and left_quat is not None and is_float(rt):
+            return call("scale", left_quat, f"{left}, (1.0f / ({right}))", lt)
+
+        if operator in ("Add", "Sub"):
+            # Component-wise, which is what the base class would do: add or subtract every
+            # member in turn.
+            if left_quat is None or right_quat is None:
+                return None
+            if structs_name(left_quat) != structs_name(right_quat):
+                self._error(
+                    f"quaternion operands must have the same type, got {lt} and {rt}", node)
+            symbol:str = "+" if operator == "Add" else "-"
+            members:List[str] = list(quaternion.quat_member_names(left_quat) or ())
+            name = structs_name(left_quat)
+            function:str = f"{name}_{'add' if operator == 'Add' else 'sub'}"
+            body:str = (
+                f"static {name} {function}({name} a, {name} b) {{\n"
+                f"    {name} r;\n"
+                + "".join(f"    r.{m} = a.{m} {symbol} b.{m};\n" for m in members)
+                + "    return r;\n}")
+            self.quaternion_helpers[function] = body
+            return f"{function}({left}, {right})", lt
+
+        return None
+
+    def _is_structure_operand(self, t:Any)->bool:
+        """Whether a translated type is a structure value (a quaternion is one too)."""
+        if not isinstance(t, str) or is_vec(t):
+            return False
+        return structs_dtype_for(t) is not None
+
+    def _structure_operator_message(self, operator:str, lt:Any, rt:Any,
+                                    node:ast.AST)->str:
+        """Why a structure cannot take part in an operator, and what to write instead."""
+        from . import structs  # noqa: PLC0415
+
+        operand:Any = lt if self._is_structure_operand(lt) else rt
+        dtype:Any = structs.dtype_for(operand)
+        members:str = ", ".join(dtype.names or ()) if dtype is not None else "?"
+        symbol:str = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/", "Mod": "%",
+                      "Pow": "**", "FloorDiv": "//", "Lt": "<", "LtE": "<=", "Gt": ">",
+                      "GtE": ">=", "Eq": "==", "NotEq": "!="}.get(operator, operator)
+        return (
+            f"a structure cannot be used with the '{symbol}' operator: device code has no "
+            f"arithmetic for a structure value, and the operands here are {lt} and {rt}. "
+            f"Operate on the members instead (`s.{members.split(', ')[0]} {symbol} ...`), or "
+            f"move the computation into a host method before the kernel -- which is how a "
+            f"quaternion rotation belongs, unless a dedicated device function for it exists")
+
     def _visit_binop(self, node:ast.BinOp)->Tuple[str, Any]:
         left, lt = self._visit_expression(node.left)
         right, rt = self._visit_expression(node.right)
         name:str = node.op.__class__.__name__
+
+        # A quaternion is a structure too, but its arithmetic *does* have a device meaning
+        # (pygf defines it), so it is handled by generated device functions before the
+        # general structure refusal below.
+        quat_result:Optional[Tuple[str, Any]] = self._emit_quaternion_binop(
+            name, left, lt, right, rt, node)
+        if quat_result is not None:
+            return quat_result
+
+        # A structure value has no arithmetic: none of `+ - * / % ** < <= > >= == !=` has a
+        # device meaning for an aggregate, and emitting one produced either a C++ operator
+        # error or -- worse for `Mult` -- a per-component scalar multiply that silently
+        # computed something the language never defined. Every other structure is refused
+        # here, before the vector dispatch, so the message can say what to do instead.
+        if self._is_structure_operand(lt) or self._is_structure_operand(rt):
+            self._error(self._structure_operator_message(name, lt, rt, node), node)
 
         if is_vec(lt) or is_vec(rt):
             symbol:str = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/",
@@ -3506,7 +3624,11 @@ class FunctionTranslator:
             name:str = op.__class__.__name__
             if name not in symbols:
                 self._error(f"unsupported comparison: {name}", op)
-            right, _ = self._visit_expression(comparator)
+            right, rt = self._visit_expression(comparator)
+            # A structure value has no comparison either: C rejects `s == s` outright, so it
+            # is refused here with the same explanation the arithmetic gets.
+            if self._is_structure_operand(lt) or self._is_structure_operand(rt):
+                self._error(self._structure_operator_message(name, lt, rt, node), op)
             parts.append(f"({left} {symbols[name]} {right})")
             left = right
         code = (" && ".join(parts)) if len(parts) > 1 else parts[0]
@@ -3831,6 +3953,47 @@ class FunctionTranslator:
 
     # ---------- calls ----------
 
+    def _emit_quaternion_call(self, node:ast.Call)->Optional[Tuple[str, Any]]:
+        """`conjugate(q)` as the generated device function for the same meaning.
+
+        `pygf.funcs.conjugate` is an ordinary python function, so without this it was
+        translated as a device *helper* -- and its body builds `m.__class__(...)`, naming a
+        class a kernel has no meaning for. The quaternion meaning is what the call is after,
+        so it maps onto the generated `{type}_conjugate` instead.
+        """
+        from . import quaternion  # noqa: PLC0415
+
+        def called_name(expr:ast.expr)->Optional[str]:
+            if isinstance(expr, ast.Name):
+                return expr.id
+            if isinstance(expr, ast.Attribute):
+                return expr.attr
+            return None
+
+        if called_name(node.func) != "conjugate" or len(node.args) != 1:
+            return None
+        if isinstance(node.func, ast.Name):
+            callee:Any = self.resolve_global(node.func.id)
+        elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            owner:Any = self.resolve_global(node.func.value.id)
+            callee = getattr(owner, node.func.attr, None)
+        else:
+            return None
+        import pygf.funcs as pygf_funcs  # noqa: PLC0415
+
+        if callee is not pygf_funcs.conjugate:
+            return None
+        argument:Tuple[str, Any] = self._visit_expression(node.args[0])
+        dtype:Optional[np.dtype] = quaternion.is_quaternion(argument[1])
+        if dtype is None:
+            self._error(
+                f"conjugate() needs a quaternion, got {argument[1]}", node)
+        type_name:str = structs_name(dtype)
+        function, body = quaternion.device_function("conjugate", type_name, dtype,
+                                                    backend=self.backend)
+        self.quaternion_helpers[function] = body
+        return f"{function}({argument[0]})", type_name
+
     def _visit_call(self, node:ast.Call)->Tuple[str, Any]:
         func:ast.expr = node.func
         if node.keywords:
@@ -3851,6 +4014,10 @@ class FunctionTranslator:
         # A builtin is recognized by the *object* the callee resolves to, never by the
         # spelling of the name, so it does not matter whether it was imported, reached
         # through the package, or is a user function that merely shares the name.
+        quaternion_result:Optional[Tuple[str, Any]] = self._emit_quaternion_call(node)
+        if quaternion_result is not None:
+            return quaternion_result
+
         builtin:Optional[str] = self._builtin_call_name(node)
         if builtin is not None:
             if builtin in ("local", "work_size"):
@@ -5161,6 +5328,9 @@ class FunctionTranslator:
                 # Structure types this helper's signature or body mentions: the caller emits
                 # their typedefs once, ahead of every device function.
                 "structs": list(callee.private_structs),
+                # A helper's body may use quaternion arithmetic too; its generated functions
+                # travel with the entry so the compile step can emit them once.
+                "quaternion_helpers": dict(callee.quaternion_helpers),
             }
             self.device_cache[sig_key] = entry
         except Exception:

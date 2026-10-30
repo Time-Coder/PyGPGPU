@@ -209,9 +209,12 @@ def _add_subscript_access(cls:Any) -> None:
     """Let a structure instance read a member by name (`s["i"]`), like a record element.
 
     Only installed when the class has no subscript of its own, so a user's `__getitem__`
-    is never shadowed.
+    -- or the one a pygf vector/quaternion inherits from its base -- is never shadowed.
+    The check walks the whole MRO: `quatf` defines no `__getitem__` itself, but `genType`
+    does, and installing ours on the subclass replaced positional indexing with a
+    member-name one, so `conjugate(q)` failed inside pygf.
     """
-    if "__getitem__" in cls.__dict__:
+    if any("__getitem__" in base.__dict__ for base in getattr(cls, "__mro__", ())):
         return
 
     def __getitem__(self:Any, key:Any)->Any:
