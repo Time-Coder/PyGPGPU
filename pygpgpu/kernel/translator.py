@@ -4046,6 +4046,15 @@ class FunctionTranslator:
                 candidate:Any = self.resolve_global(func.id)
                 if isinstance(candidate, type) and self._is_structure_class(candidate):
                     return self._visit_structure_constructor_call(node, candidate)
+                # A plain class the scan synthesized into a structure is a constructor too --
+                # it has to be handled *here*, before keyword reordering, because reordering
+                # fills a call's omitted arguments from `__init__`'s defaults, and a member
+                # whose default is `None` would reach the device as a None constant.
+                if isinstance(candidate, type):
+                    implied:Optional[np.dtype] = self._structure_from_construction(candidate)
+                    if implied is not None:
+                        self.plain_class_dtypes.add(implied)
+                        return self._visit_structure_constructor_call(node, implied)
             # A helper may be called with keywords; nothing below needs to know, so the
             # call is rewritten to positional order first, using the callee's signature.
             # Builtins take positional arguments only, so they keep refusing.
@@ -4686,27 +4695,42 @@ class FunctionTranslator:
         return structs.structure_dtype_of(candidate) is not None
 
     def _visit_structure_constructor_call(self, node:ast.Call,
-                                          candidate:type)->Tuple[str, Any]:
+                                          candidate:Any)->Tuple[str, Any]:
         """A structure constructor called with keywords: `Ray(origin=p, direction=d)`.
 
         A member name is a keyword, exactly as python's ctypes spelling addresses one, and
         the positional arguments come first in declaration order -- the same shape
         `ctypes.Structure.__init__` accepts.
-        """
-        from . import structs  # noqa: PLC0415
 
-        dtype:Optional[np.dtype] = structs.structure_dtype_of(candidate)
+        ``candidate`` is either a declared class or the dtype a plain class was synthesized
+        into. For the latter the positional arguments are matched through the class's
+        constructor parameters, not the field order: the fields are sorted by name, so the
+        first argument is not necessarily the first field.
+        """
+        from . import objects, structs  # noqa: PLC0415
+
+        parameters:List[str] = []
+        if isinstance(candidate, np.dtype):
+            # A plain class the scan synthesized: the dtype IS the layout -- there is no
+            # ctypes.Structure behind it to derive one from.
+            dtype:Optional[np.dtype] = candidate
+            owner:Optional[type] = structs.declared_class(dtype)
+            if owner is not None:
+                parameters = objects.constructed_parameters(owner)
+        else:
+            dtype = structs.structure_dtype_of(candidate)
+            parameters = list(dtype.names or ()) if dtype is not None else []
         if dtype is None:
             self._error(f"'{ast.unparse(node.func)}' is not a structure type", node)
         order:List[str] = list(dtype.names or ())
         args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
         supplied:Dict[str, Tuple[str, Any]] = {}
         for position, value in enumerate(args):
-            if position >= len(order):
+            if position >= len(parameters):
                 self._error(
-                    f"{ast.unparse(node.func)}() takes at most {len(order)} positional "
-                    f"arguments ({', '.join(order)}), got {position + 1}", node)
-            supplied[order[position]] = value
+                    f"{ast.unparse(node.func)}() takes at most {len(parameters)} positional "
+                    f"arguments ({', '.join(parameters)}), got {position + 1}", node)
+            supplied[parameters[position]] = value
         for keyword in node.keywords:
             if keyword.arg is None:
                 self._error("`**kwargs` cannot construct a structure", node)
@@ -4751,14 +4775,22 @@ class FunctionTranslator:
             # two, and a body reading only `origin` describes a one-member structure -- so
             # the unread arguments are dropped, the way python itself leaves an attribute
             # nobody mentions unassigned.
-            if dtype in self.plain_class_dtypes and len(args) > len(order):
-                args = args[:len(order)]
+            parameters:List[str] = order
+            if dtype in self.plain_class_dtypes:
+                owner:Optional[type] = structs.declared_class(dtype)
+                if owner is not None:
+                    from . import objects  # noqa: PLC0415
+
+                    parameters = objects.constructed_parameters(owner) or order
+                if len(args) > len(parameters):
+                    args = args[:len(parameters)]
             elif len(args) > len(order):
                 self._error(
                     f"{name}() takes at most {len(order)} arguments "
                     f"({', '.join(order)}), got {len(args)}", node)
             for position, (code, t) in enumerate(args):
-                supplied[order[position]] = (code, t)
+                member:str = parameters[position]
+                supplied[member] = (code, t)
 
         parts:List[str] = []
         positional_parts:List[str] = []

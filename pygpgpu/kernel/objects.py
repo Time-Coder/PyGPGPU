@@ -92,6 +92,9 @@ class Scan:
         # The values the body builds itself and hands around, keyed by its own local name.
         self.constructed:Dict[str, Any] = {}
         self.visited:set = set()
+        # Every function the walk reached: their bodies may construct a class too, and each
+        # of those constructions needs a structure the translator can hand the call.
+        self.functions_reached:List[Any] = []
 
     def add_path(self, path:str, value:Any)->None:
         self.classes.setdefault(path, type(value))
@@ -256,6 +259,24 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
     tree:Optional[ast.Module] = _parse(func)
     if tree is None:
         return
+    # A class this body constructs (`record = HitRecord(...)` inside Sphere.hit) is a value
+    # like any other: it joins the walk under the body's own name for it, so its member reads
+    # land on a path and the translator gets a structure for the constructor call. The
+    # template is built from the call's own argument types, which is where each member's type
+    # comes from. Doing this per *function* -- not once for the kernel body -- is what makes a
+    # construction inside a method or helper visible at all.
+    for local_name, template in constructed_locals(func, scan.values, scan.resolve).items():
+        if local_name not in scan.constructed:
+            scan.constructed[local_name] = template
+            scan.add_path(local_name, template)
+            # The constructor call itself names members (`HitRecord(is_hitted=False)`), and
+            # so does the template's own state -- a `__init__` that assigns every member
+            # unconditionally describes the whole layout in its defaults. Both join the
+            # reads: a value returned out of this function (`return record`) is read by the
+            # *caller*, which this walk never sees, so the construction's own names are the
+            # only evidence here.
+            for attribute in vars(template):
+                scan.note(local_name, attribute)
     _follow_aliases(tree, tracked)
     called:set = _called_members(tree, tracked)
     # `for element in p.items:` over a tracked list path: the loop variable is another name
@@ -345,7 +366,11 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
                 element_path:str = _member_path(list_path, "element#items")
                 scan.add_path(element_path, scan.lists[list_path][0])
                 scan.classes[element_path] = scan.classes[list_path]
-            scan.note(element_path, node.attr)
+            # The element's member is the *innermost* attribute: `hops` is collected outside
+            # in, so `items[j].center.z` gives `['z', 'center']` and `center` is the member
+            # read off the element (`z` belongs to the vector). Noting the outer one asked a
+            # Sphere for `z` and failed.
+            scan.note(element_path, hops[-1] if hops else node.attr)
             crossed_list = True
             continue
         if crossed_list:
@@ -544,11 +569,23 @@ def constructed_locals(func:Any, objects:Dict[str, Any],
     Only a class defined outside this module counts -- a local class has no device meaning --
     and only a call assigned to a plain local name, because an unnamed temporary has no path
     for the scan to bind.
+
+    The class resolves in the *function's own* globals first, then through ``resolve``: a
+    method's body uses the names its own module imported (`Sphere.hit` names `HitRecord`,
+    which the kernel's module never imported), and the kernel-module fallback keeps the
+    caller-visible spellings working.
     """
     found:Dict[str, Any] = {}
     tree:Optional[ast.Module] = _parse(func)
     if tree is None:
         return found
+    own_globals:Dict[str, Any] = getattr(func, "__globals__", {}) or {}
+
+    def find_class(name:str)->Any:
+        if name in own_globals:
+            return own_globals[name]
+        return resolve(name)
+
     for statement in ast.walk(tree):
         if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
             continue
@@ -559,18 +596,21 @@ def constructed_locals(func:Any, objects:Dict[str, Any],
         callee:ast.expr = value.func
         if not isinstance(callee, ast.Name):
             continue
-        cls:Any = resolve(callee.id)
+        cls:Any = find_class(callee.id)
         if not isinstance(cls, type) or issubclass(cls, (ctypes.Structure, list, tuple)):
             continue
-        kinds:List[Any] = []
+        kinds:Optional[List[Any]] = []
         for argument in value.args:
             kind:Optional[Any] = _argument_kind(argument, objects, resolve, tree)
             if kind is None:
-                kinds = []
+                # One untyped argument does not sink the construction: the member *set* is
+                # decided by the body's reads either way, and the template falls back to the
+                # class's own defaults for the types. A type pinned wrong here would put a
+                # member of the wrong width on the device; leaving the width to `__init__`'s
+                # own defaults is the more conservative answer.
+                kinds = None
                 break
             kinds.append(kind)
-        if not kinds:
-            continue
         template:Any = _template_from(kinds, cls)
         if template is not None:
             found[target.id] = template
@@ -600,7 +640,9 @@ def _argument_kind(argument:ast.expr, objects:Dict[str, Any],
         return None
     if isinstance(argument, ast.Constant) and isinstance(argument.value, (int, float)):
         return ctypes.c_float
-    return None
+    # Anything else -- an inline construction, an arithmetic expression over known operands --
+    # is answered by the same walk `_expression_kind` does for an assigned local.
+    return _expression_kind(argument, objects, resolve, tree)
 
 
 def _assigned_kind(name:str, objects:Dict[str, Any],
@@ -655,19 +697,39 @@ def _expression_kind(node:ast.expr, objects:Dict[str, Any],
             return ctypes.c_float
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return ctypes.c_float
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        # A construction written inline (`Ray(p, point3f(0, 0, -1))`): the callee *is* the
+        # type, when it is a struct or vector the device can carry.
+        cls:Any = resolve(node.func.id)
+        if isinstance(cls, type) and issubclass(cls, ctypes.Structure):
+            return cls
+        return None
     return None
 
 
 def _template_from(kinds:Sequence[Any], cls:type)->Any:
-    """An instance of `cls` built from placeholders of the given types."""
-    values:List[Any] = []
-    for kind in kinds:
+    """An instance of `cls` built from placeholders of the given types.
+
+    When the call's arguments cannot all be typed -- a local the body assigned, whose type
+    the scan cannot pin -- a default-constructed instance is the template instead: its
+    members are whatever `__init__` assigns when called with nothing, which is the type each
+    member carries in the body too. The class is still *used* by the body the same way, so
+    the member set comes from the reads either way; only the types fall back to the
+    constructor's own defaults.
+    """
+    if kinds is not None:
+        values:List[Any] = []
+        for kind in kinds:
+            try:
+                values.append(kind())
+            except Exception:  # noqa: BLE001 -- an unusable placeholder means "no template"
+                return None
         try:
-            values.append(kind())
-        except Exception:  # noqa: BLE001 -- an unusable placeholder means "no template"
+            return cls(*values)
+        except Exception:  # noqa: BLE001
             return None
     try:
-        return cls(*values)
+        return cls()
     except Exception:  # noqa: BLE001
         return None
 
@@ -675,6 +737,26 @@ def _template_from(kinds:Sequence[Any], cls:type)->Any:
 # The structures built for values a body constructs, keyed by the class: the translator asks
 # this when it reaches the constructor call, and the scan above is what filled it in.
 _CONSTRUCTED:Dict[type, Any] = {}
+
+
+_CONSTRUCTED_PARAMETERS:Dict[type, List[str]] = {}
+
+
+def _init_parameters(cls:type)->List[str]:
+    """The class's constructor parameter order, which is the order a construction supplies."""
+    import inspect as _inspect  # noqa: PLC0415
+
+    try:
+        parameters:Any = _inspect.signature(cls).parameters
+    except (TypeError, ValueError):
+        return []
+    return [name for name, parameter in parameters.items()
+            if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)]
+
+
+def constructed_parameters(cls:type)->List[str]:
+    """The constructor's positional parameter names for a class the scan constructed."""
+    return _CONSTRUCTED_PARAMETERS.get(cls, [])
 
 
 def constructed_structure(cls:type)->Optional[Any]:
@@ -799,12 +881,24 @@ _STRUCT_CACHE:Dict[Tuple[Any, ...], type] = {}
 
 def _structure_for(fields:Sequence[Tuple[str, type]],
                    methods:Sequence[Tuple[str, Any]])->type:
-    key:Tuple[Any, ...] = (tuple(fields), tuple(name for name, _ in methods))
+    # Keyed by the member *set* alone -- not their order, and not the method list. The walk
+    # collects members through `ast.walk` (order not source order), and one path may see a
+    # method where another does not (`hitable.hit` is called in one place, only read in
+    # another). Two classes with one layout are still two ctypes types, so the class has to
+    # be one: a later call adds any method the first one did not know about.
+    key:Tuple[Any, ...] = frozenset((member, kind) for member, kind in fields)
     cached:Optional[type] = _STRUCT_CACHE.get(key)
     if cached is not None:
+        for method_name, function in methods:
+            if method_name not in cached.__dict__:
+                setattr(cached, method_name, function)
         return cached
-    name:str = "Object" + "".join(member.capitalize() for member, _ in fields)
-    namespace:Dict[str, Any] = {"_fields_": [(member, kind) for member, kind in fields]}
+    # The field order is fixed by name, so the same member set always describes the same
+    # layout -- the device type is generated from this dtype, and a differing order would
+    # make one value's structure incompatible with another's.
+    ordered:List[Tuple[str, type]] = sorted(fields, key=lambda f: f[0])
+    name:str = "Object" + "".join(member.capitalize() for member, _ in ordered)
+    namespace:Dict[str, Any] = {"_fields_": [(member, kind) for member, kind in ordered]}
     structure:type = type(name, (ctypes.Structure,), namespace)
     # A method the body calls has to be reachable from the synthesized class: the translator
     # resolves `p.method` from the class its dtype came from.
@@ -1004,8 +1098,13 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
         element_path:str = element_paths[0]
         list_element_paths[list_path] = element_path
         for path in element_paths[1:]:
-            scan.members[element_path] = list({
-                *scan.members[element_path], *scan.members[path]})
+            # Ordered, not set-unioned: the member order decides the structure's field order,
+            # and two paths must merge to the *same* class -- an unordered merge built
+            # `ObjectRadiusCenter` in one place and `ObjectCenterRadius` in another, so a
+            # method looked absent on the copy the translator saw.
+            for member in scan.members[path]:
+                if member not in scan.members[element_path]:
+                    scan.members[element_path].append(member)
         # The element structure must exist before any parent that carries the list as a
         # fixed-length array of it.
         fields:List[Tuple[str, type]] = []
@@ -1103,6 +1202,11 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
 
                 register_declared_class(dtype, cls)
                 _CONSTRUCTED[cls] = dtype
+                # The order the constructor's arguments arrive in, which is the `__init__`
+                # parameter order -- *not* the member order. The synthesized structure sorts
+                # its fields by name, so a positional aggregate literal filled in field
+                # order would put `direction` where `origin` belongs.
+                _CONSTRUCTED_PARAMETERS[cls] = _init_parameters(cls)
                 continue
 
             def build(source:Any)->Any:

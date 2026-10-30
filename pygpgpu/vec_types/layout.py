@@ -19,7 +19,7 @@ what keeps the common case free.
 from __future__ import annotations
 
 import ctypes
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -316,12 +316,63 @@ def pack(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any], None]]]:
     return value, None
 
 
+_DEV_TYPE_CACHE:Dict[Tuple[type, str], type] = {}
+
+
+def _ctypes_align(field_type:Any)->int:
+    """The OpenCL C alignment of a ctypes field type, which ctypes does not know.
+
+    `ctypes` lays out an OpenCL `float3` (a 16-byte padded class) with align 4, because the
+    class itself is three floats plus padding. OpenCL C aligns a three- or four-component
+    vector to 16, so a structure holding one is wider than ctypes computes -- and the driver
+    rejects the short buffer ("Buffer size too small (40 instead of at least 64 bytes)").
+    """
+    if issubclass(field_type, ctypes.Array):
+        return _ctypes_align(field_type._type_)
+    name:Optional[str] = _is_vector_class(field_type)
+    if name is not None:
+        size:int = ctypes.sizeof(_device_class(name, "opencl"))
+        return 16 if size >= 16 else size
+    if issubclass(field_type, ctypes.Structure):
+        return max([_ctypes_align(kind) for _, kind in field_type._fields_] or [1])
+    return ctypes.alignment(field_type) or 1
+
+
+def _opencl_field_list(members:List[Tuple[str, Any, Any]])->List[Tuple[str, Any]]:
+    """The ctypes field list that reproduces OpenCL C's layout.
+
+    Each field is placed at the offset OpenCL would give it, and the gaps are spelled as
+    anonymous padding arrays -- ctypes has no way to set an offset or an alignment directly,
+    so the padding has to be a field of its own.
+    """
+    fields:List[Tuple[str, Any]] = []
+    cursor:int = 0
+    alignment:int = 1
+    for index, (name, device_type, _) in enumerate(members):
+        field_align:int = _ctypes_align(device_type)
+        alignment = max(alignment, field_align)
+        aligned:int = -(-cursor // field_align) * field_align
+        if aligned > cursor:
+            fields.append((f"_pad{index}", ctypes.c_ubyte * (aligned - cursor)))
+        cursor = aligned + ctypes.sizeof(device_type)
+        fields.append((name, device_type))
+    tail:int = -(-cursor // alignment) * alignment
+    if tail > cursor:
+        fields.append(("_pad_tail", ctypes.c_ubyte * (tail - cursor)))
+    return fields
+
+
 def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any], None]]]:
     """Re-lay a ctypes structure whose members include vectors or arrays of them.
 
     The device type is built on the fly: same field order, with every vector member (and
     every array of vectors, and every nested structure) replaced by its device layout. The
     write-back copies each member home.
+
+    The generated class is cached by (source type, backend): an array of these structures
+    needs ONE element class -- ctypes rejects a `T[2]` field assignment that mixes two
+    distinct `T_dev` types even when their layouts are identical, which is what "incompatible
+    types, T_dev instance instead of T_dev instance" was.
     """
     if backend != "opencl":
         return value, None
@@ -339,12 +390,10 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
             if name is not None:
                 device_type = _device_class(name, backend) * field_type._length_
                 changed = True
-            else:
-                if issubclass(field_type._type_, ctypes.Structure):
-                    packed, packed_write_back = _pack_structure(field_type._type_(), backend)
-                    if packed_write_back is not None:
-                        device_type = type(packed)
-                        changed = True
+            elif issubclass(field_type._type_, ctypes.Structure):
+                packed_element:Any = _pack_structure(field_type._type_(), backend)[0]
+                device_type = type(packed_element) * field_type._length_
+                changed = True
         elif issubclass(field_type, ctypes.Structure):
             packed, packed_write_back = _pack_structure(field_type(), backend)
             if packed_write_back is not None:
@@ -360,9 +409,12 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
     if not changed:
         return value, None
 
-    device_type_new:type = type(f"{source_type.__name__}_dev",
-                                (ctypes.Structure,),
-                                {"_fields_": [(name, device) for name, device, _ in members]})
+    device_type_new:type = _DEV_TYPE_CACHE.get((source_type, backend))
+    if device_type_new is None:
+        device_type_new = type(f"{source_type.__name__}_dev",
+                               (ctypes.Structure,),
+                               {"_fields_": _opencl_field_list(members)})
+        _DEV_TYPE_CACHE[(source_type, backend)] = device_type_new
     packed:Any = device_type_new()
     for field_name, device_field_type, host_field_type in members:
         name = _is_vector_class(host_field_type)
@@ -373,6 +425,15 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
             target:Any = getattr(packed, field_name)
             for index in range(host_field_type._length_):
                 target[index] = _pack_vector(host_array[index], backend)
+        elif issubclass(host_field_type, ctypes.Array) \
+                and issubclass(host_field_type._type_, ctypes.Structure):
+            # An array of structures with vector members: every element is packed into its
+            # own device class, the same way a single nested structure is.
+            host_array = getattr(value, field_name)
+            target = getattr(packed, field_name)
+            for index in range(host_field_type._length_):
+                element_packed, _ = _pack_structure(host_array[index], backend)
+                target[index] = element_packed
         else:
             setattr(packed, field_name, getattr(value, field_name))
 
@@ -385,5 +446,18 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
                 for index in range(host_field_type._length_):
                     _unpack_vector(getattr(source, field_name)[index],
                                    getattr(value, field_name)[index])
+            elif issubclass(host_field_type, ctypes.Array) \
+                    and issubclass(host_field_type._type_, ctypes.Structure):
+                # Copy every member back through the nested structure's own write-back: its
+                # vector members are padded on the device, so `source.x` is a device `float3`
+                # and assigning it straight onto the caller's field answered "incompatible
+                # types, float3 instance instead of point3f instance".
+                source_array:Any = getattr(source, field_name)
+                host_array = getattr(value, field_name)
+                for index in range(host_field_type._length_):
+                    _packed_element, element_unpack = _pack_structure(
+                        host_array[index], backend)
+                    if element_unpack is not None:
+                        element_unpack(source_array[index])
 
     return packed, unpack
