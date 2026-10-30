@@ -31,6 +31,7 @@
 | [09_reduction.py](09_reduction.py) | 数组求和归约: 逐元素原子、跨步私有累加、本地内存树形归约三种写法 |
 | [10_async_launch.py](10_async_launch.py) | 装饰后 kernel 的非阻塞启动: `submit` / `async_call` |
 | [11_python_backend.py](11_python_backend.py) | 纯 Python 后端: `k["python"]`、魔法循环与 gid 写法、`submit`/`async_call` |
+| [11_returns_and_scope.py](11_returns_and_scope.py) | 返回值(以参数形式传递, 首个返回者胜出)与外层作用域变量(参数化, `nonlocal` 会写回) |
 | [12_print_in_kernel.py](12_print_in_kernel.py) | kernel 里的 `print()`: 自动翻译成设备端 `printf`, 输出与 Python 完全一致的文本 |
 | [13_image.py](13_image.py) | 与后端无关的 `Image` 类型: kernel 里像数组一样下标(`src[y, x]`), 在 CUDA 上翻译为 `tex2D`/`surf2Dwrite`, 在 OpenCL 上翻译为 `read_imagef`/`write_imagef`, 在 `python` 后端由宿主实现执行, 三者结果逐元素一致 |
 
@@ -42,13 +43,13 @@
 kernel 有两种方式声明自己的迭代域, 自动 work size 需要其中之一:
 
 - **魔法循环**, 即 `for i in range(x.shape[0]): ...`(二维/三维用 `np.ndindex`/`np.ndenumerate`), 循环边界就是迭代域;
-- 对基于 `gpu.get_global_id` 的 **gid 写法** kernel, 在函数体开头声明: `gpu.work_size(x)`。这条语句只在 host 侧生效——翻译器会把它擦除, 不生成任何设备代码——并且它会贡献 `x` 的全部维度, 与 `np.ndindex(x.shape)` 的语义一致。两者都没有时, 调用会直接报错, 而不是静默猜测。
+- 对基于 `get_global_id` 的 **gid 写法** kernel, 在函数体开头声明: `work_size(x)`。这条语句只在 host 侧生效——翻译器会把它擦除, 不生成任何设备代码——并且它会贡献 `x` 的全部维度, 与 `np.ndindex(x.shape)` 的语义一致。两者都没有时, 调用会直接报错, 而不是静默猜测。
 
 有了迭代域后, `@kernel` 依据这些 extent 推导 local size, 并可能把 global size 向上取整到 local 的整数倍(这样在 shape 尴尬时——例如长度为质数——仍能保持高效的工作组划分, 而不是退化成单个 work item)。生成的 kernel 会为每个 work-item 做越界保护, 所以对 `@kernel` 是安全的。
 
 手写 kernel 必须自己 clamp, 而且不能用 `get_global_size(0)` 来做: 它返回的是取整后的启动规模, 不是元素个数。请像 `vecadd.cl` 那样把真实元素数作为 kernel 参数传入并据此比较。
 
-纯 Python 后端(`k["python"]`)对两种写法保持同样的语义: 魔法循环 kernel 按原样只跑一次(循环本身已覆盖所有元素), gid 写法 kernel 按其迭代域的每个工作项跑一次。它无法模拟 `gpu.local`, 因为组内共享内存需要并行的工作项。
+纯 Python 后端(`k["python"]`)对两种写法保持同样的语义: 魔法循环 kernel 按原样只跑一次(循环本身已覆盖所有元素), gid 写法 kernel 按其迭代域的每个工作项跑一次。它无法模拟 `local`, 因为组内共享内存需要并行的工作项。
 
 ## 关于后端初始化
 

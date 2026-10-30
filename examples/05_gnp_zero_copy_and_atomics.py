@@ -10,9 +10,9 @@ the device:
   upload (handled automatically by the static read/write analysis).
 
 Device builtin namespace `gpu.*`:
-- `gpu.atomic_add(arr, idx, val)`: atomic integer add, handy for histograms
+- `atomic_add(arr, idx, val)`: atomic integer add, handy for histograms
   and reductions;
-- `gpu.local(dtype, count)`: a work-group local memory buffer + `gpu.barrier()`
+- `local(dtype, count)`: a work-group local memory buffer + `barrier()`
   for synchronization;
 - plus the indexing builtins get_global_id / get_local_id / get_group_id.
 
@@ -22,7 +22,7 @@ Run:
 import numpy as np
 
 import pygpgpu.numpy as gnp
-from pygpgpu import kernel, gpu
+from pygpgpu import kernel, atomic_add, barrier, get_global_id, get_group_id, get_local_id, local, work_size
 
 
 @kernel
@@ -41,9 +41,9 @@ def add_inplace(x: np.ndarray, c: float):
 def histogram(data: np.ndarray, counts: np.ndarray):
     # A gid-style kernel must declare its iteration domain explicitly (there is no magic
     # loop to read it from): `data` supplies the launch size, dimension by dimension.
-    gpu.work_size(data)
-    i = gpu.get_global_id(0)
-    gpu.atomic_add(counts, data[i], 1)
+    work_size(data)
+    i = get_global_id(0)
+    atomic_add(counts, data[i], 1)
 
 
 GROUP_ITEMS = 1024  # elements per work group = 4 elements/thread * 256 threads
@@ -53,8 +53,8 @@ GROUP_ITEMS = 1024  # elements per work group = 4 elements/thread * 256 threads
 def group_reduce(x: np.ndarray, out: np.ndarray):
     """Reduction: each work group first reduces into local memory, then thread
     0 atomically adds the partial sum into the global out."""
-    g = gpu.get_group_id(0)
-    l = gpu.get_local_id(0)
+    g = get_group_id(0)
+    l = get_local_id(0)
     base = g * GROUP_ITEMS
 
     # Each thread accumulates the 4 elements it owns
@@ -62,15 +62,15 @@ def group_reduce(x: np.ndarray, out: np.ndarray):
     for j in range(l * 4, l * 4 + 4):
         s += x[base + j]
 
-    buf = gpu.local(np.int32, 256)  # local (shared) memory
+    buf = local(np.int32, 256)  # local (shared) memory
     buf[l] = s
-    gpu.barrier()  # the whole group must finish writing before anyone reads
+    barrier()  # the whole group must finish writing before anyone reads
 
     if l == 0:
         total = 0
         for k in range(256):
             total += buf[k]
-        gpu.atomic_add(out, 0, total)
+        atomic_add(out, 0, total)
 
 
 def main():

@@ -47,9 +47,12 @@ def main():
     print("opencl:0    - OK")
 
     # 4) Manual work size (total, per group); global is the total work-item
-    #    count; CUDA/HIP grid block count = global / local, converted automatically
+    #    count; CUDA/HIP grid block count = global / local, converted automatically.
+    #    A bracket replaces the size derived from the magic loop, so it has to cover
+    #    every element the kernel must touch: round n up to a multiple of the group.
     out.fill(0.0)
-    saxpy[(128 * 4096, 256)](x, y, out, 2.0)
+    total = -(-n // 256) * 256
+    saxpy[(total, 256)](x, y, out, 2.0)
     assert np.allclose(out, x * 2.0 + y)
     print("Manual work size - OK")
 

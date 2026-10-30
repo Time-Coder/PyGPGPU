@@ -7,9 +7,9 @@ for small inputs -- and it is a reference implementation of the launch semantics
 
 - a magic-loop kernel (`for i in range(x.shape[0])`, `enumerate`, `np.ndindex`) already
   contains the loop over the elements, so the function is called once, as written;
-- a gid-style kernel (`gpu.get_global_id`) is run once per work item of its iteration
-  domain, with `gpu.get_global_id` reporting the current index -- the serial
-  replacement of "one work item per element". The domain comes from `gpu.work_size(x)`
+- a gid-style kernel (`get_global_id`) is run once per work item of its iteration
+  domain, with `get_global_id` reporting the current index -- the serial
+  replacement of "one work item per element". The domain comes from `work_size(x)`
   or from a `(total, local)` bracket.
 
 `submit` / `async_call` work here too, on a ThreadPoolExecutor (one launch is still
@@ -22,7 +22,7 @@ import asyncio
 
 import numpy as np
 
-from pygpgpu import kernel, gpu
+from pygpgpu import kernel, atomic_add, get_global_id, work_size
 
 
 @kernel
@@ -34,10 +34,10 @@ def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float):
 
 @kernel
 def histogram(data: np.ndarray, counts: np.ndarray):
-    """gid-style: the interpreter runs this once per index of data (gpu.work_size)."""
-    gpu.work_size(data)
-    i = gpu.get_global_id(0)
-    gpu.atomic_add(counts, data[i], 1)
+    """gid-style: the interpreter runs this once per index of data (work_size)."""
+    work_size(data)
+    i = get_global_id(0)
+    atomic_add(counts, data[i], 1)
 
 
 def main():

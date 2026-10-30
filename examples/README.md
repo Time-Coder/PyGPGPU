@@ -32,6 +32,7 @@ matching the rest of the repository.
 | [09_reduction.py](09_reduction.py) | Array-sum reduction: per-element atomics, strided private sums, and a local-memory tree reduction |
 | [10_async_launch.py](10_async_launch.py) | Non-blocking launches of a `@kernel` function: `submit` / `async_call` |
 | [11_python_backend.py](11_python_backend.py) | The pure-Python backend: `k["python"]`, magic loop vs gid-style, plus `submit`/`async_call` |
+| [11_returns_and_scope.py](11_returns_and_scope.py) | Return values (as parameters, first return wins) and outer-scope variables (parameterized, `nonlocal` written back) |
 | [12_print_in_kernel.py](12_print_in_kernel.py) | `print()` inside a kernel: translated to device `printf` with python's exact rendering |
 | [13_image.py](13_image.py) | One backend-neutral `Image` type: a kernel indexes it like an array (`src[y, x]`), translated into `tex2D`/`surf2Dwrite` on CUDA and `read_imagef`/`write_imagef` on OpenCL, and executed by a host implementation on the `python` backend so all three agree element for element |
 
@@ -46,8 +47,8 @@ one of them:
 
 - a **magic loop**, `for i in range(x.shape[0]): ...` (or `np.ndindex`/`np.ndenumerate` for 2-D/3-D),
   whose loop bound is the domain;
-- for a **gid-style** kernel that dispatches on `gpu.get_global_id`, a declaration at the top of the
-  body: `gpu.work_size(x)`. That statement is host-side only — the translator erases it and emits no
+- for a **gid-style** kernel that dispatches on `get_global_id`, a declaration at the top of the
+  body: `work_size(x)`. That statement is host-side only — the translator erases it and emits no
   device code — and it contributes all of `x`'s dimensions, matching what `np.ndindex(x.shape)` would
   give. Without either, the call raises instead of silently guessing.
 
@@ -62,7 +63,7 @@ and compare against it, as `vecadd.cl` does.
 
 The pure-Python backend (`k["python"]`) keeps the same meaning for both styles: a magic-loop kernel
 runs once as written (the loop already covers the elements), while a gid-style kernel runs once per
-work item of its iteration domain. It cannot emulate `gpu.local`, since group-shared memory needs
+work item of its iteration domain. It cannot emulate `local`, since group-shared memory needs
 parallel work items.
 
 ## About backend initialization

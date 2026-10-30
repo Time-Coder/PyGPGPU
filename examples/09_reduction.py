@@ -15,15 +15,15 @@ simplest to fastest:
                         (shared) memory with a tree, so a group needs log2(group)
                         steps instead of one atomic per work item.
 
-A gid-style kernel (`gpu.get_global_id`) has no loop for the automatic work size to read
-the iteration domain from, so each one opens with `gpu.work_size(x)`. That statement is
+A gid-style kernel (`get_global_id`) has no loop for the automatic work size to read
+the iteration domain from, so each one opens with `work_size(x)`. That statement is
 host-side only -- it is erased at translation, emits no device code, and tells the
 launcher that `x`'s full shape is the domain. Without it, the call raises rather than
 silently launching a one-work-item grid. A bracketed launch such as
 `k[(total, local)](...)` also works, and the total must be a multiple of the per-group
 size.
 
-The output slot is `int32` because `gpu.atomic_add` only supports integer element
+The output slot is `int32` because `atomic_add` only supports integer element
 types. Two ways to sum floats: scale the data to integers, or use the local-memory
 tree and let a single work item add the float partial sums (one writer, so a plain
 add is safe there).
@@ -33,7 +33,7 @@ Run:
 """
 import numpy as np
 
-from pygpgpu import kernel, gpu
+from pygpgpu import kernel, atomic_add, barrier, get_global_id, get_global_size, get_group_id, get_local_id, get_local_size, local, work_size
 
 
 def launch_size(n, local=256):
@@ -44,9 +44,9 @@ def launch_size(n, local=256):
 @kernel
 def sum_atomic(x: np.ndarray, out: np.ndarray):
     """One atomic add per element: the simplest correct reduction."""
-    gpu.work_size(x)  # declare the iteration domain; erased at translation
-    i = gpu.get_global_id(0)
-    gpu.atomic_add(out, 0, x[i])
+    work_size(x)  # declare the iteration domain; erased at translation
+    i = get_global_id(0)
+    atomic_add(out, 0, x[i])
 
 
 @kernel
@@ -57,9 +57,9 @@ def sum_strided(x: np.ndarray, out: np.ndarray, n: np.int32):
     The bound is `n`, the real element count: the launch size may be rounded up past
     it, so the extra work items must not read out of range.
     """
-    gpu.work_size(x)
-    i = gpu.get_global_id(0)
-    stride = gpu.get_global_size(0)
+    work_size(x)
+    i = get_global_id(0)
+    stride = get_global_size(0)
 
     s = 0
     j = i
@@ -67,7 +67,7 @@ def sum_strided(x: np.ndarray, out: np.ndarray, n: np.int32):
         s += x[j]
         j += stride
 
-    gpu.atomic_add(out, 0, s)
+    atomic_add(out, 0, s)
 
 
 GROUP = 256  # work items per group, matching the local buffer size below
@@ -76,11 +76,11 @@ GROUP = 256  # work items per group, matching the local buffer size below
 @kernel
 def sum_local_tree(x: np.ndarray, out: np.ndarray, n: np.int32):
     """Tree reduction through local (shared) memory: log2(GROUP) steps per group."""
-    gpu.work_size(x)
-    g = gpu.get_group_id(0)
-    l = gpu.get_local_id(0)
-    group_size = gpu.get_local_size(0)
-    stride = gpu.get_global_size(0)
+    work_size(x)
+    g = get_group_id(0)
+    l = get_local_id(0)
+    group_size = get_local_size(0)
+    stride = get_global_size(0)
 
     # 1) Every work item reduces its strided slice privately.
     s = 0
@@ -89,22 +89,22 @@ def sum_local_tree(x: np.ndarray, out: np.ndarray, n: np.int32):
         s += x[j]
         j += stride
 
-    # `gpu.local` needs a literal count, so this mirrors GROUP.
-    buf = gpu.local(np.int32, 256)
+    # `local` needs a literal count, so this mirrors GROUP.
+    buf = local(np.int32, 256)
     buf[l] = s
-    gpu.barrier()  # the whole group must finish writing before anyone reads
+    barrier()  # the whole group must finish writing before anyone reads
 
     # 2) Halve the active range each step: 256 -> 128 -> ... -> 1.
     offset = group_size // 2
     while offset > 0:
         if l < offset:
             buf[l] = buf[l] + buf[l + offset]
-        gpu.barrier()
+        barrier()
         offset = offset // 2
 
     # 3) Work item 0 of each group adds the group total to the global output.
     if l == 0:
-        gpu.atomic_add(out, 0, buf[0])
+        atomic_add(out, 0, buf[0])
 
 
 def main():
@@ -113,7 +113,7 @@ def main():
     expected = int(x.sum(dtype=np.int64))
     print(f"sum of {n} int32 values, expected = {expected}")
 
-    # 1) One atomic per element -- work size from the gpu.work_size(x) declaration
+    # 1) One atomic per element -- work size from the work_size(x) declaration
     out = np.zeros(1, dtype=np.int32)
     sum_atomic(x, out)
     assert int(out[0]) == expected, (int(out[0]), expected)

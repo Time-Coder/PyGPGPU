@@ -44,7 +44,7 @@ No C code to write, no build system to configure; the first call translates, com
 - **Static read/write analysis**: the kernel body is parsed to infer whether each pointer argument is read-only, write-only or read-write — write-only arguments skip the upload, read-only arguments skip the read-back, and data stays on the device across calls (zero intermediate copies for gnp arrays).
 - **Vector types**: 50 vector types (float4/int3/...) with `.x/.y/.z/.w` members, swizzles, construction, arithmetic (scalar broadcast), comparisons and component-wise math.
 - **Dual-sided function library** `pygpgpu.funcs` (aka `pygpgpu.vec_types.funcs`): `dot/cross/normalize/clamp/...` run as-is in host Python and are translated to device builtins inside `@kernel`.
-- **Device builtin namespace** `gpu.*`: `get_global_id/barrier/atomic_add/dot/...` covers GPU builtins that have no Python counterpart, mapped per backend.
+- **Device builtins, exported at the top level**: `get_global_id`, `barrier`, `atomic_add`, `dot`, ... are plain functions imported from `pygpgpu`. Inside a `@kernel` body the translator recognizes each one by the object it resolves to and maps it to the call of every backend, so the same kernel body runs on OpenCL, CUDA, HIP and in the interpreter.
 - **Multi-dimensional iteration**: `np.ndindex(shape)` / `np.ndenumerate(arr)` magic loops (2D/3D), `enumerate(arr)` for a 1D index plus value snapshot.
 - **Three cache layers**: parsed metadata / compiled artifacts / generated sources, all invalidated by mtime — unchanged sources mean zero recompilation.
 
@@ -70,7 +70,7 @@ When `@kernel` has no explicit `backend`, backends are probed in **cuda -> hip -
 Every commonly used API is importable straight from the `pygpgpu` top level — no need to remember submodule names:
 
 ```python
-from pygpgpu import kernel, gpu, funcs, float4       # @kernel / device builtins / dual-sided funcs / vector types
+from pygpgpu import kernel, funcs, float4             # @kernel / dual-sided funcs / vector types
 from pygpgpu import list_devices, get_device
 from pygpgpu import climport, cuimport, hipimport    # import hooks for handwritten .cl/.cu/.hip files
 ```
@@ -84,7 +84,7 @@ The three import hooks load lazily: the corresponding backend is only loaded whe
 ```python
 import math
 import numpy as np
-from pygpgpu import kernel, gpu, funcs, float4
+from pygpgpu import kernel, funcs, float4
 
 def norm2(v: float4) -> float:
     return funcs.dot(v, v)
@@ -101,16 +101,68 @@ def matrix_scale(m: np.ndarray, out: np.ndarray, k: float) -> None:
 
 @kernel(backend="cuda")
 def histogram(data: np.ndarray, counts: np.ndarray) -> None:
-    gpu.work_size(data)                   # iteration domain for a gid-style kernel
-    i = gpu.get_global_id(0)
-    gpu.atomic_add(counts, data[i], 1)    # atomics, results read back automatically
+    work_size(data)                   # iteration domain for a gid-style kernel
+    i = get_global_id(0)
+    atomic_add(counts, data[i], 1)    # atomics, results read back automatically
 ```
 
 Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/comparison/bit ops, `math.*` and `np.*` math functions, class methods (`self.xxx` attributes become arguments automatically), static methods, and calling helpers through a name — a module-level function, `module.func(...)`, `SomeClass.static_method(...)`, and `self.method(...)` for another method of the same class. Unsupported syntax raises a `SyntaxError` carrying the line number.
 
+### `+=` into an array element
+
+`arr[i] op= value` follows Python's semantics even when several work items meet at the same element: `bins[image[i, j, k]] += 1` accumulates every pixel, without writing `atomic_add` by hand. The translator emits a device atomic whenever it cannot prove the element belongs to one work item — the proof being that the subscript is built from exactly the magic loop's own index variables, so `out[i] += x[i]` stays a plain (faster) read-modify-write.
+
+```python
+@kernel
+def histogram(image: np.ndarray):
+    bins: np.ndarray = np.zeros((3, 256), dtype=np.int32)   # created on the host
+    for i, j, k in np.ndindex(image.shape):
+        bins[k, image[i, j, k]] += 1    # one atomic add per pixel: no lost counts
+    return bins
+```
+
+Only operators with a device atomic counterpart are automated (`+=`, `-=`, `&=`, `|=`, `^=`). A racy `*=`/`/=`/`**=`, or a racy accumulation into a float element, raises a `SyntaxError` instead of losing data: there is no portable float atomic on the OpenCL backend, so use an integer buffer or accumulate per work item and reduce afterwards (`examples/09_reduction.py`).
+
+### Accumulating into a single scalar
+
+A handwritten kernel takes a pointer to one element (`__global int* total`) and passes it to `atomicAdd`. There are three equivalent shapes here:
+
+```python
+from pygpgpu import atomic_add, kernel
+
+# 1) a 1-element array IS that pointer
+@kernel
+def count(x: np.ndarray, total: np.ndarray):
+    for i in range(x.shape[0]):
+        if x[i] > 0.0:
+            atomic_add(total, 0, 1)     # or simply: total[0] += 1
+
+# 2) an outer scalar declared nonlocal/global becomes a device pointer,
+#    and the result is written back to the enclosing scope after the call
+@kernel
+def count_global(x: np.ndarray):
+    global TOTAL
+    for i in range(x.shape[0]):
+        if x[i] > 0.0:
+            TOTAL += 1                  # atomic on the device, native in the interpreter
+
+# 3) a counter created in the body can be returned as the result
+@kernel
+def count_and_return(x: np.ndarray):
+    total: np.ndarray = np.zeros(1, dtype=np.int32)
+    for i in range(x.shape[0]):
+        if x[i] > 0.0:
+            total[0] += 1
+    return total                        # a 1-element array: the caller reads [0]
+```
+
+All three are exact on every backend — thousands of work items incrementing one location lose nothing. An outer scalar is always a *shared* location, so `TOTAL += 1` there is always atomic; `atomic_add(scalar, 0, 1)` is refused with a message pointing at that spelling, since an atomic needs an array to index.
+
+
+
 Type annotations are optional: the snippets in this README carry them for readability, but the device types come from the arguments at call time, so the same code works unannotated (`self` is not a kernel argument, so annotating it changes nothing).
 
-A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `gpu.get_global_id`, declare `gpu.work_size(x)` — that statement is host-side only, erased by the translator, and contributes all of `x`'s dimensions. A `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
+A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `get_global_id`, declare `work_size(x)` — that statement is host-side only, erased by the translator, and contributes all of `x`'s dimensions. A `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
 
 ### Printing from a kernel
 
@@ -184,10 +236,10 @@ The two kernel styles keep their meanings, which is where the interpreter differ
 | Kernel style | What `k["python"](...)` does |
 |---|---|
 | magic loop (`for i in range(x.shape[0])`, `enumerate(x)`, `np.ndindex`/`np.ndenumerate`) | runs the function once: the loop already covers every element. A `(total, local)` bracket changes nothing here, because the loop, not the launch, decides the extent |
-| gid-style (`gpu.get_global_id`), domain from `gpu.work_size(x)` | runs the body once per work item of the declared domain (`x`'s full shape), with `gpu.get_global_id` reporting the current index — one serial step per element, in `np.ndindex` order |
+| gid-style (`get_global_id`), domain from `work_size(x)` | runs the body once per work item of the declared domain (`x`'s full shape), with `get_global_id` reporting the current index — one serial step per element, in `np.ndindex` order |
 | gid-style, domain from a `k[(total, local)]` bracket | same, one step per work item of the bracket, so the body must clamp itself against the real element count exactly as it does on a GPU |
 
-Inside such a body `gpu.*` resolves to host implementations: the indexing builtins, the atomics (plain read-modify-writes — serial execution makes them exact), `gpu.barrier()` (a no-op) and the vector math family, which uses `pygpgpu.funcs`' host implementation. Two things cannot be emulated and raise instead: `gpu.local` (group-local memory is shared by parallel work items) and a `gpu.get_global_id` call inside a magic-loop body, where there is no current work item — use the loop variable there.
+Inside such a body the same functions resolve to their host implementations: the indexing builtins, the atomics (plain read-modify-writes — serial execution makes them exact), `barrier()` (a no-op) and the vector math family, which uses `pygpgpu.funcs`' host implementation. Two things cannot be emulated and raise instead: `local` (group-local memory is shared by parallel work items) and a `get_global_id` call inside a magic-loop body, where there is no current work item — use the loop variable there.
 
 Vector-typed arrays work unchanged: reading `v = points[i]` yields a vector instance, and `out[i] = v.xyzy * 2.0` writes its components.
 
@@ -397,7 +449,7 @@ wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
 | Input data | numpy arrays directly | wrap in `ti.field`, explicit `from_numpy`/`to_numpy` | `cuda.to_device` + `copy_to_host` by hand | wrap in `wp.array` |
 | Helper functions | **plain Python — no decorator, annotations optional** | `@ti.func` + annotated args | `@cuda.jit(device=True)` | `@wp.func` + annotated args |
 | Backends in one process | **all three, mixed freely** | one, fixed by `ti.init(arch=...)` | CUDA only | CUDA only |
-| Launch size | inferred from the loop bound (or `gpu.work_size(x)` / a bracket) | inferred from `range` | blocks × threads by hand, plus a guard | pass `dim=` |
+| Launch size | inferred from the loop bound (or `work_size(x)` / a bracket) | inferred from `range` | blocks × threads by hand, plus a guard | pass `dim=` |
 | Bounds guard | emitted for you | emitted for you | you write it | you write it |
 | Backends | OpenCL, CUDA, HIP | CPU, CUDA, Vulkan and others | CPU, CUDA | CPU, CUDA |
 | AMD GPU | HIP (native AMD codegen) and OpenCL | via Vulkan | no | no |
@@ -438,6 +490,81 @@ Where the others are ahead — worth knowing before you pick:
 
 This table was written from each project's documentation and the snippets above; their APIs move
 fast, so confirm against current docs before relying on a specific cell.
+
+### Return values and outer variables
+
+A kernel runs once per work item, so there is no single C return value to hand back. The
+translator gives every returned position a device parameter of its own — a one-element
+buffer for a scalar or vector, the array object itself for an array — and the first work
+item to reach a `return` claims the result with an atomic compare-and-swap. The host reads
+the slots back after the launch and returns exactly what the winning work item returned:
+
+```python
+@kernel
+def first_peak(x: np.ndarray):
+    for i in range(x.shape[0]):
+        if x[i] > 10.0:
+            return x[i], i          # a tuple
+    return None                     # a launch where nothing returns is None
+
+value, index = first_peak[backend](x)
+```
+
+The supported return types are exactly the supported parameter types, every `return`
+statement may have its own shape (`return x[i]` from one branch, `return x[i], i` from
+another), and a bare `return` gives `None`. `submit()` and `async_call()` deliver the same
+value once their future resolves, after read-back. A value-returning `return` is refused
+below the magic loop: there it would return one work item's local, not the function's
+result.
+
+Variables the body reads from outside become parameters too, so a changed outer value is
+visible on the next call — inlining it would leave the kernel stale:
+
+```python
+SCALE = 2.0
+
+@kernel
+def scaled(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = x[i] * SCALE
+
+scaled[backend](x, out)     # SCALE is passed as an argument
+SCALE = 100.0               # the next call uses 100.0
+scaled[backend](x, out)
+```
+
+A `nonlocal`/`global` declaration makes the outer scalar writable: it travels as a pointer,
+every use inside is a dereference, and the value is copied back into its scope after the
+call — a closure cell for `nonlocal`, the module globals for `global`. Outer arrays are
+pointer parameters as well, and are read back when the kernel writes them. Rebinding an
+outer array (as opposed to writing its elements) is refused, because the object is shared
+with the caller. A helper function gets the same treatment as the kernel that calls it.
+
+Statements above the magic loop may also *create* data with numpy — `np.zeros`, `np.ones`,
+`np.empty`, `np.full`, `np.arange`, `np.linspace`, `*_like`, `np.float32(...)` and the rest
+of the allocating constructors. The interpreter runs those statements, so the array has
+exactly the shape and dtype numpy gives it, and it reaches the kernel as a parameter:
+
+```python
+@kernel
+def normalized(x: np.ndarray, out: np.ndarray):
+    total = np.zeros(1, dtype=np.float32)      # built on the host
+    for i in range(x.shape[0]):
+        total[0] = total[0] + x[i]
+    for i in range(out.shape[0]):
+        out[i] = x[i] / total[0]
+
+@kernel
+def doubled(x: np.ndarray):
+    result = np.zeros_like(x)                  # created, then returned as itself
+    for i in range(x.shape[0]):
+        result[i] = x[i] * 2.0
+    return result
+```
+
+A created object the body returns reuses the parameter it already travels through, so the
+caller receives the host's own object rather than a copy. Creation below the magic loop is
+refused: it would build one object per work item instead of one.
 
 ### Images
 
@@ -575,7 +702,7 @@ set_print_info(True)       # verbose again (the default)
 
 ## Known limitations
 
-- `@kernel` does not support: strings/lists/dicts, closures, recursion, kernel return values, dynamic multi-dimensional shape indexing;
+- `@kernel` does not support: strings/lists/dicts, recursion, dynamic multi-dimensional shape indexing. Closures and module globals *are* supported: an outer variable becomes a kernel parameter, and one declared `nonlocal`/`global` is written back after the call (see "Return values and outer variables" above);
 - `print()` inside a kernel prints one `True`/`False` pair, integer, real or vector at a time. `sep` and `end` are translated, but must be string literals (the format string is fixed in the device code); `file` and `flush` are refused; it also cannot print an array (print an element instead). A line containing many floats expands into a `switch` over their digit counts, so an extremely long line can hit the code-size guard and should be split into several calls. The HIP backend rejects `print()` outright: its driver drops the device on such kernels on the tested runtime;
 - vector comparison, writing through a swizzle, and nesting beyond three operands are restricted in favour of cross-backend consistency (the error message suggests a workaround);
 - `Image` is unsupported on the HIP backend: HIP reuses CUDA code generation, which has no texture object type, and `hipTexObjectCreate` is rejected with "operation not supported" on hardware without texture support (an integrated Radeon under ROCm 7.2 Windows, for instance). The translator raises a `SyntaxError` naming the backend; use cuda, opencl or python for image kernels;
@@ -583,7 +710,7 @@ set_print_info(True)       # verbose again (the default)
 - a `@kernel` signature may carry default values, and a call may pass arguments by keyword: the call is bound to positional order before launch, with omitted defaults filled in. `*args`, `**kwargs` and keyword-only parameters remain unsupported;
 - fp16 (`np.float16`) arguments are unavailable on the CUDA/HIP backends (use float32);
 - the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used;
-- the pure-Python backend (`k["python"]`) does not emulate `gpu.local` (group-shared memory): it runs serially and has no parallel work items to share it.
+- the pure-Python backend (`k["python"]`) does not emulate `local` (group-shared memory): it runs serially and has no parallel work items to share it.
 
 On CUDA, the array APIs (`Array` upload/read-back through `cuMemcpy2D`) work on every supported interpreter. `cuSurfObjectCreate` and `cuTexObjectCreate` occasionally return `CUDA_ERROR_INVALID_VALUE` on a descriptor that is byte-for-byte valid; the failures cluster in the first few calls of a process and then stop. Measured on the machine this was developed on (driver 13.4, RTX 4070): about one in a hundred creations fails, retrying an already-failed descriptor does not recover it, and a fresh descriptor for a newly created array usually does. Because an `Image` binds one surface and one texture per launch, a scenario that launches several image kernels in one process can therefore lose a few launches. The `python` and OpenCL backends are unaffected: OpenCL images are created per launch on a code path that has not shown the failure, and the `python` backend touches no device at all. `examples/11_texture2d.py` reports a driver refusal instead of raising.
 ## License

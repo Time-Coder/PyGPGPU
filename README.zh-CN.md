@@ -44,7 +44,7 @@ saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运�
 - **静态读写分析**: 解析 kernel 函数体, 推断每个指针参数是只读/只写/读写——只写参数跳过上传, 只读参数跳过回读, 连续调用间数据留在设备上(gnp 数组零中间拷贝)。
 - **向量类型**: 50 个向量类型(float4/int3/...), 支持 `.x/.y/.z/.w` 成员与 swizzle、构造、算术(标量广播)、比较、逐分量 math。
 - **双面函数库** `pygpgpu.funcs`(即 `pygpgpu.vec_types.funcs`): `dot/cross/normalize/clamp/...` 在宿主 Python 直接可运行, 在 `@kernel` 里自动翻译为设备内建。
-- **设备内建命名空间** `gpu.*`: `get_global_id/barrier/atomic_add/dot/...` 覆盖 Python 没有对应物的 GPU 内建, 按后端自动映射。
+- **设备内建直接从顶层导出**: `get_global_id`、`barrier`、`atomic_add`、`dot` 等都是普通函数, 从 `pygpgpu` 直接导入即可。在 `@kernel` 函数体里, 翻译器按**它解析到的函数对象**识别(而非名字), 再映射成各后端的调用, 所以同一份函数体在 OpenCL / CUDA / HIP 和解释器后端上都能跑。
 - **多维遍历**: `np.ndindex(shape)` / `np.ndenumerate(arr)` 魔法循环(2D/3D), `enumerate(arr)` 一维索引+值快照。
 - **三层缓存**: 解析元信息 / 编译产物 / 生成源码, 全部按 mtime 自动失效, 源码不变则零重编译。
 
@@ -70,7 +70,8 @@ Python ≥ 3.7。GPU 运行时按需自备(任一即可):
 常用 API 都可以直接从 `pygpgpu` 顶层导入, 不用记子包名:
 
 ```python
-from pygpgpu import kernel, gpu, funcs, float4       # @kernel / 设备内建 / 双面函数库 / 向量类型
+from pygpgpu import kernel, funcs, float4             # @kernel / 双面函数库 / 向量类型
+from pygpgpu import get_global_id, atomic_add        # 设备内建也是顶层普通函数
 from pygpgpu import list_devices, get_device
 from pygpgpu import climport, cuimport, hipimport    # 手写 .cl/.cu/.hip 文件的 import 钩子
 ```
@@ -84,7 +85,7 @@ from pygpgpu import climport, cuimport, hipimport    # 手写 .cl/.cu/.hip 文�
 ```python
 import math
 import numpy as np
-from pygpgpu import kernel, gpu, funcs, float4
+from pygpgpu import kernel, funcs, float4, atomic_add, get_global_id, work_size
 
 def norm2(v: float4) -> float:
     return funcs.dot(v, v)
@@ -101,16 +102,66 @@ def matrix_scale(m: np.ndarray, out: np.ndarray, k: float) -> None:
 
 @kernel(backend="cuda")
 def histogram(data: np.ndarray, counts: np.ndarray) -> None:
-    gpu.work_size(data)                   # gid 写法需要声明迭代域
-    i = gpu.get_global_id(0)
-    gpu.atomic_add(counts, data[i], 1)    # 原子操作, 结果自动回读
+    work_size(data)                   # gid 写法需要声明迭代域
+    i = get_global_id(0)
+    atomic_add(counts, data[i], 1)    # 原子操作, 结果自动回读
 ```
 
 支持的能力: 标量/数组/向量参数, if/while/for-range, 算术/比较/位运算, `math.*` 与 `np.*` 数学函数, 类方法(`self.xxx` 属性自动转为参数), 静态方法, 以及按名字调用辅助函数 —— 模块级函数、`module.func(...)`、`SomeClass.static_method(...)`, 以及同一个类里 `self.method(...)` 这种实例方法互调。不支持的语法抛出带行号的 `SyntaxError`。
 
 类型注解是可选项: 本 README 里的代码片段带上注解只为便于阅读, 设备端类型来自调用时的实参, 所以同样的代码不写注解也能跑(`self` 不是 kernel 参数, 给它加注解没有任何影响)。
 
-kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `gpu.get_global_id` 的写法里声明 `gpu.work_size(x)` —— 这条语句只在 host 侧生效, 会被翻译器擦除, 并贡献 `x` 的全部维度。用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
+kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `get_global_id` 的写法里声明 `work_size(x)` —— 这条语句只在 host 侧生效, 会被翻译器擦除, 并贡献 `x` 的全部维度。用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
+
+### 数组元素上的 `+=`
+
+即使多个工作项会撞到同一个元素, `arr[i] op= value` 也遵循 Python 语义: `bins[image[i, j, k]] += 1` 会累计每一个像素, 不需要手写 `atomic_add`。翻译器在无法证明该元素只属于一个工作项时, 会生成设备端原子操作 —— 能证明的情形是下标恰好由魔法循环自己的索引变量构成, 于是 `out[i] += x[i]` 仍是普通的(更快)读改写。
+
+```python
+@kernel
+def histogram(image: np.ndarray):
+    bins: np.ndarray = np.zeros((3, 256), dtype=np.int32)   # 在 host 侧创建
+    for i, j, k in np.ndindex(image.shape):
+        bins[k, image[i, j, k]] += 1    # 每个像素一次原子加: 不会丢计数
+    return bins
+```
+
+只有存在对应原子原语的运算符会自动处理(`+=`、`-=`、`&=`、`|=`、`^=`)。有竞争的 `*=`/`/=`/`**=`, 或者往浮点元素上做有竞争的累加, 会抛出 `SyntaxError` 而不是悄悄丢数据: OpenCL 后端没有可移植的浮点原子操作, 请改用整型缓冲区, 或者先按工作项局部累加再做归约(见 `examples/09_reduction.py`)。
+
+### 累加到单个标量
+
+手写 kernel 里是把单个元素的指针(`__global int* total`)交给 `atomicAdd`。这里有三种等价写法:
+
+```python
+from pygpgpu import atomic_add, kernel
+
+# 1) 单元素数组就是那个指针
+@kernel
+def count(x: np.ndarray, total: np.ndarray):
+    for i in range(x.shape[0]):
+        if x[i] > 0.0:
+            atomic_add(total, 0, 1)     # 也可以直接写: total[0] += 1
+
+# 2) 声明为 nonlocal/global 的外部标量会变成设备端指针,
+#    调用结束后结果写回外层作用域
+@kernel
+def count_global(x: np.ndarray):
+    global TOTAL
+    for i in range(x.shape[0]):
+        if x[i] > 0.0:
+            TOTAL += 1                  # 设备端是原子操作, 解释器里是原生语义
+
+# 3) 在函数体里创建计数器并作为返回值交回
+@kernel
+def count_and_return(x: np.ndarray):
+    total: np.ndarray = np.zeros(1, dtype=np.int32)
+    for i in range(x.shape[0]):
+        if x[i] > 0.0:
+            total[0] += 1
+    return total                        # 单元素数组, 调用方读 [0]
+```
+
+三种写法在每个后端上都精确: 成千上万个工作项同时累加同一个位置也不会丢。外部标量永远是**共享**位置, 所以 `TOTAL += 1` 一定是原子操作; 而对它调用 `atomic_add(scalar, 0, 1)` 会被拒绝, 并提示改用前者——原子操作需要一个可下标的数组。
 
 ### 在 kernel 里打印
 
@@ -184,10 +235,10 @@ saxpy["py"].submit(x, y, out, 2.0)   # 同一次启动, 放到线程池里执行
 | kernel 写法 | `k["python"](...)` 的行为 |
 |---|---|
 | 魔法循环(`for i in range(x.shape[0])`、`enumerate(x)`、`np.ndindex`/`np.ndenumerate`) | 函数只调用一次: 循环本身已经覆盖了所有元素。此时 `(total, local)` 中括号不改变任何东西, 因为决定迭代范围的是循环, 不是启动规模 |
-| gid 写法(`gpu.get_global_id`), 迭代域来自 `gpu.work_size(x)` | 按声明的迭代域(`x` 的完整 shape)每个工作项跑一遍函数体, `gpu.get_global_id` 返回当前索引——也就是按 `np.ndindex` 顺序, 每个元素一步 |
+| gid 写法(`get_global_id`), 迭代域来自 `work_size(x)` | 按声明的迭代域(`x` 的完整 shape)每个工作项跑一遍函数体, `get_global_id` 返回当前索引——也就是按 `np.ndindex` 顺序, 每个元素一步 |
 | gid 写法, 迭代域来自 `k[(total, local)]` 中括号 | 同上, 按中括号的每个工作项跑一遍, 因此函数体必须像在 GPU 上一样, 自己针对真实元素个数做越界保护 |
 
-这类函数体里的 `gpu.*` 会解析到 host 侧实现: 索引内建、原子操作(退化为普通读-改-写, 串行执行使其结果精确)、`gpu.barrier()`(空操作)以及向量数学函数族(直接调用 `pygpgpu.funcs` 的 host 实现)。有两种东西无法模拟, 会直接报错: `gpu.local`(组内共享内存需要并行工作项)与魔法循环函数体里的 `gpu.get_global_id`(那里没有"当前工作项", 请改用循环变量)。
+这类函数体里的内建函数会解析到 host 侧实现: 索引内建、原子操作(退化为普通读-改-写, 串行执行使其结果精确)、`barrier()`(空操作)以及向量数学函数族(直接调用 `pygpgpu.funcs` 的 host 实现)。有两种东西无法模拟, 会直接报错: `local`(组内共享内存需要并行工作项)与魔法循环函数体里的 `get_global_id`(那里没有"当前工作项", 请改用循环变量)。
 
 向量数组可以照常使用: 读取 `v = points[i]` 得到向量实例, `out[i] = v.xyzy * 2.0` 写回各分量。
 
@@ -392,7 +443,7 @@ wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
 | 输入数据 | numpy 数组直接用 | 包进 `ti.field`, 手动 `from_numpy`/`to_numpy` | 手动 `cuda.to_device` + `copy_to_host` | 包进 `wp.array` |
 | 子函数 | **普通 Python——不需要装饰器, 注解可选** | `@ti.func` + 标注参数 | `@cuda.jit(device=True)` | `@wp.func` + 标注参数 |
 | 同进程多后端 | **三个都能用, 可自由混用** | 只有一个, 由 `ti.init(arch=...)` 固定 | 仅 CUDA | 仅 CUDA |
-| 启动规模 | 由循环上界推导(或 `gpu.work_size(x)` / 中括号) | 由 `range` 推导 | block × thread 手算, 外加守卫 | 显式传 `dim=` |
+| 启动规模 | 由循环上界推导(或 `work_size(x)` / 中括号) | 由 `range` 推导 | block × thread 手算, 外加守卫 | 显式传 `dim=` |
 | 边界守卫 | 自动生成 | 自动生成 | 自己写 | 自己写 |
 | 后端 | OpenCL, CUDA, HIP | CPU, CUDA, Vulkan 等 | CPU, CUDA | CPU, CUDA |
 | AMD GPU | HIP(原生 AMD 代码生成)与 OpenCL | 经 Vulkan | 不支持 | 不支持 |
@@ -431,6 +482,72 @@ apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
 - **最低解释器版本**: 本库支持 Python 3.7 及以上, 64 位与 32 位 Windows 均可; 其他几个需要更新的解释器。
 
 这张表依据各项目文档与上面的代码片段整理; 它们的 API 迭代很快, 依赖某一格之前请核对当前文档。
+
+### 返回值与外层变量
+
+kernel 每个工作项执行一次, 因此没有唯一的 C 返回值可以带回。翻译器给每个返回位置一个独立的设备参数——
+标量与向量是一元素缓冲区, 数组则直接用数组对象本身——再由第一个走到 `return` 的工作项用原子比较交换
+认领结果。宿主在启动完成后读回这些槽位, 返回的就是胜出工作项给出的值:
+
+```python
+@kernel
+def first_peak(x: np.ndarray):
+    for i in range(x.shape[0]):
+        if x[i] > 10.0:
+            return x[i], i          # 元组
+    return None                     # 没有任何工作项返回时就是 None
+
+value, index = first_peak[backend](x)
+```
+
+支持的返回类型与支持的参数类型完全一致; 每条 `return` 语句的形状可以不同(某个分支 `return x[i]`,
+另一个 `return x[i], i`); 裸 `return` 得到 `None`。`submit()` 与 `async_call()` 在 future 完成
+(即读回之后)交出同样的值。魔法循环之后的值返回会被拒绝: 那里返回的是某个工作项的局部值, 而不是函数的
+结果。
+
+函数体从外部读取的变量同样成为参数, 因此外层值改变后下一次调用立刻可见——若内联, kernel 会变陈旧:
+
+```python
+SCALE = 2.0
+
+@kernel
+def scaled(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = x[i] * SCALE
+
+scaled[backend](x, out)     # SCALE 作为参数传入
+SCALE = 100.0               # 下一次调用用 100.0
+scaled[backend](x, out)
+```
+
+用 `nonlocal`/`global` 声明的外层标量是可写的: 它以指针传入, 内部每次使用都是解引用, 调用结束后值会写回
+其作用域——`nonlocal` 写回闭包 cell, `global` 写回模块全局。外层数组也是指针参数, 若 kernel 写了它, 会
+被读回。重绑定外层数组(与写其元素相对)会被拒绝, 因为该对象与调用方共享。helper 函数与调用它的 kernel
+受到完全相同的处理。
+
+魔法循环之上的语句还可以用 numpy 创建数据——`np.zeros`、`np.ones`、`np.empty`、`np.full`、
+`np.arange`、`np.linspace`、`*_like`、`np.float32(...)` 以及其他分配类构造器。这些语句由解释器执行,
+因此数组的形状与 dtype 与 numpy 给出的完全一致, 并作为参数传给 kernel:
+
+```python
+@kernel
+def normalized(x: np.ndarray, out: np.ndarray):
+    total = np.zeros(1, dtype=np.float32)      # 在宿主创建
+    for i in range(x.shape[0]):
+        total[0] = total[0] + x[i]
+    for i in range(out.shape[0]):
+        out[i] = x[i] / total[0]
+
+@kernel
+def doubled(x: np.ndarray):
+    result = np.zeros_like(x)                  # 创建后原样返回
+    for i in range(x.shape[0]):
+        result[i] = x[i] * 2.0
+    return result
+```
+
+被返回的创建对象复用它本来就在使用的那个参数, 因此调用方拿到的是宿主自己的对象, 而不是副本。魔法循环
+之下的创建会被拒绝: 那会为每个工作项创建一个对象, 而不是一个。
 
 ### 图像
 
@@ -560,7 +677,7 @@ set_print_info(True)       # 恢复详细输出(默认)
 
 ## 已知限制
 
-- `@kernel` 不支持: 字符串/列表/字典、闭包、递归、kernel 返回值、多维 shape 动态索引;
+- `@kernel` 不支持: 字符串/列表/字典、递归、多维 shape 动态索引。闭包与模块全局变量**是**支持的: 外层变量成为 kernel 参数, 用 `nonlocal`/`global` 声明过的会在调用后写回(见上文 "返回值与外层变量");
 - kernel 里的 `print()` 逐个参数处理 `True`/`False`、整数、浮点数与向量, `sep`/`end` 可用但需为字符串字面量（格式串固化在设备代码中），`file`/`flush` 不支持, 也不能直接打印数组(请打印某个元素)。含大量浮点数的一行会展开成一个按位数选择的 `switch`, 特别长的一行会触达代码体积保护, 请拆成多次调用。HIP 后端直接拒绝 `print()`: 在被测运行时上, 这类 kernel 会让驱动丢失设备;
 - 向量比较/swizzle 写、三元以上嵌套等按跨后端一致性优先做了限制(报错信息会给出替代写法);
 - HIP 后端不支持 `Image`: HIP 复用 CUDA 代码生成, 其中没有纹理对象类型, 并且在不支持纹理的硬件上 `hipTexObjectCreate` 会被拒绝(返回 "operation not supported", 例如 ROCm 7.2 Windows 下的集成 Radeon)。翻译器会抛出指明后端的 `SyntaxError`; 图像 kernel 请使用 cuda、opencl 或 python;
@@ -568,7 +685,7 @@ set_print_info(True)       # 恢复详细输出(默认)
 - `@kernel` 签名可以带默认值, 调用也可以用关键字传参: 启动前会先绑定为位置顺序, 并补上省略的默认值。`*args`、`**kwargs` 与仅限关键字参数仍不支持;
 - fp16 (`np.float16`) 参数在 CUDA/HIP 后端不可用(建议 float32);
 - HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用;
-- 纯 Python 后端(`k["python"]`)不模拟 `gpu.local`(组内共享内存), 它是串行执行的, 没有并行工作项的概念。
+- 纯 Python 后端(`k["python"]`)不模拟 `local`(组内共享内存), 它是串行执行的, 没有并行工作项的概念。
 
 在 CUDA 上，数组 API（`Array` 的 `cuMemcpy2D` 上传/回读）在每个受支持的解释器上都正常。`cuSurfObjectCreate` 与 `cuTexObjectCreate` 偶尔会对一份逐字节合法的描述符返回 `CUDA_ERROR_INVALID_VALUE`；失败集中在进程最初若干次调用，之后不再出现。在开发此项目的机器上实测（驱动 13.4，RTX 4070）：约每一百次创建失败一次，对已失败的描述符重试无法挽回，而为新建数组重新构造描述符通常可以。由于一个 `Image` 每次 launch 需要绑定一个 surface 和一个 texture，同一进程内连续启动多个图像 kernel 的场景可能损失若干次 launch。`python` 与 OpenCL 后端不受影响：OpenCL 的图像在每次 launch 时创建，其代码路径未出现过该失败，而 `python` 后端完全不接触设备。`examples/11_texture2d.py` 在驱动拒绝时报出原因而不是抛异常。
 ## License
