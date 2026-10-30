@@ -463,10 +463,25 @@ class PythonKernel:
         if analysis.magic_form is not None:
             # The loop is the launch: serial execution covers the array's real extent, so
             # a bracket cannot add or drop work items here (on a GPU it only decides how
-            # the same range is split into work items). The work sizes still answer the
-            # gpu.get_*size builtins.
-            extents, local = self._serial_sizes(analysis, instance, args)
-            return self._execute(instance, args, PythonFrame(extents, local))
+            # the same range is split into work items).
+            #
+            # The group size still has to reach the work-item queries: `blockIdx`/`threadIdx`
+            # and `get_local_id`/`get_group_id` divide by it, so a bracket splits the same
+            # extents the way a device run would. Only those queries are affected -- the body
+            # runs once, as written, so the loop itself is untouched.
+            extents, auto_local = self._serial_sizes(analysis, instance, args)
+            local: Optional[Tuple[int, ...]] = auto_local or None
+            if extents and local_size is not None:
+                if global_size is not None:
+                    _, local = self._checked_sizes(global_size, local_size)
+                else:
+                    local = tuple(int(l) for l in local_size)
+            elif extents and global_size is not None:
+                _, local = self._checked_sizes(global_size, local_size)
+            frame: PythonFrame = PythonFrame(extents, local or ())
+            # The body stands for the first work item of the launch (see _flat_coords).
+            frame.coords = tuple(0 for _ in extents) if extents else None
+            return self._execute(instance, args, frame)
 
         if analysis.declared:
             # A gid-style body that declared its domain with gpu.work_size(...): the

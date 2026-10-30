@@ -26,7 +26,7 @@ Usage::
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 # The vector half of the namespace (dot/length/normalize/clamp/mix/...) is dual-sided
 # already: `pygpgpu.vec_types.funcs` holds one implementation that serves both sides, so
@@ -303,17 +303,76 @@ def zeros_per_group(shape: Any, dtype: Any = "float32") -> Any:
     nothing for it: the index is a statement about *which* group's memory is meant, and
     inside a work item only one answer is reachable.
 
-    A serial run cannot honour a work-group barrier, so this refuses on the interpreter
-    backend rather than returning a silently different number: an algorithm that counts
-    into shared memory and then merges would otherwise produce the wrong total. Use a
-    cuda/opencl/hip backend, or write the same result with ``atomic_add`` straight into an
-    array argument.
+    On the interpreter backend this returns the mapping itself, with each group's array
+    created on first use, so a body that reads ``buf[blockIdx][j]`` works unchanged and a
+    group never sees another group's storage. A serial run has no real parallelism, so a
+    ``barrier()`` cannot order anything -- a body that *depends* on another work item having
+    written first still gets a serial answer, which is the answer a device run would give
+    only if the ordering happened to be the same.
     """
-    raise SyntaxError(
-        "zeros_per_group() is not supported by the python backend: it needs a work-group "
-        "barrier to separate the phases that share the buffer, and a serial run cannot "
-        "honor one. Use a cuda/opencl/hip backend for this kernel, or write the same result "
-        "with atomic_add straight into an array argument") from None
+    from .host_runtime import require_frame
+
+    frame: Any = require_frame("zeros_per_group")
+    return _GroupSlices(shape, dtype, frame)
+
+
+class _GroupSlices:
+    """One group's zeroed array per block id, created on demand.
+
+    Subscripting is the whole point -- ``buf[blockIdx]`` -- and a block id outside the launch
+    is refused rather than silently allocated, because that would hand out storage for a
+    group the launch does not have.
+    """
+
+    __slots__ = ("_shape", "_dtype", "_frame", "_slices")
+
+    def __init__(self, shape: Any, dtype: Any, frame: Any)->None:
+        if isinstance(shape, int):
+            shape = (shape, )
+        self._shape: Any = tuple(int(s) for s in shape)
+        self._dtype: Any = dtype
+        self._frame: Any = frame
+        self._slices: Dict[Any, Any] = {}
+
+    def __getitem__(self, group: Any)->Any:
+        import numpy as np
+
+        key: Tuple[int, ...] = _group_key(group)
+        groups: List[int] = []
+        for axis in range(len(self._frame.global_size)):
+            local: int = self._frame.local_size[axis] if axis < len(self._frame.local_size) else 1
+            groups.append(-(-self._frame.global_size[axis] // max(1, local)))
+        for axis, count in enumerate(groups):
+            if axis < len(key) and key[axis] >= count:
+                raise IndexError(
+                    f"no work group {key} in this launch: it has {tuple(groups)} group(s), so "
+                    f"a zeros_per_group() buffer has no storage for it")
+        if key not in self._slices:
+            self._slices[key] = np.zeros(self._shape, dtype=self._dtype)
+        return self._slices[key]
+
+    def __repr__(self)->str:
+        return f"<zeros_per_group{self._shape} dtype={self._dtype}>"
+
+
+def _group_key(group: Any)->Tuple[int, ...]:
+    """The block id a `buf[blockIdx]` subscript names, as a tuple of axis indices."""
+    if isinstance(group, int):
+        return (int(group), )
+    # `blockIdx`/`get_group_id(0)` and a plain list of axes are all acceptable: what matters
+    # is the three numbers, not the container.
+    if isinstance(group, _IndexVector):
+        from .host_runtime import get_host_frame
+
+        frame: Any = get_host_frame()
+        axes: int = len(frame.global_size) if frame is not None else 3
+        return tuple(group[axis] for axis in range(max(1, axes)))
+    try:
+        return tuple(int(v) for v in group)
+    except TypeError:
+        raise TypeError(
+            f"a zeros_per_group() buffer is indexed by a work group, not by "
+            f"{type(group).__name__}: use `buf[blockIdx]`") from None
 
 
 # One object, two names: a CUDA reader looks for "block" and an OpenCL reader for "group".

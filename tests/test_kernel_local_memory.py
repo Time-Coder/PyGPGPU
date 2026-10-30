@@ -30,6 +30,8 @@ from pygpgpu import (
     atomic_add,
     barrier,
     blockIdx,
+    threadIdx,
+    zeros_per_block,
     get_global_id,
     get_group_id,
     get_local_id,
@@ -176,12 +178,27 @@ def test_a_shared_buffer_cannot_be_used_without_a_group():
     assert "block" in str(caught.value).lower()
 
 
-def test_the_interpreter_backend_refuses_shared_memory():
-    """Group-shared memory needs parallel work items; a serial run cannot emulate it."""
-    pixels = np.zeros(16, dtype=np.uint8)
-    with pytest.raises(SyntaxError) as caught:
-        shared_histogram["python"](pixels, np.zeros(BINS, dtype=np.uint32))
-    assert "zeros_per_group" in str(caught.value)
+def test_the_interpreter_backend_keeps_each_groups_slice_apart():
+    """The host model is a real mapping, so a serial run still separates the groups.
+
+    `blockIdx` is not pinned to zero there: the group size comes from the launch, so each
+    work item's `blockIdx`/`threadIdx` split the domain exactly as on a device, and one
+    group's shared array never holds another's values.
+    """
+
+    @kernel
+    def tag(out: np.ndarray):
+        buf = zeros_per_block((2, 2), np.int32)
+        blk = blockIdx.x
+        lid = threadIdx.x
+        buf[blk][lid // 2, lid % 2] = blk * 100 + lid
+        barrier()
+        out[blk * 4 + lid] = buf[blk][lid // 2, lid % 2]
+
+    out = np.zeros(8, dtype=np.int32)
+    tag["python"][(8, 4)](out)
+    np.testing.assert_array_equal(
+        out, np.array([0, 1, 2, 3, 100, 101, 102, 103], dtype=np.int32))
 
 
 def test_the_cuda_index_vector_is_the_opencl_scalar(gpu_backend):
@@ -196,6 +213,47 @@ def test_the_cuda_index_vector_is_the_opencl_scalar(gpu_backend):
     out = np.zeros(BINS, dtype=np.int32)
     both[gpu_backend][(BINS, BINS)](out)
     np.testing.assert_array_equal(out, np.ones(BINS, dtype=np.int32))
+
+
+def test_the_interpreter_reports_real_group_ids():
+    """`blockIdx` is not pinned to zero on the interpreter: the launch splits the domain.
+
+    Only the work-item queries change -- a magic-loop body still runs once, over the real
+    extent -- so the same bracket yields the same grouping a device run would report.
+    """
+    import numpy as np
+
+    from pygpgpu import get_group_id, get_local_id
+
+    @kernel
+    def ids(out: np.ndarray):
+        work_size(out)
+        i = get_global_id(0)
+        out[i] = get_group_id(0) * 100 + get_local_id(0)
+
+    out = np.zeros(8, dtype=np.int32)
+    ids["python"][(8, 4)](out)
+    np.testing.assert_array_equal(
+        out, np.array([0, 1, 2, 3, 100, 101, 102, 103], dtype=np.int32))
+
+    out[:] = 0
+    ids["python"][(8, 2)](out)
+    np.testing.assert_array_equal(
+        out, np.array([0, 1, 100, 101, 200, 201, 300, 301], dtype=np.int32))
+
+
+def test_a_magic_loop_body_is_not_split_by_the_bracket():
+    """The bracket reaches the ids only; the loop still covers the array's real extent."""
+
+    @kernel
+    def doubled(magic: np.ndarray, out: np.ndarray):
+        for i in range(magic.shape[0]):
+            out[i] = magic[i] * 2
+
+    values = np.arange(8, dtype=np.int32)
+    out = np.zeros(8, dtype=np.int32)
+    doubled["python"][(16, 4)](values, out)
+    np.testing.assert_array_equal(out, values * 2)
 
 
 def test_a_local_size_reports_the_group_width(gpu_backend):
