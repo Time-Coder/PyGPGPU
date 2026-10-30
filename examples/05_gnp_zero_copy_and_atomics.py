@@ -12,7 +12,7 @@ the device:
 Device builtin namespace `gpu.*`:
 - `atomic_add(arr, idx, val)`: atomic integer add, handy for histograms
   and reductions;
-- `local(dtype, count)`: work-group shared memory, one slice per group, indexed by
+- `zeros_per_group(dtype, count)`: work-group shared memory, one slice per group, indexed by
   `blockIdx` (`buf[blockIdx][lane]`) + `barrier()` for synchronization;
 - plus the indexing builtins get_global_id / get_local_id / get_group_id.
 
@@ -23,7 +23,7 @@ import numpy as np
 
 import pygpgpu.numpy as gnp
 from pygpgpu import (kernel, atomic_add, barrier, blockIdx, get_global_id, get_group_id,
-                     get_local_id, local, work_size)
+                     get_local_id, zeros_per_group, work_size)
 
 
 @kernel
@@ -63,7 +63,7 @@ def group_reduce(x: np.ndarray, out: np.ndarray):
     for j in range(l * 4, l * 4 + 4):
         s += x[base + j]
 
-    buf = local(np.int32, 256)  # shared memory, one slice per work group
+    buf = zeros_per_group(np.int32, 256)  # shared memory, one slice per work group
     buf[blockIdx][l] = s
     barrier()  # the whole group must finish writing before anyone reads
 

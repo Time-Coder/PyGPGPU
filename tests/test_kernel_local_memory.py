@@ -1,4 +1,4 @@
-"""Work-group shared memory: `local(...)`, `barrier()`, and atomics on those buffers.
+"""Work-group shared memory: `zeros_per_group(...)`, `barrier()`, and atomics on those buffers.
 
 This is the `__shared__` histogram every CUDA tutorial shows, written once and run on every
 device backend:
@@ -12,7 +12,7 @@ device backend:
     __syncthreads();
     if (threadIdx.x < 256) atomicAdd(&global[tid], bins[tid]);
 
-A `local(...)` value stands for **every group's slice**, so it is indexed by the group first
+A `zeros_per_group(...)` value stands for **every group's slice**, so it is indexed by the group first
 (`bins[blockIdx][lane]`) and only then by the slot. On a device that first subscript folds
 away -- the hardware already gives each group private storage -- but the spelling keeps the
 model honest, and it is what makes the same code meaningful on the host.
@@ -35,7 +35,7 @@ from pygpgpu import (
     get_local_id,
     get_local_size,
     kernel,
-    local,
+    zeros_per_group,
     work_size,
 )
 
@@ -47,7 +47,7 @@ def shared_histogram(pixels: np.ndarray, hist: np.ndarray):
     """One work item per pixel; counts accumulate in shared memory, then merge once."""
     work_size(pixels)              # bounds guard against the real pixel count
     lane = get_local_id(0)         # threadIdx.x
-    bins = local(np.uint32, 256)   # __shared__ uint bins[256], per group
+    bins = zeros_per_group(np.uint32, 256)   # __shared__ uint bins[256], per group
 
     bins[blockIdx][lane] = 0       # zero this group's bins (one lane per bin)
     barrier()                      # __syncthreads()
@@ -64,7 +64,7 @@ def shared_histogram_plus_equals(pixels: np.ndarray, hist: np.ndarray):
     """The same kernel with `+=`, which is atomic on shared memory for the same reason."""
     work_size(pixels)
     lane = get_local_id(0)
-    bins = local(np.uint32, 256)
+    bins = zeros_per_group(np.uint32, 256)
     bins[blockIdx][lane] = 0
     barrier()
     bins[blockIdx][int(pixels[get_global_id(0)])] += 1
@@ -78,7 +78,7 @@ def shared_sums(x: np.ndarray, hist: np.ndarray):
     """A shared buffer used as a scratch pad, without atomics: each lane owns one slot."""
     work_size(x)
     lane = get_local_id(0)
-    slots = local(np.int32, 256)
+    slots = zeros_per_group(np.int32, 256)
     slots[blockIdx][lane] = int(x[get_global_id(0)]) * 2
     barrier()
     if lane < 256:
@@ -134,7 +134,7 @@ def test_the_local_count_must_be_a_literal(gpu_backend):
     @kernel
     def uses_a_global_count(out: np.ndarray):
         work_size(out)
-        slots = local(np.float32, BINS)  # a module global, not a literal
+        slots = zeros_per_group(np.float32, BINS)  # a module global, not a literal
         slots[blockIdx][get_local_id(0)] = 0.0
         barrier()
         out[get_global_id(0)] = slots[blockIdx][get_local_id(0)]
@@ -151,7 +151,7 @@ def test_a_shared_buffer_must_be_indexed_by_its_group(gpu_backend):
     def wrong_index(pixels: np.ndarray, out: np.ndarray):
         work_size(out)
         lane = get_local_id(0)
-        slots = local(np.int32, 256)
+        slots = zeros_per_group(np.int32, 256)
         slots[lane] = 1                    # a local id is not a group id
         barrier()
         out[get_global_id(0)] = slots[lane]
@@ -168,7 +168,7 @@ def test_a_shared_buffer_cannot_be_used_without_a_group():
     @kernel
     def bare(out: np.ndarray):
         work_size(out)
-        slots = local(np.int32, 256)
+        slots = zeros_per_group(np.int32, 256)
         out[get_global_id(0)] = slots
 
     with pytest.raises(SyntaxError) as caught:
@@ -181,7 +181,7 @@ def test_the_interpreter_backend_refuses_shared_memory():
     pixels = np.zeros(16, dtype=np.uint8)
     with pytest.raises(SyntaxError) as caught:
         shared_histogram["python"](pixels, np.zeros(BINS, dtype=np.uint32))
-    assert "local" in str(caught.value)
+    assert "zeros_per_group" in str(caught.value)
 
 
 def test_the_cuda_index_vector_is_the_opencl_scalar(gpu_backend):

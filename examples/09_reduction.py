@@ -34,7 +34,7 @@ Run:
 import numpy as np
 
 from pygpgpu import (kernel, atomic_add, barrier, blockIdx, get_global_id,
-                     get_global_size, get_group_id, get_local_id, get_local_size, local,
+                     get_global_size, get_group_id, get_local_id, get_local_size, zeros_per_group,
                      work_size)
 
 
@@ -91,8 +91,8 @@ def sum_local_tree(x: np.ndarray, out: np.ndarray, n: np.int32):
         s += x[j]
         j += stride
 
-    # `local` needs a literal count, so this mirrors GROUP.
-    buf = local(np.int32, 256)      # shared memory, one slice per work group
+    # `zeros_per_group` needs a literal count, so this mirrors GROUP.
+    buf = zeros_per_group(np.int32, 256)      # shared memory, one slice per work group
     buf[blockIdx][l] = s
     barrier()  # the whole group must finish writing before anyone reads
 

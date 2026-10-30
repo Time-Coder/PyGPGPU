@@ -2494,9 +2494,10 @@ class FunctionTranslator:
                 f"cannot assign to self.{target.attr}: host attributes cannot be written by device code; "
                 f"write into an array element (self.{target.attr}[i] = ...) or use a local variable", node)
 
-        # local memory declaration: buf = local(np.float32, 64)
+        # shared memory declaration: buf = zeros_per_group(np.float32, 64)
         if (isinstance(node.value, ast.Call)
-                and self._builtin_call_name(node.value) == "local"):
+                and self._builtin_call_name(node.value) in ("zeros_per_group",
+                                                        "zeros_per_block")):
             self._handle_local_declaration(node)
             return
 
@@ -2628,7 +2629,7 @@ class FunctionTranslator:
         return outer
 
     def _handle_local_declaration(self, node:ast.Assign)->None:
-        """`buf = local(np.float32, 64)` -> a shared array, one slice per work group.
+        """`buf = zeros_per_group(np.float32, 64)` -> a shared array, one slice per work group.
 
         A work item can only touch memory inside its own group, so the value the name
         stands for is a **dictionary keyed by block id**: `buf[block_id(0)][j]` is this
@@ -2641,7 +2642,7 @@ class FunctionTranslator:
         """
         call:ast.Call = node.value
         if len(call.args) != 2 or call.keywords:
-            self._error("gpu.local(dtype, count) takes exactly 2 arguments", call)
+            self._error("zeros_per_group(dtype, count) takes exactly 2 arguments", call)
 
         dtype_node:ast.expr = call.args[0]
         dtype_name:str = ""
@@ -2650,33 +2651,33 @@ class FunctionTranslator:
             if module is np:
                 dtype_name = dtype_node.attr
             else:
-                self._error("gpu.local() dtype must be a numpy dtype like np.float32", dtype_node)
+                self._error("zeros_per_group() dtype must be a numpy dtype like np.float32", dtype_node)
         elif isinstance(dtype_node, ast.Constant) and isinstance(dtype_node.value, str):
             dtype_name = dtype_node.value
         else:
-            self._error("gpu.local() dtype must be a numpy dtype like np.float32", dtype_node)
+            self._error("zeros_per_group() dtype must be a numpy dtype like np.float32", dtype_node)
 
         if dtype_name not in DTYPE_MAP:
-            self._error(f"gpu.local() unsupported dtype: {dtype_name}", dtype_node)
+            self._error(f"zeros_per_group() unsupported dtype: {dtype_name}", dtype_node)
 
         ctype:str = DTYPE_MAP[dtype_name]
         if ctype == "half":
-            self._error("gpu.local() does not support half (fp16)", dtype_node)
+            self._error("zeros_per_group() does not support half (fp16)", dtype_node)
 
         count_node:ast.expr = call.args[1]
         if not (isinstance(count_node, ast.Constant) and isinstance(count_node.value, int) and count_node.value > 0):
-            self._error("gpu.local() count must be a constant positive integer", count_node)
+            self._error("zeros_per_group() count must be a constant positive integer", count_node)
 
         c_name:str = f"_local{len(self.local_buffers)}"
         self.local_buffers.append((c_name, ctype, count_node.value))
 
         target:ast.expr = node.targets[0]
         if not isinstance(target, ast.Name):
-            self._error("gpu.local() result must be assigned to a plain variable", node)
+            self._error("zeros_per_group() result must be assigned to a plain variable", node)
         self._define(target.id, ("shared", ctype, c_name, count_node.value), node)
 
     def _is_local_buffer(self, node:ast.expr)->bool:
-        """True when ``node`` reaches `local(...)` memory, i.e. work-group shared storage.
+        """True when ``node`` reaches `zeros_per_group(...)` memory, i.e. work-group shared storage.
 
         Both spellings count: the buffer itself (`bins`) and the group's slice of it
         (`bins[blockIdx]`). The slice form is what an atomic call passes -- `atomic_add(
@@ -3502,7 +3503,7 @@ class FunctionTranslator:
                 # A shared buffer is not itself a pointer: it is one slice per group, and
                 # only uf[block_id(d)] picks the caller's out (see _visit_shared_slice).
                 self._error(
-                    f"'{node.id}' is a local() buffer, which is one slice per work group: "
+                    f"'{node.id}' is a zeros_per_group() buffer, which is one slice per work group: "
                     f"index it with the group first, as '{node.id}[blockIdx]'", node)
             if isinstance(t, tuple) and len(t) == 4 and t[0] == "bodyarr":
                 # A private array created in the body is indexed like any array; its extents
@@ -3816,7 +3817,7 @@ class FunctionTranslator:
         if member is not None:
             return member
 
-        # `buf[k]` on a `local(...)` value: the index selects a work group, and only the
+        # `buf[k]` on a `zeros_per_group(...)` value: the index selects a work group, and only
         # caller's own group is reachable from inside a work item, so `k` must be the block
         # id. The result is that group's slice, which is then indexed normally.
         shared:Optional[Tuple[str, Any]] = self._visit_shared_slice(node)
@@ -3856,7 +3857,7 @@ class FunctionTranslator:
         index:ast.expr = node.slice
         if not self._is_block_id_expression(index):
             self._error(
-                "a local() buffer is one slice per work group, and a work item can only "
+                "a zeros_per_group() buffer is one slice per work group, and a work item can only "
                 "reach its own: index it with the group first, as `buf[blockIdx][j]` "
                 "(or `buf[get_group_id(0)][j]`)", index)
         # Both backends give each work group its own copy of the buffer -- OpenCL allocates
@@ -3874,9 +3875,12 @@ class FunctionTranslator:
         same number by another name.
         """
         if isinstance(node, ast.Name):
-            # `blockIdx` is the group vector itself; a local holding `block_id(0)` is the
-            # same axis under another name.
+            # `blockIdx` is the group vector itself; a local holding one is the same axis
+            # under another name.
             return node.id == "blockIdx" or self._lookup(node.id) == "blockid"
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            # `blockIdx.x`: one axis of the group vector.
+            return node.value.id == "blockIdx" and node.attr in ("x", "y", "z")
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             return False
         return self._builtin_call_name(node) == "get_group_id"
@@ -4258,7 +4262,7 @@ class FunctionTranslator:
 
         builtin:Optional[str] = self._builtin_call_name(node)
         if builtin is not None:
-            if builtin in ("local", "work_size"):
+            if builtin in ("zeros_per_group", "zeros_per_block", "work_size"):
                 self._error(
                     f"{builtin}() is a statement, not a value: use it on its own, as "
                     f"`name = {builtin}(...)`", node)

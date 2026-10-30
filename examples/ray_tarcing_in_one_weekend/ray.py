@@ -1,14 +1,11 @@
-from pygf import point3f, float3
-from ctypes import Structure
+from pygf import point3f, vector3f
 
 
-class Ray(Structure):
+class Ray:
 
-    _fields_ = [
-        ("origin", point3f),
-        ("direction", float3)
-    ]
+    def __init__(self, origin: point3f, direction: vector3f):
+        self.origin = origin
+        self.direction = direction
 
     def at(self, t: float)->point3f:
         return self.origin + t * self.direction
-    

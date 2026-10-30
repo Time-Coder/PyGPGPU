@@ -28,7 +28,7 @@ from pygpgpu import (
     float3,
     get_global_id,
     kernel,
-    local,
+    zeros_per_group,
     work_size,
 )
 from pygpgpu.kernel import builtins as namespace
@@ -41,7 +41,7 @@ def _dispatched_names() -> list[str]:
     return sorted(set(builtin_tables.INDEX_BUILTINS)
                   | set(builtin_tables.ATOMIC_BUILTINS)
                   | set(builtin_tables.GENERIC_BUILTINS)
-                  | {"local", "work_size"})
+                  | {"zeros_per_group", "work_size"})
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +144,10 @@ def test_work_size_and_barrier_are_no_ops_on_the_host():
     assert barrier() is None
 
 
-def test_local_is_refused_on_the_host():
+def test_zeros_per_group_is_refused_on_the_host():
     with pytest.raises(SyntaxError) as caught:
-        local(np.float32, 16)
-    assert "local" in str(caught.value)
+        zeros_per_group(np.float32, 16)
+    assert "zeros_per_group" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------

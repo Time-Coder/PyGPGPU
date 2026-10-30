@@ -95,7 +95,7 @@ __all__ = [
     # CUDA's index vectors (three axes each)
     "blockIdx", "threadIdx", "blockDim", "gridDim",
     # synchronisation and launch shape
-    "barrier", "work_size", "local",
+    "barrier", "work_size", "zeros_per_group", "zeros_per_block",
     # atomics
     "atomic_add", "atomic_sub", "atomic_min", "atomic_max",
     "atomic_and", "atomic_or", "atomic_xor", "atomic_xchg", "atomic_cas",
@@ -271,8 +271,14 @@ def work_size(*arrays: Any) -> None:
     return None
 
 
-def local(dtype: Any, count: int) -> Any:
-    """Shared (work-group) memory: ``count`` elements of ``dtype``, one slice per group.
+def zeros_per_group(dtype: Any, count: int) -> Any:
+    """Shared (work-group) memory: ``count`` elements of ``dtype``, zeroed, one slice per group.
+
+    The name says what it builds -- zeros, one per group -- so it cannot be confused with a
+    kernel-local variable, which ``local()`` invited. ``zeros_per_block`` is the same function
+    under CUDA's word for a group; both spellings are published because a CUDA reader looks
+    for "block" and an OpenCL reader for "group", and requiring one of them would make half
+    the readers hunt for an alias.
 
     This is CUDA's ``__shared__`` / OpenCL's ``__local``, and the value stands for **all
     groups' slices at once**, keyed by group:
@@ -295,10 +301,16 @@ def local(dtype: Any, count: int) -> Any:
     array argument.
     """
     raise SyntaxError(
-        "local() is not supported by the python backend: it needs a work-group barrier to "
-        "separate the phases that share the buffer, and a serial run cannot honor one. Use "
-        "a cuda/opencl/hip backend for this kernel, or write the same result with "
-        "atomic_add straight into an array argument") from None
+        "zeros_per_group() is not supported by the python backend: it needs a work-group "
+        "barrier to separate the phases that share the buffer, and a serial run cannot "
+        "honor one. Use a cuda/opencl/hip backend for this kernel, or write the same result "
+        "with atomic_add straight into an array argument") from None
+
+
+# One object, two names: a CUDA reader looks for "block" and an OpenCL reader for "group".
+# They are the same function, so the host and the device cannot disagree about them however
+# they are spelled (see the one-object-per-name rule in AGENTS.md).
+zeros_per_block: Any = zeros_per_group
 
 
 # ---------------------------------------------------------------------------

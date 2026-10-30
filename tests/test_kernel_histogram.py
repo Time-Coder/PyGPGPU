@@ -175,5 +175,5 @@ def test_the_interpreter_refuses_shared_memory():
     with pytest.raises(SyntaxError) as caught:
         hist["python"](image)
     message: str = str(caught.value)
-    assert "local" in message
+    assert "zeros_per_group" in message
     assert "barrier" in message

@@ -1,6 +1,6 @@
 import numpy as np
 from pygpgpu import (atomic_add, barrier, blockIdx, get_global_id, get_local_id, get_local_size,
-                     kernel, local, work_size)
+                     kernel, zeros_per_group, work_size)
 
 
 # Intensity histograms: one bin per possible uint8 value, so bin i counts the pixels whose
@@ -118,7 +118,7 @@ def hist(image:np.ndarray):
     size1 = get_local_size(1)
     lane = get_local_id(0) + size0 * (get_local_id(1) + size1 * get_local_id(2))
     group_total = size0 * size1 * get_local_size(2)
-    bins = local(np.int32, 768)            # __shared__ bins[3 * 256], per work group
+    bins = zeros_per_group(np.int32, 768)            # __shared__ bins[3 * 256], per work group
     dest_hist:np.ndarray = np.zeros((3, 256), dtype=np.int32)
 
     # Clear the group's bins: each lane takes a strided slice of the 768 bins. The first
