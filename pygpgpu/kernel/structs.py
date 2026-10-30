@@ -73,7 +73,12 @@ def field_type(field_dtype:Any, backend:str)->Tuple[str, str]:
             raise SyntaxError(
                 f"a structure member of dtype {dtype} has no device type; use a scalar, a "
                 f"vector, a nested structure, or an array of those")
-        base = "uchar" if dtype.name == "bool" else scalar
+        # A bool member is a byte. OpenCL spells the unsigned byte `uchar`; CUDA C does not
+        # define that alias, so it takes the full spelling there.
+        if dtype.name == "bool":
+            base = "uchar" if backend == "opencl" else "unsigned char"
+        else:
+            base = scalar
 
     # numpy records a sub-array member as (dtype, shape); C puts the extents on the name.
     suffix:str = ""

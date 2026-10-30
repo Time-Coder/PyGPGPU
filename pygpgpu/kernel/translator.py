@@ -481,7 +481,10 @@ _MATH_CONSTS:Dict[str, str] = {
     "pi": "3.14159265358979323846f",
     "e": "2.71828182845904523536f",
     "tau": "6.28318530717958647692f",
-    "inf": "INFINITY",
+    # A literal rather than the INFINITY macro: NVRTC's default headers do not define it,
+    # so the CUDA translation unit failed with "identifier INFINITY is undefined". A float
+    # literal is the same value on every backend and needs no header.
+    "inf": "(1.0f / 0.0f)",
 }
 
 # ---------- print() support ----------
@@ -1836,11 +1839,11 @@ class FunctionTranslator:
         self.scopes.pop()
 
     def _visit_for(self, node:ast.For)->None:
-        if isinstance(node.iter, ast.Name) or isinstance(node.iter, ast.Attribute):
-            self._error(
-                "iterating an array directly (`for x in arr`) is not supported in a kernel: "
-                "a work-item has no index to write through; use `for i, x in enumerate(arr)` "
-                "(x is a read-only element snapshot) or `for i in range(arr.shape[0])`", node.iter)
+        if isinstance(node.iter, (ast.Name, ast.Attribute)):
+            # `for x in arr`: an element-wise walk becomes an indexed one, with `x` bound to
+            # the current element by value -- the same read-only snapshot `enumerate` gives.
+            self._emit_element_loop(node)
+            return
         if (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
                 and node.iter.func.id == "enumerate"):
             self._error(
@@ -1883,6 +1886,56 @@ class FunctionTranslator:
         else:
             self._error("range() step must be a constant integer", node.iter.args[-1])
         self._push_scope_block(node.body)
+        self._emit("}")
+
+    def _emit_element_loop(self, node:ast.For)->None:
+        """`for x in arr:` as an indexed loop with `x` a copy of the current element.
+
+        A work item cannot write through an iterator, so the element is read-only -- which is
+        what python's iteration gives for a record too. The index variable is hidden, so a
+        body that also declares `i` does not collide with it.
+        """
+        if not isinstance(node.target, ast.Name):
+            self._error("iterating an array needs a plain variable: `for x in arr`", node.target)
+        code, t = self._visit_expression(node.iter)
+        if not is_ptr(t):
+            self._error(
+                "iterating a value directly needs an array; this is a scalar. Use an array "
+                "argument, or a range() loop", node.iter)
+        element_t:Any = t[1]
+        holder:ast.expr = node.iter
+        # The extent: a parameter's own shape variable, or a structure member's fixed length.
+        if isinstance(holder, ast.Name):
+            stop:str = self._shape_var(holder.id, 0)
+        elif isinstance(holder, ast.Attribute) and isinstance(holder.value, ast.Name):
+            base_t:Any = self._lookup(holder.value.id)
+            base_element:Any = base_t[1] if is_ptr(base_t) else base_t
+            dtype:Optional[np.dtype] = (structs_dtype_for(base_element)
+                                        if isinstance(base_element, str) else None)
+            if dtype is None or holder.attr not in (dtype.names or ()):
+                self._error(
+                    f"cannot iterate '{ast.unparse(holder)}': it is not an array member",
+                    holder)
+            field_dtype:np.dtype = np.dtype(dtype.fields[holder.attr][0])
+            if field_dtype.subdtype is None:
+                self._error(
+                    f"cannot iterate '{ast.unparse(holder)}': a scalar member is not an array",
+                    holder)
+            stop = str(field_dtype.subdtype[1][0])
+        else:
+            self._error(
+                f"cannot iterate '{ast.unparse(holder)}': use a named array parameter or an "
+                f"array member of one", node.iter)
+
+        name:str = node.target.id
+        index:str = f"_{name}_idx"
+        self._emit(f"for (int {index} = 0; {index} < {stop}; {index}++) {{")
+        self._emit(f"{self._device_type(element_t)} {name} = {code}[{index}];")
+        self._define(name, element_t, node.target)
+        self._indent += 1
+        for statement in node.body:
+            self._visit_statement(statement)
+        self._indent -= 1
         self._emit("}")
 
     # ---------- kernel return values ----------
@@ -3362,6 +3415,9 @@ class FunctionTranslator:
         code, t = self._visit_expression(node.operand)
         name:str = node.op.__class__.__name__
         if name == "USub":
+            if is_vec(t) and self.backend == "cuda":
+                # CUDA has no unary minus on a vector type: the negation is per component.
+                return self._vec_componentwise("-", code, t), t
             return f"(-{code})", t
         if name == "UAdd":
             return f"(+{code})", t
@@ -3720,6 +3776,13 @@ class FunctionTranslator:
     def _visit_call(self, node:ast.Call)->Tuple[str, Any]:
         func:ast.expr = node.func
         if node.keywords:
+            # A structure constructor takes member names as keywords -- Ray(origin=p) is
+            # how python's ctypes spelling addresses members -- so it is translated before
+            # the positional reordering below, which only knows about plain functions.
+            if isinstance(func, ast.Name):
+                candidate:Any = self.resolve_global(func.id)
+                if isinstance(candidate, type) and self._is_structure_class(candidate):
+                    return self._visit_structure_constructor_call(node, candidate)
             # A helper may be called with keywords; nothing below needs to know, so the
             # call is rewritten to positional order first, using the callee's signature.
             # Builtins take positional arguments only, so they keep refusing.
@@ -3951,6 +4014,17 @@ class FunctionTranslator:
             self._error("len() takes an array argument", node)
         holder = node.args[0]
         if not isinstance(holder, ast.Name):
+            # `len(bag.items)` on a member array: the argument spelling differs but the
+            # length is the same compile-time shape variable, keyed on the base's name.
+            if isinstance(holder, ast.Attribute) and isinstance(holder.value, ast.Name):
+                base_t:Any = self._lookup(holder.value.id)
+                element_t:Any = base_t[1] if is_ptr(base_t) else base_t
+                dtype:Optional[np.dtype] = (structs_dtype_for(element_t)
+                                            if isinstance(element_t, str) else None)
+                if dtype is not None and holder.attr in (dtype.names or ()):
+                    field_dtype:np.dtype = np.dtype(dtype.fields[holder.attr][0])
+                    if field_dtype.subdtype is not None:
+                        return (str(field_dtype.subdtype[1][0]), "int")
             self._error("len() takes an array parameter name", node)
         return self._shape_var(holder.id, 0), "int"
 
@@ -4302,8 +4376,55 @@ class FunctionTranslator:
                 return base.__name__
         return None
 
+    def _is_structure_class(self, candidate:Any)->bool:
+        """Whether a global name is a `ctypes.Structure` subclass with a device layout."""
+        from . import structs  # noqa: PLC0415
+
+        return structs.structure_dtype_of(candidate) is not None
+
+    def _visit_structure_constructor_call(self, node:ast.Call,
+                                          candidate:type)->Tuple[str, Any]:
+        """A structure constructor called with keywords: `Ray(origin=p, direction=d)`.
+
+        A member name is a keyword, exactly as python's ctypes spelling addresses one, and
+        the positional arguments come first in declaration order -- the same shape
+        `ctypes.Structure.__init__` accepts.
+        """
+        from . import structs  # noqa: PLC0415
+
+        dtype:Optional[np.dtype] = structs.structure_dtype_of(candidate)
+        if dtype is None:
+            self._error(f"'{ast.unparse(node.func)}' is not a structure type", node)
+        order:List[str] = list(dtype.names or ())
+        args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+        supplied:Dict[str, Tuple[str, Any]] = {}
+        for position, value in enumerate(args):
+            if position >= len(order):
+                self._error(
+                    f"{ast.unparse(node.func)}() takes at most {len(order)} positional "
+                    f"arguments ({', '.join(order)}), got {position + 1}", node)
+            supplied[order[position]] = value
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                self._error("`**kwargs` cannot construct a structure", node)
+            if keyword.arg not in order:
+                self._error(
+                    f"{ast.unparse(node.func)} has no member '{keyword.arg}' "
+                    f"(available: {', '.join(order)})", keyword.value)
+            if keyword.arg in supplied:
+                self._error(
+                    f"member '{keyword.arg}' supplied twice in {ast.unparse(node.func)}()",
+                    keyword.value)
+            supplied[keyword.arg] = self._visit_expression(keyword.value)
+        # Hand the constructor the values keyed by member, so a member given as a keyword
+        # does not shift the positional ones; omitted members are zeroed there.
+        return self._emit_structure_constructor(structs.register(dtype), dtype,
+                                                args, node, supplied=supplied)
+
     def _emit_structure_constructor(self, name:str, dtype:np.dtype,
-                                    args:List[Tuple[str, Any]], node:ast.expr)->Tuple[str, Any]:
+                                    args:List[Tuple[str, Any]], node:ast.expr,
+                                    supplied:Optional[Dict[str, Tuple[str, Any]]] = None
+                                    )->Tuple[str, Any]:
         """`Ray(origin, direction)` as a compound literal keyed by member name.
 
         A `ctypes.Structure` class describes a layout, so a call to it is a structure *value*
@@ -4319,14 +4440,14 @@ class FunctionTranslator:
             self.private_structs.append(dtype)
         members:Dict[str, Any] = structs.member_types(dtype, self.backend)
         order:List[str] = list(dtype.names or ())
-        supplied:Dict[str, Tuple[str, Any]] = {}
-
-        if len(args) > len(order):
-            self._error(
-                f"{name}() takes at most {len(order)} arguments "
-                f"({', '.join(order)}), got {len(args)}", node)
-        for position, (code, t) in enumerate(args):
-            supplied[order[position]] = (code, t)
+        if supplied is None:
+            supplied = {}
+            if len(args) > len(order):
+                self._error(
+                    f"{name}() takes at most {len(order)} arguments "
+                    f"({', '.join(order)}), got {len(args)}", node)
+            for position, (code, t) in enumerate(args):
+                supplied[order[position]] = (code, t)
 
         parts:List[str] = []
         positional_parts:List[str] = []

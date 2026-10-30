@@ -29,7 +29,7 @@ from __future__ import annotations
 import ast
 import ctypes
 from collections.abc import Callable
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -167,6 +167,57 @@ def _element_path_of(scan:Scan, list_path:str)->Optional[str]:
     return None
 
 
+def _resolve_list_path(base_path:str, attr:str, scan:Scan,
+                       tracked:Dict[str, str])->Optional[str]:
+    """The list path `base_path.attr` names, when that member is a list of objects.
+
+    Opening it here is what makes `bag.items[j].v` work without a `for ... in bag.items:`
+    anywhere: the subscript's chain is walked, the member list is registered as a list path,
+    and the element reads describe the element structure.
+    """
+    member_path:str = _member_path(base_path, attr)
+    if member_path in scan.lists:
+        return member_path
+    value:Any = getattr(scan.values.get(base_path), attr, None)
+    if isinstance(value, list) and value and (
+            all(looks_like_object(item) or isinstance(item, ctypes.Structure)
+                for item in value)):
+        scan.add_list(member_path, value)
+        scan.note(base_path, attr)
+        return member_path
+    return None
+
+
+def self_chain(cursor:ast.Attribute, tracked:Dict[str, str], scan:Scan,
+               called:set, node:ast.AST)->Optional[str]:
+    """The path a nested attribute chain (`bag.items`) resolves to, opening paths en route."""
+    hops:List[str] = []
+    walker:ast.AST = cursor
+    while isinstance(walker, ast.Attribute):
+        hops.append(walker.attr)
+        walker = walker.value
+    if not (isinstance(walker, ast.Name) and walker.id in tracked):
+        return None
+    current:str = tracked[walker.id]
+    for attr in reversed(hops):
+        member_path:str = _member_path(current, attr)
+        value:Any = getattr(scan.values.get(current), attr, None)
+        if isinstance(value, list) and value:
+            opened:str = _resolve_list_path(current, attr, scan, tracked)
+            if opened is not None:
+                current = opened
+                continue
+        if looks_like_object(value):
+            if member_path not in scan.members:
+                scan.add_path(member_path, value)
+            scan.note(current, attr)
+            current = member_path
+            continue
+        scan.note(current, attr)
+        return None
+    return current
+
+
 def _list_root(path:str)->str:
     """The list path an element path belongs to: `items.element#<id>`'s root is `items`.
 
@@ -263,19 +314,27 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
             hops.append(cursor.attr)
             cursor = cursor.value
         if isinstance(cursor, ast.Subscript):
-            # `items[j].v`: the subscript's value chain decides the list, and everything
-            # after the subscript belongs to the element structure.
+            # `items[j].v` -- or deeper, `bag.items[j].v`: walk the subscript's value chain
+            # to its root, opening any object and list paths along the way, and the member
+            # read belongs to the element structure the chain ends on.
             while isinstance(cursor, ast.Subscript):
                 cursor = cursor.value
-            if not (isinstance(cursor, (ast.Name, ast.Attribute))):
-                continue
-            if isinstance(cursor, ast.Name) and cursor.id in tracked:
-                list_path:str = tracked[cursor.id]
-            elif isinstance(cursor, ast.Attribute):
-                continue
+            if not isinstance(cursor, ast.Attribute):
+                if not (isinstance(cursor, ast.Name) and cursor.id in tracked):
+                    continue
+                base_path:str = tracked[cursor.id]
             else:
-                continue
-            if list_path not in scan.lists:
+                base_path:str = self_chain(cursor, tracked, scan, called, node)
+                if base_path is None:
+                    continue
+            # The chain under the subscript names the LIST: either it already ends on one
+            # (ag.items[j], where base_path IS the list path), or the last hop names it
+            # (items[j] on a top-level list).
+            if base_path in scan.lists:
+                list_path:str = base_path
+            else:
+                list_path:str = _resolve_list_path(base_path, node.attr, scan, tracked)
+            if list_path is None:
                 continue
             element_path:str = _element_path_of(scan, list_path)
             if element_path is None:
@@ -293,8 +352,9 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
             continue
         root_path:str = tracked[cursor.id]
         # Resolve hop by hop: every hop whose value is itself an object becomes its own path,
-        # and the members after it belong to that path. A hop whose value is not an object is
-        # a plain member read and ends the chain.
+        # and the members after it belong to that path. A hop whose value is a *list of
+        # objects* opens a list path, exactly as a top-level list argument does. Anything
+        # else is a plain member read and ends the chain.
         current_path:str = root_path
         for index, attr in enumerate(reversed(hops)):
             member_path:str = _member_path(current_path, attr)
@@ -306,6 +366,15 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
                 if member_path not in scan.members:
                     scan.add_path(member_path, value)
                 scan.note(current_path, attr)
+                current_path = member_path
+                continue
+            if index < len(hops) - 1 and isinstance(value, list) and value:
+                # A member that is a list of objects, read *through* (`scene.hittables` and
+                # then `h.hit(...)` on the elements): it becomes a list path of its own, and
+                # the walk continues inside the elements.
+                if member_path not in scan.lists:
+                    scan.add_list(member_path, value)
+                    scan.note(current_path, attr)
                 current_path = member_path
                 continue
             if index < len(hops) - 1:
@@ -348,34 +417,13 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
             raise SyntaxError(
                 f"{owner.__name__}.{node.func.attr} is not a method that can be translated into "
                 f"device code")
-        from .translator import scan_self_attrs  # noqa: PLC0415
 
-        # A method may itself call another method of the same object, and that one's reads
-        # belong to the same member set -- `ray_color` calling `self.hit` reading
-        # `self.hittables` is one chain. `scan_self_attrs` only returns the *data* a body
-        # reads, so the method calls are followed from here, recursively.
-        def follow(method:Any, seen:Set[Any])->None:
-            if method in seen:
-                return
-            seen.add(method)
-            method_tree:Optional[ast.Module] = _parse(method)
-            if method_tree is None:
-                return
-            called:Set[str] = set()
-            for inner_node in ast.walk(method_tree):
-                if (isinstance(inner_node, ast.Call) and isinstance(inner_node.func, ast.Attribute)
-                        and isinstance(inner_node.func.value, ast.Name)
-                        and inner_node.func.value.id == "self"):
-                    called.add(inner_node.func.attr)
-            for name in scan_self_attrs(method, "self", owner):
-                scan.note(origin, name)
-            for name in called:
-                inner:Any = getattr(owner, name, None)
-                if isinstance(inner, Callable) and not isinstance(inner, (type, ctypes.Structure)):
-                    scan.note_method(origin, name, inner)
-                    follow(inner, seen)
-
-        follow(function, set())
+        # The method body is scanned with the FULL walker, bound to the same object: its own
+        # `for e in self.items:` loops open list paths, its `self.other()` calls are followed
+        # recursively, and its member reads land on the same origin -- `ray_color` calling
+        # `self.hit` reading `self.hittables` is one chain, and the element reads inside
+        # `hit` describe the element structure of `self.hittables`.
+        _scan_function(function, {"self": origin}, scan)
         scan.note_method(origin, node.func.attr, function)
 
     # `helper(p)`: the helper's parameter becomes another name for the same object.
@@ -651,9 +699,11 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
         return tuple(args)
 
     parameters:List[str] = list(func.__code__.co_varnames[:func.__code__.co_argcount])
-    all_parameters:List[str] = list(parameters)
     if self_param and parameters and parameters[0] == self_param:
+        # The receiver travels outside rgs, so it is dropped from the names that index
+        # into it -- and ll_parameters is the same list, used only for the positions.
         parameters = parameters[1:]
+    all_parameters:List[str] = list(parameters)
     named:Dict[str, Any] = {}
     for index in hits:
         if index >= len(parameters):
@@ -686,6 +736,9 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
     structure_of:Dict[str, type] = {}
     nested_of:Dict[str, List[Tuple[str, type]]] = {}
     list_element_paths:Dict[str, str] = {}
+    # A member that is a list of objects becomes a fixed-length array member of the parent's
+    # structure: element structure * element count, both known from the caller's list.
+    list_array_types:Dict[str, Any] = {}
     for list_path in scan.lists:
         element_paths:List[str] = [path for path in scan.members
                                    if _list_root(path) == list_path and path != list_path]
@@ -698,26 +751,53 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
         for path in element_paths[1:]:
             scan.members[element_path] = list({
                 *scan.members[element_path], *scan.members[path]})
+        # The element structure must exist before any parent that carries the list as a
+        # fixed-length array of it.
+        fields:List[Tuple[str, type]] = []
+        called_methods:set = {name for name, _ in scan.methods.get(element_path, [])}
+        for member in scan.members[element_path]:
+            if member in called_methods:
+                continue
+            value:Any = getattr(scan.values[element_path], member)
+            member_path:str = _member_path(element_path, member)
+            if member_path in structure_of:
+                fields.append((member, structure_of[member_path]))
+            else:
+                fields.append((member, member_type(value, member)))
+        structure_of[element_path] = _structure_for(fields, scan.methods[element_path])
+
+    # Second pass for the list members: their element structures exist now, so the parent's
+    # field can be a fixed-length array of them.
+    for list_path, element_path in list_element_paths.items():
+        if '#' in list_path:
+            continue                     # a list inside a list is not supported
+        element_structure:type = structure_of[element_path]
+        count:int = len(scan.lists[list_path])
+        list_array_types[list_path] = element_structure * count
+
+    # Nested objects and member chains: built innermost first, so a parent's field can name
+    # the structure of the member it carries.
+    nested_of:Dict[str, List[Tuple[str, type]]] = {}
     for path in sorted(scan.members, key=len, reverse=True):
         if path in named and "." not in path and path not in scan.lists:
             continue                     # top-level paths are built below, with merging
         if _list_root(path) in scan.lists and path != _list_root(path):
-            pass                         # an element path; built here like any other
+            pass                         # an element path; built with its list above
         elif path in scan.lists:
             continue                     # the list itself becomes an array, not a structure
+        if path in structure_of:
+            continue                     # an element path, already built
         fields:List[Tuple[str, type]] = []
         called_methods:set = {name for name, _ in scan.methods.get(path, [])}
         for member in scan.members[path]:
             if member in called_methods:
-                # A method the body calls: it is copied onto the synthesized class by
-                # `_structure_for`, and it is not data, so it takes no field.
-                continue
+                continue                 # a translated method, copied onto the class
             value:Any = getattr(scan.values[path], member)
             member_path:str = _member_path(path, member)
             if member_path in structure_of:
-                # The member was scanned as a nested object: its synthesized structure is
-                # the field's type.
                 fields.append((member, structure_of[member_path]))
+            elif member_path in list_array_types:
+                fields.append((member, list_array_types[member_path]))
             else:
                 fields.append((member, member_type(value, member)))
         structure_of[path] = _structure_for(fields, scan.methods[path])
@@ -738,6 +818,8 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
                 member_path:str = _member_path(name, member)
                 if member_path in structure_of:
                     fields.append((member, structure_of[member_path]))
+                elif member_path in list_array_types:
+                    fields.append((member, list_array_types[member_path]))
                 else:
                     fields.append((member, member_type(getattr(named[name], member), member)))
             fields.extend((m, k) for m, k in nested_of.get(name, [])
@@ -759,6 +841,20 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
                         # A nested member is rebuilt in the synthesized type from the values
                         # the caller's object carries.
                         value = kind(**{n: getattr(value, n) for n, _ in kind._fields_})
+                    elif isinstance(value, list) and isinstance(kind, type) \
+                            and issubclass(kind, ctypes.Array):
+                        # A list member: the field is a fixed-length array of the element
+                        # structure, filled from the caller's list in order.
+                        filled:Any = kind()
+                        element_kind:Any = kind._type_
+                        for position, item in enumerate(value):
+                            if isinstance(element_kind, type) \
+                                    and issubclass(element_kind, ctypes.Structure) \
+                                    and not isinstance(item, element_kind):
+                                item = element_kind(**{
+                                    n: getattr(item, n) for n, _ in element_kind._fields_})
+                            filled[position] = item
+                        value = filled
                     values[member] = value
                 return structure(**values)
 
@@ -785,16 +881,22 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
                     binding.instances[name] = instance
                     binding.values[name] = named[name]
 
-    # A list-of-objects argument becomes a numpy record array of the element structure: a
-    # device loop over it indexes the array, exactly as a record array argument would. The
+    # A top-level list-of-objects argument becomes a numpy record array of the element
+    # structure; a member list was already embedded in its parent's structure above. The
     # element class is registered first, so a method the body calls on an element resolves
     # from the class its dtype came from.
     from .structs import reregister_class  # noqa: PLC0415
 
     for list_path, element_path in list_element_paths.items():
-        index:int = all_parameters.index(_list_root(list_path))
         element_structure:type = structure_of[element_path]
         reregister_class(element_structure)
+        root:str = _list_root(list_path)
+        if "." in list_path or "#" in list_path:
+            # A member list (ag.items): the parent structure already carries it as a
+            # fixed-length array, so there is no argument to replace. (An element path
+            # never reaches this loop; # marks one.)
+            continue
+        index:int = all_parameters.index(root)
         records:np.ndarray = np.zeros(len(scan.lists[list_path]), dtype=np.dtype(element_structure))
         for position, item in enumerate(scan.lists[list_path]):
             for member, _ in element_structure._fields_:
