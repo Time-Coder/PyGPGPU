@@ -175,3 +175,51 @@ def test_a_structure_instance_answers_a_member_name():
     ray = Ray(point3f(1.0, 2.0, 3.0), float3(4.0, 5.0, 6.0))
     assert ray["origin"]["y"] == pytest.approx(2.0)
     assert ray["direction"]["z"] == pytest.approx(6.0)
+
+
+# ---------------------------------------------------------------------------
+# Member access by attribute, the python spelling a kernel body may use
+# ---------------------------------------------------------------------------
+
+
+@kernel
+def read_member_by_attribute(ray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = ray.direction.y
+
+
+@kernel
+def chain_member_attributes(ray, out: np.ndarray):
+    """A structure's member is itself a vector, so one more attribute reaches a component."""
+    for i in range(out.shape[0]):
+        out[i] = ray.origin.x + ray.direction.z
+
+
+def test_a_structure_member_by_attribute(runner):
+    out = np.zeros(1, dtype=np.float32)
+    runner(read_member_by_attribute, Ray(point3f(0.0, 0.0, 0.0), float3(1.0, 5.0, 0.0)), out)
+    assert float(out[0]) == pytest.approx(5.0)
+
+
+def test_a_member_then_a_component(runner):
+    out = np.zeros(1, dtype=np.float32)
+    runner(chain_member_attributes,
+           Ray(point3f(2.0, 0.0, 0.0), float3(0.0, 0.0, 7.0)), out)
+    assert float(out[0]) == pytest.approx(9.0)
+
+
+@kernel
+def read_unknown_member(ray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = ray.centre.x
+
+
+def test_an_unknown_member_is_reported(gpu_backend, runner):
+    """A member that is not in the layout names the ones that are."""
+    with pytest.raises(SyntaxError) as caught:
+        runner(read_unknown_member,
+               Ray(point3f(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0)),
+               np.zeros(1, dtype=np.float32))
+    message = str(caught.value)
+    assert "centre" in message and "origin" in message
+

@@ -3588,6 +3588,22 @@ class FunctionTranslator:
                 self._error(
                     f"vector type {base_t} has no component '.{node.attr}'", node)
             return f"({base_code}.{component})", _C_FIELD_TYPES[field_key]
+
+        # A structure member, read with python's attribute spelling. It cannot be confused
+        # with a vector component: the branch above has already claimed every base that is a
+        # vector, so a name reaching here is only a member if the base is a structure.
+        from . import structs
+
+        if isinstance(base_t, str):
+            dtype:Optional[np.dtype] = structs.dtype_for(base_t)
+            if dtype is not None:
+                members:Dict[str, Any] = structs.member_types(dtype, self.backend)
+                if node.attr not in members:
+                    self._error(
+                        f"structure {base_t} has no member '.{node.attr}' "
+                        f"(available: {', '.join(members)})", node)
+                return f"({base_code}).{node.attr}", members[node.attr]
+
         self._error(f"unsupported attribute access: .{node.attr}", node)
 
     # ---------- calls ----------

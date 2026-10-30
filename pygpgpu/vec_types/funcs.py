@@ -8,7 +8,7 @@ one code base works on both sides.
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from .genVec import genVec
 
@@ -314,3 +314,49 @@ def mad24(a:Any, b:Any, c:Any)->Any:
         result.append(value_at(a, a_components, i) * value_at(b, b_components, i)
                       + value_at(c, c_components, i))
     return type(a)(*result)
+
+
+# The functions pygf also publishes are *its* objects, not copies of them: a kernel body that
+# imports `normalize` from pygf and one that imports it from pygpgpu have to reach the same
+# builtin, and the translator decides that by the identity of the callee. A second
+# implementation of one name leaves whichever copy the user imported translated as a device
+# helper, and its body (`length(x)`, a `_div` helper, ...) has no device meaning.
+#
+# pygf's versions are stricter about what they accept -- `dot` there refuses scalars, which a
+# device `dot` reduces to a multiply -- and the two names that take the wider contract keep
+# their implementation here (see the loop below), registering pygf's alongside them so both
+# spellings translate.
+from pygf import funcs as _pygf_funcs  # noqa: E402
+
+# These admit more in the host interpreter than pygf's do, so their own body stays.
+_WIDER_THAN_PYGF:frozenset = frozenset({"dot"})
+
+# (name, our implementation, pygf's) for the names whose host contract is wider than pygf's.
+_ALIASES:List[Tuple[str, Any, Any]] = []
+
+for _name in list(__all__):
+    _shared:Any = getattr(_pygf_funcs, _name, None)
+    if _shared is None:
+        continue
+    if _name in _WIDER_THAN_PYGF:
+        _own:Any = globals()[_name]
+        # Recorded here, not imported at module scope: `builtins` imports this module, so
+        # reaching for its registry now would close the cycle mid-initialisation.
+        _ALIASES.append((_name, _own, _shared))
+        continue
+    globals()[_name] = _shared
+
+del _name, _shared, _pygf_funcs
+
+
+def _register_aliases() -> None:
+    """Hand the aliases to the builtin registry once it exists.
+
+    Called by `pygpgpu.kernel.builtins` at the end of its own import, which is the first
+    moment the registry can be built.
+    """
+    from ..kernel.builtin_registry import register_builtin_alias
+
+    for name, own, shared in _ALIASES:
+        register_builtin_alias(name, own)
+        register_builtin_alias(name, shared)

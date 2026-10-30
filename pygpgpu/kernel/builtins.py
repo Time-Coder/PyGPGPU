@@ -209,3 +209,11 @@ def atomic_cas(array: Any, index: int, compare: Any, value: Any) -> Any:
     """
     return atomic_in_place(
         array, index, lambda current: value if current == compare else current)
+
+
+# The aliases the function library recorded. `pygpgpu.vec_types.funcs` cannot reach the
+# registry itself -- this module is what it imports -- so it hands them over here, at the end
+# of the import, which is the first moment the registry can be built.
+from ..vec_types.funcs import _register_aliases as _install_aliases  # noqa: E402
+
+_install_aliases()
