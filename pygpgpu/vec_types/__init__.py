@@ -49,3 +49,14 @@ from .genVec3 import genVec3
 from .genVec4 import genVec4
 from .genVec8 import genVec8
 from .genVec16 import genVec16
+
+# pygf owns the numpy patches and the `VectorArray` view they produce (see
+# pygf/vector_array.py). It knows the types it defines; the widths above that PyGPGPU adds --
+# the 8/16-wide ones and the char/uchar/short families -- have to be handed over, or an array
+# of them would come back as plain records and `a[i].x` would fail.
+import pygf as _pygf
+
+for _value in list(globals().values()):
+    _pygf.register_vector_type(_value)
+
+del _value, _pygf

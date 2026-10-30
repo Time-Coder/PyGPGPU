@@ -38,17 +38,13 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+from pygf import wrap_vector_array
 
-from .builtins import (
-    ATOMIC_BUILTINS,
-    INDEX_BUILTINS,
-    gpu,
-    get_host_frame,
-    set_host_frame,
-)
+from .builtin_registry import builtin_name_of
+from .host_runtime import get_host_frame, set_host_frame
+from .device_builtins import INDEX_BUILTINS
 from .translator import _parse_kernel_source, get_dedented_source
 from ..utils import local_size_for_global
-from ..vec_types import funcs as VEC_FUNCS
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +67,10 @@ _MAGIC_RANGE = "range"
 _MAGIC_ENUMERATE = "enumerate"
 _MAGIC_NDINDEX = "ndindex"
 _MAGIC_NDENUMERATE = "ndenumerate"
+
+# Sentinel for "no work item returned a value yet": a kernel that returns None has to be
+# distinguishable from one that has not returned at all.
+_NO_RESULT: Any = object()
 
 
 def _dedented_ast(func: Callable) -> Optional[ast.FunctionDef]:
@@ -150,13 +150,21 @@ def _nd_magic(iter_node: ast.expr, self_param: str, globals_of: Dict[str, Any]) 
 
 
 def _gpu_attr(call: ast.Call, globals_of: Dict[str, Any]) -> Optional[str]:
-    """The ``xxx`` of a ``<gpu object>.xxx(...)`` call, or None for any other call."""
+    """The builtin name a call invokes, or None when it invokes something else.
+
+    Identity, not spelling: the callee is resolved through the kernel's globals the way
+    python would, and the resulting object is looked up in the registry. A user function
+    that merely shares a builtin's name is therefore not mistaken for one.
+    """
     func = call.func
-    if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
-        return None
-    if globals_of.get(func.value.id) is not gpu:
-        return None
-    return func.attr
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        owner = globals_of.get(func.value.id)
+        if owner is None:
+            return None
+        return builtin_name_of(getattr(owner, func.attr, None))
+    if isinstance(func, ast.Name):
+        return builtin_name_of(globals_of.get(func.id))
+    return None
 
 
 class PythonAnalysis:
@@ -217,73 +225,16 @@ def analyse(func: Callable, self_param: str = "") -> PythonAnalysis:
 # ---------------------------------------------------------------------------
 # Vector-valued arrays
 #
-# A vector array (`np.zeros(n, dtype=float4.dtype)`) reads each element back as a
-# numpy.void record, so `v.x` and `v.xyzy * 2.0` -- both fine on the GPU backends, which
-# hand the work item a vector value -- fail in the interpreter. Reading through a
-# VectorArray view rebuilds the vector instance from the record, and writing one
-# stores its components, so the same body runs unchanged.
+# A vector array (`np.zeros(n, dtype=float4.dtype)`) holds a structured dtype, whose
+# elements are np.void records: reading one gives a record, not a vector. `pygf` owns the
+# `VectorArray` view that rebuilds the vector instance and accepts a vector write, so a body
+# that says `a[i].x` or `a[i] = float3(...)` means the same thing here as on a device.
 # ---------------------------------------------------------------------------
-
-_VECTOR_TYPES: Dict[Any, Any] = {}
-
-
-def _vector_registry() -> Dict[Any, Any]:
-    """numpy dtype of a vector type -> the vector class (built once, lazily)."""
-    global _VECTOR_TYPES
-    if _VECTOR_TYPES:
-        return _VECTOR_TYPES
-
-    def is_vector_type(value: Any) -> bool:
-        return (isinstance(value, type) and hasattr(value, "_fields_")
-                and hasattr(value, "numpy_dtype") and callable(value.numpy_dtype))
-
-    # The 2/4-wide float/int/double/uint types come from pygf and are re-exported by
-    # pygpgpu.vec_types, the wider and integer-narrow ones are PyGPGPU's own: scan both.
-    import pygf
-    from .. import vec_types
-
-    registry: Dict[Any, Any] = {}
-    for module in (vec_types, pygf):
-        for name in dir(module):
-            value: Any = getattr(module, name)
-            if not is_vector_type(value):
-                continue
-            try:
-                dtype = np.dtype(value._fields_)
-            except Exception:
-                continue
-            registry.setdefault(dtype, value)
-    _VECTOR_TYPES = registry
-    return registry
-
-
-class VectorArray(np.ndarray):
-    """Array view whose vector elements read back as vector instances instead of records."""
-
-    def __getitem__(self, item: Any) -> Any:
-        value: Any = super().__getitem__(item)
-        if isinstance(value, np.void):
-            vector = _vector_registry().get(value.dtype)
-            if vector is not None:
-                return vector.from_buffer_copy(value.tobytes())
-        return value
-
-    def __setitem__(self, item: Any, value: Any) -> None:
-        if hasattr(value, "_fields_") and hasattr(value, "__len__"):
-            value = tuple(value)
-        super().__setitem__(item, value)
 
 
 def as_host_array(value: Any) -> Any:
-    """Wrap a vector-dtype array in a VectorArray view; other values pass through."""
-    if not isinstance(value, np.ndarray):
-        return value
-    dtype = getattr(value, "dtype", None)
-    if dtype is None or dtype.fields is None:
-        return value
-    if dtype not in _vector_registry():
-        return value
-    return value.view(VectorArray)
+    """The array as the body should see it: vector elements are vector instances."""
+    return wrap_vector_array(value)
 
 
 # ---------------------------------------------------------------------------
@@ -291,10 +242,11 @@ def as_host_array(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 class PythonFrame:
-    """The gpu.* host implementations of one launch, installed per thread.
+    """The launch state the builtin implementations read while a body runs serially.
 
-    ``GPUNamespace.__getattr__`` consults the frame installed on the calling thread, so
-    two concurrent launches never see each other's work item.
+    Only launch state lives here: the launch shape and the current work item. The operations
+    themselves are the bodies in ``builtins.py``. One frame is installed per thread for the
+    duration of a kernel call, so two concurrent launches never see each other's work item.
     """
 
     def __init__(self, global_size: Tuple[int, ...] = (),
@@ -304,110 +256,6 @@ class PythonFrame:
         # Global id per dimension of the work item being run; None for the plain call of
         # a magic-loop body, where there is no current work item.
         self.coords: Optional[Tuple[int, ...]] = None
-
-    # ----- gpu.* entry point -----
-
-    def builtin(self, name: str) -> Callable:
-        """Resolve ``gpu.<name>`` for this launch."""
-        if name in INDEX_BUILTINS:
-            return lambda dim: self._index(name, dim)
-        if name in ATOMIC_BUILTINS:
-            return lambda array, index, value: self._atomic(name, array, index, value)
-        if name == "barrier":
-            return self._barrier
-        if name == "local":
-            return self._local
-        if name == "work_size":
-            return self._work_size
-        if hasattr(VEC_FUNCS, name):
-            # The dual-sided library: its host implementation is the same function.
-            return getattr(VEC_FUNCS, name)
-        raise SyntaxError(
-            f"gpu.{name} is not supported by the python backend: it has no host-side "
-            f"implementation (supported: the indexing builtins, atomics, gpu.barrier, "
-            f"gpu.work_size and the vector math functions)") from None
-
-    # ----- indexing builtins -----
-
-    def _dim(self, name: str, dim: Any) -> int:
-        if not isinstance(dim, int) or isinstance(dim, bool) or dim not in (0, 1, 2):
-            raise SyntaxError(f"gpu.{name}(dim) requires a dimension of 0, 1 or 2") from None
-        return dim
-
-    def _index(self, name: str, dim: Any) -> int:
-        d: int = self._dim(name, dim)
-        needs_item: bool = name in ("get_global_id", "get_local_id", "get_group_id")
-        if needs_item and self.coords is None:
-            raise SyntaxError(
-                f"gpu.{name}({d}) has no meaning in a serial python run: the python "
-                f"backend executes a magic-loop kernel as one plain call, so there is no "
-                f"current work item. Use the loop variable instead (the magic loop gives "
-                f"the same index).") from None
-        if self.coords is not None and d >= len(self.coords):
-            raise ValueError(
-                f"gpu.{name}({d}) is out of range: this launch has {len(self.coords)} "
-                f"work-size dimension(s)")
-        if needs_item:
-            assert self.coords is not None
-            gid: int = self.coords[d]
-            if name == "get_global_id":
-                return gid
-            local: int = self.local_size[d] if d < len(self.local_size) else 1
-            return gid % local if name == "get_local_id" else gid // local
-
-        if d >= len(self.global_size):
-            raise ValueError(
-                f"gpu.{name}({d}) is out of range: this launch has "
-                f"{len(self.global_size)} work-size dimension(s); declare the domain with "
-                f"gpu.work_size(array) or pass a (global, local) bracket")
-
-        global_extent: int = self.global_size[d]
-        local_extent: int = self.local_size[d] if d < len(self.local_size) else 1
-        if name == "get_global_size":
-            return global_extent
-        if name == "get_local_size":
-            return local_extent
-        return -(-global_extent // local_extent)  # get_num_groups
-
-    # ----- atomics -----
-
-    def _atomic(self, name: str, array: Any, index: Any, value: Any) -> Any:
-        """Serial atomic: one work item at a time, so a plain read-modify-write is exact."""
-        if name == "atomic_xchg":
-            previous = array[index]
-            array[index] = value
-            return previous
-        current = array[index]
-        if name == "atomic_add":
-            array[index] = current + value
-        elif name == "atomic_sub":
-            array[index] = current - value
-        elif name == "atomic_min":
-            array[index] = min(current, value)
-        elif name == "atomic_max":
-            array[index] = max(current, value)
-        elif name == "atomic_and":
-            array[index] = current & value
-        elif name == "atomic_or":
-            array[index] = current | value
-        elif name == "atomic_xor":
-            array[index] = current ^ value
-        return array[index]
-
-    # ----- the rest of the namespace -----
-
-    def _barrier(self) -> None:
-        """Serial execution has a single work item at a time, so nothing to wait for."""
-        return None
-
-    def _local(self, *args: Any) -> Any:
-        raise SyntaxError(
-            "gpu.local() is not supported by the python backend: local (shared) memory is "
-            "shared by the work items of one group, which a serial run cannot emulate") from None
-
-    def _work_size(self, *args: Any) -> None:
-        """Host-side declaration only: the launch shape is derived by the caller."""
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -463,14 +311,21 @@ def _current_loop() -> asyncio.AbstractEventLoop:
 
 
 def _asyncio_future(work: concurrent.futures.Future) -> asyncio.Future:
-    """Bridge a pool future to an asyncio.Future, resolving it on the event loop thread."""
+    """Bridge a pool future to an asyncio.Future, resolving it on the event loop thread.
+
+    The value the work produced is carried over, so a launch that returns something
+    resolves its asyncio future with that value, exactly as the pool future does.
+    """
     loop: asyncio.AbstractEventLoop = _current_loop()
     future: asyncio.Future = loop.create_future()
 
     def complete(done: concurrent.futures.Future) -> None:
         error: Optional[BaseException] = None
+        result: Any = None
         try:
             error = done.exception()
+            if error is None:
+                result = done.result()
         except BaseException as exc:  # cancelled or failed to deliver a result
             error = exc
 
@@ -480,7 +335,7 @@ def _asyncio_future(work: concurrent.futures.Future) -> asyncio.Future:
             if error is not None:
                 future.set_exception(error)
             else:
-                future.set_result(None)
+                future.set_result(result)
 
         try:
             loop.call_soon_threadsafe(settle)
@@ -617,8 +472,14 @@ class PythonKernel:
 
     def _run_items(self, instance: Any, args: Tuple[Any, ...],
                    domain: Tuple[int, ...],
-                   local: Optional[Tuple[int, ...]]) -> None:
-        """Run the body once per work item of the domain."""
+                   local: Optional[Tuple[int, ...]]) -> Any:
+        """Run the body once per work item of the domain.
+
+        The result is the first value a work item returned, matching the "first one
+        wins" rule the GPU backends implement with an atomic claim: the serial loop
+        simply stops taking results once one has been produced, so later work items
+        still run (they may write their own outputs) but cannot change the result.
+        """
         if local is not None:
             local = tuple(int(l) for l in local)
             if len(local) != len(domain):
@@ -632,13 +493,16 @@ class PythonKernel:
         frame = PythonFrame(domain, local or local_size_for_global(domain))
         previous: Optional[PythonFrame] = get_host_frame()
         set_host_frame(frame)
+        winner: Any = _NO_RESULT
         try:
             for coords in np.ndindex(*domain):
                 frame.coords = tuple(int(c) for c in coords)
-                self.func(*self._call_args(instance, args))
+                result: Any = self.func(*self._call_args(instance, args))
+                if winner is _NO_RESULT and result is not None:
+                    winner = result
         finally:
             set_host_frame(previous)
-        return None
+        return None if winner is _NO_RESULT else winner
 
     def _execute(self, instance: Any, args: Tuple[Any, ...], frame: PythonFrame) -> Any:
         previous: Optional[PythonFrame] = get_host_frame()

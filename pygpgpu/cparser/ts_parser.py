@@ -389,6 +389,14 @@ class TSParserMixin:
                 flags = KernelFlags.Readed
             elif arg.writeonly:
                 flags = KernelFlags.Writed
+            elif flags & KernelFlags.Writed:
+                # Reading a buffer the kernel writes is implied by writing it: the download
+                # after a launch copies the *whole* buffer back into the caller's array, so
+                # a buffer that was never uploaded would replace every element the kernel
+                # did not write with the contents of a fresh device buffer (zeros). Python
+                # keeps those elements, so the upload has to happen -- `out[i, j, 0] = ...`
+                # on a 3-channel image must leave channels 1 and 2 as the caller had them.
+                flags = flags | KernelFlags.Readed
 
             result[name] = flags
         return result

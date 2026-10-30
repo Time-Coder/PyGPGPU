@@ -46,11 +46,12 @@ dependencies = [
     # when it happens to be installed, and codegen coerces a PyCapsule to a
     # Language, so either grammar distribution works.
     "tree-sitter-cuda37>=0.21.2",
-    # pygpgpu/__init__.py imports pygf for the numpy.array monkey-patch and re-exports its
-    # vector types, so it is a hard requirement rather than an optional extra.
-    # 0.1.4 is the first release whose metadata builds under the newest setuptools
-    # that supports 3.7, so a 3.7 source build of the dependency succeeds.
-    "pygf>=0.1.4",
+    # pygpgpu/__init__.py imports pygf for the numpy patches and re-exports its vector types,
+    # so it is a hard requirement rather than an optional extra.
+    # 0.1.5 is the first release that owns the whole numpy boundary: the `VectorArray` view,
+    # the constructor patches, and reading a sequence of vector instances as an array of
+    # vectors. On 0.1.4 those live here, and the interpreter backend needs the view.
+    "pygf>=0.1.5",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",
@@ -137,8 +138,9 @@ ignore = [
 # ---------------------------------------------------------------------------
 [tool.ty]
 environment.python-version = "3.12"
-# pygf lives in a sibling checkout on this machine, so it is not on the default module search
-# path even though it is installed. `pip install pygf` makes this unnecessary.
+# pygf lives in a sibling checkout on this machine. Installing it (`pip install -e ../pygf`)
+# is what the runtime imports, and the type checker reads the checkout directly so a change
+# in one repo is visible in the other without a reinstall.
 environment.extra-paths = ["../pygf"]
 src.exclude = [
     # auto-generated stubs

@@ -19,6 +19,7 @@ from ..driver import (
 from ...utils import md5sums, save_var, modify_time, load_var
 from .build_options import BuildOptions
 from .program_info import KernelInfo, ArgInfo, StructInfo, VarInfo
+from .struct_layout import align_struct
 
 if TYPE_CHECKING:
     from .command_queue import CommandQueue
@@ -330,6 +331,9 @@ class Kernel_{kernel_name}(KernelWrapper):
         for member in struct_info.members.values():
             if member.base_type_str in CLInfo.basic_types:
                 base_type = CLInfo.basic_types[member.base_type_str]
+            elif member.base_type_str in CLInfo.vec_types:
+                # A vector member is a type of its own, not a registered structure.
+                base_type = CLInfo.vec_types[member.base_type_str]
             else:
                 base_type = self._create_struct_type(self._struct_infos[member.base_type_str])
 
@@ -343,9 +347,12 @@ class Kernel_{kernel_name}(KernelWrapper):
                 pointer_types[member.name] = member_type
             else:
                 _fields_.append((member.name, member_type))
-                dtype.append((member.name, base_type, member.array_shape))
+                # A vector member contributes its structured dtype (a ctypes class has no
+                # numpy dtype of its own), so the record layout matches the C structure.
+                dtype.append((member.name, getattr(base_type, "dtype", base_type),
+                              member.array_shape))
 
-        dtype = np.dtype(dtype)
+        _fields_, dtype = align_struct(_fields_, dtype)
         ptr_field_prefix:str = f"_{struct_info.name}_ptr_"
 
         def __init__(self, *args, **kwargs):

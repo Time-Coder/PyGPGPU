@@ -309,6 +309,10 @@ class Kernel_{kernel_name}(Kernel):
         for member in struct_info.members.values():
             if member.base_type_str in CUInfo.basic_types:
                 base_type = CUInfo.basic_types[member.base_type_str]
+            elif member.base_type_str in CUInfo.vec_types:
+                # A vector member is a type of its own, not a registered structure: its
+                # numpy dtype describes it for the host-side field list.
+                base_type = CUInfo.vec_types[member.base_type_str]
             else:
                 base_type = self._create_struct_type(self._struct_infos[member.base_type_str])
 
@@ -322,7 +326,10 @@ class Kernel_{kernel_name}(Kernel):
                 pointer_types[member.name] = member_type
             else:
                 _fields_.append((member.name, member_type))
-                dtype.append((member.name, base_type, member.array_shape))
+                # A vector member contributes its structured dtype (a ctypes class has no
+                # numpy dtype of its own), so the record layout matches the C structure.
+                dtype.append((member.name, getattr(base_type, "dtype", base_type),
+                              member.array_shape))
 
         dtype = np.dtype(dtype)
 

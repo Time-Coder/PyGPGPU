@@ -384,6 +384,12 @@ class Kernel(HIPObject):
         max_shape = None
         for arg in self._arg_list:
             if arg.need_read_back:
+                if arg.mem_obj is None:
+                    # The binding for this launch is recorded separately (see
+                    # _process_arg), so a shared ArgInfo may carry no buffer at all --
+                    # the CUDA backend guards the same way. Skipping keeps this fallback
+                    # from raising where it used to work.
+                    continue
                 arg_shape = (arg.mem_obj.data.shape if arg.mem_obj.data is not None else arg.mem_obj.shape)
                 if ((
                         arg.base_type_str in HIPInfo.vec_types and
@@ -443,9 +449,15 @@ class Kernel(HIPObject):
 
             if not arg_info.is_ptr:
                 if is_vec3:
-                    # HIP like CUDA: 3-component vectors are passed in a compact layout
-                    packed:Any = self._pack_vec3(value, content_type)
+                    # HIP like CUDA: 3-component vectors are passed in a compact layout, and
+                    # the launch wants the address of the value, so it must be a ctypes buffer.
+                    packed:Any = self._pack_vec3_value(value, content_type)
                     return pointer(packed)
+
+                if is_struct and isinstance(value, (np.void, bytes, bytearray)):
+                    # A numpy record holds exactly the bytes the dtype described, which is the
+                    # layout the parsed structure has, so it can back the ctypes value directly.
+                    value = content_type.from_buffer_copy(bytes(value))
 
                 if isinstance(value, content_type):
                     used_value = value
@@ -520,6 +532,20 @@ class Kernel(HIPObject):
             return packed
 
         raise TypeError(f"cannot pack {type(value).__name__} as 3-component vector")
+
+    @staticmethod
+    def _pack_vec3_value(value:Any, content_type:Any)->Any:
+        """Pack one 3-component *value* into the compact layout, as a ctypes buffer.
+
+        The by-value counterpart of :meth:`_pack_vec3`, which packs arrays for upload: a
+        kernel argument is passed as the address of its value, so it has to be ctypes.
+        """
+        fields:List[str] = [f for f, _ in content_type._fields_][:3]
+        element:Any = content_type._fields_[0][1]
+        packed:Any = (element * 3)()
+        for i, f in enumerate(fields):
+            packed[i] = value[f] if isinstance(value, np.void) else getattr(value, f)
+        return packed
 
     @property
     def _func_head(self)->str:

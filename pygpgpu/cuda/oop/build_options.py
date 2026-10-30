@@ -4,6 +4,10 @@ from ..driver import GPUArch, CppStd, OptInfoKind
 
 class BuildOptions:
 
+    # `maxrregcount` defaults to None, meaning "do not pass --maxrregcount at all". A
+    # default of 0 used to emit `--maxrregcount=0` on every compile, which ptxas reads as
+    # "cap each thread at zero registers" and repairs to the hardware minimum, warning
+    # "adjusting per thread register count of 0 to lower bound of 24" for every kernel.
     def __init__(self,
         gpu_architecture: Optional[GPUArch] = None, arch: Optional[GPUArch] = None,
         device_c:Optional[bool] = None, dc:Optional[bool] = None,
@@ -13,7 +17,7 @@ class BuildOptions:
         device_debug:Optional[bool] = None, G:Optional[bool] = None,
         generate_line_info:Optional[bool] = None, lineinfo:Optional[bool] = None,
         ptxas_options:Optional[List[str]] = None, Xptxas:Optional[List[str]] = None,
-        maxrregcount:Optional[int] = 0, ftz:Optional[bool] = None,
+        maxrregcount:Optional[int] = None, ftz:Optional[bool] = None,
         prec_sqrt:Optional[bool] = None, prec_div: Optional[bool] = None,
         fmad:Optional[bool] = None, use_fast_math: Optional[bool] = None,
         extra_device_vectorization:Optional[bool] = None, modify_stack_limit: Optional[bool] = None,

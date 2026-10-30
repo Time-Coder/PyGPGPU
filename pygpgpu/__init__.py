@@ -15,13 +15,12 @@ so to use things from the submodules write `from pygpgpu.kernel import ...`.
 import importlib
 from typing import Any, List
 
-# pygf owns the single process-wide numpy.array monkey-patch. Importing it
-# applies that patch (patch_nparray), which teaches numpy.array to read a
-# host vector container as its components -- including the structured dtype
-# path the vector-typed buffers below depend on. PyGPGPU no longer ships its
-# own copy of the patch; this is a deliberate unification.
+# pygf owns the whole numpy surface for its types: importing it patches numpy.array
+# (patch_nparray), the array constructors, and installs the VectorArray view whose
+# elements are vectors rather than records. PyGPGPU takes no part in that -- it only
+# registers the vector types it adds (8/16-wide, char/uchar/short families), so their
+# arrays get the same element access. See pygf/vector_array.py.
 import pygf  # noqa: F401  (applies the numpy.array patch on import)
-
 
 # ---------- Top-level exports: public API of kernel ----------
 # kernel subpackage's __all__ copied as-is (top-level kernel is the @kernel decorator)
@@ -33,10 +32,14 @@ from .kernel import (
     get_default_device,
     list_devices,
     get_device,
-    gpu,
     kernel,
     set_default_device,
 )
+# The dual-sided device builtins are plain functions, so they are exported here directly:
+# `from pygpgpu import get_global_id, atomic_add`. Inside a @kernel body the translator
+# recognizes each one by the object it resolves to and emits the device call.
+from .kernel.builtins import *  # noqa: F403
+from .kernel.builtins import __all__ as _builtin_names
 
 # ---------- Top-level exports: public API of vec_types ----------
 
@@ -107,9 +110,11 @@ from .utils import get_print_info, set_print_info  # noqa: E402  (needs to follo
 
 __all__ = [
     # kernel
-    "kernel", "gpu", "PyKernel", "DEFAULT_BACKEND_ORDER",
+    "kernel", "PyKernel", "DEFAULT_BACKEND_ORDER",
     "list_devices", "get_device", "available_devices",
     "set_default_device", "get_default_device",
+    # device builtins (dual-sided functions; see pygpgpu/kernel/builtins.py)
+    *_builtin_names,
     # images
     "Image", "ImageFilter", "ImageAddress",
     # logging
@@ -132,3 +137,4 @@ __all__ = [
 
 def __dir__()->List[str]:
     return sorted(set(globals()) | set(__all__))
+

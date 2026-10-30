@@ -23,6 +23,9 @@ class VarInfo:
         "unsigned int": "uint",
         "unsigned long long": "ulong",
         "unsigned long": "ulong",
+        # `long long` is how the 64-bit signed type is spelled for NVRTC (see
+        # _CUDA_TYPE_NAMES); the driver tables key it as `long`.
+        "long long": "long",
     }
 
     def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], type_qualifiers: List[str], kernel_flags:Optional[KernelFlags]=None):

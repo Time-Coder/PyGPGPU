@@ -47,7 +47,13 @@ class HIPInfo:
     def _vec_types(cls):
         if cls.vec_types is None:
             from ...opencl.driver.clinfo import CLInfo
+            from ...cuda.driver.cuinfo import CUInfo
             cls.vec_types = dict(CLInfo.vec_types)
+            # HIP's vector ABI is CUDA's, not OpenCL's: a 3-component vector is three
+            # components (12 bytes), not four padded slots. The OpenCL table would make
+            # `float3` 16 bytes, which then fails both the by-value packing and the
+            # by-pointer conversion (`is_vec3` looks for exactly three fields).
+            cls.vec_types.update(CUInfo.vec_types)
             for name, ctype in cls.basic_types.items():
                 cls.vec_types.setdefault(name, ctype)
         return cls.vec_types

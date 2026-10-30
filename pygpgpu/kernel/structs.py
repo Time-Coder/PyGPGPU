@@ -1,0 +1,178 @@
+"""Device structures built from numpy record dtypes.
+
+A structured dtype describes a layout completely, so it is also the definition the device
+needs: `np.dtype([("i", "<i4"), ("f", "<f4")])` is `struct { int i; float f; };`. Nothing on
+the host has to be a `ctypes` class, and an array of that dtype is simply an array of the
+structure.
+
+The generated names are derived from the dtype text, so the same dtype always yields the same
+C type name -- the kernel cache is keyed by the generated source, and a name that changed
+between runs would defeat it.
+"""
+from __future__ import annotations
+
+import hashlib
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+
+def is_record(dtype:Any)->bool:
+    """True for a structured dtype that is a *structure*, not a vector."""
+    from ..vec_types.layout import _vector_dtype_name
+
+    if not isinstance(dtype, np.dtype) or dtype.fields is None:
+        return False
+    if _vector_dtype_name(dtype) is not None:
+        return False
+    return True
+
+
+def struct_name(dtype:np.dtype)->str:
+    """A stable C identifier for the structure a dtype describes."""
+    digest:str = hashlib.md5(repr(np.dtype(dtype)).encode("utf-8")).hexdigest()[:10]
+    return f"_st_{digest}"
+
+
+def _scalar_type(dtype:np.dtype)->Optional[str]:
+    from .translator import DTYPE_MAP
+
+    return DTYPE_MAP.get(dtype.name)
+
+
+def field_type(field_dtype:Any, backend:str)->Tuple[str, str]:
+    """(C base type, array suffix) for one field: scalar, vector, nested structure, or array."""
+    from ..vec_types.layout import _vector_dtype_name
+
+    dtype:np.dtype = np.dtype(field_dtype)
+    shape:Any = None
+    if dtype.subdtype is not None:
+        base_dtype, shape = dtype.subdtype
+        dtype = base_dtype
+
+    vector:Optional[str] = _vector_dtype_name(dtype)
+    if vector is not None:
+        base:str = vector
+    elif is_record(dtype):
+        base = struct_name(dtype)
+    else:
+        scalar:Optional[str] = _scalar_type(dtype)
+        if scalar is None:
+            raise SyntaxError(
+                f"a structure member of dtype {dtype} has no device type; use a scalar, a "
+                f"vector, a nested structure, or an array of those")
+        base = "uchar" if dtype.name == "bool" else scalar
+
+    # numpy records a sub-array member as (dtype, shape); C puts the extents on the name.
+    suffix:str = ""
+    if shape is not None:
+        suffix = "".join(f"[{int(extent)}]" for extent in shape)
+    return base, suffix
+
+
+def structure_fields(dtype:np.dtype, backend:str)->List[str]:
+    """One C member declaration per field, in declaration order."""
+    members:List[str] = []
+    for name in dtype.names or ():
+        field_dtype:Any = dtype.fields[name][0]
+        base, suffix = field_type(field_dtype, backend)
+        members.append(f"{base} {name}{suffix}")
+    return members
+
+
+def nested_dtypes(dtype:np.dtype)->List[np.dtype]:
+    """Every structure dtype this one contains, deepest first (a typedef needs its members)."""
+    from ..vec_types.layout import _vector_dtype_name
+
+    found:List[np.dtype] = []
+    for name in dtype.names or ():
+        base:np.dtype = np.dtype(dtype.fields[name][0])
+        if base.subdtype is not None:
+            base = base.subdtype[0]
+        if _vector_dtype_name(base) is not None or not is_record(base):
+            continue
+        for inner in nested_dtypes(base):
+            if inner not in found:
+                found.append(inner)
+        if base not in found:
+            found.append(base)
+    return found
+
+
+def render_structures(dtypes:List[np.dtype], backend:str)->str:
+    """The typedef block for every structure the kernel uses, members before containers."""
+    ordered:List[np.dtype] = []
+    for dtype in dtypes:
+        for inner in nested_dtypes(dtype):
+            if inner not in ordered:
+                ordered.append(inner)
+        if dtype not in ordered:
+            ordered.append(dtype)
+
+    lines:List[str] = []
+    for dtype in ordered:
+        name:str = struct_name(dtype)
+        members:str = " ".join(f"{member};" for member in structure_fields(dtype, backend))
+        if backend == "opencl":
+            lines.append(f"typedef struct {{ {members} }} {name};")
+        else:
+            lines.append(f"struct {name} {{ {members} }};")
+            lines.append(f"typedef struct {name} {name};")
+    return "\n".join(lines)
+
+
+_REGISTRY: Dict[str, np.dtype] = {}
+
+
+def register(dtype:Any) -> str:
+    """Record a structure dtype and return its C type name."""
+    name:str = struct_name(np.dtype(dtype))
+    _REGISTRY[name] = np.dtype(dtype)
+    return name
+
+
+def dtype_for(name:str) -> Optional[np.dtype]:
+    """The structure dtype behind a registered C type name, or None."""
+    return _REGISTRY.get(name)
+
+
+def member_types(dtype:np.dtype, backend:str) -> Dict[str, Any]:
+    """field name -> the translator's type for reading it.
+
+    A scalar member is its scalar type name, a vector member its vector name, a nested
+    structure its structure name, and a sub-array member a pointer marker so `s["xs"][1]`
+    indexes it directly.
+    """
+    from ..vec_types.layout import _vector_dtype_name
+
+    members:Dict[str, Any] = {}
+    for name in dtype.names or ():
+        field_dtype:np.dtype = np.dtype(dtype.fields[name][0])
+        shape:Any = None
+        if field_dtype.subdtype is not None:
+            base_dtype, shape = field_dtype.subdtype
+            field_dtype = base_dtype
+        vector:Optional[str] = _vector_dtype_name(field_dtype)
+        if vector is not None:
+            kind:Any = vector
+        elif is_record(field_dtype):
+            kind = register(field_dtype)
+        else:
+            scalar:Optional[str] = _scalar_type(field_dtype)
+            kind = "uchar" if field_dtype.name == "bool" else scalar
+        if shape is not None:
+            # An array member is addressed with a plain index, so it carries the pointer
+            # marker; the element type is the member's own.
+            members[name] = ("*", kind)
+        else:
+            members[name] = kind
+    return members
+
+
+def dtype_of(value:Any)->Optional[np.dtype]:
+    """The record dtype a value carries, when it is a structure or an array of them."""
+    if isinstance(value, np.void):
+        return value.dtype if is_record(value.dtype) else None
+    if isinstance(value, np.ndarray) and is_record(value.dtype):
+        return value.dtype
+    return None

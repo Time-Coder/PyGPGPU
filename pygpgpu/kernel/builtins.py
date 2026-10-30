@@ -1,245 +1,211 @@
-"""Namespace of device builtin functions available inside `@kernel` kernels.
+"""The dual-sided device builtins: one function per name a kernel body may call.
+
+This module holds the builtins and nothing else. On a device backend the translator
+recognizes a call by *which function it resolves to* (see ``builtin_registry.py``) and
+emits the matching OpenCL C or CUDA call, never looking at the body below. On the
+``python`` backend the body is what runs, so it implements the same operation on host numpy
+values -- that is why each one is written out rather than left as a placeholder.
+
+The two sides must agree, which is why the implementations live here next to the names:
+the signatures are what an editor shows, and the bodies are what the interpreter does.
+Anything a body needs but a user should not see lives in ``host_runtime.py``; the device
+side lives in ``device_builtins.py``.
+
+Outside a kernel, the functions that depend on a work item (``get_global_id`` and friends)
+raise a ``SyntaxError`` explaining that; the ones that act on a value (``atomic_add``,
+``dot``, ...) simply operate on it.
 
 Usage::
 
-    from pygpgpu.kernel import gpu
+    from pygpgpu import atomic_add, get_global_id
 
     @kernel
-    def k(out):
-        i = gpu.get_global_id(0)
-        gpu.atomic_add(out, i, 1)
-
-The translator recognizes calls on `gpu` and maps them to OpenCL/CUDA builtins per backend.
-The `python` backend serves the same names from a thread-local frame instead: its
-interpreter runs the kernel body directly, so `gpu.get_global_id` and friends must
-report the work item the serial loop is currently emulating (see python_backend.py).
-
-Python's builtin ``print`` works inside a kernel body too: the translator turns it into
-device ``printf`` calls that print the same text (see ``FunctionTranslator._emit_print``).
-The `python` backend needs no translation there -- the interpreter prints as usual.
+    def k(out: np.ndarray):
+        i = get_global_id(0)
+        atomic_add(out, i, 1)
 """
 from __future__ import annotations
 
-import threading
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any
+
+# The vector half of the namespace (dot/length/normalize/clamp/mix/...) is dual-sided
+# already: `pygpgpu.vec_types.funcs` holds one implementation that serves both sides, so
+# the names are re-exported here to give them a signature in this namespace too. The
+# explicit `as` spelling marks them as deliberate re-exports rather than unused imports.
+from ..vec_types.funcs import abs_diff as abs_diff
+from ..vec_types.funcs import all as all
+from ..vec_types.funcs import any as any
+from ..vec_types.funcs import clamp as clamp
+from ..vec_types.funcs import cross as cross
+from ..vec_types.funcs import distance as distance
+from ..vec_types.funcs import dot as dot
+from ..vec_types.funcs import exp2 as exp2
+from ..vec_types.funcs import hadd as hadd
+from ..vec_types.funcs import isequal as isequal
+from ..vec_types.funcs import isgreater as isgreater
+from ..vec_types.funcs import isgreaterequal as isgreaterequal
+from ..vec_types.funcs import isless as isless
+from ..vec_types.funcs import islessequal as islessequal
+from ..vec_types.funcs import isnotequal as isnotequal
+from ..vec_types.funcs import isordered as isordered
+from ..vec_types.funcs import isunordered as isunordered
+from ..vec_types.funcs import length as length
+from ..vec_types.funcs import mad as mad
+from ..vec_types.funcs import mad24 as mad24
+from ..vec_types.funcs import mix as mix
+from ..vec_types.funcs import mul24 as mul24
+from ..vec_types.funcs import normalize as normalize
+from ..vec_types.funcs import rhadd as rhadd
+from ..vec_types.funcs import rsqrt as rsqrt
+from ..vec_types.funcs import saturate as saturate
+from ..vec_types.funcs import select as select
+from ..vec_types.funcs import step as step
+
+from .host_runtime import atomic_in_place, local_extent, work_item, work_size_extent
+
+# Everything a kernel body may call, so `from pygpgpu import *` and an editor completing
+# `pygpgpu.` show exactly the supported set and nothing else.
+__all__ = [
+    # work-item indexing
+    "get_global_id", "get_local_id", "get_group_id",
+    "get_global_size", "get_local_size", "get_num_groups",
+    # synchronisation and launch shape
+    "barrier", "work_size", "local",
+    # atomics
+    "atomic_add", "atomic_sub", "atomic_min", "atomic_max",
+    "atomic_and", "atomic_or", "atomic_xor", "atomic_xchg", "atomic_cas",
+    # math and vector builtins (defined in pygpgpu.vec_types.funcs)
+    "rsqrt", "exp2", "clamp", "mix", "mad", "saturate", "step", "select",
+    "any", "all",
+    "isequal", "isnotequal", "isgreater", "isgreaterequal",
+    "isless", "islessequal", "isordered", "isunordered",
+    "abs_diff", "hadd", "rhadd", "mad24", "mul24",
+    "dot", "cross", "normalize", "length", "distance",
+]
 
 
-
-# The python backend installs one frame per thread for the duration of a kernel call.
-# It lives here (rather than in python_backend.py) so attribute access on `gpu` can find
-# it without importing the backend, which would cycle back through the translator.
-_HOST_FRAME = threading.local()
+# ---------------------------------------------------------------------------
+# Work-item indexing
+# ---------------------------------------------------------------------------
 
 
-def set_host_frame(frame: Optional[Any])->None:
-    """Install the active python-backend frame for this thread (None clears it)."""
-    _HOST_FRAME.frame = frame
+def get_global_id(dim: int) -> int:
+    """The global id of this work item along ``dim``."""
+    return work_item(dim, "get_global_id")
 
 
-def get_host_frame()->Optional[Any]:
-    """The frame installed by the python backend on this thread, or None."""
-    return getattr(_HOST_FRAME, "frame", None)
+def get_local_id(dim: int) -> int:
+    """The id of this work item inside its group along ``dim``."""
+    return work_item(dim, "get_local_id") % local_extent(dim, "get_local_id")
 
 
-class GPUNamespace:
-    """Marker type: the translator recognizes `gpu.xxx(...)` calls and maps them to device builtins.
+def get_group_id(dim: int) -> int:
+    """The id of this work item's group along ``dim``."""
+    return work_item(dim, "get_group_id") // local_extent(dim, "get_group_id")
 
-    While a python-backend call is running on the current thread, the same attributes
-    resolve to the host implementations supplied by that frame instead.
+
+def get_global_size(dim: int) -> int:
+    """The total number of work items along ``dim``."""
+    global_extent, _ = work_size_extent(dim, "get_global_size")
+    return global_extent
+
+
+def get_local_size(dim: int) -> int:
+    """The number of work items per group along ``dim``."""
+    _, local_size = work_size_extent(dim, "get_local_size")
+    return local_size
+
+
+def get_num_groups(dim: int) -> int:
+    """The number of groups along ``dim``."""
+    global_extent, local_size = work_size_extent(dim, "get_num_groups")
+    return -(-global_extent // local_size)
+
+
+# ---------------------------------------------------------------------------
+# Synchronisation and launch shape
+# ---------------------------------------------------------------------------
+
+
+def barrier() -> None:
+    """Wait for every work item of the group. A serial run has nothing to wait for."""
+    return None
+
+
+def work_size(*arrays: Any) -> None:
+    """Declare the iteration domain of a gid-style kernel.
+
+    Host-side only: the translator erases the statement, and the launch derived from it is
+    what the device backends use. Here it only needs to exist so the call is a no-op.
     """
-
-    def __init__(self)->None:
-        self.__name__ = "pygpgpu.kernel.builtins"
-
-    def __getattr__(self, name:str)->Callable:
-        frame:Optional[Any] = get_host_frame()
-        if frame is not None:
-            return frame.builtin(name)
-
-        def _not_callable(*args, **kwargs)->None:
-                        raise SyntaxError(
-                f"gpu.{name} is only available inside a @kernel function body "
-                f"(it maps to a device builtin, not a host function)") from None
-        return _not_callable
+    return None
 
 
-gpu = GPUNamespace()
+def local(dtype: Any, count: int) -> Any:
+    """Allocate ``count`` elements of ``dtype`` in local (shared) memory.
 
-
-def tex1D(texture:Any, u:Any)->Any:
-    """Sample a 1D CUDA texture at a normalized coordinate, inside a @kernel body.
-
-    The translator rewrites the call into ``tex1D<float>(texture, u)``. Sampling runs
-    on the device, so this body only gives the name something to bind to.
-    """
-    raise SyntaxError(
-        "tex1D() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
-
-
-def tex2D(texture:Any, u:Any, v:Any)->Any:
-    """Sample a 2D CUDA texture at normalized coordinates, inside a @kernel body.
-
-    The translator rewrites the call into ``tex2D<float>(texture, u, v)``. Sampling
-    runs on the device, so this body only gives the name something to bind to.
-    """
-    raise SyntaxError(
-        "tex2D() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
-
-
-def tex3D(texture:Any, u:Any, v:Any, w:Any)->Any:
-    """Sample a 3D CUDA texture at normalized coordinates, inside a @kernel body.
-
-    The translator rewrites the call into ``tex3D<float>(texture, u, v, w)``.
-    Sampling runs on the device, so this body only gives the name something to bind
-    to.
-    """
-    raise SyntaxError(
-        "tex3D() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
-
-
-def surf1Dread(surface:Any, x:Any)->Any:
-    """Read one element of a 1D CUDA surface, inside a @kernel body.
-
-    The translator rewrites the call into ``surf1Dread<float>(surface, x)``.
-    """
-    raise SyntaxError(
-        "surf1Dread() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
-
-
-def surf1Dwrite(surface:Any, value:Any, x:Any)->Any:
-    """Write one element of a 1D CUDA surface, inside a @kernel body.
-
-    The translator rewrites the call into ``surf1Dwrite<float>(value, surface, x)``.
-    """
-    raise SyntaxError(
-        "surf1Dwrite() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
-
-
-def surf3Dread(surface:Any, x:Any, y:Any, z:Any)->Any:
-    """Read one element of a 3D CUDA surface, inside a @kernel body.
-
-    The translator rewrites the call into ``surf3Dread<float>(surface, x, y, z)``.
-    """
-    raise SyntaxError(
-        "surf3Dread() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
-
-
-def surf3Dwrite(surface:Any, value:Any, x:Any, y:Any, z:Any)->Any:
-    """Write one element of a 3D CUDA surface, inside a @kernel body.
-
-    The translator rewrites the call into ``surf3Dwrite<float>(value, surface, x, y, z)``.
-    """
-    raise SyntaxError(
-        "surf3Dwrite() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
-
-
-def surf2Dread(surface:Any, x:Any, y:Any)->Any:
-    """Read one element of a 2D CUDA surface, inside a @kernel body.
-
-    The translator rewrites the call into ``surf2Dread<float>(surface, x, y)``.
-    """
-    raise SyntaxError(
-        "surf2Dread() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
-
-
-def surf2Dwrite(surface:Any, value:Any, x:Any, y:Any)->Any:
-    """Write one element of a 2D CUDA surface, inside a @kernel body.
-
-    The translator rewrites the call into ``surf2Dwrite<float>(value, surface, x, y)``.
+    Device-only, and the interpreter says so rather than guessing: a shared buffer is
+    meaningless without barriers, and ``barrier()`` is a no-op in a serial run, so an
+    algorithm that counts into shared memory and then merges would silently produce a
+    different number there. Run such a kernel on a device backend, or write the same
+    result with atomics straight into an array argument.
     """
     raise SyntaxError(
-        "surf2Dwrite() is a device builtin: it is translated inside a @kernel body and "
-        "cannot be called on the host") from None
+        "local() is not supported by the python backend: it needs a work-group barrier to "
+        "separate the phases that share the buffer, and a serial run cannot honor one. Use "
+        "a cuda/opencl/hip backend for this kernel, or write the same result with "
+        "atomic_add straight into an array argument") from None
 
 
-# ---------- mapping metadata used at translation time ----------
-
-# Index builtins: (gpu name, opencl name, cuda expression template); dim argument must be an integer literal
-INDEX_BUILTINS:Dict[str, Tuple[str, str]] = {
-    "get_global_id": ("get_global_id", "(int)(blockIdx{c} * blockDim{c} + threadIdx{c})"),
-    "get_local_id": ("get_local_id", "(int)threadIdx{c}"),
-    "get_group_id": ("get_group_id", "(int)blockIdx{c}"),
-    "get_global_size": ("get_global_size", "(int)blockDim{c} * gridDim{c}"),
-    "get_local_size": ("get_local_size", "(int)blockDim{c}"),
-    "get_num_groups": ("get_num_groups", "(int)gridDim{c}"),
-}
-
-# Atomic ops: (gpu name, opencl name, cuda name); signature (array, index, value), integer element types only
-ATOMIC_BUILTINS:Dict[str, Tuple[str, str]] = {
-    "atomic_add": ("atomic_add", "atomicAdd"),
-    "atomic_sub": ("atomic_sub", "atomicSub"),
-    "atomic_min": ("atomic_min", "atomicMin"),
-    "atomic_max": ("atomic_max", "atomicMax"),
-    "atomic_and": ("atomic_and", "atomicAnd"),
-    "atomic_or": ("atomic_or", "atomicOr"),
-    "atomic_xor": ("atomic_xor", "atomicXor"),
-    "atomic_xchg": ("atomic_xchg", "atomicExch"),
-}
-
-# Math/vector builtins: (gpu name, opencl name, cuda name or None meaning special codegen is needed)
-GENERIC_BUILTINS:Dict[str, Tuple[str, str]] = {
-    "barrier": ("barrier", "__syncthreads()"),
-    "rsqrt": ("rsqrt", "rsqrtf"),
-    "exp2": ("exp2", "exp2f"),
-    "clamp": ("clamp", ""),      # cuda needs special codegen
-    "mix": ("mix", ""),          # cuda needs special codegen (a*(1-t)+b*t)
-    "mad": ("mad", ""),          # cuda (a*b+c)
-    "saturate": ("clamp", ""),   # cuda needs special codegen (clamp to 0..1)
-    "step": ("step", ""),        # cuda needs special codegen (x < edge ? 0 : 1)
-    "select": ("select", ""),    # cuda needs special codegen (per-component cond ? b : a)
-    "any": ("any", ""),          # vector reduction, cuda needs special codegen
-    "all": ("all", ""),          # vector reduction, cuda needs special codegen
-    "isequal": ("isequal", ""),  # relation-function family: opencl natively returns int vectors,
-    "isnotequal": ("isnotequal", ""),  # cuda generates per-component (int)(l op r)
-    "isgreater": ("isgreater", ""),
-    "isgreaterequal": ("isgreaterequal", ""),
-    "isless": ("isless", ""),
-    "islessequal": ("islessequal", ""),
-    "isordered": ("isordered", ""),
-    "isunordered": ("isunordered", ""),
-    "abs_diff": ("abs_diff", ""),  # integer: cuda per-component abs(l-r)
-    "hadd": ("hadd", ""),          # integer: cuda (a&b) + ((a^b)>>1)
-    "rhadd": ("rhadd", ""),        # integer: cuda (a|b) - ((a^b)>>1)
-    "mad24": ("mad24", ""),        # integer: cuda plain multiply-add
-    "mul24": ("mul24", ""),        # integer: cuda plain multiply
-    "dot": ("dot", ""),          # vector: opencl native, cuda per-component sum
-    "cross": ("cross", ""),
-    "normalize": ("normalize", ""),
-    "length": ("length", ""),
-    "distance": ("distance", ""),
-}
+# ---------------------------------------------------------------------------
+# Atomics
+# ---------------------------------------------------------------------------
 
 
-def dim_component(dim:int)->str:
-    if dim not in (0, 1, 2):
-        raise ValueError(f"dimension index must be 0, 1 or 2, got {dim}")
-    return (".x", ".y", ".z")[dim]
+def atomic_add(array: Any, index: int, value: Any) -> Any:
+    """Add ``value`` to ``array[index]``; returns the previous value."""
+    return atomic_in_place(array, index, lambda current: current + value)
 
 
-def emit_index(name:str, dim:int, backend:str)->str:
-    opencl_name, cuda_template = INDEX_BUILTINS[name]
-    component:str = dim_component(dim)
-    if backend == "opencl":
-        return f"{opencl_name}({dim})"
-    return cuda_template.format(c=component)
+def atomic_sub(array: Any, index: int, value: Any) -> Any:
+    """Subtract ``value`` from ``array[index]``; returns the previous value."""
+    return atomic_in_place(array, index, lambda current: current - value)
 
 
-def emit_barrier(backend:str)->str:
-    if backend == "opencl":
-        return "barrier(CLK_GLOBAL_MEM_FENCE)"
-    return "__syncthreads()"
+def atomic_min(array: Any, index: int, value: Any) -> Any:
+    """Keep the smaller of ``array[index]`` and ``value``; returns the previous value."""
+    return atomic_in_place(array, index, lambda current: min(current, value))
 
 
-def emit_atomic(name:str, array_code:str, index_code:str, value_code:str, elem_type:str, backend:str)->str:
-    opencl_name, cuda_name = ATOMIC_BUILTINS[name]
-    if backend == "opencl":
-        return f"{opencl_name}((volatile __global {elem_type} *)(&({array_code})[{index_code}]), {value_code})"
-    return f"{cuda_name}(&({array_code})[{index_code}], {value_code})"
+def atomic_max(array: Any, index: int, value: Any) -> Any:
+    """Keep the larger of ``array[index]`` and ``value``; returns the previous value."""
+    return atomic_in_place(array, index, lambda current: max(current, value))
+
+
+def atomic_and(array: Any, index: int, value: Any) -> Any:
+    """Bitwise-and ``value`` into ``array[index]``; returns the previous value."""
+    return atomic_in_place(array, index, lambda current: current & value)
+
+
+def atomic_or(array: Any, index: int, value: Any) -> Any:
+    """Bitwise-or ``value`` into ``array[index]``; returns the previous value."""
+    return atomic_in_place(array, index, lambda current: current | value)
+
+
+def atomic_xor(array: Any, index: int, value: Any) -> Any:
+    """Bitwise-xor ``value`` into ``array[index]``; returns the previous value."""
+    return atomic_in_place(array, index, lambda current: current ^ value)
+
+
+def atomic_xchg(array: Any, index: int, value: Any) -> Any:
+    """Store ``value`` into ``array[index]``; returns the previous value."""
+    return atomic_in_place(array, index, lambda current: value)
+
+
+def atomic_cas(array: Any, index: int, compare: Any, value: Any) -> Any:
+    """Store ``value`` into ``array[index]`` when it still holds ``compare``.
+
+    Returns the previous value, so a caller can tell whether the swap happened.
+    """
+    return atomic_in_place(
+        array, index, lambda current: value if current == compare else current)

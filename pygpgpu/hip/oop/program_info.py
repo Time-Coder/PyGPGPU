@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from typing import Tuple, Any, Dict, List, Optional
 
 import numpy as np
@@ -12,11 +12,34 @@ from .buffer import Buffer
 from .event import Event
 
 
+# Full C spellings -> the short names the driver tables are keyed by.
+_TYPE_ALIASES:Dict[str, str] = {
+    "unsigned char": "uchar",
+    "unsigned short": "ushort",
+    "unsigned int": "uint",
+    "unsigned long long": "ulong",
+    "unsigned long": "ulong",
+    # `long long` is how the 64-bit signed type is spelled for the compiler (see
+    # _CUDA_TYPE_NAMES); the driver tables key it as `long`.
+    "long long": "long",
+}
+
+
 class VarInfo:
 
     def __init__(self, name: str, type_str: str, array_shape: Tuple[int, ...], type_qualifiers: List[str], kernel_flags:Optional[KernelFlags]=None):
         self.name = name
-        self.type_str = type_str
+        # HIP compiles the CUDA code generation, which writes unsigned types in their full
+        # C spelling (see _CUDA_TYPE_NAMES in pygpgpu/kernel/translator.py), while the driver
+        # tables are keyed by the OpenCL-style short names. Normalising here keeps every
+        # downstream lookup -- including the numpy dtype used to bind an argument -- on one
+        # spelling, which is what the CUDA stack already does.
+        stripped:str = type_str.strip()
+        pointer:str = ""
+        if stripped.endswith("*"):
+            stripped = stripped[:-1].rstrip()
+            pointer = "*"
+        self.type_str = _TYPE_ALIASES.get(stripped, stripped) + pointer
         self.array_shape = array_shape
         self.type_qualifiers = type_qualifiers
         self.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed) if kernel_flags is None else kernel_flags

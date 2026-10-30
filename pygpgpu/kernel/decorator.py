@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import concurrent.futures
+import functools
 import inspect
 import os
 import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
+from ..vec_types.layout import pack
 from ..utils import local_size_for_global, detect_work_size, device_limits
 from .python_backend import PythonKernel
 from .translator import (
     FunctionTranslator,
     infer_ctype,
+    is_ptr,
     scan_self_attrs,
     short_hash,
     type_sig,
@@ -334,45 +338,225 @@ def _bind_arguments(func:Callable, args:Tuple[Any, ...],
     ``func`` is the undecorated function, so the signature is the author's own.
     ``skip_first`` drops the leading parameter of a method, whose receiver is supplied
     separately by the caller.
+
+    A bad call must fail the way the same call to the undecorated function fails, so the
+    binding runs through CPython itself (see _signature_stub) instead of a re-worded
+    message of our own: the wording, the singular/plural forms, the "Did you mean ...?"
+    suggestion and even the mention of keyword-only leftovers then follow the running
+    interpreter rather than a hand-written table of phrases.
+
+    A method is checked with its receiver counted, because that is how CPython words the
+    error for the undecorated method: `Model.run() takes 3 positional arguments but 4 were
+    given`. The receiver is a placeholder -- its value never reaches the kernel, only the
+    count does.
     """
-    try:
-        signature = inspect.signature(func)
-    except (TypeError, ValueError):
+    full_signature:Optional[inspect.Signature] = _callable_signature(func, skip_first=False)
+    signature:Optional[inspect.Signature] = _callable_signature(func, skip_first)
+    if signature is None:
         if kwargs:
             raise TypeError(
                 "keyword arguments need a retrievable signature; call positionally") from None
         return args
 
-    parameters = list(signature.parameters.items())
-    if skip_first and parameters:
-        parameters = parameters[1:]
-        signature = signature.replace(
-            parameters=[inspect.Parameter(name, parameter.kind,
-                                          default=parameter.default)
-                        for name, parameter in parameters])
-
-    try:
-        bound = signature.bind_partial(*args, **kwargs)
-    except TypeError as error:
-        raise TypeError(str(error)) from None
+    # Let CPython bind and reject: it raises the native TypeError for an arity or keyword
+    # mismatch, attributed to the kernel's own qualified name and trimmed to the caller.
+    assert full_signature is not None
+    stub:Callable = _signature_stub(full_signature, func)
+    bound:inspect.BoundArguments = _bind_and_reject(
+        func, signature, stub, args, kwargs, skip_first)
+    qualname:str = _qualname_for_errors(func)
+    for name in bound.arguments:
+        if name == "self":
+            continue
+        try:
+            _check_annotated_argument(func, name, bound.arguments[name], qualname)
+        except ArgumentTypeError as error:
+            error.__traceback__ = None
+            raise
 
     ordered:List[Any] = []
-    missing:List[str] = []
     for name, parameter in signature.parameters.items():
         if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
             continue
         if name in bound.arguments:
             ordered.append(bound.arguments[name])
-        elif parameter.default is not parameter.empty:
-            ordered.append(parameter.default)
         else:
-            missing.append(name)
-
-    if missing:
-        raise TypeError(
-            "missing %d required argument%s: %s"
-            % (len(missing), "" if len(missing) == 1 else "s", ", ".join(missing)))
+            # bind() accepted the call without it, so the parameter has a default.
+            ordered.append(parameter.default)
     return tuple(ordered)
+
+
+def _bound_arguments_for_call(func:Callable, args:Tuple[Any, ...],
+                              kwargs:Dict[str, Any],
+                              skip_first:bool=False)->Tuple[Any, ...]:
+    """``_bind_arguments`` as the entry points call it (see _native_argument_errors)."""
+    return _bind_arguments(func, args, kwargs, skip_first)
+
+
+def _native_argument_errors(entry:Callable[..., Any])->Callable[..., Any]:
+    """Give an entry point native-python's single-frame traceback for a bad call.
+
+    Native python blames the call site and nothing else; a decorated call would otherwise
+    also show this module's ``__call__`` and the signature stub, so the same mistake looked
+    different once a function was decorated. The trimming happens here, at the entry point,
+    because clearing the traceback deeper inside and re-raising lets every frame the
+    exception travels through push itself back on again.
+    """
+    @functools.wraps(entry)
+    def wrapper(*args:Any, **kwargs:Any)->Any:
+        try:
+            return entry(*args, **kwargs)
+        except (ArgumentTypeError, TypeError) as error:
+            error.__traceback__ = None
+            raise
+
+    return wrapper
+
+
+def _callable_signature(func:Callable, skip_first:bool)->Optional[inspect.Signature]:
+    """The signature a kernel call is checked against, with a method's receiver removed."""
+    try:
+        signature:inspect.Signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return None
+    if not skip_first:
+        return signature
+    parameters:List[inspect.Parameter] = list(signature.parameters.values())[1:]
+    return signature.replace(parameters=parameters)
+
+
+_STUB_SCACHE:Dict[str, Callable] = {}
+
+
+class ArgumentTypeError(TypeError):
+    """A TypeError raised by this module's argument checks.
+
+    Marked as its own class so the call boundary can trim the traceback to the caller for
+    the errors this module words itself, the same treatment the interpreter's own binding
+    errors get. Callers see a plain TypeError, exactly as they would from the undecorated
+    function.
+    """
+
+# Stands in for a method's receiver when CPython is asked to word an argument error.
+# Never reaches the kernel: it exists so the error counts the receiver like native python.
+_RECEIVER_PLACEHOLDER:Any = object()
+
+
+def _signature_stub(signature:inspect.Signature, func:Callable)->Callable:
+    """A stand-in function with this signature, used only to raise CPython's own errors.
+
+    Calling it performs the real argument binding, so a wrong call fails with exactly the
+    text the undecorated function would have produced -- including the parts a
+    reimplementation tends to miss ("but 3 were given", "1 required positional argument",
+    "Did you mean 'b'?"). Annotations are dropped because they cannot always be
+    stringified, and no parameter type reaches this function: only the shape matters.
+
+    Stubs are cached per signature text and qualified name, so a repeated bad call does
+    not recompile the same throwaway function.
+    """
+    source_signature:str = str(signature)
+    qualname:str = _qualname_for_errors(func)
+    cache_key:str = qualname + source_signature
+    stub:Optional[Callable] = _STUB_SCACHE.get(cache_key)
+    if stub is not None:
+        return stub
+
+    body:str = ("from __future__ import annotations\n"
+                f"def _signature_stub{source_signature}:\n"
+                f"    return None\n")
+    namespace:Dict[str, Any] = {"__name__": "pygpgpu.kernel._signature_stub"}
+    exec(compile(body, "<kernel signature>", "exec"), namespace)  # noqa: S102 - a builder, not a container
+    stub = namespace["_signature_stub"]
+    # CPython prints the qualified name in its message, so an error reads
+    # `Model.method() ...` exactly as it would for the undecorated method.
+    stub.__qualname__ = qualname
+    stub.__name__ = qualname
+    _STUB_SCACHE[cache_key] = stub
+    return stub
+
+
+def _qualname_for_errors(func:Callable)->str:
+    """The name CPython would print for this callable in an argument error."""
+    qualname:str = getattr(func, "__qualname__", None) or getattr(func, "__name__", "kernel")
+    return qualname
+
+
+# What a kernel parameter's annotation says the argument should be. Only the two kinds a
+# kernel can carry are recognised; an annotation that is absent or means something else
+# leaves the argument unchecked, so this never rejects a call the launch path accepts.
+_ARRAY_ANNOTATIONS:Set[str] = {"np.ndarray", "ndarray", "numpy.ndarray"}
+_SCALAR_ANNOTATIONS:Set[str] = {"int", "float", "bool", "np.int32", "np.int64", "np.float32",
+                                "np.float64", "np.bool_", "np.uint8", "np.uint32", "np.uint64"}
+
+
+def _annotation_kind(func:Callable, name:str)->str:
+    """'array', 'scalar' or '' for one parameter's annotation.
+
+    An annotation may arrive as a type object or (under ``from __future__ import
+    annotations``) as its source text, so both forms are recognised. Anything else means
+    "no opinion": a kernel is specialized per argument type at call time (see
+    infer_ctype), which is why the annotation is documentation rather than a constraint
+    the launch has to honour. Name matching is by text because resolving a forward
+    reference would import a module just to reject a call.
+    """
+    annotations:Any = getattr(func, "__annotations__", None) or {}
+    annotation:Any = annotations.get(name, None)
+    if annotation is None:
+        return ""
+    if isinstance(annotation, type):
+        if annotation is np.ndarray:
+            return "array"
+        return "scalar" if annotation in (bool, int, float) else ""
+    if isinstance(annotation, str):
+        text:str = annotation.strip().strip("'\"")
+        if text in _ARRAY_ANNOTATIONS:
+            return "array"
+        if text in _SCALAR_ANNOTATIONS:
+            return "scalar"
+        return ""
+    return ""
+
+
+def _check_annotated_argument(func:Callable, name:str, value:Any, qualname:str) -> None:
+    """Reject an argument whose type contradicts the parameter's annotation.
+
+    This is the argument check a reader expects from the signature they wrote: passing a
+    scalar where an array is annotated used to surface much later as a confusing device
+    error about the kernel body, which pointed at the kernel source instead of the call.
+    """
+    kind:str = _annotation_kind(func, name)
+    if not kind:
+        return
+    if kind == "array" and not isinstance(value, np.ndarray):
+        raise ArgumentTypeError(
+            f"{qualname}() argument '{name}' must be a numpy array, not "
+            f"{type(value).__name__}")
+    if kind == "scalar" and isinstance(value, np.ndarray):
+        raise ArgumentTypeError(
+            f"{qualname}() argument '{name}' must be a scalar, not "
+            f"{type(value).__name__}")
+
+
+def _bind_and_reject(func:Callable, signature:inspect.Signature,
+                     stub:Callable, args:Tuple[Any, ...],
+                     kwargs:Dict[str, Any], skip_first:bool)->inspect.BoundArguments:
+    """Let CPython bind the call, re-raising its TypeError from the caller's own frame.
+
+    Native python reports a bad call with one frame -- the call site -- and the traceback
+    here would otherwise also show this module's ``__call__`` and the stub's call, which is
+    what makes the same mistake look different once a function is decorated. Clearing the
+    traceback and re-raising at this boundary leaves exactly the caller's frame, the same
+    shape ``_translate_errors`` gives a translation failure.
+    """
+    try:
+        if skip_first:
+            stub(_RECEIVER_PLACEHOLDER, *args, **kwargs)
+        else:
+            stub(*args, **kwargs)
+        return signature.bind(*args, **kwargs)
+    except TypeError as error:
+        error.__traceback__ = None
+        raise
 
 
 def _caller_traceback(traceback:Any)->Any:
@@ -452,6 +636,7 @@ class _KernelCall:
             (global_size if global_size is not None else self._global_size),
             (local_size if local_size is not None else self._local_size))
 
+    @_native_argument_errors
     def __call__(self, *args:Any, **kwargs:Any)->Any:
         instance:Any = self._instance
         instance_arg:Optional[Any] = None
@@ -468,6 +653,7 @@ class _KernelCall:
                                                     skip_first=self._kernel._is_method)
         return self._kernel._invoke(
             instance, call_args, self._backend, self._device, self._global_size, self._local_size)
+
     def _launch(self, launch:str, args:Tuple[Any, ...],
                 kwargs:Optional[Dict[str, Any]]=None)->Any:
         """Shared body of the three launch styles, honouring the bracket selectors."""
@@ -486,10 +672,12 @@ class _KernelCall:
             instance, call_args, self._backend, self._device,
             self._global_size, self._local_size, launch=launch)
 
+    @_native_argument_errors
     def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
         """Non-blocking launch of the bracketed form, e.g. ``k["cuda"].submit(...)``."""
         return self._launch("submit", args, kwargs)
 
+    @_native_argument_errors
     def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
         """Non-blocking asyncio launch of the bracketed form, e.g. ``k["cuda"].async_call(...)``."""
         return self._launch("async", args, kwargs)
@@ -505,11 +693,13 @@ class _BoundKernelMethod:
     def __getitem__(self, item:Any)->_KernelCall:
         return _KernelCall(self._kernel, self._instance)[item]
 
+    @_native_argument_errors
     def __call__(self, *args:Any, **kwargs:Any)->Any:
         call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
                                                     skip_first=True)
         return self._kernel._invoke(self._instance, call_args, None, None, None, None)
 
+    @_native_argument_errors
     def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
         """Non-blocking launch: ``instance.kernel_method.submit(...)``."""
         call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
@@ -517,6 +707,7 @@ class _BoundKernelMethod:
         return self._kernel._invoke(self._instance, call_args, None, None, None, None,
                                     launch="submit")
 
+    @_native_argument_errors
     def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
         """Non-blocking asyncio launch: ``instance.kernel_method.async_call(...)``."""
         call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
@@ -582,6 +773,7 @@ class PyKernel:
     def __getitem__(self, item:Any)->_KernelCall:
         return _KernelCall(self, None)[item]
 
+    @_native_argument_errors
     def __call__(self, *args:Any, **kwargs:Any)->Any:
         if self._is_method:
             if not args:
@@ -593,6 +785,7 @@ class PyKernel:
         call_args = _bind_arguments(self.raw_func, args, kwargs)
         return self._invoke(None, call_args, None, None, None, None)
 
+    @_native_argument_errors
     def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
         """Launch without waiting, returning a ``concurrent.futures.Future``.
 
@@ -613,6 +806,7 @@ class PyKernel:
         call_args = _bind_arguments(self.raw_func, args, kwargs)
         return self._invoke(None, call_args, None, None, None, None, launch="submit")
 
+    @_native_argument_errors
     def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
         """Launch without waiting, returning an ``asyncio.Future``.
 
@@ -711,12 +905,46 @@ class PyKernel:
             # surface calls makes every later texture/surface creation fail, so an
             # image bound after compilation would never get its device storage.
             self._bind_images(full_values=args, backend=backend)
-            entry = self._compile(args, arg_types, self_types, self_attrs, owner, sig, backend, device_obj)
+            entry = self._compile(args, arg_types, self_types, self_attrs, owner, sig,
+                                  backend, device_obj, instance)
             self._cache[cache_key] = entry
-        kernel_obj, shape_sources, work_size_dims, local_sizes, uses_global_id, image_samplers = entry
+        (kernel_obj, shape_sources, work_size_dims, local_sizes, uses_global_id,
+         image_samplers, returns, outer_vars, launch_meta) = entry
 
-        full:List[Any] = list(args) + list(self_values)
-        launch_args:List[Any] = self._build_launch_args(full, arg_types + self_types, shape_sources)
+        full:List[Any] = [_kernel_scalar_argument(value, t)
+                          for value, t in zip(list(args) + list(self_values),
+                                              arg_types + self_types)]
+        own_count:int = len(full)
+        # Outer-scope values are read before the launch arguments are built: a shape
+        # source can name an outer array, and `full` is indexed by the device parameter
+        # order (see _build_launch_args), so the outer values have to be part of it.
+        outer_state:Dict[str, Any] = self._bind_outer_values(outer_vars, backend)
+        # Objects the kernel body creates are built here, on every call, exactly as the
+        # interpreter would at that point in the body. They travel as trailing parameters.
+        # A method's creation may read `self` (`np.zeros((self.height, ...))`), so the
+        # instance is bound too.
+        created:Dict[str, Any] = _host_created_values(
+            self.raw_func, tuple(args), instance)[0]
+        runtime_values:List[Any] = list(outer_state["full"]) + _created_arguments(created)
+        return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
+                                      if returns else {})
+        # Launch order must match the device signature: own arguments, shape extents, then
+        # the values the host supplies (outer scope, then created objects). The shape
+        # extents are read from `full` by device-parameter index, so the runtime values are
+        # part of `full` but are appended to the launch afterwards.
+        full.extend(runtime_values)
+        # `full` indexes like the device parameter list, which is what shape_sources were
+        # recorded against. Validate the dimensions first: an index past an array's rank
+        # used to raise a bare `IndexError: tuple index out of range`, which says nothing
+        # about which array or loop was wrong.
+        _check_shape_indices(self.__name__, full, shape_sources, work_size_dims, launch_meta)
+        launch_args:List[Any] = list(full[:own_count])
+        for param_index, dim in shape_sources:
+            launch_args.append(int(full[param_index].shape[dim]))
+        # The signature declares the sampler and local-memory arguments right after the
+        # shape extents, and the outer/created values last (see render_kernel), so they are
+        # appended in that order here. Getting this wrong shifts every later argument: the
+        # local pointer would land where an outer scalar is expected.
         if backend == "opencl":
             # A sampler per sampled image, in the order the signature declares them.
             for param_index in image_samplers:
@@ -725,21 +953,83 @@ class PyKernel:
             # cuda local memory is a static __shared__ declaration; only opencl needs the byte size passed
             for local_bytes in local_sizes:
                 launch_args.append(local_bytes)
+        launch_args.extend(runtime_values)
+        if return_state:
+            # Return slots last: they are appended to the device signature after every
+            # parameter the work size, samplers and local sizes derive from.
+            launch_args.extend(return_state["buffers"])
+            launch_args.append(return_state["claim"])
+            launch_args.append(return_state["site"])
+        # Vector values travel in the layout the backend's ABI defines: OpenCL pads a
+        # 3-component vector to four slots, CUDA/HIP take the host's three. The host keeps
+        # the three-component form everywhere, so each argument is converted here and its
+        # result copied back once the launch has finished.
+        unpackers:List[Any] = []
+        for index, argument in enumerate(launch_args):
+            packed_value, unpack = pack(argument, backend)
+            if packed_value is not argument:
+                launch_args[index] = packed_value
+            if unpack is not None:
+                unpackers.append((packed_value, unpack))
         if global_size is None and work_size_dims:
             # A dim of -1 is an explicit gpu.work_size(x) declaration: that array contributes
-            # all of its dimensions, matching what np.ndindex(x.shape) would give.
+            # all of its dimensions, matching what np.ndindex(x.shape) would give. An entry
+            # with no parameter index is a literal count, as in np.ndindex(2, 3).
             extents_list:List[int] = []
             for pi, dim in work_size_dims:
+                if pi is None:
+                    extents_list.append(dim)
+                    continue
+                if dim == -2:
+                    # A host-side integer supplied as an argument, used as an extent:
+                    # `np.ndindex(self.image_height, self.image_width)`.
+                    extents_list.append(int(full[pi]))
+                    continue
                 shape:Tuple[int, ...] = tuple(int(s) for s in full[pi].shape)
                 if dim >= 0:
                     extents_list.append(shape[dim])
                 else:
                     extents_list.extend(shape)
             if len(extents_list) > 3:
+                source:str = ""
+                if work_size_dims[0][0] is not None:
+                    source = (f" from an array of shape "
+                              f"{tuple(int(s) for s in full[work_size_dims[0][0]].shape)}")
                 raise ValueError(
-                    f"gpu.work_size({self.__name__}) declared {len(extents_list)} dimensions "
-                    f"from an array of shape {tuple(int(s) for s in full[work_size_dims[0][0]].shape)}; "
-                    f"at most 3 are supported")
+                    f"the magic loop of {self.__name__} declared {len(extents_list)} "
+                    f"dimensions{source}; at most 3 are supported")
+            # `np.ndindex(arr.shape)` means the array's whole shape, but the translator only
+            # sees a pointer and cannot know its rank, so it takes one dimension per loop
+            # name. `for j, i in np.ndindex(image.shape)` over an RGB image would therefore
+            # iterate two of the three axes and never vary the channel. Check it here, where
+            # the rank is known.
+            whole:int = int(launch_meta.get("whole_shape_index", -1))
+            loop_names:int = int(launch_meta.get("loop_names", 0))
+            if whole >= 0 and loop_names:
+                rank:int = len(tuple(int(s) for s in full[whole].shape))
+                if rank != loop_names:
+                    raise ValueError(
+                        f"{self.__name__}(): the magic loop unpacks {loop_names} index "
+                        f"name{'s' if loop_names != 1 else ''} but np.ndindex(...) iterates "
+                        f"the whole shape of '{launch_meta['param_names'].get(whole, 'the array')}'"
+                        f", which has {rank} dimension{'s' if rank != 1 else ''} "
+                        f"{tuple(int(s) for s in full[whole].shape)}. Give one name per "
+                        f"dimension, or iterate an explicit subset, e.g. "
+                        f"np.ndindex(image.shape[0], image.shape[1])")
+            # The loop has to name one index per dimension of its domain: `for j, i in
+            # np.ndindex(image.shape)` over an RGB image would silently iterate only two of
+            # the three dimensions, so the third axis never varies. Say so instead.
+            if loop_names and loop_names != len(extents_list):
+                source = ""
+                if work_size_dims[0][0] is not None:
+                    source = (f" (the array has shape "
+                              f"{tuple(int(s) for s in full[work_size_dims[0][0]].shape)})")
+                raise ValueError(
+                    f"{self.__name__}(): the magic loop unpacks {loop_names} index "
+                    f"name{'s' if loop_names != 1 else ''} but its iteration domain has "
+                    f"{len(extents_list)} dimension{'s' if len(extents_list) != 1 else ''}"
+                    f"{source}. Give one name per dimension, or iterate an explicit subset, "
+                    f"e.g. np.ndindex(image.shape[0], image.shape[1])")
             extents:Tuple[int, ...] = tuple(extents_list)
             if local_size is None:
                 global_size, local_size = detect_work_size(
@@ -785,10 +1075,196 @@ class PyKernel:
             else:
                 kernel_obj = kernel_obj[(global_size, local_size)]
         if launch == "submit":
-            return kernel_obj.submit(*launch_args)
+            future = kernel_obj.submit(*launch_args)
+            if return_state or outer_state["writable"]:
+                return self._with_returns(future, return_state, returns, full, outer_state, created)
+            return future
         if launch == "async":
-            return kernel_obj.async_call(*launch_args)
-        return kernel_obj(*launch_args)
+            future = kernel_obj.async_call(*launch_args)
+            if return_state or outer_state["writable"]:
+                return self._with_returns(future, return_state, returns, full, outer_state, created)
+            return future
+        kernel_obj(*launch_args)
+        for packed_value, unpack in unpackers:
+            unpack(packed_value)
+        result:Any = (self._finish_returns(return_state, returns, full, created)
+                      if return_state else None)
+        self._write_back_outer(outer_state)
+        return result
+
+    # ---------- outer-scope variables ----------
+
+    def _bind_outer_values(self, outer_vars:Dict[str, Any], backend:str)->Dict[str, Any]:
+        """The launch arguments carrying this call's outer-scope values.
+
+        A read-only outer variable is passed by value, refreshed on every call, so a
+        changed scope value is seen immediately -- that is the whole point of
+        parameterizing it instead of inlining it. A declared `nonlocal`/`global` scalar
+        travels as a one-element buffer, because the device writes through the pointer;
+        the buffer is copied back into the scope once the launch has completed (see
+        _write_back_outer and _with_returns). An outer array is passed as itself, and the
+        backend's read/write analysis reads it back when the kernel wrote it.
+        """
+        args:List[Any] = []
+        full:List[Any] = []
+        writable:List[Dict[str, Any]] = []
+        for name, outer in outer_vars.items():
+            kind:str = outer["kind"]
+            value:Any = self._read_outer(name, kind)
+            if is_ptr(outer["type"]):
+                if value is None:
+                    raise ValueError(
+                        f"outer array '{name}' is undefined at launch time")
+                args.append(value)
+                full.append(value)
+                continue
+            if not outer["writable"]:
+                converted:Any = _kernel_scalar_argument(value, outer["type"])
+                args.append(converted)
+                full.append(converted)
+                continue
+            buffer:np.ndarray = np.zeros(1, dtype=_outer_slot_dtype(outer["type"]))
+            buffer[0] = _scalar_slot_value(value, outer["type"])
+            args.append(buffer)
+            full.append(buffer)
+            writable.append({"name": name, "kind": kind, "buffer": buffer,
+                             "type": outer["type"]})
+        return {"args": args, "writable": writable, "full": full}
+
+    def _read_outer(self, name:str, kind:str)->Any:
+        """The current value of an outer name, read the way python would resolve it."""
+        if kind == "closure":
+            cells:Dict[str, Any] = {}
+            for cell_name, cell in zip(self.raw_func.__code__.co_freevars,
+                                       self.raw_func.__closure__ or ()):
+                cells[cell_name] = cell
+            cell = cells.get(name)
+            if cell is None:
+                raise ValueError(f"outer variable '{name}' is not in the kernel's closure")
+            return cell.cell_contents
+        return self.raw_func.__globals__.get(name, None)
+
+    def _write_back_outer(self, outer_state:Dict[str, Any])->None:
+        """Copy a declared outer scalar's final value back into its scope."""
+        for entry in outer_state.get("writable", ()):
+            value:Any = _outer_scope_value(entry["buffer"][0], entry["type"])
+            self._store_outer(entry["name"], entry["kind"], value)
+
+    def _store_outer(self, name:str, kind:str, value:Any)->None:
+        """Assign an outer name, through its closure cell or the module globals."""
+        if kind == "closure":
+            for cell_name, cell in zip(self.raw_func.__code__.co_freevars,
+                                       self.raw_func.__closure__ or ()):
+                if cell_name == name:
+                    cell.cell_contents = value
+                    return
+            raise ValueError(f"outer variable '{name}' is not in the kernel's closure")
+        self.raw_func.__globals__[name] = value
+
+    def _alloc_return_slots(self, returns:Dict[str, Any])->Dict[str, Any]:
+        """One device buffer per value slot, plus the shared claim and site words.
+
+        Every buffer is zero-initialised: the claim word then starts unclaimed, so a
+        launch where no work item returned reads back as None rather than as garbage.
+        """
+        buffers:List[np.ndarray] = [np.zeros(1, dtype=dtype) for dtype in returns["slot_types"]]
+        return {"buffers": buffers,
+                "claim": np.zeros(1, dtype=np.int32),
+                "site": np.zeros(1, dtype=np.int32)}
+
+    def _finish_returns(self, return_state:Dict[str, Any],
+                        returns:Dict[str, Any], full:List[Any],
+                        created:Optional[Dict[str, Any]]=None)->Any:
+        """Rebuild the python result of a finished launch.
+
+        The winning return site decides the shape: `return a, b` gives a tuple,
+        `return value` gives the bare value, and a bare `return` gives None. A launch in
+        which no work item reached any `return` gives None too, exactly as a python
+        function does when no returning branch was taken.
+
+        An array position resolves to the host's own object: a parameter comes from the
+        launch arguments, and an object the body created comes from `created`. Either way
+        the caller receives the same object, never a copy.
+        """
+        if not int(return_state["claim"][0]):
+            return None
+        site:int = int(return_state["site"][0]) - 1
+        layout:Dict[str, Any] = returns["sites"][site]
+        if not layout["positions"]:
+            # The winning site was a bare `return` (or `return None`).
+            return None
+        values:List[Any] = []
+        for entry in layout["positions"]:
+            if entry["kind"] == "array":
+                name:str = entry["name"]
+                if created is not None and name in created:
+                    values.append(created[name])
+                else:
+                    values.append(full[returns["arg_indices"][name]])
+            else:
+                dtype:Any = returns["slot_types"][entry["slot"]]
+                kind:str = returns["slot_kinds"][entry["slot"]]
+                values.append(_return_value(return_state["buffers"][entry["slot"]][0], dtype, kind))
+        return tuple(values) if layout["is_tuple"] else values[0]
+
+    def _with_returns(self, future:Any,
+                      return_state:Dict[str, Any],
+                      returns:Optional[Dict[str, Any]],
+                      full:List[Any],
+                      outer_state:Optional[Dict[str, Any]]=None,
+                      created:Optional[Dict[str, Any]]=None)->Any:
+        """Wrap an asynchronous launch so its future resolves to the returned value.
+
+        The backend future resolves once every read-back has completed (see the kernel
+        classes), so by the time this callback runs the slots hold the winner's values.
+        A backend future may be bound to a loop other than the caller's (the python
+        backend installs one when none is running), so an asyncio result is delivered
+        through a fresh future on the caller's running loop when there is one, and is
+        otherwise completed in place on whatever loop the backend future uses.
+        """
+        is_asyncio:bool = isinstance(future, asyncio.Future)
+        deliver:Any = concurrent.futures.Future()
+        try:
+            caller_loop:Any = asyncio.get_running_loop()
+        except RuntimeError:
+            caller_loop = None
+        if is_asyncio:
+            deliver = caller_loop.create_future() if caller_loop is not None else future
+
+        def settle(*_args:Any)->None:
+            error:Optional[BaseException] = None
+            try:
+                error = future.exception()
+            except BaseException as caught:  # cancelled, or never resolved
+                error = caught
+
+            def apply() -> None:
+                if deliver.done():
+                    return
+                if error is not None:
+                    deliver.set_exception(error)
+                else:
+                    # Write-back happens here, after the launch has completed and its
+                    # buffers have been read back, so a declared outer scalar holds the
+                    # value the kernel left in it by the time the caller sees the result.
+                    if outer_state is not None:
+                        self._write_back_outer(outer_state)
+                    deliver.set_result(self._finish_returns(return_state, returns, full, created)
+                                       if return_state else None)
+
+            if is_asyncio:
+                try:
+                    future.get_loop().call_soon_threadsafe(apply)
+                except RuntimeError:
+                    pass  # the loop was closed before the launch finished
+                return
+            apply()
+
+        if future.done():
+            settle()
+        else:
+            future.add_done_callback(settle)
+        return deliver
 
     def _invoke_python(self, instance:Any, args:Tuple[Any, ...],
                        device_sel:Optional[str],
@@ -825,6 +1301,19 @@ class PyKernel:
         return short_hash(f"{source}\nbackend={self.backend}")
 
     def _resolve_global(self, name:str)->Any:
+        """Resolve a name the kernel body reads from outside the function.
+
+        A closure cell takes precedence over a module global, exactly as python resolves
+        it, so a nested kernel sees its enclosing function's variable (which is what the
+        outer-scope feature parameterizes).
+        """
+        for cell_name, cell in zip(self.raw_func.__code__.co_freevars,
+                                   self.raw_func.__closure__ or ()):
+            if cell_name == name:
+                try:
+                    return cell.cell_contents
+                except ValueError:  # the cell is still empty
+                    return None
         return self.raw_func.__globals__.get(name)
 
     def _c_kernel_name(self, sig:str, backend:str)->str:
@@ -852,7 +1341,7 @@ class PyKernel:
 
     def _compile(self, args:List[Any], arg_types:List[Any], self_types:List[Any],
                  self_attrs:List[str], owner:Optional[type], sig:str,
-                 backend:str, device_obj:Any)->Tuple[Any, List[str]]:
+                 backend:str, device_obj:Any, instance:Any=None)->Tuple[Any, List[str]]:
         if backend in ("cuda", "hip"):
             for t in list(arg_types) + list(self_types):
                 base:str = (t[1] if isinstance(t, tuple) else t)
@@ -867,11 +1356,17 @@ class PyKernel:
 
         # hip accepts CUDA syntax (threadIdx/atomicAdd/make_float4 etc.), so codegen goes through cuda
         codegen_backend:str = ("cuda" if backend == "hip" else backend)
+        # Statements above the magic loop that only build data are executed by the
+        # interpreter, not translated: numpy decides the shape and dtype, and the resulting
+        # object is what the kernel receives as a parameter (see
+        # FunctionTranslator._host_created_assignment).
+        creation_values, _ = _host_created_values(self.raw_func, args, instance)
         translator:FunctionTranslator = FunctionTranslator(
             self.raw_func, list(arg_types) + list(self_types), codegen_backend,
             self._resolve_global, device_cache, is_kernel=True,
             self_param=self._self_param, self_attr_types=self_attr_types,
-            self_owner=owner, launch_backend=backend)
+            self_owner=owner, launch_backend=backend,
+            host_creation_values=creation_values)
         translator.translate()
         kernel_code:str = translator.render_kernel(c_name)
 
@@ -893,7 +1388,11 @@ class PyKernel:
 
         param_index:Dict[str, int] = {name: i for i, (name, _) in enumerate(translator.params)}
         shape_sources:List[Tuple[int, int]] = [(param_index[array_name], dim) for array_name, dim in translator.shapes_used]
-        work_size_dims:List[Tuple[str, int]] = [(param_index[name], dim) for name, dim in translator.work_size_dims]
+        # Each entry is (parameter index, dimension) for an array-sourced extent, or
+        # (None, count) for a literal one (np.ndindex(2, 3)).
+        work_size_dims:List[Tuple[Optional[int], int]] = [
+            (param_index[name], dim) if name else (None, dim)
+            for name, dim in translator.work_size_dims]
         # An explicit gpu.work_size(x) declaration: expand each named array into its own
         # dimensions. The rank is only known at call time, so record (param, -1) markers and
         # let _invoke substitute the real per-dimension indices.
@@ -908,7 +1407,28 @@ class PyKernel:
         # parameter supplies the sampler so the launch can append it.
         image_samplers:List[int] = [param_index[name]
                                     for name in sorted(translator.required_image_samplers)]
-        return kernel, shape_sources, work_size_dims, local_sizes, translator.uses_global_id, image_samplers
+        # Return slots: one per distinct value type any return site writes, plus the
+        # claim/site words. `arg_indices` maps an array a return site names to its
+        # position in the launch arguments, so the result can hand back that same object.
+        returns:Dict[str, Any] = {
+            "slot_types": [translator.return_slot_dtype(index)
+                           for index in range(len(translator.return_layout))],
+            "slot_kinds": [entry["type"] for entry in translator.return_layout],
+            "sites": translator.return_site_layout(),
+            "arg_indices": {name: position for name, position in param_index.items()},
+        }
+        return (kernel, shape_sources, work_size_dims, local_sizes,
+                translator.uses_global_id, image_samplers,
+                returns if translator.has_returns else None,
+                translator.outer_vars,
+                {"param_names": {position: name for name, position in param_index.items()},
+                 "subscript_indices": dict(translator.subscript_indices),
+                 # How many index names the magic loop unpacks: the launch checks it against
+                 # the number of dimensions its iteration domain actually has.
+                 "loop_names": len(translator.work_item_indices),
+                 # The array behind a `np.ndindex(arr.shape)` domain (index into the device
+                 # parameter list, or -1), whose rank the loop must name one index per.
+                 "whole_shape_index": param_index.get(translator.nd_whole_shape_param, -1)})
 
     def _cache_dir(self, backend:str)->str:
         source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
@@ -1014,6 +1534,236 @@ def _image_sampler(image:Any)->Any:
     return sampler_t(normalized_coords=False,
                      addressing_mode=address_mode,
                      filter_mode=filter_mode)
+
+
+def _outer_slot_dtype(t:Any)->Any:
+    """The numpy dtype of a one-element buffer carrying a declared outer scalar."""
+    return np.dtype(_SCALAR_SLOT_DTYPES[t])
+
+
+def _scalar_slot_value(value:Any, t:Any)->Any:
+    """An outer scalar as the element its buffer stores."""
+    if t == "bool":
+        return np.uint8(1 if value else 0)
+    return value
+
+
+def _outer_scope_value(raw:Any, t:Any)->Any:
+    """A declared outer scalar's buffer element as the python value to store back."""
+    if t == "bool":
+        return bool(int(raw))
+    if t in ("char", "uchar", "short", "ushort", "int", "uint", "long", "ulong"):
+        return int(raw)
+    return float(raw)
+
+
+_SCALAR_SLOT_DTYPES:Dict[str, Any] = {
+    "bool": np.uint8,
+    "char": np.int8,
+    "uchar": np.uint8,
+    "short": np.int16,
+    "ushort": np.uint16,
+    "int": np.int32,
+    "uint": np.uint32,
+    "long": np.int64,
+    "ulong": np.uint64,
+    "float": np.float32,
+    "double": np.float64,
+}
+
+
+def _check_shape_indices(kernel_name:str, full:List[Any],
+                         shape_sources:List[Tuple[int, int]],
+                         work_size_dims:List[Tuple[Optional[int], int]],
+                         launch_meta:Dict[str, Any])->None:
+    """Refuse a dimension the array does not have, in the caller's own terms.
+
+    A magic loop's index count is written in the source (``for i, j, k in ...``) while an
+    array's rank is only known from the value passed at call time, so the mismatch can
+    only be found here. The python backend reports it as ``not enough values to unpack
+    (expected 3, got 2)``; a device launch used to say ``tuple index out of range``,
+    which names neither the array nor the loop.
+
+    The same read is applied to how the body subscripts each array: ``out[i, j]`` on a
+    3-D array selects a *slice* in python, which a work item cannot represent, and used to
+    compile into a single flat element -- a silently wrong answer.
+    """
+    param_names:Dict[int, str] = launch_meta["param_names"]
+
+    # The highest dimension referenced per array, from the shape arguments the kernel
+    # receives and from the work-size derivation of the magic loop.
+    highest:Dict[int, int] = {}
+    for param_index, dim in shape_sources:
+        highest[param_index] = max(highest.get(param_index, -1), dim)
+    for param_index, dim in work_size_dims:
+        if param_index is not None and dim >= 0:
+            highest[param_index] = max(highest.get(param_index, -1), dim)
+
+    for param_index, dim in sorted(highest.items()):
+        value:Any = full[param_index]
+        shape:Any = getattr(value, "shape", None)
+        if shape is None:
+            continue
+        rank:int = len(shape)
+        if dim < rank:
+            continue
+        name:str = param_names.get(param_index, f"argument {param_index}")
+        indexed:int = dim + 1
+        raise ValueError(
+            f"{kernel_name}(): not enough values to unpack "
+            f"(expected {indexed}, got {rank}): '{name}' has shape "
+            f"{tuple(int(s) for s in shape)}, so it cannot be indexed with {indexed} "
+            f"indices. The magic loop unpacks {indexed} names and must match the number "
+            f"of dimensions of the array it iterates"
+        ) from None
+
+    name_to_index:Dict[str, int] = {name: index for index, name in param_names.items()}
+    for name, count in sorted(launch_meta["subscript_indices"].items()):
+        param_index:int = name_to_index.get(name, -1)
+        if param_index < 0:
+            continue  # a local buffer or an image: no numpy value to measure
+        value = full[param_index]
+        shape = getattr(value, "shape", None)
+        if shape is None:
+            continue
+        rank = len(shape)
+        if count == rank:
+            continue
+        if count > rank:
+            raise ValueError(
+                f"{kernel_name}(): too many indices for '{name}': it has shape "
+                f"{tuple(int(s) for s in shape)} and is indexed with {count} indices, "
+                f"but only {rank} dimension{'s' if rank != 1 else ''} exist"
+            ) from None
+        raise ValueError(
+            f"{kernel_name}(): '{name}' has shape {tuple(int(s) for s in shape)} and is "
+            f"indexed with {count} indices; python would select a sub-array there, which "
+            f"a work item cannot represent. Index every dimension, e.g. "
+            f"'{name}[i, j, k]' for a 3-D array"
+        ) from None
+
+
+def _kernel_scalar_argument(value:Any, t:Any)->Any:
+    """A kernel argument in the type the device signature declares for it.
+
+    Only `bool` needs converting: the translator passes it as a byte, because a real
+    bool is rejected as a kernel parameter by OpenCL and has no CUDA binding entry. The
+    conversion happens on the argument handed to the launch, not on the caller's object,
+    so the values a return site hands back are still the caller's own objects.
+    """
+    if t == "bool":
+        return np.uint8(1 if value else 0)
+    return value
+
+
+def _host_created_values(func:Any,
+                         args:Optional[Tuple[Any, ...]]=None,
+                         instance:Any=None
+                         )->Tuple[Dict[str, Any], List[str]]:
+    """Build the objects a kernel creates above its magic loop.
+
+    The statements are ordinary python and are run as such, in the function's own
+    namespace, so `np.zeros(x.shape[0], dtype=x.dtype)` means exactly what it means
+    outside a kernel -- including reading the arguments the caller passed (`args`), which
+    is why this runs at call time, not at decoration time. `instance` is the receiver when
+    the kernel is a method, so a creation can read `self` (`np.zeros((self.height, ...))`).
+    Only the statements the translator recognises as pure creation are executed; everything
+    else stays device code.
+    """
+    from .translator import _assigned_name_of, _creation_assignments
+
+    values:Dict[str, Any] = {}
+    names:List[str] = []
+    try:
+        assignments:List[Any] = _creation_assignments(func)
+    except SyntaxError:
+        return values, names
+    if not assignments:
+        return values, names
+
+    globalns:Dict[str, Any] = dict(func.__globals__)
+    localns:Dict[str, Any] = {}
+    for arg_name, value in zip(_positional_argument_names(func), args or ()):
+        localns[arg_name] = value
+    receiver:str = _receiver_name(func)
+    if receiver and instance is not None:
+        localns[receiver] = instance
+    for name, cell in zip(func.__code__.co_freevars, func.__closure__ or ()):
+        try:
+            localns[name] = cell.cell_contents
+        except ValueError:
+            pass
+    for assignment in assignments:
+        expression:Any = compile(ast.Expression(body=assignment.value),
+                                 "<kernel creation>", "eval")
+        target:Optional[str] = _assigned_name_of(assignment)
+        if target is None:
+            continue
+        try:
+            value:Any = eval(expression, globalns, localns)  # noqa: S307 - the kernel source itself
+        except Exception:
+            continue  # the translator reports the real problem, with a source position
+        values[target] = value
+        localns[target] = value
+        names.append(target)
+    return values, names
+
+
+def _receiver_name(func:Any)->str:
+    """The name of a method's receiver parameter (`self` / `cls`), or "" for a function."""
+    code:Any = getattr(func, "__code__", None)
+    if code is None or not code.co_varnames:
+        return ""
+    first:str = code.co_varnames[0]
+    return first if first in ("self", "cls") else ""
+
+
+def _positional_argument_names(func:Any)->List[str]:
+    """The python parameter names of a kernel, skipping the `self` parameter if present."""
+    code:Any = getattr(func, "__code__", None)
+    if code is None:
+        return []
+    names:List[str] = list(code.co_varnames[:code.co_argcount])
+    if names and names[0] in ("self", "cls"):
+        return names[1:]
+    return names
+
+
+def _created_arguments(created:Dict[str, Any])->List[Any]:
+    """The launch arguments for the objects a kernel body created, in declaration order."""
+    return [_kernel_scalar_argument(value, infer_ctype(value)) for value in created.values()]
+
+
+def _return_value(raw:Any, dtype:Any, kind:str)->Any:
+    """One value slot's stored element as the python value it represents.
+
+    ``kind`` is the translator's type name for the returned position, which is how a
+    byte-valued slot is turned back into the bool or the char it came from.
+    """
+    global _VEC_RETURN_TYPES
+    if not _VEC_RETURN_TYPES:
+        # The host's own classes: a value slot holds the host layout (a 3-component vector
+        # has three components there), which is what the caller gets back.
+        from ..vec_types.layout import _host_classes
+
+        for name, cls in _host_classes().items():
+            _VEC_RETURN_TYPES.setdefault(str(np.dtype(cls.numpy_dtype())), cls)
+    vector:Any = _VEC_RETURN_TYPES.get(str(np.dtype(dtype)))
+    if vector is not None:
+        return vector.from_buffer_copy(np.asarray(raw).tobytes())
+    value:Any = np.asarray(raw).reshape(())[()]
+    if isinstance(dtype, np.dtype) and dtype.fields is not None:
+        # A structure slot holds a record: the caller gets the record itself, and reads its
+        # members exactly as the kernel body did (`result["i"]`).
+        return value
+    if kind == "bool":
+        return bool(int(value))
+    if kind in ("char", "uchar", "short", "ushort", "int", "uint", "long", "ulong"):
+        return int(value)
+    return float(value)
+
+
+_VEC_RETURN_TYPES:Dict[str, Any] = {}
 
 
 def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:

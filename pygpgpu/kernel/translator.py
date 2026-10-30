@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import inspect
 import math
 import os
 import re
 import textwrap
+import types
 from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple
 
 import numpy as np
 
-from .builtins import (
+from .builtin_registry import builtin_name_of
+from .device_builtins import (
     ATOMIC_BUILTINS,
     GENERIC_BUILTINS,
     INDEX_BUILTINS,
@@ -19,8 +22,6 @@ from .builtins import (
     emit_barrier,
     emit_index,
 )
-from .builtins import gpu as GPU_BUILTINS
-from ..vec_types import funcs as VEC_FUNCS
 
 
 def get_dedented_source(func:Callable)->str:
@@ -121,6 +122,19 @@ def _normalize_ast_legacy_nodes(tree:ast.AST)->ast.AST:
         elif isinstance(_value, ast.AST):
             setattr(tree, _field, _normalize_ast_legacy_nodes(_value))
     return tree
+
+
+def _returns_a_value(body:List[ast.stmt])->bool:
+    """True when some `return` of this body carries a value (and not just None)."""
+    for node in ast.walk(ast.Module(body=list(body), type_ignores=[])):
+        if not isinstance(node, ast.Return):
+            continue
+        if node.value is None:
+            continue
+        if isinstance(node.value, ast.Constant) and node.value.value is None:
+            continue
+        return True
+    return False
 
 
 def _parse_kernel_source(source:str)->ast.Module:
@@ -327,6 +341,10 @@ _CUDA_TYPE_NAMES:Dict[str, str] = {
     "uchar": "unsigned char",
     "ushort": "unsigned short",
     "uint": "unsigned int",
+    # `long` is 32-bit in CUDA C on Windows (where NVRTC and HIP are used here), so the
+    # 64-bit spelling has to be written out: leaving it as `long` made an int64 array a
+    # 4-byte-stride buffer, which silently produced wrong values for every element.
+    "long": "long long",
     "ulong": "unsigned long long",
 }
 
@@ -364,6 +382,32 @@ def _c_scalar_name(ctypes_type:Any)->str:
 
 def is_vec(t:Any)->bool:
     return isinstance(t, str) and t in _vec_registry()
+
+# A 3-component vector is padded to 16 bytes for the device ABI, so its ctypes struct carries
+# a trailing `_` field that is not a component. Everything that names components counts them
+# through this helper, so the padding never reaches a constructor, a swizzle or a print.
+def _vec_components(vec:str)->List[Tuple[str, Any]]:
+    """The real (field name, ctypes type) components of a vector type, in order."""
+    return [field for field in _vec_registry()[vec]._fields_ if field[0] != "_"]
+
+def _vec_field_names(cls_or_name:Any)->List[str]:
+    """The component names of a vector type, given the class or its name.
+
+    Everything that expands a vector into per-component code goes through this, so the
+    padding field of a 3-component vector never becomes a member the device does not have.
+    """
+    fields:Any = (cls_or_name._fields_
+                  if isinstance(cls_or_name, type)
+                  else _vec_registry()[cls_or_name]._fields_)
+    return [name for name, _ in fields if name != "_"]
+
+# Colour-style component names, as in `color.rgb`. OpenCL C accepts them natively but CUDA's
+# vector types only have x/y/z/w, so the translator normalizes them for every backend.
+_VEC_COLOR_ALIASES:Dict[str, str] = {"r": "x", "g": "y", "b": "z", "a": "w"}
+
+def _vec_component_name(text:str)->str:
+    """`rgb` -> `xyz`: the device spelling of a component or swizzle."""
+    return "".join(_VEC_COLOR_ALIASES.get(char, char) for char in text)
 
 _MATH_FUNCS:Dict[str, Optional[str]] = {
     "sqrt": None, "exp": None, "log": None, "log2": None, "log10": None,
@@ -491,8 +535,10 @@ def promote(t1:Any, t2:Any)->Any:
 
 def infer_ctype(value:Any)->Any:
     """Actual call argument -> C type."""
+    from ..vec_types.layout import _vector_dtype_name
+    from . import structs
+
     registry:Dict[str, Any] = _vec_registry()
-    dtype_to_vec:Dict[Any, str] = {cls.numpy_dtype(): name for name, cls in registry.items()}
 
     # A backend-neutral Image is opaque storage: the kernel only samples or stores
     # through it, so the parameter carries its channel count and scalar type.
@@ -506,20 +552,32 @@ def infer_ctype(value:Any)->Any:
         return (IMAGE, value.channels, channel_type)
 
     if isinstance(value, np.void):
-        vec_name:str = dtype_to_vec.get(value.dtype)
-        if vec_name is None:
-            raise SyntaxError(f"unsupported numpy structured scalar: {value.dtype}") from None
-        return vec_name
+        # A structured scalar is either a vector element or a structure value: both are
+        # described completely by the dtype, so both become a device type.
+        vec_name:Optional[str] = _vector_dtype_name(value.dtype)
+        if vec_name is not None:
+            return vec_name
+        if structs.is_record(value.dtype):
+            return structs.register(value.dtype)
+        raise SyntaxError(f"unsupported numpy structured scalar: {value.dtype}") from None
 
     for vec_name, cls in registry.items():
         if isinstance(value, cls):
             return vec_name
 
+    # A vector instance from the host library (`pygf`) is not one of the driver's classes,
+    # but its bases name the same device type: `point3f` -> `float3`, `color3d` -> `double3`.
+    for base in type(value).__mro__:
+        if base.__name__ in registry:
+            return base.__name__
+
     if isinstance(value, np.ndarray):
         if value.dtype.fields is not None:
-            vec_name = dtype_to_vec.get(value.dtype)
+            vec_name = _vector_dtype_name(value.dtype)
             if vec_name is not None:
                 return (PTR, vec_name)
+            if structs.is_record(value.dtype):
+                return (PTR, structs.register(value.dtype))
             raise SyntaxError(f"unsupported numpy structured dtype: {value.dtype}") from None
         if value.dtype.name not in DTYPE_MAP:
             raise SyntaxError(f"unsupported numpy dtype: {value.dtype.name}") from None
@@ -537,9 +595,6 @@ def infer_ctype(value:Any)->Any:
     raise SyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays, int/float/bool scalars and texture handles are supported)") from None
 
 
-# surf*Dread/write address the first axis in bytes, and float elements are 4.
-_SURFACE_ELEMENT_BYTES = 4
-
 TEXTURE_HANDLE_TYPES = ("TextureObject", "cudaTextureObject_t")
 SURFACE_HANDLE_TYPES = ("SurfaceObject", "cudaSurfaceObject_t")
 
@@ -555,11 +610,197 @@ def _handle_device_type(value:Any)->str:
         return "cudaSurfaceObject_t"
     return "cudaTextureObject_t"
 
+# numpy names a kernel body may use as a type in a creation statement (`dtype=np.float32`).
+_NUMPY_DEVICE_TYPES:Set[str] = {
+    "float16", "float32", "float64", "int8", "int16", "int32", "int64",
+    "uint8", "uint16", "uint32", "uint64", "bool_", "complex64", "complex128",
+}
+
+# numpy functions that build or transform host data, and can therefore be executed by the
+# interpreter instead of translated (see _creation_assignments). This is the whole family
+# of array constructors and shape/layout transforms: any of them may appear on the
+# right-hand side of a statement above the magic loop. Device-side arithmetic on the
+# result is not part of a creation statement, which is why only these names are listed --
+# a `np.sum(...)` or `np.dot(...)` there is a computation the kernel itself should do.
+_HOST_CREATION_FUNCTIONS:Set[str] = {
+    # constructors
+    "zeros", "ones", "empty", "full", "zeros_like", "ones_like", "empty_like",
+    "full_like", "arange", "linspace", "logspace", "geomspace",
+    "identity", "eye", "tri", "tril", "triu", "diag", "diagflat", "vander",
+    "indices", "meshgrid", "fromfunction", "frombuffer", "fromiter", "fromfile",
+    "array", "asarray", "asanyarray", "ascontiguousarray", "asfortranarray",
+    "copy", "copyto", "filled",
+    # shape and layout transforms
+    "reshape", "ravel", "flatten", "transpose", "swapaxes", "moveaxis",
+    "flip", "fliplr", "flipud", "roll", "rot90", "squeeze", "expand_dims",
+    "broadcast_to", "broadcast_arrays", "atleast_1d", "atleast_2d", "atleast_3d",
+    "repeat", "tile", "resize", "pad", "take", "compress", "trim_zeros",
+    # combining and splitting
+    "concatenate", "stack", "hstack", "vstack", "dstack", "column_stack",
+    "row_stack", "block", "split", "hsplit", "vsplit", "dsplit", "append",
+    "insert", "delete", "unique",
+    # element-wise or ordering helpers that only reshape the data
+    "where", "clip", "round", "around", "sort", "argsort", "lexsort", "cumsum",
+    "cumprod", "nan_to_num", "real", "imag", "conj", "angle",
+    # dtype constructors (np.float32(x) and friends)
+    "float16", "float32", "float64", "int8", "int16", "int32", "int64",
+    "uint8", "uint16", "uint32", "uint64", "bool_",
+}
+
+# The statements a kernel body may execute on the host: assignments above the magic loop
+# whose right-hand side only builds data.
+def _creation_assignments(func:Callable)->List[ast.stmt]:
+    """The host-executed creation statements of a kernel body, in order.
+
+    The host runs exactly these before the launch, so the objects exist with the shape and
+    dtype numpy gives them. A magic loop is what defines "above" here: an assignment below
+    it would run once per work item, so it is not lifted out (the translator refuses it).
+    """
+    source:str = get_dedented_source(func)
+    tree:ast.Module = _parse_kernel_source(source)
+    if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
+        return []
+    body:List[ast.stmt] = tree.body[0].body
+    magic_index:Optional[int] = next(
+        (index for index, stmt in enumerate(body) if _is_magic_loop_stmt(stmt)), None)
+    # A gid-style body has no magic loop, so its whole body is "above the work item": it is
+    # the per-work-item code, and a top-level creation statement there still runs once per
+    # launch on the host, which is what python means.
+    if magic_index is None:
+        magic_index = len(body)
+
+    import builtins as _builtins
+
+    globalns:Dict[str, Any] = getattr(func, "__globals__", {})
+
+    def is_numpy(node:ast.expr)->bool:
+        return (isinstance(node, ast.Name) and globalns.get(node.id) is np)
+
+    def is_creation(node:ast.expr)->bool:
+        """True when this expression only *builds* data (and cannot run on the device)."""
+        if isinstance(node, ast.Constant):
+            return False
+        if isinstance(node, ast.Name):
+            return False
+        if isinstance(node, ast.Attribute):
+            return is_numpy(node.value)
+        if isinstance(node, ast.Call):
+            func_node:ast.expr = node.func
+            if not (isinstance(func_node, ast.Attribute) and is_numpy(func_node.value)):
+                return False
+            name:str = func_node.attr
+            if name in _NUMPY_DEVICE_TYPES or name in FunctionTranslator.RETURN_SLOT_TYPES:
+                # A scalar-type call builds a host value only when its arguments are
+                # constants; `np.float32(x[i])` is a device cast (see _emit_numpy_cast).
+                return all(isinstance(arg, ast.Constant) for arg in node.args)
+            if name not in _HOST_CREATION_FUNCTIONS and not name.endswith("_like"):
+                return False
+            # The arguments may be ordinary values (a shape, a count, an input array); what
+            # makes the statement host-only is the numpy constructor itself. Only a dtype
+            # argument has to be a type name, which is why it is not evaluated on the device.
+            return True
+        return False
+
+    del _builtins
+    chosen:List[ast.stmt] = []
+    for stmt in body[:magic_index]:
+        value:Optional[ast.expr] = _creation_target_of(stmt)
+        if value is None:
+            continue
+        if is_creation(value):
+            chosen.append(stmt)
+    return chosen
+
+
+def _creation_target_of(stmt:ast.stmt)->Optional[ast.expr]:
+    """The right-hand side of `name = expr` / `name: T = expr`, when the target is a plain name.
+
+    An annotated assignment is the same statement to python -- the annotation is only a
+    hint for readers and type checkers -- so `x: np.ndarray = np.zeros_like(y)` creates an
+    array exactly like `x = np.zeros_like(y)`. Recognising only the unannotated form made
+    the annotated one fall through to the device code, which has no numpy.
+    """
+    if isinstance(stmt, ast.Assign):
+        if len(stmt.targets) != 1:
+            return None
+        target:ast.expr = stmt.targets[0]
+        return stmt.value if isinstance(target, ast.Name) else None
+    if isinstance(stmt, ast.AnnAssign):
+        if stmt.value is None:
+            return None  # `x: np.ndarray` declares nothing, so there is nothing to create
+        return stmt.value if isinstance(stmt.target, ast.Name) else None
+    return None
+
+
+def _assigned_name_of(stmt:ast.stmt)->Optional[str]:
+    """The plain name an assignment binds, for either assignment spelling."""
+    if isinstance(stmt, ast.Assign):
+        if len(stmt.targets) != 1:
+            return None
+        target:ast.expr = stmt.targets[0]
+        return target.id if isinstance(target, ast.Name) else None
+    if isinstance(stmt, ast.AnnAssign):
+        return stmt.target.id if isinstance(stmt.target, ast.Name) else None
+    return None
+
+
+def _magic_loop_index(body:List[ast.stmt])->int:
+    """The index of the outermost loop that becomes work-item dispatch, or len(body).
+
+    The same detection the translator uses, reduced to "where does the body's host region
+    end": statements before it run once, everything from it on runs per work item.
+    """
+    for index, stmt in enumerate(body):
+        if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt):
+            return index
+    return len(body)
+
+
+def _is_magic_loop_stmt(stmt:ast.stmt)->bool:
+    """True for the outermost loop the translator turns into work-item dispatch."""
+    if not isinstance(stmt, ast.For):
+        return False
+    iterator:ast.expr = stmt.iter
+    if isinstance(iterator, ast.Call):
+        func:ast.expr = iterator.func
+        if isinstance(func, ast.Name) and func.id in ("range", "enumerate"):
+            return True
+        if (isinstance(func, ast.Attribute) and func.attr in ("ndindex", "ndenumerate")
+                and isinstance(func.value, ast.Name)):
+            return True
+    return False
+
+
+_UNRESOLVED:Any = object()
+
+# Python builtins are never kernel parameters: they resolve through the translator's own
+# dispatch (print, len, range, ...) or are rejected with a message of their own.
+_BUILTIN_NAMES:Set[str] = set(dir(builtins))
+
+
+def _declared_scope_names(tree:ast.AST)->Set[str]:
+    """Names the function declares with `nonlocal`/`global`.
+
+    Python requires such a declaration before a nested function may assign to an outer
+    name, so the declarations are exactly the writable outer variables. Both statements
+    are otherwise unsupported in a kernel body, which is why this scan happens before the
+    body is visited instead of in the statement dispatch.
+    """
+    names:Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Nonlocal):
+            names.update(node.names)
+        elif isinstance(node, ast.Global):
+            names.update(node.names)
+    return names
+
+
 def type_sig(types:List[Any])->str:
     parts:List[str] = []
     for t in types:
         parts.append((t[1] + "[]") if is_ptr(t) else str(t))
     return "_".join(parts) or "void"
+
 
 def short_hash(text:str)->str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
@@ -572,11 +813,21 @@ class FunctionTranslator:
     loop of the function body is translated into the work-item dispatch.
     """
 
+    # How many elements a private array created in the work-item body may spell out in its
+    # initialiser; a longer one cannot be initialised without a loop, so it is refused.
+    PRIVATE_ARRAY_MAX_UNROLL = 64
+
+    # Element types a device atomic operation can address. Both backends provide 32-bit and
+    # 64-bit integer atomics; int8/int16 have none, which is why a byte-sized histogram bin
+    # is rejected rather than silently miscompiled.
+    ATOMIC_ELEMENT_TYPES:Set[str] = {"int", "uint", "long", "ulong"}
+
     def __init__(self, func:Callable, param_types:List[Any], backend:str,
                  resolve_global:Callable[[str], Any], device_cache:Dict[Any, Any],
                  is_kernel:bool=False, self_param:str="",
                  self_attr_types:Optional[Dict[str, Any]]=None,
-                 self_owner:Optional[type]=None, launch_backend:Optional[str]=None):
+                 self_owner:Optional[type]=None, launch_backend:Optional[str]=None,
+                 host_creation_values:Optional[Dict[str, Any]]=None):
         self.func:Callable = func
         self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
         self.backend:str = backend
@@ -593,6 +844,9 @@ class FunctionTranslator:
         # is a data attribute, an instance method, or a staticmethod. None for the
         # decoration-time body scan, where the class does not exist yet.
         self.self_owner:Optional[type] = self_owner
+        # Objects the host already built for statements above the magic loop, keyed by the
+        # name the body assigns them to (see _host_created_assignment).
+        self.host_creation_values:Dict[str, Any] = dict(host_creation_values or {})
 
         try:
             # The dedented copy starts at the decorator line, so remember where that was in
@@ -610,6 +864,24 @@ class FunctionTranslator:
         self.shapes_used:List[Tuple[str, int]] = []
         self.gid_param:Optional[str] = None
         self.work_size_dims:List[Tuple[str, int]] = []
+        # One (array, dimension) source per dimension of the ndindex magic loop, in the
+        # order the loop unpacks them (see _ndindex_extents). None for the other forms.
+        self._nd_loop_extents:Optional[List[Tuple[str, int]]] = None
+        # The array named by np.ndindex(arr.shape), whose rank is the loop's unpacking.
+        self._nd_shape_holder:str = ""
+        # name -> how many indices the body subscripts that array with (see
+        # _record_subscript_indices); checked against the real shape at launch.
+        self.subscript_indices:Dict[str, int] = {}
+        # The magic loop's index variables, in unpack order. A subscript formed from
+        # exactly these names addresses a different element per work item, which is what
+        # makes a plain read-modify-write safe (see _augassign_is_race_free).
+        self.work_item_indices:List[str] = []
+        # Structure dtypes a private array created in the body mentions: their typedefs
+        # have to be emitted even though they are not parameters.
+        self.private_structs:List[Any] = []
+        # The array whose whole shape a `np.ndindex(arr.shape)` loop iterates, when that is
+        # how the domain was spelled: the launch checks its rank against the loop's names.
+        self.nd_whole_shape_param:str = ""
         # Array names declared by an explicit `gpu.work_size(x)` statement; this is the
         # gid-style equivalent of a magic loop's implied iteration domain. The rank comes
         # from each array's runtime shape (a pointer type carries no rank).
@@ -630,6 +902,39 @@ class FunctionTranslator:
         self.atomic_targets:Set[str] = set()
         self._tmp_counter:int = 0
         self.local_buffers:List[Tuple[str, str, int]] = []
+        self.return_type:Optional[Any] = None
+        # Kernel return values. A kernel runs once per work item, so it cannot have a C
+        # return value; every returned position becomes a device parameter instead (a
+        # one-element buffer for a value, the array parameter's own name for an array) and
+        # the first work item to reach a `return` claims the whole result.
+        #
+        # return_layout: one entry per value slot ({"ctype", "type"}), shared by every
+        #   return site whose value has that C type.
+        # return_sites: per `return` statement, its positions as the translator saw them.
+        # _site_slot_map: per site, (position ordinal, slot index) pairs it writes.
+        self.return_layout:List[Dict[str, Any]] = []
+        self.return_sites:List[List[Dict[str, Any]]] = []
+        self._site_slot_map:Dict[int, List[Tuple[int, int]]] = {}
+        # True when statements currently being visited run once per work item after the
+        # magic loop (see _visit_region and _visit_kernel_return).
+        self.after_magic_loop:bool = False
+        # True when statements currently being visited are inside (or after) the magic
+        # loop, where building data would happen once per work item (see _visit_assign).
+        self.creation_below_loop:bool = False
+        # True when any site returns a value; then the kernel needs the claim and site
+        # parameters even if some other site is a bare `return`.
+        self.has_returns:bool = False
+        # Outer-scope variables: a name the body uses that is neither a parameter nor a
+        # local becomes a device parameter instead (see _bind_outer_variables). Each entry
+        # records how the host reaches the name ("closure" through a cell, "global" through
+        # func.__globals__), its device type, and whether the body declares it writable
+        # (`nonlocal`/`global`) -- which decides between `T* name` + `*name` and a plain `T`.
+        self.outer_vars:Dict[str, Dict[str, Any]] = {}
+        # Values the host creates for the kernel: an assignment above the magic loop whose
+        # right-hand side only builds data (np.zeros, np.full, ...) is executed by the
+        # interpreter, not translated, and the object travels as a parameter (see
+        # _host_created_assignment).
+        self.host_values:Dict[str, Dict[str, Any]] = {}
         self.return_type:Optional[Any] = None
         self.lines:List[str] = []
         self._indent:int = 1
@@ -686,6 +991,18 @@ class FunctionTranslator:
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
+        # A host-created object and an outer variable are device parameters too, so a
+        # type query has to see them; the magic-loop scan asks which arrays exist before
+        # any statement of the body has been visited.
+        host:Optional[Dict[str, Any]] = self.host_values.get(name)
+        if host is not None:
+            return host["type"]
+        outer:Optional[Dict[str, Any]] = self.outer_vars.get(name)
+        if outer is not None:
+            # A declared outer scalar is a pointer on the device (see _visit_name).
+            if outer["writable"] and not is_ptr(outer["type"]):
+                return (PTR, outer["type"])
+            return outer["type"]
         return None
 
     def _define(self, name:str, t:Any, node:Optional[ast.AST])->None:
@@ -701,6 +1018,13 @@ class FunctionTranslator:
                 self._error(f"variable '{name}' changes type from {existing} to {t}", node)
 
     def _shape_var(self, array_name:str, dim:int)->str:
+        # A private array created in the work-item body has a constant shape, so its extents
+        # are compile-time numbers rather than launch parameters.
+        binding:Any = self._lookup(array_name)
+        if isinstance(binding, tuple) and len(binding) == 4 and binding[0] == "bodyarr":
+            shape:Tuple[int, ...] = binding[2]
+            if 0 <= dim < len(shape):
+                return str(shape[dim])
         key = (array_name, dim)
         if key not in self.shapes_used:
             self.shapes_used.append(key)
@@ -713,13 +1037,138 @@ class FunctionTranslator:
 
     def translate(self)->None:
         body:List[ast.stmt] = self.tree.body
+        # Outer-scope names and host-created objects must be known before the body is
+        # visited: every use of them compiles against the parameter that will carry them,
+        # and the magic-loop scan asks which arrays exist before any statement is reached
+        # (a created array can be the loop's iteration domain).
+        self._bind_outer_variables()
         if self.is_kernel:
+            self._bind_host_values(body)
+            # Whether any return site carries a value decides the device signature, and
+            # that is known only after the whole body has been seen; every site's code
+            # depends on it, so the body is scanned once first.
+            self.has_returns = _returns_a_value(body)
             self._translate_magic_loop(body)
         else:
             for stmt in body:
                 self._visit_statement(stmt)
             if self.return_type is None:
                 self.return_type = "void"
+    # ---------- outer-scope variables ----------
+
+    def _bind_outer_variables(self)->None:
+        """Turn every outer name the body uses into a device parameter.
+
+        Python resolves such a name through the enclosing function's closure or the
+        module globals; a device kernel has neither, so the value travels as an argument
+        the host supplies at launch (see PyKernel._compile / _invoke_inner). Which names
+        qualify is decided from the decorated function itself:
+
+        * a `nonlocal`/`global` declaration makes the name writable: it becomes `T*` and
+          the body reads and writes it through the pointer, so the host can copy the final
+          value back into the scope;
+        * any other name the function references but does not define is a free variable
+          (`co_freevars`, i.e. a closure cell) or a module global (`co_names`): it becomes
+          a plain `T` parameter and is read-only, because python itself would not let the
+          body assign to it without a declaration.
+
+        A cell's content can change between calls, so a read-only name is still a
+        parameter -- inlining the current value would make the kernel stale, which is the
+        whole reason this exists.
+        """
+        code:Any = getattr(self.func, "__code__", None)
+        if code is None:
+            return
+        cell_names:Set[str] = set(code.co_freevars)
+        declared:Set[str] = _declared_scope_names(self.tree)
+        # Names the body defines locally never reach the scope; parameters are already bound.
+        bound:Set[str] = self._local_names() | set(self.self_attr_types)
+        bound |= {name for name, _ in self.params}
+        if self.self_param:
+            bound.add(self.self_param)
+        # `co_names` also holds attribute names (`x.shape` contributes "shape") and the
+        # names of called builtins/helpers, so only names the body actually reads as a
+        # plain variable can become parameters. A name the body *assigns* without a
+        # declaration is python's local, not a scope variable, so it is not a candidate --
+        # but `co_names` still lists it for the global case, hence the `referenced` filter.
+        referenced:Set[str] = self._referenced_names()
+
+        candidates:List[str] = []
+        for name in sorted(declared | cell_names | referenced | set(code.co_names)):
+            if name in bound or name in self.outer_vars:
+                continue
+            if name in _BUILTIN_NAMES:
+                continue
+            candidates.append(name)
+        for name in candidates:
+            value:Any = self.resolve_global(name)
+            if value is _UNRESOLVED:
+                continue
+            entry:Optional[Dict[str, Any]] = self._outer_var_entry(name, value, code, declared)
+            if entry is None:
+                continue
+            self.outer_vars[name] = entry
+            if entry["writable"]:
+                self.params.append((name, (PTR, entry["type"])))
+            else:
+                self.params.append((name, entry["type"]))
+
+    def _outer_var_entry(self, name:str, value:Any, code:Any,
+                         declared:Set[str])->Optional[Dict[str, Any]]:
+        """The device parameter for one outer name, or None when it is not a value.
+
+        A module, a class, a builtin or a helper function is not a value a parameter can
+        carry: those names are resolved by the translator's own dispatch (numpy is
+        `np`, `gpu`, `math`, helper calls, ...), so they are left alone. An outer name
+        that *is* a value has to be a supported argument type, and a declared write has to
+        be a scalar, because the scope only ever holds that variable's value.
+        """
+        if isinstance(value, (type, types.ModuleType)) or callable(value):
+            # A module, class, builtin or helper function is not a value a parameter can
+            # carry: those names are resolved by the translator's own dispatch (numpy is
+            # `np`, `gpu`, `math`, helper calls, ...), so they are left alone.
+            return None
+        writable:bool = name in declared
+        try:
+            device_type:Any = infer_ctype(value)
+        except SyntaxError as error:
+            if not writable:
+                # Not a name this feature handles; the normal "unknown name" path will
+                # explain it with the right position if the body really reads it.
+                return None
+            raise SyntaxError(f"outer variable '{name}' cannot be written back: {error}") from None
+        if writable and is_ptr(device_type):
+            raise SyntaxError(
+                f"cannot rebind the outer array '{name}': the array object itself is "
+                f"shared with the caller, so a device kernel can only write its elements") from None
+        return {"type": device_type, "writable": writable,
+                "kind": ("closure" if name in code.co_freevars else "global")}
+
+    def _local_names(self)->Set[str]:
+        """Names this function defines as locals (assigns, unpacks, loop targets).
+
+        A name declared `global`/`nonlocal` is *not* local even though the body assigns
+        to it: python binds it in the scope, which is exactly what this feature reproduces.
+        An undeclared name that is both read and assigned is python's local variable (it
+        shadows any outer name of the same name), so it stays local here too.
+        """
+        declared:Set[str] = _declared_scope_names(self.tree)
+        names:Set[str] = set()
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                if node.id not in declared:
+                    names.add(node.id)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+        return names
+
+    def _referenced_names(self)->Set[str]:
+        """Names the body loads as a plain variable, not as an attribute or call target."""
+        names:Set[str] = set()
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                names.add(node.id)
+        return names
 
     def _shape_holder_param(self, attr_node:ast.expr)->Optional[str]:
         """When X in `X.shape` is an array parameter, return its parameter name (plain name or _self_ attribute parameter)."""
@@ -766,6 +1215,7 @@ class FunctionTranslator:
 
     def _emit_work_item_head(self, index_name:str, param:str)->None:
         """Emit the gid definition and the out-of-range guard."""
+        self.work_item_indices = [index_name]
         self._define(index_name, "int", None)
         gid_bound:str = self._shape_var(param, 0)
         if self.backend == "opencl":
@@ -775,14 +1225,26 @@ class FunctionTranslator:
         self._emit(f"if ({index_name} >= {gid_bound}) return;")
 
     def _nd_magic_target(self, iter_node:ast.expr)->Optional[Tuple[str, str, str]]:
-        """Parse the np.ndindex(arr.shape) / np.ndenumerate(arr) magic loops.
+        """Parse the np.ndindex(...) / np.ndenumerate(...) magic loops.
 
-        Returns (form, array parameter name, module name); ndenumerate's element
-        type is looked up in scope by the caller.
+        Returns (form, array parameter name, module name); ndenumerate's element type is
+        looked up in scope by the caller.
+
+        numpy accepts three equivalent spellings for the same iteration domain, and all of
+        them have to be recognised -- otherwise the loop is not seen as a magic loop at
+        all, every statement above it is translated as device code, and a host-created
+        array among them is never lifted out:
+
+            for i, j in np.ndindex(arr.shape):
+            for i, j in np.ndindex(arr.shape[0], arr.shape[1]):
+            for i, j in np.ndindex(2, 3):
+
+        The number of dimensions comes from the names the loop unpacks; this method only
+        records where each extent comes from (``self._nd_loop_extents``), and None means
+        "the single array's own shape, one dimension per unpacked name".
         """
         if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Attribute)
-                and isinstance(iter_node.func.value, ast.Name) and len(iter_node.args) == 1
-                and not iter_node.keywords):
+                and isinstance(iter_node.func.value, ast.Name) and not iter_node.keywords):
             return None
         module:Any = self.resolve_global(iter_node.func.value.id)
         if module is not np:
@@ -791,19 +1253,25 @@ class FunctionTranslator:
         if form not in ("ndindex", "ndenumerate"):
             return None
 
+        if form == "ndindex":
+            explicit:Optional[List[Tuple[str, int]]] = self._ndindex_extents(iter_node)
+            if explicit is None:
+                return None
+            self._nd_loop_extents = explicit or None
+            # A literal-only domain (np.ndindex(2, 3)) names no array, which is valid: the
+            # extents are stated outright and no shape parameter is involved.
+            holder:str = (explicit[0][0] if explicit else self._nd_shape_holder)
+            return form, holder, iter_node.func.value.id
+
+        if len(iter_node.args) != 1:
+            return None
         arg:ast.expr = iter_node.args[0]
         param:str = ""
-        if form == "ndindex":
-            # np.ndindex(<array>.shape)
-            if isinstance(arg, ast.Attribute) and arg.attr == "shape":
-                param = (self._shape_holder_param(arg) or "")
-        else:
-            # np.ndenumerate(<array>)
-            if isinstance(arg, ast.Name):
-                param = arg.id
-            elif (self.self_param and isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
-                    and arg.value.id == self.self_param):
-                param = f"_self_{arg.attr}"
+        if isinstance(arg, ast.Name):
+            param = arg.id
+        elif (self.self_param and isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
+                and arg.value.id == self.self_param):
+            param = f"_self_{arg.attr}"
         if not param:
             return None
         holder_type:Any = self._lookup(param)
@@ -812,18 +1280,91 @@ class FunctionTranslator:
         # can define the iteration domain of a magic loop.
         if not (is_ptr(holder_type) or is_image(holder_type)):
             return None
+        self._nd_loop_extents = None
         return form, param, iter_node.func.value.id
 
+    def _ndindex_extents(self, iter_node:ast.Call)->Optional[List[Tuple[str, int]]]:
+        """Where each extent of one np.ndindex(...) call comes from.
+
+        An empty list means the call named a whole array shape (``np.ndindex(arr.shape)``
+        or ``np.ndindex((a, b))``), so its dimensions are the loop's own unpacked names.
+        Otherwise one entry per extent: ``(array, dimension)`` for an array dimension, or
+        ``("", value)`` for a literal count.
+        """
+        args:List[ast.expr] = list(iter_node.args)
+        if len(args) == 1:
+            arg:ast.expr = args[0]
+            if isinstance(arg, ast.Attribute) and arg.attr == "shape":
+                holder:Optional[str] = self._shape_holder_param(arg)
+                if holder is None:
+                    return None
+                holder_type:Any = self._lookup(holder)
+                if not (is_ptr(holder_type) or is_image(holder_type)):
+                    return None
+                self._nd_shape_holder = holder
+                return []
+            if isinstance(arg, ast.Tuple):
+                args = list(arg.elts)
+            else:
+                return None
+
+        extents:List[Tuple[str, int]] = []
+        for arg in args:
+            pair:Optional[Tuple[str, int]] = self._extent_source(arg)
+            if pair is None:
+                return None
+            extents.append(pair)
+        return extents
+
+    def _extent_source(self, node:ast.expr)->Optional[Tuple[str, int]]:
+        """One extent of np.ndindex: ``<array>.shape[d]``, ``self.<attr>``, or a literal count."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            # np.ndindex(2, 3): the iteration domain is stated outright.
+            return "", int(node.value)
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and self.self_param and node.value.id == self.self_param):
+            # A host-side integer attribute is a constant for this launch, like a literal:
+            # `np.ndindex(self.image_height, self.image_width)`. The extent is read from the
+            # argument carrying the attribute (see the -2 marker in PyKernel._invoke_inner).
+            attribute_type:Any = self.self_attr_types.get(node.attr)
+            if attribute_type is not None and is_int(attribute_type):
+                return f"_self_{node.attr}", -2
+            return None
+        if not isinstance(node, ast.Subscript):
+            return None
+        if not isinstance(node.slice, ast.Constant) or not isinstance(node.slice.value, int):
+            return None
+        holder:Optional[str] = self._shape_holder_param(node.value)
+        if holder is None:
+            return None
+        holder_type:Any = self._lookup(holder)
+        if not (is_ptr(holder_type) or is_image(holder_type)):
+            return None
+        return holder, node.slice.value
+
+    def _nd_bound_code(self, source:Tuple[str, int])->str:
+        """The C expression bounding one dimension (a shape variable, a scalar, or a literal)."""
+        name, dim = source
+        if not name:
+            return str(dim)
+        if dim == -2:
+            # `np.ndindex(self.image_height, ...)`: the extent is the value of that argument
+            # itself, which travels as a plain scalar parameter.
+            return name
+        return self._shape_var(name, dim)
+
     def _emit_nd_head(self, names:List[str], param:str)->None:
-        """Multi-dimensional work-item head: names[0] maps to dimension 0 (slowest), the last name maps to gid0 (fastest)."""
+        """Multi-dimensional work-item head: names[0] maps to dimension 0 (slowest)."""
         ndim:int = len(names)
+        self.work_item_indices = list(names)
+        sources:List[Tuple[str, int]] = self._nd_loop_extents or [(param, d) for d in range(ndim)]
         for d, name in enumerate(names):
             self._define(name, "int", None)
-            self._shape_var(param, d)
+            self._nd_bound_code(sources[d])
         checks:List[str] = []
         for d, name in enumerate(names):
             component:int = ndim - 1 - d
-            bound:str = self._shape_var(param, d)
+            bound:str = self._nd_bound_code(sources[d])
             if self.backend == "opencl":
                 self._emit(f"const int {name} = get_global_id({component});")
             else:
@@ -878,6 +1419,11 @@ class FunctionTranslator:
         # among them would be redundant: flag it before visiting so the check sees the conflict.
         self.magic_loop_present = True
         for stmt in body[:magic_index]:
+            # A creation the device cannot perform is executed by the interpreter instead
+            # and becomes a parameter; that is only possible here, above the loop, because
+            # below it the statement would run once per work item.
+            if self._host_created_assignment(stmt):
+                continue
             self._visit_statement(stmt)
 
         if enumerate_form is not None:
@@ -899,10 +1445,8 @@ class FunctionTranslator:
             self._define(value_name, elem_t, target.elts[1])
             self._emit(f"{elem_t} {value_name} = {param}[{index_name}];")
 
-            for stmt in loop.body:
-                self._visit_statement(stmt)
-            for stmt in body[magic_index + 1:]:
-                self._visit_statement(stmt)
+            self._visit_work_item_body(loop.body)
+            self._visit_region(body[magic_index + 1:], after_magic_loop=True)
             self.work_size_dims = [(param, 0)]
             return
 
@@ -935,6 +1479,26 @@ class FunctionTranslator:
             if ndim > 3:
                 self._error(f"{module_name}.{form} supports at most 3 dimensions, got {ndim}", target)
 
+            # One extent per unpacked name. An explicit np.ndindex(a, b, ...) states them
+            # itself, so a mismatch is a mistake worth naming; the whole-shape spelling
+            # takes its extents from the array, one per name.
+            explicit:Optional[List[Tuple[str, int]]] = self._nd_loop_extents
+            if explicit is not None and len(explicit) != ndim:
+                self._error(
+                    f"this loop unpacks {ndim} name{'s' if ndim != 1 else ''} but "
+                    f"{module_name}.ndindex(...) is given {len(explicit)} "
+                    f"extent{'s' if len(explicit) != 1 else ''}; they must match", target)
+            sources:List[Tuple[str, int]] = (explicit
+                                             if explicit is not None
+                                             else [(param, d) for d in range(ndim)])
+            if explicit is None:
+                # `np.ndindex(arr.shape)` asks for the array's whole shape, but a pointer
+                # carries no rank, so "whole" can only be checked at launch. Remember which
+                # array it was: the launch compares its rank with `ndim` and refuses a loop
+                # that names fewer dimensions than the array has.
+                self.nd_whole_shape_param = param
+            self._nd_loop_extents = sources
+
             self.gid_param = param
             self._emit_nd_head(names, param)
             if form == "ndenumerate":
@@ -943,11 +1507,12 @@ class FunctionTranslator:
                 self._define(value_name, elem_t, None)
                 self._emit(f"{elem_t} {value_name} = {param}[{self._nd_flat_index(names, param)}];")
 
-            for stmt in loop.body:
-                self._visit_statement(stmt)
-            for stmt in body[magic_index + 1:]:
-                self._visit_statement(stmt)
-            self.work_size_dims = [(param, d) for d in range(ndim - 1, -1, -1)]
+            self._visit_work_item_body(loop.body)
+            self._visit_region(body[magic_index + 1:], after_magic_loop=True)
+            # The launch sizes dimensions fastest-first, which is the reverse of the order
+            # the loop unpacks them: gid 0 is the last index. Getting this backwards used
+            # to launch a 2x3 domain as 3x2, so the last column or row was never written.
+            self.work_size_dims = list(reversed(sources))
             return
 
         loop:ast.For = body[magic_index]
@@ -955,13 +1520,21 @@ class FunctionTranslator:
         bound:ast.expr = range_call.args[0]
 
         array_name:str = (self._shape_holder_param(bound.value) or "")
-        if array_name not in {n for n, _ in self.params} or not is_ptr(self._lookup(array_name)):
+        outer:Optional[Dict[str, Any]] = self.outer_vars.get(array_name)
+        host:Optional[Dict[str, Any]] = self.host_values.get(array_name)
+        is_outer_array:bool = ((outer is not None and is_ptr(outer["type"]))
+                               or (host is not None and is_ptr(host["type"])))
+        if not is_outer_array and not is_ptr(self._lookup(array_name)):
             self._error(f"'{array_name}' is not an array parameter of this kernel", bound)
 
         self.gid_param = array_name
 
         gid_bound:str = self._shape_var(array_name, 0)
         target:str = loop.target.id
+        # This branch emits its own work-item head (the 1-D form), so it has to record the
+        # index variable that makes a `arr[i] += v` provably race-free just as the
+        # multi-dimensional head does.
+        self.work_item_indices = [target]
         self._define(target, "int", loop.target)
         if self.backend == "opencl":
             self._emit(f"const int {target} = get_global_id(0);")
@@ -970,15 +1543,146 @@ class FunctionTranslator:
         self._emit(f"if ({target} >= {gid_bound}) return;")
 
         # The loop body is the work-item body; nested range loops translate as real serial loops
-        for stmt in loop.body:
-            self._visit_statement(stmt)
-        for stmt in body[magic_index + 1:]:
-            self._visit_statement(stmt)
+        self._visit_work_item_body(loop.body)
+        self._visit_region(body[magic_index + 1:], after_magic_loop=True)
         self.work_size_dims = [(array_name, 0)]
 
     # ---------- statements ----------
 
+    # ---------- host-created values ----------
+    #
+    # A statement above the magic loop that only *builds* data -- np.zeros(...),
+    # np.full(...), np.arange(...), np.float32(2.5), ... -- has no device meaning at all.
+    # The interpreter runs it as written, the object it produced is passed to the kernel as
+    # a parameter (or inlined, when it is a scalar constant the body only reads), and the
+    # device code just uses it. This keeps the python semantics exactly: the array exists,
+    # has the shape and dtype numpy gave it, and can be returned to the caller as the very
+    # same object.
+    #
+    # The statement must be above the magic loop: below it, it would run once per work
+    # item, creating N arrays where python creates one.
+
+    def _bind_host_values(self, body:List[ast.stmt])->None:
+        """Record every host-created object above the magic loop before the body is visited.
+
+        The magic-loop scan needs to know which arrays exist -- `for i in
+        np.ndindex(created.shape)` defines the iteration domain from a created array -- and
+        every later use needs the object's type, so the declarations are collected once,
+        up front, instead of being discovered while walking the body.
+        """
+        for stmt in body[:_magic_loop_index(body)]:
+            value:Optional[ast.expr] = _creation_target_of(stmt)
+            name:Optional[str] = _assigned_name_of(stmt)
+            if value is None or name is None:
+                continue
+            if not self._is_creation_expression(value):
+                continue
+            produced:Any = self.host_creation_values.get(name, _UNRESOLVED)
+            if produced is _UNRESOLVED:
+                self._error(
+                    f"'{name}' cannot be created here: the expression only builds "
+                    f"data, but it could not be evaluated on the host; build it from values "
+                    f"that exist at call time (a shape, a constant, another array)",
+                    value)
+            device_type:Any = infer_ctype(produced)
+            self.host_values[name] = {"expr": value, "type": device_type}
+            # The object travels as a parameter, appended after the outer-scope values
+            # (see render_kernel and PyKernel._invoke_inner for the launch order).
+            self.params.append((name, device_type))
+
+    def _host_created_assignment(self, node:ast.stmt)->bool:
+        """Skip one creation statement: it was already bound by _bind_host_values.
+
+        Returns True when the statement was handled here (the device needs no code for it).
+        Only a plain `name = <creation>` counts: a creation buried in an expression the
+        device must evaluate is not a creation this can lift out.
+        """
+        name:Optional[str] = _assigned_name_of(node)
+        if name is None:
+            return False
+        return name in self.host_values
+
+    def _is_creation_expression(self, node:ast.expr)->bool:
+        """True when this expression *builds data* the device cannot build itself.
+
+        A plain constant is ordinary python that the device handles directly, so it is not
+        a creation: `total = 0.0` stays a local variable.
+        """
+        if isinstance(node, ast.Constant):
+            return False
+        if isinstance(node, ast.Name):
+            return False
+        if isinstance(node, ast.Attribute):
+            # np.float32 and friends: a dtype/type object, not a value.
+            if isinstance(node.value, ast.Name) and self.resolve_global(node.value.id) is np:
+                return True
+            return False
+        if isinstance(node, ast.Call):
+            func:ast.expr = node.func
+            if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                    and self.resolve_global(func.value.id) is np):
+                return False
+            if self._is_numpy_dtype_name(func.attr):
+                # `np.float32(2.5)` builds a constant the host can hold, while
+                # `np.float32(x[i] * 2.0)` converts a device value in place (see
+                # _emit_numpy_cast). Only the constant form is a creation, so a cast inside
+                # the loop keeps working instead of being refused as a per-work-item one.
+                return all(isinstance(arg, ast.Constant) for arg in node.args)
+            return self._is_creation_function(func.attr)
+        return False
+
+    def _is_numpy_dtype_name(self, name:str)->bool:
+        """True for a numpy scalar type (`np.float32`, `np.int32`, ...)."""
+        return name in _NUMPY_DEVICE_TYPES or name in self.RETURN_SLOT_TYPES
+
+    def _is_creation_function(self, name:str)->bool:
+        """A numpy function that only allocates or reshapes host data."""
+        if name in _HOST_CREATION_FUNCTIONS:
+            return True
+        return name.endswith("_like")
+
+    def _visit_work_item_body(self, statements:List[ast.stmt])->None:
+        """Visit the magic loop's body: these statements run once per work item.
+
+        A `return` here is exactly what a kernel return is (one work item leaving early),
+        so this is *not* the "after the loop" region -- but a creation here would build one
+        object per work item, which is why creations are refused with `after_loop_only`.
+        """
+        previous:bool = self.after_magic_loop
+        previous_creation:bool = self.creation_below_loop
+        self.after_magic_loop = previous
+        self.creation_below_loop = True
+        try:
+            for stmt in statements:
+                self._visit_statement(stmt)
+        finally:
+            self.after_magic_loop = previous
+            self.creation_below_loop = previous_creation
+
+    def _visit_region(self, statements:List[ast.stmt], after_magic_loop:bool)->None:
+        """Visit a run of statements, marking whether they run once per work item.
+
+        Everything after the magic loop is emitted into every work item, so a value
+        `return` there hands back one work item's own local -- not the single value the
+        python function would compute after its loop. `_visit_kernel_return` refuses such
+        a return; an array return stays allowed, since the object is the same whichever
+        work item names it.
+        """
+        previous:bool = self.after_magic_loop
+        self.after_magic_loop = previous or after_magic_loop
+        try:
+            for stmt in statements:
+                self._visit_statement(stmt)
+        finally:
+            self.after_magic_loop = previous
+
     def _visit_statement(self, node:ast.stmt)->None:
+        # A creation statement was executed by the interpreter and travels as a parameter,
+        # so the device emits nothing for it. Checked here as well as in the magic-loop
+        # header: a gid-style body has no loop above which to lift them, yet its top-level
+        # statements are just as much "once per launch".
+        if self.is_kernel and self._host_created_assignment(node):
+            return
         if isinstance(node, ast.Assign):
             self._visit_assign(node)
         elif isinstance(node, ast.AugAssign):
@@ -1030,6 +1734,11 @@ class FunctionTranslator:
             self._emit("break;")
         elif isinstance(node, ast.Continue):
             self._emit("continue;")
+        elif isinstance(node, (ast.Nonlocal, ast.Global)):
+            # The scope declarations themselves emit nothing: they were already read while
+            # binding the outer variables (see _bind_outer_variables), so the name travels
+            # as a device parameter and every use goes through it.
+            pass
         elif isinstance(node, ast.Pass):
             pass
         else:
@@ -1093,14 +1802,239 @@ class FunctionTranslator:
         self._push_scope_block(node.body)
         self._emit("}")
 
+    # ---------- kernel return values ----------
+    #
+    # A kernel is one work item, so it has no C return value to hand back: a launch of N
+    # work items returns N values, and only one of them can be "the" result. The kernel
+    # therefore returns through parameters: every returned position gets a slot of its own
+    # -- a one-element buffer for a value, the array parameter's own name for an array --
+    # plus one shared claim flag. The first work item to reach a `return` claims the
+    # result with an atomic compare-and-swap and writes its own return site's values.
+    #
+    # Python lets every `return` statement have its own shape, so the sites are NOT
+    # required to agree: site 7 may return a float and site 9 a (float, int) pair. What
+    # the device signature needs is the union of the slots every site can write, which is
+    # collected here; the winning site is recorded so the host can rebuild exactly the
+    # value that site produced (and None for a bare `return`).
+    #
+    # Nesting a tuple inside a returned tuple is refused: it has no slot layout, and the
+    # host could not tell it from a flat tuple of the same length.
+
+    RETURN_CLAIM:str = "_ret_claim"
+    RETURN_SITE:str = "_ret_site"
+
+    # The C element type a value slot is declared with, and the numpy dtype the host uses
+    # for the same slot. A slot is internal storage, so its C type only has to hold the
+    # value: bool travels as a byte (OpenCL rejects a _Bool kernel parameter and the CUDA
+    # binding table has no bool entry), and char also travels as an unsigned byte because
+    # OpenCL's `char` binds to ctypes.c_char (|S1), which is not an integer array at all.
+    # The host converts when it reads the slot back.
+    RETURN_SLOT_TYPES:Dict[str, Tuple[str, Any]] = {
+        "bool": ("uchar", np.uint8),
+        "char": ("uchar", np.uint8),
+        "uchar": ("uchar", np.uint8),
+        "short": ("short", np.int16),
+        "ushort": ("ushort", np.uint16),
+        "int": ("int", np.int32),
+        "uint": ("uint", np.uint32),
+        "long": ("long", np.int64),
+        "ulong": ("ulong", np.uint64),
+        "float": ("float", np.float32),
+        "double": ("double", np.float64),
+    }
+
+    def _return_position(self, node:ast.expr)->Dict[str, Any]:
+        """Classify one returned expression as an array position or a value position."""
+        if isinstance(node, ast.Subscript):
+            # A slice/element of an array is not an array: it would be a single element,
+            # which a kernel cannot hand back as a view (the device sees a flat pointer).
+            if isinstance(node.slice, ast.Slice):
+                self._error(
+                    "a kernel cannot return an array slice: return the whole array "
+                    "parameter by name, or return the element as a value", node)
+        code, t = self._visit_expression(node)
+        if is_image(t):
+            self._error("cannot return an image: image parameters are opaque handles", node)
+        if is_ptr(t):
+            # An array travels as its own parameter: the host already holds the object, so
+            # there is nothing to copy and nothing to allocate. Only a name identifies a
+            # parameter, so an expression is refused rather than silently copied. A
+            # `self.<attr>` array counts as a name: it is a parameter too (`_self_<attr>`).
+            if not isinstance(node, (ast.Name, ast.Attribute)):
+                self._error(
+                    "a kernel can return an array parameter, but it must name it "
+                    "(e.g. `return out`), not an expression", node)
+            name:str = self._array_name(node)
+            if name not in {param_name for param_name, _ in self.params}:
+                # A host-created array is a parameter too, just not a python argument.
+                if name not in self.host_values:
+                    self._error(f"cannot return the array '{name}': it is not a parameter", node)
+            return {"kind": "array", "name": name, "type": t}
+        return {"kind": "value", "type": t, "code": code}
+
+    def _return_site(self, node:ast.Return)->List[Dict[str, Any]]:
+        """The shape of one `return` statement, regardless of what other sites return."""
+        if node.value is None:
+            return []
+        if isinstance(node.value, ast.Constant) and node.value.value is None:
+            # `return None` is the same as a bare `return` in python.
+            return []
+        if isinstance(node.value, ast.Tuple):
+            for item in node.value.elts:
+                if isinstance(item, ast.Tuple):
+                    self._error(
+                        "a returned tuple position must be a single value, not a nested tuple", item)
+            return [self._return_position(item) for item in node.value.elts]
+        return [self._return_position(node.value)]
+
+    def _visit_kernel_return(self, node:ast.Return)->None:
+        """Translate a `return` in a kernel body into a claim plus slot stores."""
+        positions:List[Dict[str, Any]] = self._return_site(node)
+        if self.after_magic_loop and any(position["kind"] == "value" for position in positions):
+            self._error(
+                "a value-returning return cannot appear after the magic loop: the "
+                "statements after the loop run once per work item, so a value accumulated "
+                "there belongs to one work item, not to the whole call. Return from inside "
+                "the loop, or reduce into an array argument and return that array", node)
+        site:int = len(self.return_sites)
+        self.return_sites.append(positions)
+        self._record_return_slots(site, positions, node)
+
+        if not self.has_returns:
+            # No return site of this kernel returns a value at all (see
+            # _returns_a_value): a plain return, and the result is None.
+            self._emit("return;")
+            return
+
+        # Every site claims, including a bare `return`: in python the first work item to
+        # leave the function decides the result, so a bare return must be able to win
+        # with None just as a value site wins with its tuple.
+        claim:str = f"{self.RETURN_CLAIM}[0]"
+        guard:str = (f"atomic_cmpxchg((volatile __global int*)(&{claim}), 0, 1) == 0"
+                     if self.backend == "opencl"
+                     else f"atomicCAS(&{claim}, 0, 1) == 0")
+        self._emit(f"if ({guard}) {{")
+        # The winning site records what it returned, so the host rebuilds that site's
+        # shape rather than a shape inferred from every site at once.
+        self._emit(f"    {self.RETURN_SITE}[0] = {site + 1};")
+        for slot, position in self._site_slots(site):
+            if position["kind"] != "value":
+                continue
+            self._emit(f"    {self._return_slot(slot)}[0] = {position['code']};")
+        self._emit("}")
+        self._emit("return;")
+
+    def _return_slot(self, index:int)->str:
+        return f"_ret{index}"
+
+    def _record_return_slots(self, site:int, positions:List[Dict[str, Any]],
+                             node:ast.Return)->None:
+        """Give each value position of this site a slot, extending the shared layout.
+
+        A slot is keyed by its C element type, so two sites returning a float share one
+        buffer while a site returning an int gets a buffer of its own. A returned array
+        occupies no slot: the host hands back the very object it passed in.
+        """
+        for ordinal, position in enumerate(positions):
+            if position["kind"] != "value":
+                continue
+            ctype:str = self._return_param_type(position["type"])
+            slot:Optional[int] = self._slot_for_type(ctype)
+            if slot is None:
+                slot = len(self.return_layout)
+                self.return_layout.append({"ctype": ctype, "type": position["type"]})
+            self._site_slot_map.setdefault(site, []).append((ordinal, slot))
+
+    def _slot_for_type(self, ctype:str)->Optional[int]:
+        for index, entry in enumerate(self.return_layout):
+            if entry["ctype"] == ctype:
+                return index
+        return None
+
+    def _site_slots(self, site:int)->List[Tuple[int, Dict[str, Any]]]:
+        """(slot, position) pairs this site stores into."""
+        positions:List[Dict[str, Any]] = self.return_sites[site]
+        pairs:List[Tuple[int, Dict[str, Any]]] = []
+        for ordinal, slot in self._site_slot_map.get(site, []):
+            pairs.append((slot, positions[ordinal]))
+        return pairs
+
+    def _return_param_type(self, t:Any)->str:
+        """The C element type of a value slot."""
+        from . import structs
+
+        if is_vec(t):
+            return t
+        if isinstance(t, str) and structs.dtype_for(t) is not None:
+            # A structure value travels as a one-element buffer of that structure, so the
+            # slot element is the structure type itself.
+            return t
+        slot:Optional[Tuple[str, Any]] = self.RETURN_SLOT_TYPES.get(t)
+        if slot is None:
+            self._error(f"cannot return a value of type {t}")
+        return self._device_type(slot[0])
+
+    def return_slot_dtype(self, index:int)->Any:
+        """The numpy dtype the host uses for one value slot.
+
+        A vector slot uses the *host* layout (a 3-component vector has three components);
+        `pygpgpu.vec_types.layout.pack` re-lays it out for the backend that needs padding,
+        the same way it does for vector arguments.
+        """
+        from ..vec_types.layout import _host_classes
+        from . import structs
+
+        entry:Dict[str, Any] = (self.return_layout or [])[index]
+        if is_vec(entry["type"]):
+            return _host_classes()[entry["type"]].numpy_dtype()
+        structure:Any = structs.dtype_for(entry["type"]) if isinstance(entry["type"], str) else None
+        if structure is not None:
+            return structure
+        return self.RETURN_SLOT_TYPES[entry["type"]][1]
+
+    def render_return_params(self)->List[str]:
+        """The extra device parameters a kernel with returns needs.
+
+        A kernel that returns only an array still needs the claim and site words, so this
+        is gated on `has_returns` rather than on the value slots alone.
+        """
+        if not self.has_returns:
+            return []
+        qualifier:str = ("__global " if self.backend == "opencl" else "")
+        params:List[str] = [f"{qualifier}{entry['ctype']}* {self._return_slot(index)}"
+                            for index, entry in enumerate(self.return_layout)]
+        params.append(f"{qualifier}int* {self.RETURN_CLAIM}")
+        params.append(f"{qualifier}int* {self.RETURN_SITE}")
+        return params
+
+    def return_site_layout(self)->List[Dict[str, Any]]:
+        """What the host needs to rebuild the result of each return site.
+
+        Per site: the positions in return order, each "value" with its slot index or
+        "array" with the parameter name to hand back, plus whether the site returned a
+        tuple. A site with no positions is a bare `return`, i.e. None.
+        """
+        layout:List[Dict[str, Any]] = []
+        for site, positions in enumerate(self.return_sites):
+            entries:List[Dict[str, Any]] = [{"kind": "value", "ordinal": ordinal, "slot": slot}
+                                            for ordinal, slot in self._site_slot_map.get(site, [])]
+            for ordinal, position in enumerate(positions):
+                if position["kind"] == "array":
+                    entries.append({"kind": "array", "ordinal": ordinal, "name": position["name"]})
+            entries.sort(key=lambda entry: entry["ordinal"])
+            layout.append({"positions": entries,
+                           "is_tuple": len(positions) > 1})
+        return layout
+
     def _visit_return(self, node:ast.Return)->None:
+        if self.is_kernel:
+            self._visit_kernel_return(node)
+            return
+
         if node.value is None:
             self.return_type = self.return_type or "void"
             self._emit("return;")
             return
-
-        if self.is_kernel:
-            self._error("a @kernel function must not return values; write results into an array argument instead", node)
 
         code, t = self._visit_expression(node.value)
         if is_ptr(t):
@@ -1111,14 +2045,164 @@ class FunctionTranslator:
         elif self.return_type != t:
             unified:Any = promote(self.return_type, t)
             if unified != self.return_type:
-                code = f"(({self.return_type})({code}))"
+                # The cast has to be spelled in this backend's own type names: CUDA C has
+                # no `uchar`/`ushort`/`uint`/`ulong`, so a bare translator name here made
+                # every device helper returning one of those fail to compile under NVRTC.
+                code = f"(({self._device_type(self.return_type)})({code}))"
             self.return_type = unified
         self._emit(f"return {code};")
+
+    def _eval_constant(self, node:Optional[ast.expr])->Any:
+        """Evaluate a compile-time expression: a shape, a dtype, a fill value.
+
+        Only the forms a creation statement uses are supported (constants, names resolved in
+        the kernel's namespace, attribute access, and calls), and an unsupported form raises
+        so the caller can refuse the statement with its own message.
+        """
+        if node is None:
+            return None
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            return self.resolve_global(node.id)
+        if isinstance(node, ast.Attribute):
+            return getattr(self._eval_constant(node.value), node.attr)
+        if isinstance(node, ast.Call):
+            function:Any = self._eval_constant(node.func)
+            arguments:List[Any] = [self._eval_constant(argument) for argument in node.args]
+            keywords:Dict[str, Any] = {keyword.arg: self._eval_constant(keyword.value)
+                                       for keyword in node.keywords if keyword.arg}
+            return function(*arguments, **keywords)
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return tuple(self._eval_constant(element) for element in node.elts)
+        raise SyntaxError("not a compile-time constant expression")
+
+    def _private_element_type(self, dtype_value:Any)->Optional[Tuple[str, Any]]:
+        """(C element type, translator type) for a private array's element, or None."""
+        from . import structs
+
+        if dtype_value is None:
+            dtype_value = np.float64
+        try:
+            dtype:np.dtype = np.dtype(dtype_value)
+        except TypeError:
+            return None
+        from ..vec_types.layout import _vector_dtype_name
+
+        vector:Optional[str] = _vector_dtype_name(dtype)
+        if vector is not None:
+            # Device-side storage: the padded width is what the device type means here.
+            return self._device_type(vector), vector, False
+        if structs.is_record(dtype):
+            name:str = structs.register(dtype)
+            if dtype not in self.private_structs:
+                self.private_structs.append(dtype)
+            return name, name, False
+        scalar:Optional[str] = DTYPE_MAP.get(dtype.name)
+        if scalar is None:
+            return None
+        if scalar == "bool":
+            scalar = "uchar"
+        return self._device_type(scalar), scalar, True
+
+    def _emit_private_array(self, name:str, node:ast.Assign)->bool:
+        """Emit a per-work-item C array for `name = np.zeros(<constant shape>, ...)`.
+
+        Returns False when the statement is not something a private array can represent, so
+        the caller reports the reason.
+        """
+        call:ast.Call = node.value  # type: ignore[assignment]
+        if isinstance(call.func, ast.Attribute):
+            constructor:str = call.func.attr
+        else:
+            return False
+        if constructor not in ("zeros", "ones", "full", "empty"):
+            return False
+
+        # np.zeros(4, ...) / np.zeros((2, 3), ...) -- one positional shape argument.
+        positional:List[ast.expr] = list(call.args)
+        try:
+            shape_value:Any = self._eval_constant(positional[0]) if positional else None
+            dtype_node:Optional[ast.expr] = next(
+                (keyword.value for keyword in call.keywords if keyword.arg == "dtype"), None)
+            dtype_value:Any = self._eval_constant(dtype_node)
+            fill_value:Any = None
+            if constructor == "full" and len(positional) > 1:
+                fill_value = self._eval_constant(positional[1])
+        except SyntaxError:
+            return False
+
+        if shape_value is None:
+            shape:Tuple[int, ...] = ()
+        elif isinstance(shape_value, int):
+            shape = (shape_value,)
+        elif isinstance(shape_value, (tuple, list)) and all(
+                isinstance(extent, int) for extent in shape_value):
+            shape = tuple(int(extent) for extent in shape_value)
+        else:
+            return False
+        if not shape or any(extent <= 0 for extent in shape):
+            return False
+
+        element:Optional[Tuple[str, Any, bool]] = self._private_element_type(dtype_value)
+        if element is None:
+            return False
+        ctype, element_t, scalar_element = element
+        total:int = 1
+        for extent in shape:
+            total *= extent
+
+        initialiser:Optional[str] = self._private_initialiser(constructor, total, fill_value,
+                                                             scalar_element)
+        if initialiser is None:
+            return False
+        self._emit(f"{ctype} {name}[{total}]{initialiser};")
+        self._define(name, ("bodyarr", total, shape, element_t), node)
+        return True
+
+    def _private_initialiser(self, constructor:str, total:int, fill_value:Any,
+                             scalar_element:bool)->Optional[str]:
+        """The C initialiser for a private array, matching the numpy constructor.
+
+        CUDA/HIP compile as C++, where a vector or structure aggregate is value-initialised
+        with `{}`; OpenCL C needs `{0}`. A non-scalar element cannot take a `full`/`ones`
+        value without a conversion the initialiser cannot express, so that is refused (the
+        caller reports it) rather than emitting something that does not compile.
+        """
+        empty:str = " = {}" if self.backend != "opencl" else " = {0}"
+        if constructor == "empty":
+            return ""
+        if constructor == "zeros":
+            return empty
+        value:Any = 1 if constructor == "ones" else fill_value
+        if value is None:
+            return empty
+        if not scalar_element:
+            return None
+        if total > self.PRIVATE_ARRAY_MAX_UNROLL:
+            return None
+        return " = {" + ", ".join(f"({value})" for _ in range(total)) + "}"
 
     def _visit_assign(self, node:ast.Assign)->None:
         if len(node.targets) != 1:
             self._error("chained assignment is not supported", node)
         target:ast.expr = node.targets[0]
+
+        # A creation below the magic loop runs once per work item, so its object cannot be a
+        # host parameter. When the shape is a compile-time constant it is exactly a C local
+        # array -- private storage per work item, which is what python's fresh array means --
+        # and it is emitted as one. A runtime extent has no fixed-size declaration, so it is
+        # refused instead of being silently shared between work items.
+        if (self.creation_below_loop and isinstance(target, ast.Name)
+                and self._is_creation_expression(node.value)):
+            if self._emit_private_array(target.id, node):
+                return
+            self._error(
+                "a value cannot be created below the magic loop unless its shape is a "
+                "compile-time constant: the statements there run once per work item, so a "
+                "constant shape becomes a private array and anything else would create one "
+                "object per work item. Create it above the loop, or give it a constant "
+                "shape (e.g. np.zeros(4, dtype=np.float32))", node)
 
         # self.xxx = ... : host attributes cannot be written back from device code
         if (self.self_param and isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
@@ -1127,11 +2211,9 @@ class FunctionTranslator:
                 f"cannot assign to self.{target.attr}: host attributes cannot be written by device code; "
                 f"write into an array element (self.{target.attr}[i] = ...) or use a local variable", node)
 
-        # local memory declaration: buf = gpu.local(np.float32, 64)
-        if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
-                and node.value.func.attr == "local"
-                and isinstance(node.value.func.value, ast.Name)
-                and self.resolve_global(node.value.func.value.id) is GPU_BUILTINS):
+        # local memory declaration: buf = local(np.float32, 64)
+        if (isinstance(node.value, ast.Call)
+                and self._builtin_call_name(node.value) == "local"):
             self._handle_local_declaration(node)
             return
 
@@ -1175,9 +2257,19 @@ class FunctionTranslator:
             return
         code, t = self._visit_expression(node.value)
         if is_ptr(t):
+            # Rebinding an outer array is refused earlier, while binding the outer
+            # variables, so this message only covers a local/parameter target.
+            if isinstance(target, ast.Name) and target.id in self.outer_vars:
+                self._error(
+                    f"cannot rebind the outer array '{target.id}': the array object itself "
+                    f"is shared with the caller, so a device kernel can only write its elements", node)
             self._error("cannot assign an array to a variable", node)
 
         if isinstance(target, ast.Name):
+            outer:Optional[Dict[str, Any]] = self._named_outer_target(target, node)
+            if outer is not None:
+                self._emit(f"{target.id}[0] = {code};")
+                return
             existing:Any = self._lookup(target.id)
             if existing is not None and is_ptr(existing):
                 self._error(f"cannot assign to array parameter '{target.id}'", node)
@@ -1188,6 +2280,21 @@ class FunctionTranslator:
                 decl = self._device_type(t) + " "
             self._emit(f"{decl}{target.id} = {code};")
         elif isinstance(target, ast.Subscript):
+            # A string subscript on a structure value writes a member: `s["i"] = 1` becomes
+            # `s.i = 1`. Recognized before the array path, which rejects a structure base
+            # because a structure is a value, not a pointer.
+            member:Optional[Tuple[str, Any]] = self._struct_member_access(target)
+            if member is not None:
+                # The generated field assignment goes through a parenthesised member
+                # expression, which the static read/write analysis does not attribute to the
+                # array; record the target so the host still reads the array back.
+                if isinstance(target.value, ast.Subscript):
+                    try:
+                        self.atomic_targets.add(self._array_name(target.value.value))
+                    except SyntaxError:
+                        pass
+                self._emit(f"{member[0]} = {code};")
+                return
             base_code, base_t = self._visit_array_target(target.value)
             if is_image(base_t):
                 self._emit_image_write(base_code, base_t, target, code)
@@ -1196,6 +2303,28 @@ class FunctionTranslator:
             self._emit(f"{base_code}[{index_code}] = {code};")
         else:
             self._error(f"unsupported assignment target: {target.__class__.__name__}", node)
+
+    def _named_outer_target(self, target:ast.Name, node:ast.AST)->Optional[Dict[str, Any]]:
+        """Resolve a plain-name assignment to an outer variable, refusing what cannot work.
+
+        A `nonlocal`/`global`-declared variable is written through its pointer, so
+        `total = total + x` writes the scope value and the host copies it back after the
+        launch. An undeclared outer name is refused: python would create a local there,
+        which would silently shadow the scope variable instead of touching it.
+        """
+        outer:Optional[Dict[str, Any]] = self.outer_vars.get(target.id)
+        if outer is None:
+            return None
+        if not outer["writable"]:
+            self._error(
+                f"cannot assign to the outer variable '{target.id}': without a "
+                f"'nonlocal {target.id}' or 'global {target.id}' declaration this would "
+                f"create a local variable, shadowing the outer one", node)
+        if is_ptr(outer["type"]):
+            self._error(
+                f"cannot rebind the outer array '{target.id}': the array object itself is "
+                f"shared with the caller, so a device kernel can only write its elements", node)
+        return outer
 
     def _handle_local_declaration(self, node:ast.Assign)->None:
         """buf = gpu.local(np.float32, 64) -> a local memory array.
@@ -1239,12 +2368,37 @@ class FunctionTranslator:
             self._error("gpu.local() result must be assigned to a plain variable", node)
         self._define(target.id, ("lptr", ctype, c_name, count_node.value), node)
 
+    def _is_local_buffer(self, node:ast.expr)->bool:
+        """True when ``node`` names a `local(...)` buffer, i.e. work-group shared memory."""
+        if not isinstance(node, ast.Name):
+            return False
+        t:Any = self._lookup(node.id)
+        return isinstance(t, tuple) and len(t) == 4 and t[0] == "lptr"
+
+    def _builtin_call_name(self, node:ast.expr)->Optional[str]:
+        """The builtin this call invokes, or None when it invokes something else.
+
+        Identity, not spelling: the callee is resolved the way python would resolve it and
+        the resulting object is looked up in the registry, so a bare name (``dot(...)``), an
+        attribute of the package (``pygpgpu.dot(...)``) and a name imported from the module
+        that defines it all agree, while a user function that happens to share a name is
+        recognized as theirs.
+        """
+        if not isinstance(node, ast.Call):
+            return None
+        callee:ast.expr = node.func
+        if isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
+            owner:Any = self.resolve_global(callee.value.id)
+            if owner is None:
+                return None
+            return builtin_name_of(getattr(owner, callee.attr, None))
+        if isinstance(callee, ast.Name):
+            return builtin_name_of(self.resolve_global(callee.id))
+        return None
+
     def _is_work_size_decl(self, node:ast.expr)->bool:
-        """True for a `gpu.work_size(...)` statement call."""
-        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "work_size"
-                and isinstance(node.func.value, ast.Name)
-                and self.resolve_global(node.func.value.id) is GPU_BUILTINS)
+        """True for a `work_size(...)` statement call."""
+        return self._builtin_call_name(node) == "work_size"
 
     def _handle_work_size_decl(self, call:ast.Call)->None:
         """`gpu.work_size(x)` declares the iteration domain as x's full shape.
@@ -1495,9 +2649,8 @@ class FunctionTranslator:
         (the low bits of such a double are zero, so 17 digits are its shortest form too).
         Keeping the layout that small is what lets a whole vector stay one printf.
         """
-        cls:Any = _vec_registry()[vec]
         pieces:List[Tuple[str, str, Any]] = [("text", f"{vec}(", None)]
-        for position, (field_name, _field_type) in enumerate(cls._fields_):
+        for position, (field_name, _field_type) in enumerate(_vec_components(vec)):
             if position:
                 pieces.append(("text", ", ", None))
             component_t:str = _C_FIELD_TYPES[(vec, field_name)]
@@ -1669,13 +2822,129 @@ class FunctionTranslator:
         self._tmp_counter += 1
         return str(self._tmp_counter)
 
+    def _augassign_is_race_free(self, target:ast.Subscript)->bool:
+        """True when each work item provably touches a different element.
+
+        The only case the translator can prove without knowing the launch geometry is the
+        one where the subscript is built from the magic loop's own index variables: every
+        index is one of them, each appears once, and all of them appear. Distinct work
+        items then have distinct index tuples, so `out[i, j] += v` cannot overlap with
+        another work item and a plain read-modify-write is exact.
+
+        Anything else -- a subscript driven by a data value (`bins[image[i]] += 1`), a
+        partial tuple (`out[i] += v` in a 2-D loop), or an arithmetic index -- may collide
+        and is treated as racy.
+        """
+        indices:ast.expr = target.slice
+        elements:List[ast.expr] = list(indices.elts) if isinstance(indices, ast.Tuple) else [indices]
+        if not all(isinstance(element, ast.Name) for element in elements):
+            return False
+        names:List[str] = [element.id for element in elements]  # type: ignore[union-attr]
+        work_items:List[str] = self.work_item_indices
+        if not work_items:
+            # A gid-style kernel states its work item through gpu.get_global_id, which this
+            # check cannot relate to a subscript, so nothing is provable there.
+            return False
+        return sorted(names) == sorted(work_items)
+
+    # The augmented operators that have a device atomic counterpart, and its gpu name.
+    ATOMIC_ASSIGN_OPS:Dict[str, str] = {
+        "Add": "atomic_add", "Sub": "atomic_sub",
+        "BitAnd": "atomic_and", "BitOr": "atomic_or", "BitXor": "atomic_xor",
+    }
+
+    def _visit_atomic_augassign(self, node:ast.AugAssign, op_name:str,
+                                atomic_name:str,
+                                pointer_code:Optional[str]=None)->None:
+        """Emit a racy `arr[i] op= value` as the matching device atomic operation.
+
+        ``pointer_code`` is set when the target is an outer scalar: the device parameter is
+        already a pointer to one element, so there is no subscript to compute.
+        """
+        if pointer_code is not None:
+            name:str = node.target.id  # type: ignore[union-attr]
+            outer:Dict[str, Any] = self.outer_vars[name]
+            self._emit_atomic_update(node, op_name, atomic_name, outer["type"],
+                                     array_code=name, index_code="0",
+                                     pointer_code=pointer_code)
+            return
+
+        target:ast.Subscript = node.target  # type: ignore[assignment]
+        # _visit_array_target already narrows a pointer to its element type.
+        base_code, element_t = self._visit_array_target(target.value)
+        if is_image(element_t):
+            self._error(
+                "'op=' on an image element is not supported; write `img[x, y] = value` "
+                "or use gpu.atomic_* on an array buffer", node)
+        index_code, _ = self._visit_subscript_index(target)
+        self._emit_atomic_update(node, op_name, atomic_name, element_t,
+                                 array_code=base_code, index_code=index_code,
+                                 is_local=self._is_local_buffer(target.value))
+
+    def _emit_atomic_update(self, node:ast.AugAssign, op_name:str, atomic_name:str,
+                            element_t:Any, array_code:str, index_code:str,
+                            pointer_code:Optional[str]=None,
+                            is_local:bool=False)->None:
+        """The shared tail of an atomic `op=` on an array element or an outer scalar."""
+        if not is_int(element_t):
+            self._error(
+                f"'{self._augassign_symbol(op_name)}=' on this location may be written by "
+                f"several work items at once, and a {element_t} value has no device atomic "
+                f"operation. Python would add every contribution, so the plain "
+                f"read-modify-write would lose some. Use an integer counter, or accumulate "
+                f"per work item and reduce afterwards (see examples/09_reduction.py)", node)
+        value_code, value_t = self._visit_expression(node.value)
+        if not is_int(value_t) and not is_float(value_t):
+            self._error(f"'{op_name}' needs a numeric value", node)
+        if pointer_code is None:
+            self.atomic_targets.add(self._array_name(node.target.value))  # type: ignore[union-attr]
+        else:
+            self.atomic_targets.add(node.target.id)  # type: ignore[union-attr]
+        call:str = emit_atomic(atomic_name, array_code, index_code, value_code,
+                               element_t, self.backend, pointer_code=pointer_code,
+                               is_local=is_local)
+        self._emit(f"{call};")
+
+    def _augassign_symbol(self, op_name:str)->str:
+        return {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/", "FloorDiv": "//",
+                "Mod": "%", "Pow": "**", "LShift": "<<", "RShift": ">>",
+                "BitAnd": "&", "BitOr": "|", "BitXor": "^"}.get(op_name, op_name)
+
     def _visit_augassign(self, node:ast.AugAssign)->None:
+        # A racy `arr[i] op= v` must not compile into a plain read-modify-write: every work
+        # item reads the old value and writes it back, so contributions are lost with no
+        # error at all. Python accumulates every one of them, so the device code has to use
+        # an atomic operation whenever the translator cannot prove the elements are
+        # distinct. `out[i] += x[i]` over the loop's own index stays a plain store.
+        op_name:str = node.op.__class__.__name__
+        # An outer scalar named `nonlocal`/`global` is one device location shared by every
+        # work item, so an in-place update there is racy in exactly the same way a
+        # data-driven array index is -- python accumulates every contribution.
+        outer:Optional[Dict[str, Any]] = (
+            self.outer_vars.get(node.target.id)
+            if isinstance(node.target, ast.Name) else None)
+        racy:bool = ((isinstance(node.target, ast.Subscript)
+                      and not self._augassign_is_race_free(node.target))
+                     or (outer is not None and bool(outer["writable"])))
+        if racy:
+            atomic_name:Optional[str] = self.ATOMIC_ASSIGN_OPS.get(op_name)
+            if atomic_name is None:
+                where:str = ("this shared outer variable"
+                             if outer is not None else "this array")
+                self._error(
+                    f"'{self._augassign_symbol(op_name)}=' on {where} may be updated by "
+                    f"several work items at once, and there is no device atomic operation "
+                    f"for it. Write the update explicitly, e.g. use atomic_add for a sum, "
+                    f"or accumulate per work item and reduce afterwards "
+                    f"(see examples/09_reduction.py)", node)
+            pointer:Optional[str] = node.target.id if outer is not None else None
+            self._visit_atomic_augassign(node, op_name, atomic_name, pointer_code=pointer)
+            return
+
         target_code, target_t = self._visit_target(node.target)
         value_code, value_t = self._visit_expression(node.value)
-        if isinstance(node.target, ast.Subscript) and not is_int(self._lookup_type_of_index(node)):
-            pass
 
-        name:str = node.op.__class__.__name__
+        name:str = op_name
         if name == "Div":
             if is_int(target_t) and is_int(value_t):
                 self._error("integer /= integer changes type (use // or float operands)", node)
@@ -1705,6 +2974,18 @@ class FunctionTranslator:
 
     def _visit_target(self, target:ast.expr)->Tuple[str, Any]:
         if isinstance(target, ast.Name):
+            outer:Optional[Dict[str, Any]] = self.outer_vars.get(target.id)
+            if outer is not None:
+                if not outer["writable"]:
+                    self._error(
+                        f"cannot assign to the outer variable '{target.id}': without a "
+                        f"'nonlocal {target.id}' or 'global {target.id}' declaration this "
+                        f"would create a local variable, shadowing the outer one", target)
+                # A store through the parameter as `name[0]` rather than `(*name)`: both are
+                # the same location, but only the subscript form is recognized as a write
+                # by the static read/write analysis, which decides whether the value is
+                # read back to the host.
+                return f"{target.id}[0]", outer["type"]
             t:Any = self._lookup(target.id)
             if t is None:
                 self._error(f"variable '{target.id}' used before assignment", target)
@@ -1712,6 +2993,12 @@ class FunctionTranslator:
                 self._error(f"cannot assign to array parameter '{target.id}'", target)
             return target.id, t
         if isinstance(target, ast.Subscript):
+            # A string subscript on a structure value writes a member: `s["i"] = 1` becomes
+            # `s.i = 1`. It has to be recognized before the array path, which would reject a
+            # structure base (it is a value, not a pointer).
+            member:Optional[Tuple[str, Any]] = self._struct_member_access(target)
+            if member is not None:
+                return member
             base_code, base_t = self._visit_array_target(target.value)
             index_code, _ = self._visit_subscript_index(target)
             return f"{base_code}[{index_code}]", base_t
@@ -1727,7 +3014,31 @@ class FunctionTranslator:
             self._error("only array (numpy) and image arguments can be indexed", node)
         return code, t[1]
 
+    def _record_subscript_indices(self, node:ast.Subscript)->None:
+        """Remember how many indices each array is subscripted with.
+
+        A pointer parameter carries no rank, so the translator cannot tell whether
+        ``out[i, j]`` addresses one element or selects a slice; the value passed at call
+        time can. Recording the count here lets the launch compare it with the array's
+        real shape instead of silently writing one element of a 3-D array (which is what
+        ``out[i, j] = v`` used to compile into).
+        """
+        base:ast.expr = node.value
+        name:str = ""
+        if isinstance(base, ast.Name):
+            name = base.id
+        elif (self.self_param and isinstance(base, ast.Attribute)
+              and isinstance(base.value, ast.Name) and base.value.id == self.self_param):
+            name = f"_self_{base.attr}"
+        else:
+            return
+        if not is_ptr(self._lookup(name)):
+            return
+        count:int = len(node.slice.elts) if isinstance(node.slice, ast.Tuple) else 1
+        self.subscript_indices[name] = max(self.subscript_indices.get(name, 0), count)
+
     def _visit_subscript_index(self, node:ast.Subscript)->Tuple[str, Any]:
+        self._record_subscript_indices(node)
         index:ast.expr = node.slice
         if isinstance(index, ast.Tuple):
             array_name:str = self._array_name(node.value)
@@ -1772,7 +3083,8 @@ class FunctionTranslator:
         if isinstance(node, ast.BoolOp):
             parts:List[str] = [self._visit_expression(v)[0] for v in node.values]
             symbol:str = ("&&" if isinstance(node.op, ast.And) else "||")
-            return f"({' ' + symbol + ' '.join(parts)})", "bool"
+            joined:str = f" {symbol} ".join(parts)
+            return f"({joined})", "bool"
         if isinstance(node, ast.IfExp):
             cond, _ = self._visit_expression(node.test)
             then_code, tt = self._visit_expression(node.body)
@@ -1805,10 +3117,26 @@ class FunctionTranslator:
         self._error(f"unsupported constant: {value!r}", node)
 
     def _visit_name(self, node:ast.Name)->Tuple[str, Any]:
+        host:Optional[Dict[str, Any]] = self.host_values.get(node.id)
+        if host is not None:
+            # The host created this object; on the device it is just the parameter that
+            # carries it (see _host_created_assignment).
+            return node.id, host["type"]
+        outer:Optional[Dict[str, Any]] = self.outer_vars.get(node.id)
+        if outer is not None:
+            # A writable outer variable travels as `T*`, so every use is a dereference; a
+            # read-only one travels as `T` and is simply the parameter itself.
+            if outer["writable"]:
+                return f"(*{node.id})", outer["type"]
+            return node.id, outer["type"]
         t:Any = self._lookup(node.id)
         if t is not None:
             if isinstance(t, tuple) and len(t) == 4 and t[0] == "lptr":
                 return t[2], (PTR, t[1])
+            if isinstance(t, tuple) and len(t) == 4 and t[0] == "bodyarr":
+                # A private array created in the body is indexed like any array; its extents
+                # are constants (see _shape_var).
+                return node.id, (PTR, t[3])
             return node.id, t
         value:Any = self.resolve_global(node.id)
         if isinstance(value, bool):
@@ -1825,7 +3153,7 @@ class FunctionTranslator:
         right is a vector operand, scalar is a broadcast scalar operand.
         """
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [field_name for field_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         infix:bool = (op in ("+", "-", "*", "/"))
         terms:List[str] = []
         for c in components:
@@ -1954,18 +3282,62 @@ class FunctionTranslator:
         if isinstance(value, ast.Attribute) and value.attr == "shape":
             array_name:str = self._array_name(value.value)
             t:Any = self._lookup(array_name)
-            if not is_ptr(t):
+            # A private array created in the body has a constant shape, so `.shape[d]` is a
+            # compile-time number just like for a parameter (see _shape_var).
+            private:bool = (isinstance(t, tuple) and len(t) == 4 and t[0] == "bodyarr")
+            if not is_ptr(t) and not private:
                 self._error("'.shape' is only available on array parameters", node)
             index:ast.expr = node.slice
             if isinstance(index, ast.Constant) and isinstance(index.value, int):
                 return self._shape_var(array_name, index.value), "int"
             self._error("only `<array>.shape[<constant>]` is supported", node)
 
+        # A string subscript on a structure value reads a member: numpy's spelling for a
+        # record field, emitted as C member access. It covers nested structures
+        # (`s["inner"]["a"]`) because the member itself is a structure-typed value.
+        member:Optional[Tuple[str, Any]] = self._struct_member_access(node)
+        if member is not None:
+            return member
+
         base_code, base_t = self._visit_array_target(value)
         if is_image(base_t):
             return self._emit_image_read(base_code, base_t, node)
         index_code, _ = self._visit_subscript_index(node)
         return f"{base_code}[{index_code}]", base_t
+
+    def _struct_member_access(self, node:ast.Subscript)->Optional[Tuple[str, Any]]:
+        """`s["field"]` on a structure value, or `v["x"]` on a vector, or None.
+
+        A string subscript is numpy's spelling for a record field, and it works for a vector
+        too (`v["x"]`). Both are member access in C, so both are emitted the same way.
+        """
+        from . import structs
+
+        index:ast.expr = node.slice
+        if not (isinstance(index, ast.Constant) and isinstance(index.value, str)):
+            return None
+        base_code, base_t = self._visit_expression(node.value)
+        field:str = index.value
+
+        if is_vec(base_t):
+            component:str = _vec_component_name(field)
+            if component not in _vec_field_names(base_t):
+                self._error(
+                    f"vector type {base_t} has no component '{field}' "
+                    f"(available: {''.join(_vec_field_names(base_t))})", node)
+            return f"({base_code}).{component}", _C_FIELD_TYPES[(base_t, component)]
+
+        dtype:Optional[Any] = structs.dtype_for(base_t) if isinstance(base_t, str) else None
+        if dtype is None:
+            return None
+        members:Dict[str, Any] = structs.member_types(dtype, self.backend)
+        if field not in members:
+            self._error(
+                f"structure value has no member '{field}' "
+                f"(available: {', '.join(members)})", node)
+        # The parenthesised member expression is what C expects; a sub-array member then
+        # takes a plain index, and a vector member takes a component.
+        return f"({base_code}).{field}", members[field]
 
     def _reject_hip_image(self, node:ast.expr, writing:bool)->None:
         """Refuse an image on the HIP backend with the reason, not a compile error.
@@ -2169,17 +3541,25 @@ class FunctionTranslator:
             if module is math or module is np:
                 if node.attr in _MATH_CONSTS:
                     return _MATH_CONSTS[node.attr], "float"
+                if module is np and node.attr in _NUMPY_DEVICE_TYPES:
+                    # np.float32 / np.int32 / ... name a type, not a value. Reading it as a
+                    # value has no device meaning; a cast is `x.astype(...)` or `np.float32(x)`,
+                    # and a dtype keyword is consumed by the creation this feature lifts out.
+                    self._error(
+                        f"np.{node.attr} is a type: use it as a keyword (dtype=np.{node.attr}) "
+                        f"or as a constructor (np.{node.attr}(value)), not as a value", node)
                 self._error(f"{node.value.id}.{node.attr} is not supported", node)
 
         base_code, base_t = self._visit_expression(node.value)
         if is_vec(base_t):
-            if len(node.attr) > 1:
-                return self._emit_vec_swizzle(base_code, base_t, node.attr, node)
-            field_key:(str, str) = (base_t, node.attr)
+            component:str = _vec_component_name(node.attr)
+            if len(component) > 1:
+                return self._emit_vec_swizzle(base_code, base_t, component, node)
+            field_key:(str, str) = (base_t, component)
             if field_key not in _C_FIELD_TYPES:
                 self._error(
                     f"vector type {base_t} has no component '.{node.attr}'", node)
-            return f"({base_code}.{node.attr})", _C_FIELD_TYPES[field_key]
+            return f"({base_code}.{component})", _C_FIELD_TYPES[field_key]
         self._error(f"unsupported attribute access: .{node.attr}", node)
 
     # ---------- calls ----------
@@ -2189,14 +3569,26 @@ class FunctionTranslator:
         if node.keywords:
             # A helper may be called with keywords; nothing below needs to know, so the
             # call is rewritten to positional order first, using the callee's signature.
-            # Builtins and gpu.* take positional arguments only, so they keep refusing.
+            # Builtins take positional arguments only, so they keep refusing.
             node = self._reorder_keywords(node)
             if node.keywords:
                 self._error("keyword arguments are not supported for this call", node)
 
+        # A builtin is recognized by the *object* the callee resolves to, never by the
+        # spelling of the name, so it does not matter whether it was imported, reached
+        # through the package, or is a user function that merely shares the name.
+        builtin:Optional[str] = self._builtin_call_name(node)
+        if builtin is not None:
+            if builtin in ("local", "work_size"):
+                self._error(
+                    f"{builtin}() is a statement, not a value: use it on its own, as "
+                    f"`name = {builtin}(...)`", node)
+            args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+            return self._emit_gpu_builtin(builtin, args, node)
+
         if isinstance(func, ast.Name):
             name:str = func.id
-            args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+            args = [self._visit_expression(a) for a in node.args]
             arg_codes:List[str] = [c for c, _ in args]
 
             if name in ("int", "float", "bool"):
@@ -2211,21 +3603,23 @@ class FunctionTranslator:
             if name == "len":
                 return self._emit_len(args, node)
 
-            if name in _vec_registry():
-                return self._emit_vec_constructor(name, args, node)
-
-            if name in ("tex1D", "tex2D", "tex3D"):
-                return self._emit_tex2d(args, node)
-
-            if name in ("surf1Dread", "surf1Dwrite", "surf2Dread", "surf2Dwrite",
-                        "surf3Dread", "surf3Dwrite"):
-                return self._emit_surf(args, node, name)
+            vec_name:Optional[str] = self._vec_type_name(name)
+            if vec_name is not None:
+                return self._emit_vec_constructor(vec_name, args, node)
+            reason:Optional[str] = self._unsupported_vec_reason(self.resolve_global(name))
+            if reason is not None:
+                self._error(reason, node)
 
             target:Any = self.resolve_global(name)
+            if isinstance(target, type):
+                # Constructing a class would need a device-side object. Device code has none:
+                # it has scalars, vectors and (for handwritten kernels) ctypes structures.
+                self._error(
+                    f"'{name}' is a class: device code has no objects, so it cannot be "
+                    f"constructed inside a kernel. Keep the values in separate scalar or "
+                    f"vector variables, or pass a ctypes.Structure as a kernel argument",
+                    node)
             if callable(target):
-                # vector math functions in pygpgpu.vec_types.funcs share name and semantics with gpu.* builtins
-                if getattr(target, "__module__", "") == VEC_FUNCS.__name__:
-                    return self._emit_gpu_builtin(name, args, node)
                 return self._emit_device_call(name, target, args, node)
             self._error(f"unknown function '{name}'", node)
 
@@ -2241,14 +3635,20 @@ class FunctionTranslator:
                     f"calling self.{func.attr}() from device code is not supported: "
                     f"self.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
             module:Any = self.resolve_global(func.value.id)
-            if module is GPU_BUILTINS:
-                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
-                return self._emit_gpu_builtin(func.attr, args, node)
-            if module is VEC_FUNCS:
-                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
-                return self._emit_gpu_builtin(func.attr, args, node)
             if module is math or module is np:
+                if module is np and func.attr in ("clip", "where"):
+                    # np.clip/np.where read their own arguments: a None bound means "no
+                    # bound" and must not be evaluated as a device expression.
+                    return self._emit_numpy_elementwise_nodes(func.attr, node)
                 args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                if module is np:
+                    if func.attr in _NUMPY_DEVICE_TYPES:
+                        # np.float32(x): a cast, exactly what `(float)x` means on the device.
+                        return self._emit_numpy_cast(func.attr, args, node)
+                    elementwise:Optional[Tuple[str, Any]] = self._emit_numpy_elementwise(
+                        func.attr, args, node)
+                    if elementwise is not None:
+                        return elementwise
                 return self._emit_math_call(func.attr, args, node, module_name=func.value.id)
             if isinstance(module, type):
                 # Class.static_method(...): a class name is not a device value, so the
@@ -2270,92 +3670,6 @@ class FunctionTranslator:
             self._error(f"unsupported method call: .{func.attr}", node)
 
         self._error("unsupported call expression", node)
-
-    def _emit_tex2d(self, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
-        """Translate a texture read into the CUDA sampling call.
-
-        The device names the call after the number of texture dimensions, so
-        ``tex1D(tex, u)``, ``tex2D(tex, u, v)`` and ``tex3D(tex, u, v, w)`` map
-        straight through, keeping the Python side spelled exactly like kernel code.
-        Only the CUDA backend has texture objects: OpenCL takes an image and a
-        sampler separately, and the HIP backend reuses CUDA code generation but has
-        no texture support here, so both reject the call rather than emitting
-        something with different semantics.
-        """
-        name = node.func.id if isinstance(node.func, ast.Name) else "tex"
-        if self.backend != "cuda":
-            self._error("%s() is only available on the cuda backend" % name, node)
-
-        coordinates = len(args) - 1
-        if coordinates not in (1, 2, 3):
-            self._error(
-                "%s(handle, ...) takes 1, 2 or 3 coordinates after the handle"
-                % name, node)
-
-        expected = "tex%dD" % coordinates
-        if name != expected:
-            self._error(
-                "%s() takes %d coordinate(s) but was given %d; use %s"
-                % (name, 1 if name == "tex1D" else (2 if name == "tex2D" else 3),
-                   coordinates, expected), node)
-
-        parts = [arg[0] for arg in args[1:]]
-        return "tex%dD<float>(%s)" % (coordinates, ", ".join([args[0][0]] + parts)), "float"
-
-    def _emit_surf(self, args:List[Tuple[str, Any]], node:ast.Call, name:str)->Tuple[str, Any]:
-        """Translate a surface read or write into the CUDA call.
-
-        CUDA names the surface functions after their dimensionality, and the write
-        form takes the value first: ``surf2Dwrite(value, surface, x, y)``. The Python
-        side keeps CUDA's argument order so a kernel reads the same either way.
-        """
-        if self.backend != "cuda":
-            self._error("%s() is only available on the cuda backend" % name, node)
-
-        writing = name.endswith("write")
-        dimensions = int(name[4])
-        # Read: (surface, c0..cN). Write: (surface, value, c0..cN).
-        required = dimensions + (2 if writing else 1)
-        if len(args) != required:
-            self._error(
-                "%s() takes %d arguments (%s)" % (
-                    name, required,
-                    "surface, value, then one coordinate per dimension" if writing
-                    else "surface, then one coordinate per dimension"), node)
-
-        # CUDA has no native 1D array, so a 1D surface is a 2D array with a single
-        # row: surf1Dread/write do not take effect on it while the 2D forms do. The
-        # 1D calls are therefore emitted as their 2D equivalents with y = 0, which
-        # keeps a kernel written with surf1Dwrite working.
-        if dimensions == 1:
-            if writing:
-                value_code = args[1][0]
-                surface_code = args[0][0]
-                x_code = "((%s) * %d)" % (args[2][0], _SURFACE_ELEMENT_BYTES)
-                return "surf2Dwrite<float>(%s, %s, %s, 0)" % (
-                    value_code, surface_code, x_code), "void"
-            x_code = "((%s) * %d)" % (args[1][0], _SURFACE_ELEMENT_BYTES)
-            return "surf2Dread<float>(%s, %s, 0)" % (args[0][0], x_code), "float"
-
-        # For 2D and 3D surfaces CUDA addresses the first axis in BYTES, so that
-        # index is scaled by the element size; the remaining axes count elements.
-        def first_axis(code:str)->str:
-            return "((%s) * %d)" % (code, _SURFACE_ELEMENT_BYTES)
-
-        if writing:
-            # CUDA's write form takes the value first: surf2Dwrite(value, surface, x, y).
-            surface_code = args[0][0]
-            value_code = args[1][0]
-            coords = [arg[0] for arg in args[2:]]
-            emitted = "%s<float>(%s, %s)" % (
-                name, value_code,
-                ", ".join([surface_code, first_axis(coords[0])] + coords[1:]))
-            return emitted, "void"
-
-        coords = [arg[0] for arg in args[1:]]
-        return ("%s<float>(%s)" % (
-            name, ", ".join([args[0][0], first_axis(coords[0])] + coords[1:])),
-            "float")
 
     def _emit_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         if name == "abs":
@@ -2477,6 +3791,144 @@ class FunctionTranslator:
 
         return ast.Call(func=node.func, args=ordered, keywords=[])
 
+    def _emit_numpy_elementwise_nodes(self, attr:str,
+                                      node:ast.Call)->Optional[Tuple[str, Any]]:
+        """``_emit_numpy_elementwise`` for the calls that read their own argument syntax.
+
+        ``np.clip`` treats a literal ``None`` bound as "no bound on this side" and
+        ``np.where`` takes a condition plus two values, so both have to look at the source
+        nodes: evaluating ``None`` as a device expression fails, and evaluating every
+        argument up front would lose which ones were literal ``None``.
+        """
+        if attr == "clip":
+            if len(node.args) < 2 or len(node.args) > 3:
+                self._error("np.clip() takes 2 or 3 arguments", node)
+            value_code, value_t = self._visit_expression(node.args[0])
+            if is_ptr(value_t) or is_image(value_t):
+                self._error_numpy_array_form("clip", node)
+            bounds:List[Optional[str]] = []
+            for bound_node in node.args[1:]:
+                if isinstance(bound_node, ast.Constant) and bound_node.value is None:
+                    bounds.append(None)
+                    continue
+                code, t = self._visit_expression(bound_node)
+                if is_ptr(t) or is_image(t):
+                    self._error("np.clip() bounds must be scalars, not arrays", bound_node)
+                bounds.append(code)
+            lo:Optional[str] = bounds[0] if bounds else None
+            hi:Optional[str] = bounds[1] if len(bounds) > 1 else None
+            # np.clip keeps an integer input an integer, so the element type is not forced
+            # to float: `np.clip(300, 0, 255)` is 255, not a float.
+            result_t:Any = value_t if is_int(value_t) else "float"
+            return self._emit_clip(value_code, result_t, lo, hi), result_t
+        if attr == "where":
+            if len(node.args) == 1:
+                self._error(
+                    "np.where(cond) with one argument returns indices, which a kernel "
+                    "cannot represent; use np.where(cond, a, b)", node)
+            if len(node.args) != 3:
+                self._error("np.where() takes exactly 3 arguments in a kernel", node)
+            args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+            for code, t in args:
+                if is_ptr(t) or is_image(t):
+                    self._error_numpy_array_form("where", node)
+            return self._emit_where(args, node)
+        return None
+
+    def _error_numpy_array_form(self, attr:str, node:ast.AST)->NoReturn:
+        self._error(
+            f"np.{attr}() on an array is a host-side element-wise operation "
+            f"returning a new array, which a per-work-item kernel cannot represent. "
+            f"Index the element first, e.g. np.{attr}(arr[i], ...)", node)
+
+    def _emit_numpy_elementwise(self, attr:str, args:List[Tuple[str, Any]],
+                                node:ast.Call)->Optional[Tuple[str, Any]]:
+        """numpy functions that make sense on one element, translated into device code.
+
+        A kernel body works on single values, so the array form of these functions cannot
+        be represented (it would allocate); the element form is exactly the scalar rule
+        python applies to the same call:
+
+        * ``np.clip(v, lo, hi)`` -- clamp/min-max per backend, with None bounds omitted;
+        * ``np.where(cond, a, b)`` -- a ?: expression.
+
+        Returns None when ``attr`` is not one of them, so the caller can fall through to
+        the math table (which rejects the name with its own message).
+        """
+        if attr in ("clip", "where"):
+            for code, t in args:
+                if is_ptr(t) or is_image(t):
+                    self._error_numpy_array_form(attr, node)
+        if attr == "where":
+            return self._emit_where(args, node)
+        return None
+
+    def _emit_where(self, args:List[Tuple[str, Any]],
+                    node:ast.Call)->Tuple[str, Any]:
+        """`np.where(cond, a, b)` as a conditional expression."""
+        cond_code, cond_t = args[0]
+        then_code, then_t = args[1]
+        else_code, else_t = args[2]
+        if not is_int(cond_t) and cond_t != "bool":
+            self._error(
+                f"np.where() needs a boolean or integer condition, got {cond_t}", node)
+        unified:Any = promote(then_t, else_t)
+        return (f"(({cond_code}) ? ({unified})({then_code}) : "
+                f"({unified})({else_code}))"), unified
+
+    def _emit_clip(self, value_code:str, result_t:Any,
+                   lo:Optional[str], hi:Optional[str])->str:
+        """`np.clip` for one element, in the form the current backend provides.
+
+        OpenCL C has a real `clamp` builtin for both integer and floating types, so that
+        is used directly: one call, and the compiler recognizes it. CUDA C has no `clamp`
+        function at all (verified with NVRTC: it reports `identifier "clamp" is
+        undefined`), so the equivalent nesting of `fmin`/`fmax` is emitted instead. Both
+        forms give the same numbers; this only keeps each backend's generated code in the
+        shape that backend natively understands.
+
+        A missing bound is simply left out, matching `np.clip(a, None, hi)`.
+        """
+        if lo is None and hi is None:
+            return f"({value_code})"
+        # Every cast below must use this backend's own spelling: CUDA C has no `uchar`
+        # (see _device_type), and writing the translator's internal name here made a
+        # clipped uint8 element fail to compile.
+        element:str = self._device_type(result_t) if not is_vec(result_t) else result_t
+        if self.backend == "opencl":
+            # clamp(v, lo, hi) needs both bounds; with one bound the other side is the
+            # type's own extreme, which min/max expresses directly and without a literal.
+            if lo is not None and hi is not None:
+                return f"clamp(({element})({value_code}), ({element})({lo}), ({element})({hi}))"
+            if lo is not None:
+                return f"max(({element})({value_code}), ({element})({lo}))"
+            return f"min(({element})({value_code}), ({element})({hi}))"
+
+        # CUDA/HIP: no clamp builtin. An integer element stays on min/max, because fminf's
+        # overloads are ambiguous for integer arguments (NVRTC reports "more than one
+        # instance of overloaded function fmax matches the argument list"); a float
+        # element uses fmin/fmax, whose NaN rule (return the other operand) is what
+        # np.clip does with a NaN input.
+        pick_min:str = "min" if is_int(result_t) else "fmin"
+        pick_max:str = "max" if is_int(result_t) else "fmax"
+        code:str = f"({value_code})"
+        if lo is not None:
+            code = f"{pick_max}(({element})({code}), ({element})({lo}))"
+        if hi is not None:
+            code = f"{pick_min}(({element})({code}), ({element})({hi}))"
+        return f"({code})"
+
+    def _clip_bound(self, bound:Tuple[str, Any],
+                    node:Optional[ast.expr], call:ast.Call)->Optional[str]:
+        """One bound of np.clip: its code, or None when the bound is None."""
+        if node is None:
+            return None
+        code, t = bound
+        if is_ptr(t) or is_image(t):
+            self._error(
+                "np.clip() bounds must be scalars, not arrays", call)
+        return code
+
     def _emit_math_call(self, attr:str, args:List[Tuple[str, Any]], node:ast.Call, module_name:str="math")->Tuple[str, Any]:
         if attr not in _MATH_FUNCS:
             self._error(f"{module_name}.{attr} is not supported", node)
@@ -2518,17 +3970,87 @@ class FunctionTranslator:
         c_func:str = attr
         return f"{c_func}({', '.join(arg_codes)})", ret
 
+    def _emit_numpy_cast(self, name:str, args:List[Tuple[str, Any]],
+                         node:ast.Call)->Tuple[str, Any]:
+        """np.float32(x) / np.int32(x): a plain C cast to the matching device type."""
+        if len(args) != 1:
+            self._error(f"np.{name}() takes exactly 1 argument", node)
+        code, source_t = args[0]
+        if is_ptr(source_t) or is_vec(source_t) or is_image(source_t):
+            self._error(f"np.{name}() cannot convert a {source_t}", node)
+        target_t:Any = DTYPE_MAP.get(name)
+        if target_t is None:
+            self._error(f"np.{name}() has no device equivalent", node)
+        return f"(({self._device_type(target_t)})({code}))", target_t
+
+    def _unsupported_vec_reason(self, target:Any)->Optional[str]:
+        """Why a `pygf` class has no device vector type, or None when it has one.
+
+        The alias classes with a device counterpart resolve through `_vec_type_name`. The
+        rest are fp16 vectors (which the backends do not take) and matrices (which device
+        code has no type for), and they deserve a message that says so instead of the
+        generic "not a function that can be compiled".
+        """
+        if not isinstance(target, type):
+            return None
+        if not str(getattr(target, "__module__", "")).startswith("pygf"):
+            return None
+        name:str = target.__name__
+        if name.startswith(("matrix", "frame")):
+            return (f"{name} is a matrix type: device code has no matrix type, so build the "
+                    f"components explicitly")
+        for base in target.__mro__:
+            if base.__name__.startswith("half"):
+                return (f"{name} holds 16-bit floats: the device backends do not support "
+                        f"fp16 vectors, use a float or double vector")
+        return None
+
+    def _vec_type_name(self, name:str)->Optional[str]:
+        """The device vector type a constructor name stands for, or None.
+
+        A vector type is spelled the same way on both sides, but the host side has more
+        names for one type: `pygf` gives colour/normal/point/vector aliases that all subclass
+        the same vector (`color3f` -> `float3`). Walking the class's bases finds the device
+        name, so `color3f(r, g, b)` compiles into the `float3` constructor the body means.
+        """
+        if name in _vec_registry():
+            return name
+        target:Any = self.resolve_global(name)
+        if not isinstance(target, type):
+            return None
+        for base in target.__mro__:
+            if base.__name__ in _vec_registry():
+                return base.__name__
+        return None
+
     def _emit_vec_constructor(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         cls:Any = _vec_registry()[name]
-        expected:int = len(cls._fields_)
-        if len(args) != expected:
-            self._error(f"{name}() takes exactly {expected} component arguments ({expected} were required, {len(args)} given)", node)
-        codes:List[str] = []
-        for i, (code, t) in enumerate(args):
+        # A 3-component vector is padded to 16 bytes for the device ABI, so its ctypes struct
+        # carries a trailing `_` field that is not a component: `float3(a, b, c)` takes
+        # three arguments, not four. Count the real components, not the storage fields.
+        components:List[Tuple[str, Any]] = [f for f in cls._fields_ if f[0] != "_"]
+        expected:int = len(components)
+        field_type:str = _C_FIELD_TYPES[(name, components[0][0])]
+        # `pygf` accepts three forms, and the device call has to mean the same thing:
+        # no arguments (all zeros), one argument (broadcast), or one per component.
+        if len(args) == 0:
+            codes:List[str] = [f"(({field_type})(0))"] * expected
+        elif len(args) == 1:
+            code, t = args[0]
             if is_ptr(t) or is_vec(t):
                 self._error(f"{name}() components must be scalars", node)
-            field_type:str = _C_FIELD_TYPES[(name, cls._fields_[i][0])]
-            codes.append(code if t == field_type else f"(({field_type})({code}))")
+            codes = [code if t == field_type else f"(({field_type})({code}))"] * expected
+        elif len(args) == expected:
+            codes = []
+            for i, (code, t) in enumerate(args):
+                if is_ptr(t) or is_vec(t):
+                    self._error(f"{name}() components must be scalars", node)
+                component_type:str = _C_FIELD_TYPES[(name, components[i][0])]
+                codes.append(code if t == component_type else f"(({component_type})({code}))")
+        else:
+            self._error(
+                f"{name}() takes no arguments, one scalar to broadcast, or {expected} "
+                f"component the vector has; {len(args)} given", node)
         if self.backend == "opencl":
             return f"({name})({', '.join(codes)})", name
         return f"make_{name}({', '.join(codes)})", name
@@ -2549,20 +4071,46 @@ class FunctionTranslator:
             return emit_barrier(self.backend), "void"
 
         if name in ATOMIC_BUILTINS:
-            if len(args) != 3:
+            # Every atomic is (array, index, value) except atomic_cas, which also takes the
+            # value to compare against: (array, index, compare, value).
+            expected:int = 4 if name == "atomic_cas" else 3
+            if len(args) != expected:
+                if name == "atomic_cas":
+                    self._error(
+                        "gpu.atomic_cas(array, index, compare, value) takes exactly 4 "
+                        "arguments", node)
                 self._error(f"gpu.{name}(array, index, value) takes exactly 3 arguments", node)
-            (arr_code, arr_t), (idx_code, idx_t), (val_code, val_t) = args
+            (arr_code, arr_t), (idx_code, idx_t) = args[0], args[1]
+            val_code, val_t = args[-1]
+            compare_code:Optional[str] = (args[2][0] if name == "atomic_cas" else None)
             if not is_ptr(arr_t):
-                self._error(f"gpu.{name}() first argument must be an array", node)
+                shared:Optional[Dict[str, Any]] = (
+                    self.outer_vars.get(node.args[0].id)
+                    if isinstance(node.args[0], ast.Name) else None)
+                if shared is not None and shared["writable"]:
+                    self._error(
+                        f"{node.args[0].id} is a single shared value, not an array: update "
+                        f"it with `{node.args[0].id} += value` (or -=, &=, |=, ^=), which "
+                        f"the translator turns into the device atomic operation, and the "
+                        f"result is written back to the enclosing scope after the call. "
+                        f"{name}() itself needs an array to index", node)  # type: ignore[union-attr]
+                self._error(f"{name}() first argument must be an array", node)
             if isinstance(node.args[0], ast.Name):
                 # atomic ops write memory via pointer casts, which static analysis cannot recognize;
                 # record the target parameter so PyKernel forcibly marks it writable after compilation
                 self.atomic_targets.add(node.args[0].id)
-            if arr_t[1] not in ("int", "uint", "long", "ulong"):
-                self._error(f"gpu.{name}() only supports integer arrays, got {arr_t[1]}", node)
+            if arr_t[1] not in self.ATOMIC_ELEMENT_TYPES:
+                self._error(
+                    f"gpu.{name}() supports int32/uint32/int64/uint64 arrays, got "
+                    f"{arr_t[1]}; small integer types (int8/int16) have no device atomic "
+                    f"operation on either backend, so use int32 there", node)
             if not is_int(idx_t) or not is_int(val_t):
                 self._error(f"gpu.{name}() index and value must be integers", node)
-            return emit_atomic(name, arr_code, idx_code, val_code, arr_t[1], self.backend), arr_t[1]
+            if name == "atomic_cas" and not is_int(args[2][1]):
+                self._error("gpu.atomic_cas() compare value must be an integer", node)
+            return emit_atomic(name, arr_code, idx_code, val_code, arr_t[1], self.backend,
+                               compare_code,
+                               is_local=self._is_local_buffer(node.args[0])), arr_t[1]
 
         if name in GENERIC_BUILTINS:
             return self._emit_generic_builtin(name, args, node)
@@ -2636,7 +4184,7 @@ class FunctionTranslator:
                 return f"step({edge_code}, {x_code})", vec_t
             if vec_t is not None:
                 cls:Any = _vec_registry()[vec_t]
-                components:List[str] = [f_name for f_name, _ in cls._fields_]
+                components:List[str] = _vec_field_names(cls)
                 maker:str = f"make_{vec_t}"
                 inner:str = ", ".join(
                     f"(({self._component(x_code, x_t, c)}) < ({self._component(edge_code, edge_t, c)})) ? 0.0f : 1.0f"
@@ -2703,7 +4251,7 @@ class FunctionTranslator:
             if self.backend == "opencl":
                 return f"{name}({code})", "int"
             cls:Any = _vec_registry()[t]
-            components:List[str] = [f_name for f_name, _ in cls._fields_]
+            components:List[str] = _vec_field_names(cls)
             joiner:str = ("|" if name == "any" else "&")
             expr:str = f"({joiner.join(f'({code}.{c})' for c in components)})"
             return f"(({expr}) != 0)", "int"
@@ -2755,7 +4303,7 @@ class FunctionTranslator:
 
     def _emit_vec_clamp(self, codes:List[str], types:List[Any], vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
             f"fminf(fmaxf({self._component(codes[0], types[0], c)}, {self._component(codes[1], types[1], c)}), {self._component(codes[2], types[2], c)})"
@@ -2764,7 +4312,7 @@ class FunctionTranslator:
 
     def _emit_vec_mix(self, codes:List[str], types:List[Any], vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
             f"(({self._component(codes[0], types[0], c)}) * (1.0f - ({self._component(codes[2], types[2], c)})) + ({self._component(codes[1], types[1], c)}) * ({self._component(codes[2], types[2], c)}))"
@@ -2773,8 +4321,8 @@ class FunctionTranslator:
 
     def _emit_vec_swizzle(self, code:str, vec:str, swizzle:str, node:ast.Attribute)->Tuple[str, Any]:
         """Read a swizzle: opencl uses native v.xy; cuda generates per-component make_float2(v.x, v.y)."""
-        cls:Any = _vec_registry()[vec]
-        valid:Set[str] = {f_name for f_name, _ in cls._fields_}
+        components:List[Tuple[str, Any]] = _vec_components(vec)
+        valid:Set[str] = {f_name for f_name, _ in components}
         chars:Set[str] = set(swizzle)
         if not chars <= valid:
             self._error(f"vector type {vec} has no components '{swizzle}' "
@@ -2782,8 +4330,8 @@ class FunctionTranslator:
 
         # Result type = vector with the same element type and the component count (.zyx of float4 -> float3, .xy -> float2)
         result_vec:str = vec
-        if len(swizzle) != len(cls._fields_):
-            elem_ctype:str = _C_FIELD_TYPES[(vec, cls._fields_[0][0])]
+        if len(swizzle) != len(components):
+            elem_ctype:str = _C_FIELD_TYPES[(vec, components[0][0])]
             candidate:str = f"{elem_ctype}{len(swizzle)}"
             if candidate in _vec_registry():
                 result_vec = candidate
@@ -2792,11 +4340,6 @@ class FunctionTranslator:
 
         if self.backend == "opencl":
             return f"({code}.{swizzle})", result_vec
-        if len(swizzle) == len(cls._fields_):
-            # full-component reorder
-            maker:str = f"make_{result_vec}"
-            inner:str = ", ".join(f"({code}.{c})" for c in swizzle)
-            return f"{maker}({inner})", result_vec
         maker:str = f"make_{result_vec}"
         inner:str = ", ".join(f"({code}.{c})" for c in swizzle)
         return f"{maker}({inner})", result_vec
@@ -2812,7 +4355,7 @@ class FunctionTranslator:
         """Vector comparison: normalize the result to per-component 0/1 (device comparisons use -1,
         all-1 bits, for true, unlike genVec._compare_op's int(True)=1; here it is unified to 0/1)."""
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         int_vec:str = self._get_int_vec_type(vec)
         terms:List[str] = [f"(({left}.{c} {op} {right}.{c}) ? 1 : 0)" for c in components]
         inner:str = ", ".join(terms)
@@ -2822,7 +4365,7 @@ class FunctionTranslator:
 
     def _emit_vec_mad(self, codes:List[str], types:List[Any], vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
             f"(({self._component(codes[0], types[0], c)}) * ({self._component(codes[1], types[1], c)})) + ({self._component(codes[2], types[2], c)})"
@@ -2831,7 +4374,7 @@ class FunctionTranslator:
 
     def _emit_vec_select(self, a_code:str, b_code:str, c_code:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
             f"(({c_code}.{c}) ? ({b_code}.{c}) : ({a_code}.{c}))" for c in components)
@@ -2841,7 +4384,7 @@ class FunctionTranslator:
         op:str = {"isequal": "==", "isnotequal": "!=", "isgreater": ">",
                   "isgreaterequal": ">=", "isless": "<", "islessequal": "<="}[name]
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         int_vec:str = self._get_int_vec_type(vec)
         maker:str = f"make_{int_vec}"
         if name == "isordered":
@@ -2869,27 +4412,27 @@ class FunctionTranslator:
 
     def _emit_vec_absdiff(self, lcode:str, rcode:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         inner:str = ", ".join(f"abs(({lcode}.{c}) - ({rcode}.{c}))" for c in components)
         return self._vec_maker(vec, inner)
 
     def _emit_vec_hadd(self, lcode:str, rcode:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         inner:str = ", ".join(
             f"((({lcode}.{c}) & ({rcode}.{c})) + ((({lcode}.{c}) ^ ({rcode}.{c})) >> 1))" for c in components)
         return self._vec_maker(vec, inner)
 
     def _emit_vec_rhadd(self, lcode:str, rcode:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         inner:str = ", ".join(
             f"((({lcode}.{c}) | ({rcode}.{c})) - ((({lcode}.{c}) ^ ({rcode}.{c})) >> 1))" for c in components)
         return self._vec_maker(vec, inner)
 
     def _emit_vec_dot(self, lcode:str, rcode:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         terms:str = " + ".join(f"(({lcode}.{c}) * ({rcode}.{c}))" for c in components)
         return f"({terms})"
 
@@ -2924,7 +4467,7 @@ class FunctionTranslator:
 
     def _emit_vec_normalize(self, code:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         dot_expr:str = self._emit_vec_dot(code, code, vec)
         inner:str = ", ".join(f"(({code}.{c}) * rsqrtf({dot_expr}))" for c in components)
@@ -2932,7 +4475,7 @@ class FunctionTranslator:
 
     def _emit_vec_cross(self, lcode:str, rcode:str, vec:str)->str:
         cls:Any = _vec_registry()[vec]
-        components:List[str] = [f_name for f_name, _ in cls._fields_]
+        components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         x, y, z = components[0], components[1], components[2]
         inner:str = (f"(({lcode}.{y}) * ({rcode}.{z}) - ({lcode}.{z}) * ({rcode}.{y})), "
@@ -2950,6 +4493,13 @@ class FunctionTranslator:
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
         if is_kernel_ref:
             self._error(f"'{name}' is a @kernel function and cannot be called from device code; use a plain python function instead", node)
+        if not isinstance(raw_func, types.FunctionType):
+            # A builtin or a bound builtin method has no python source to translate, so it
+            # cannot become a device function. Say which name it was rather than failing
+            # inside inspect.getsource.
+            self._error(
+                f"'{name}' is not a python function this translator can compile into device "
+                f"code (only functions defined in python source are supported)", node)
 
         # A helper that is a method of the kernel's own class keeps the same receiver:
         # its self.xxx references become extra _self_xxx parameters appended after the
@@ -2965,7 +4515,8 @@ class FunctionTranslator:
         if entry is not None:
             if entry["status"] == "in_progress":
                 self._error(f"recursive call detected: '{name}'", node)
-            argument_codes:List[str] = call_codes + list(entry.get("shape_codes") or [])
+            argument_codes:List[str] = (call_codes + list(entry.get("shape_codes") or [])
+                                        + list(entry.get("outer_codes") or []))
             return (f"{entry['c_name']}({', '.join(argument_codes)})",
                     entry["return_type"])
 
@@ -2987,12 +4538,19 @@ class FunctionTranslator:
                     self.shapes_used.append((array_name, dim))
             shape_codes:List[str] = [self._shape_var(array_name, dim)
                                      for array_name, dim in shape_params]
+            # A helper reaches outer-scope names the same way the kernel does, so it gets
+            # the same parameters: the call site forwards its own (see below).
+            outer_codes:List[str] = []
+            for outer_name, outer in callee.outer_vars.items():
+                self._require_outer_parameter(outer_name, outer, node)
+                outer_codes.append(self._outer_argument(outer_name, outer))
             entry = {
                 "status": "done",
                 "c_name": c_name,
                 "return_type": callee.return_type,
                 "code": callee.render_device(c_name, shape_params),
                 "shape_codes": shape_codes,
+                "outer_codes": outer_codes,
             }
             self.device_cache[sig_key] = entry
         except Exception:
@@ -3006,8 +4564,33 @@ class FunctionTranslator:
                 f"'{name}' uses an image parameter from a device helper, which is not "
                 f"supported: sample or store the image in the kernel body instead", node)
 
-        argument_codes:List[str] = call_codes + list(entry.get("shape_codes") or [])
+        argument_codes:List[str] = (call_codes + list(entry.get("shape_codes") or [])
+                                    + list(entry.get("outer_codes") or []))
         return (f"{entry['c_name']}({', '.join(argument_codes)})", entry["return_type"])
+
+    def _require_outer_parameter(self, name:str, outer:Dict[str, Any], node:ast.AST)->None:
+        """Make sure the kernel carrying a helper's outer variable receives it too.
+
+        The kernel's own scan only sees names its body mentions; a helper reached from it
+        may reference more. The parameter is appended to the kernel's signature here, so
+        the launch supplies it from the same scope (see PyKernel._compile).
+        """
+        if name in self.outer_vars:
+            existing:Dict[str, Any] = self.outer_vars[name]
+            if existing["writable"] != outer["writable"] or existing["type"] != outer["type"]:
+                self._error(
+                    f"outer variable '{name}' is used with conflicting types by a helper: "
+                    f"{existing['type']} here and {outer['type']} in the helper", node)
+            return
+        self.outer_vars[name] = dict(outer)
+        if outer["writable"]:
+            self.params.append((name, (PTR, outer["type"])))
+        else:
+            self.params.append((name, outer["type"]))
+
+    def _outer_argument(self, name:str, outer:Dict[str, Any])->str:
+        """The call-site expression that forwards an outer variable to a helper."""
+        return f"&{name}" if outer["writable"] else name
 
     def _emit_self_method_call(self, kind:str, target:Any, attr:str,
                                args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
@@ -3046,17 +4629,57 @@ class FunctionTranslator:
         multi-dimensional subscripting needs them.
         """
         params:List[str] = []
+        outer_names:Set[str] = set(self.outer_vars) | set(self.host_values)
         for name, t in self.params:
+            if name in outer_names:
+                continue
             if is_ptr(t):
                 params.append(f"{self._device_type(t[1])}* {name}")
             else:
                 params.append(f"{self._device_type(t)} {name}")
         for array_name, dim in (shape_params or []):
             params.append(f"const int {self._shape_var(array_name, dim)}")
+        # Outer-scope parameters come last, matching the call site (see _emit_device_call),
+        # which forwards them after the helper's own arguments and shape extents.
+        params.extend(self._outer_param_declarations(device=True))
         ret:str = (self.return_type or "void")
         header:str = f"{self._device_qualifier()}{self._device_type(ret)} {c_name}({', '.join(params)})"
         body:str = "\n".join(self.lines)
         return f"{header} {{\n{body}\n}}"
+
+    def _outer_param_declarations(self, device:bool=False)->List[str]:
+        """C declarations for the parameters the host fills in at launch time.
+
+        This covers both the outer-scope variables and the objects the kernel body
+        creates: neither belongs to the python argument list, and both are appended to the
+        device signature after everything the work size is derived from.
+        """
+        declarations:List[str] = []
+        for name, outer in self.outer_vars.items():
+            if is_ptr(outer["type"]):
+                qualifier:str = ("" if device else
+                                 ("__global " if self.backend == "opencl" else ""))
+                declarations.append(f"{qualifier}{self._device_type(outer['type'][1])}* {name}")
+            elif outer["writable"]:
+                element:str = (self._return_param_type(outer["type"]) if device
+                               else self._kernel_scalar_type(outer["type"]))
+                qualifier = ("" if device else
+                             ("__global " if self.backend == "opencl" else ""))
+                declarations.append(f"{qualifier}{element}* {name}")
+            else:
+                declarations.append(f"{self._kernel_scalar_type(outer['type'])} {name}")
+        for name, entry in self.host_values.items():
+            declarations.append(f"{self._host_value_declaration(name, entry, device)}")
+        return declarations
+
+    def _host_value_declaration(self, name:str, entry:Dict[str, Any], device:bool)->str:
+        """The parameter declaration for one host-created object."""
+        t:Any = entry["type"]
+        if is_ptr(t):
+            qualifier:str = ("" if device else
+                             ("__global " if self.backend == "opencl" else ""))
+            return f"{qualifier}{self._device_type(t[1])}* {name}"
+        return f"{self._kernel_scalar_type(t)} {name}"
 
     def _device_type(self, t:str)->str:
         """The backend's spelling of a scalar type name.
@@ -3069,16 +4692,33 @@ class FunctionTranslator:
             return t
         return _CUDA_TYPE_NAMES.get(t, t)
 
+    def _kernel_scalar_type(self, t:Any)->str:
+        """A kernel parameter's C type.
+
+        `bool` is not portable as a kernel parameter: OpenCL C refuses a `_Bool` kernel
+        argument outright, and the CUDA/HIP argument binding has no bool entry. It travels
+        as a byte instead, which every backend accepts; the device reads 0/1.
+        """
+        if t == "bool":
+            return self._device_type("uchar")
+        return self._device_type(t)
+
     def render_kernel(self, c_name:str)->str:
+        # Outer-scope parameters are held in self.params so the host can index launch
+        # arguments by name, but they are *declared* last: the host appends them after the
+        # work-size/sampler/local-size arguments it derives (see PyKernel._invoke_inner).
+        outer_names:Set[str] = set(self.outer_vars) | set(self.host_values)
         params:List[str] = []
         for name, t in self.params:
+            if name in outer_names:
+                continue
             if is_ptr(t):
                 qualifier:str = ("__global " if self.backend == "opencl" else "")
-                params.append(f"{qualifier}{self._device_type(t[1])}* {name}")
+                params.append(f"{qualifier}{self._kernel_scalar_type(t[1])}* {name}")
             elif is_image(t):
                 params.append(f"{self._image_param_type(name, t)} {name}")
             else:
-                params.append(f"{self._device_type(t)} {name}")
+                params.append(f"{self._kernel_scalar_type(t)} {name}")
         for array_name, dim in self.shapes_used:
             params.append(f"const int {self._shape_var(array_name, dim)}")
         # OpenCL sampling takes the sampler as a kernel argument; one per sampled
@@ -3089,14 +4729,53 @@ class FunctionTranslator:
                 params.append(f"const sampler_t {self._sampler_name(image_name)}")
         for lc_name, lc_type, _ in self.local_buffers:
             if self.backend == "opencl":
-                params.append(f"__local {lc_type}* {lc_name}")
+                params.append(f"__local {self._device_type(lc_type)}* {lc_name}")
+
+        # Outer-scope parameters after everything the launch derives the work size from,
+        # matching the order the host appends them in (see PyKernel._invoke_inner).
+        params.extend(self._outer_param_declarations(device=False))
+
+        # Return slots come last, after every parameter the work size and samplers derive
+        # from, so appending them at launch time cannot disturb those positions.
+        params.extend(self.render_return_params())
 
         prefix:str = ("__kernel " if self.backend == "opencl" else "__global__ ")
         header:str = f"{prefix}void {c_name}({', '.join(params)})"
         body_lines:List[str] = []
         if self.backend == "cuda":
             for lc_name, lc_type, lc_count in self.local_buffers:
-                body_lines.append(f"__shared__ {lc_type} {lc_name}[{lc_count}];")
+                # `_device_type` because CUDA C has no `uint`: the shared array has to be
+                # declared in the backend's spelling, not the translator's internal one.
+                body_lines.append(
+                    f"__shared__ {self._device_type(lc_type)} {lc_name}[{lc_count}];")
         body_lines.extend(self.lines)
         body:str = "\n".join(body_lines)
+        typedefs:str = self.render_structure_typedefs()
+        if typedefs:
+            return f"{typedefs}\n{header} {{\n{body}\n}}"
         return f"{header} {{\n{body}\n}}"
+
+    def render_structure_typedefs(self)->str:
+        """The `typedef`s for every structure this kernel's signature mentions.
+
+        A structure is described by its numpy dtype, so the device type is generated rather
+        than declared by the user. Nested structures come first (`render_structures` orders
+        them), and a member that is a vector already has its device spelling.
+        """
+        from . import structs
+
+        dtypes:List[Any] = []
+        for name, t in list(self.params):
+            for candidate in (t[1] if is_ptr(t) else t,):
+                dtype:Any = structs.dtype_for(candidate) if isinstance(candidate, str) else None
+                if dtype is not None and dtype not in dtypes:
+                    dtypes.append(dtype)
+        for dtype in self.private_structs:
+            if dtype not in dtypes:
+                dtypes.append(dtype)
+        for entry in (self.return_layout or []):
+            candidate:Any = entry["type"]
+            dtype = structs.dtype_for(candidate) if isinstance(candidate, str) else None
+            if dtype is not None and dtype not in dtypes:
+                dtypes.append(dtype)
+        return structs.render_structures(dtypes, self.backend)

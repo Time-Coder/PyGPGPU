@@ -170,7 +170,7 @@ class cuimport:
 
     @staticmethod
     def config(
-        maxrregcount:Optional[int]=0,
+        maxrregcount:Optional[int]=None,
         ftz:Optional[bool]=None,
         prec_sqrt:Optional[bool]=None,
         prec_div:Optional[bool]=None,

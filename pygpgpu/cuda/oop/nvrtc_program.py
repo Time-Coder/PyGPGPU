@@ -93,8 +93,11 @@ class NVRTCProgram(CUObject):
                 NVRTC.nvrtcGetProgramLog(self.id, log)
 
                 error_message = self._program_parser.format_error(log.value)
+                # A successful build can still log nothing but whitespace, which used to be
+                # reported as an empty CompileWarning. Only a log with content is worth one.
                 if success:
-                    warnings.warn(error_message, CompileWarning)
+                    if error_message.strip():
+                        warnings.warn(error_message, CompileWarning)
                 else:
                     raise CompileError(error_message)
     

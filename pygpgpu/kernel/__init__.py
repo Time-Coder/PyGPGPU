@@ -1,6 +1,6 @@
-from .builtins import (gpu, tex1D, tex2D, tex3D,
-                       surf1Dread, surf1Dwrite, surf2Dread, surf2Dwrite,
-                       surf3Dread, surf3Dwrite)
+from .builtins import __all__ as _builtin_names
+from .builtin_registry import BUILTIN_FUNCTIONS, builtin_function, builtin_name_of
+from .builtins import *  # noqa: F403  (the dual-sided builtins, re-exported below)
 from .decorator import (
     DEFAULT_BACKEND_ORDER,
     available_devices,
@@ -13,9 +13,11 @@ from .decorator import (
 )
 
 __all__ = [
-    "kernel", "gpu", "tex1D", "tex2D", "tex3D",
-    "surf1Dread", "surf1Dwrite", "surf2Dread", "surf2Dwrite",
-    "surf3Dread", "surf3Dwrite", "PyKernel", "DEFAULT_BACKEND_ORDER",
+    "kernel", "PyKernel", "DEFAULT_BACKEND_ORDER",
     "list_devices", "get_device", "available_devices",
     "set_default_device", "get_default_device",
+    # The builtin tables: the translator resolves a call through them, and tests use them
+    # to check that the namespace and the device side agree.
+    "BUILTIN_FUNCTIONS", "builtin_function", "builtin_name_of",
+    *_builtin_names,
 ]
