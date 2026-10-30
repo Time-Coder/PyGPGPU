@@ -23,12 +23,16 @@ from .ushort16 import ushort16
 # layout and structured dtype). The widths pygf has no counterpart for (8/16)
 # and the char/uchar/short/ushort families stay PyGPGPU's own.
 from pygf.double2 import double2
+from pygf.double3 import double3
 from pygf.double4 import double4
 from pygf.float2 import float2
+from pygf.float3 import float3
 from pygf.float4 import float4
 from pygf.int2 import int2
+from pygf.int3 import int3
 from pygf.int4 import int4
 from pygf.uint2 import uint2
+from pygf.uint3 import uint3
 from pygf.uint4 import uint4
 
 from .float8 import float8

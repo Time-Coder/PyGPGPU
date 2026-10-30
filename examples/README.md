@@ -35,6 +35,7 @@ matching the rest of the repository.
 | [11_returns_and_scope.py](11_returns_and_scope.py) | Return values (as parameters, first return wins) and outer-scope variables (parameterized, `nonlocal` written back) |
 | [12_print_in_kernel.py](12_print_in_kernel.py) | `print()` inside a kernel: translated to device `printf` with python's exact rendering |
 | [13_image.py](13_image.py) | One backend-neutral `Image` type: a kernel indexes it like an array (`src[y, x]`), translated into `tex2D`/`surf2Dwrite` on CUDA and `read_imagef`/`write_imagef` on OpenCL, and executed by a host implementation on the `python` backend so all three agree element for element |
+| [14_heterogeneous_data.py](14_heterogeneous_data.py) | Every kind of value a kernel carries, in all three roles (argument, object built in the body, return value): scalars, 1/2/3-D scalar arrays, vectors by value, 1/2/3-D vector arrays, structures with every kind of member, and 1/2/3-D structure arrays |
 
 `@kernel` function bodies accept a docstring (the leading string literal is ignored by the
 translator and never reaches the generated GPU source), so writing explanations inside a

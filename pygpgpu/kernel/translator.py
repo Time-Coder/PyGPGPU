@@ -567,9 +567,13 @@ def infer_ctype(value:Any)->Any:
 
     # A vector instance from the host library (`pygf`) is not one of the driver's classes,
     # but its bases name the same device type: `point3f` -> `float3`, `color3d` -> `double3`.
-    for base in type(value).__mro__:
-        if base.__name__ in registry:
-            return base.__name__
+    # A numpy scalar is never a vector, even where the class name collides: `np.int8` is
+    # `numpy.int8`, while the registry has an eight-component `int8` vector, and a scalar
+    # reaching that lookup became a vector parameter the device could not bind.
+    if not isinstance(value, np.generic):
+        for base in type(value).__mro__:
+            if base.__name__ in registry:
+                return base.__name__
 
     if isinstance(value, np.ndarray):
         if value.dtype.fields is not None:

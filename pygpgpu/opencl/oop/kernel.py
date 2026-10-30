@@ -42,6 +42,30 @@ if TYPE_CHECKING:
     from .device import Device
 
 
+def _element_dtype(content_type: Any) -> Any:
+    """The numpy dtype an array argument's elements should be cast to.
+
+    `char` binds as `ctypes.c_char`, and numpy reads that as a one-byte *string*: casting an
+    integer array to it converts the numbers to characters (a 7 becomes the byte for "7",
+    0x37), which the device then reads as 55. `np.dtype(c_char)` is `|S1` however it is
+    spelled, so the string kinds are mapped back to the integer of the same width.
+    """
+    if isinstance(content_type, np.dtype):
+        dtype: np.dtype = content_type
+    else:
+        size = sizeof(content_type) if hasattr(content_type, "__mro__") else 0
+        if size == 1:
+            # c_char / c_ubyte: a signedness guess would be worse than the kernel's own
+            # declaration, and both are one byte wide, so an unsigned byte is the safe
+            # carrier and the kernel reads it back as its declared type.
+            dtype = np.dtype(np.uint8)
+        else:
+            dtype = np.dtype(content_type)
+    if dtype.kind in ("S", "U", "O"):
+        return np.dtype(f"i{dtype.itemsize}")
+    return dtype
+
+
 _async_executor:Optional[concurrent.futures.ThreadPoolExecutor] = None
 _async_executor_lock = threading.Lock()
 
@@ -580,7 +604,7 @@ class Kernel(CLObject):
                             if value.dtype != content_dtype:
                                 used_value = np.ascontiguousarray(value).view(content_dtype)
                         elif value.dtype != content_type:
-                            used_value = value.astype(content_type)
+                            used_value = value.astype(_element_dtype(content_type))
                     else:
                         ProgramParser._apply_structure_pointers(value, cmd_queue)
                         used_value = np.array(value, dtype=content_type)
