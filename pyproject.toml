@@ -54,7 +54,11 @@ dependencies = [
     # vector view. Without it `np.dtype(cls)` over a class whose layout matches a vector
     # (`{float x; float y;}` against `float2`) is read as a vector, and a structure argument
     # then fails with "string indices must be integers".
-    "pygf>=0.1.6",
+    # 0.1.7 lets a vector answer a component *name* (`v["x"]`), which is the spelling a kernel
+    # body writes for a structure member's component (`ray.direction.x` is `.x`, but the
+    # subscript form `s["v"]["x"]` needs the name). The `python` backend runs that body
+    # unchanged, so it depends on this.
+    "pygf>=0.1.7",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",
