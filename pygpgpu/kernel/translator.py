@@ -241,6 +241,38 @@ def _self_member_call_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
     return kind, target
 
 
+def writes_receiver(func:Callable, self_param:str)->bool:
+    """Whether a method body assigns to a member of its receiver (`self.x = ...`).
+
+    A method that does has to receive its receiver *by pointer*: a by-value structure is a
+    copy, so the store lands in the callee's local and never reaches the caller's value.
+    `HitRecord.set_face_normal` writes `self.front_face` and `self.normal`, and with a
+    by-value receiver every hit record's normal stayed zero -- a uniformly grey image on the
+    GPU while the interpreter was right, because it runs the method unchanged.
+    """
+    if not self_param:
+        return False
+    try:
+        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+    except Exception:
+        return False
+    for node in ast.walk(tree):
+        targets:List[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        for target in targets:
+            if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                    and target.value.id == self_param):
+                return True
+            if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Attribute)
+                    and isinstance(target.value.value, ast.Name)
+                    and target.value.value.id == self_param):
+                return True
+    return False
+
+
 def scan_self_attrs(func:Callable, self_param:str, owner:Optional[type]=None)->List[str]:
     """Collect the self.xxx data attribute names the method (and its helpers) reference.
 
@@ -2444,6 +2476,10 @@ class FunctionTranslator:
             # path is only reached for synthesized object arguments, whose host side copies
             # the final member values home after the launch.
             target_code, target_t = self._visit_target(target)
+            if self._target_is_bool_member(target, target_t, t):
+                # A bool member is a byte on the device, so a float would truncate
+                # (`front_face = 0.99` -> 0). The store keeps boolean semantics instead.
+                code = f"(({code}) != 0)"
             self._emit(f"{target_code} = {code};")
         else:
             self._error(f"unsupported assignment target: {target.__class__.__name__}", node)
@@ -3169,6 +3205,9 @@ class FunctionTranslator:
                 # marks the array as written; without this flag the host would not read the
                 # stores back. `atomic_targets` is exactly the force-writable channel.
                 self.atomic_targets.add(target.value.id)
+                if code.startswith("&"):
+                    # A method's own receiver, by address: a plain pointer store.
+                    return f"({code})->{target.attr}", member_types[target.attr]
                 return f"({code}[0]).{target.attr}", member_types[target.attr]
             if is_vec(t) or not isinstance(t, str) or structs_dtype_for(t) is None:
                 self._error(
@@ -3181,6 +3220,21 @@ class FunctionTranslator:
                     f"(available: {', '.join(member_types)})", target)
             return f"({code}).{target.attr}", member_types[target.attr]
         self._error(f"unsupported assignment target: {target.__class__.__name__}", target)
+
+    def _target_is_bool_member(self, target:ast.expr, target_t:Any, value_t:Any)->bool:
+        """Whether a member store lands in a bool-typed field while holding a wider type."""
+        from . import structs  # noqa: PLC0415
+
+        if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)):
+            return False
+        if value_t == "bool":
+            return False
+        base_t:Any = self._lookup(target.value.id)
+        struct_t:Any = base_t[1] if is_ptr(base_t) else base_t
+        dtype:Any = structs.dtype_for(struct_t) if isinstance(struct_t, str) else None
+        if dtype is None or target.attr not in (dtype.names or ()):
+            return False
+        return np.dtype(dtype.fields[target.attr][0]).name == "bool"
 
     def _visit_array_target(self, node:ast.expr)->Tuple[str, Any]:
         code, t = self._visit_expression(node)
@@ -3749,7 +3803,8 @@ class FunctionTranslator:
 
         if isinstance(base_t, tuple) and is_ptr(base_t):
             # `p.x` on a written object argument: it travels as a one-element record array,
-            # so the member read goes through the element (`p[0].x`).
+            # so the member read goes through the element (`p[0].x`). A method's receiver is
+            # a plain pointer instead (`&record`), addressed as `(&record)->x`.
             dtype:Optional[np.dtype] = structs.dtype_for(base_t[1])
             if dtype is not None:
                 members:Dict[str, Any] = structs.member_types(dtype, self.backend)
@@ -3757,6 +3812,9 @@ class FunctionTranslator:
                     self._error(
                         f"structure {base_t[1]} has no member '.{node.attr}' "
                         f"(available: {', '.join(members)})", node)
+                if base_code.startswith("&"):
+                    # A receiver passed by address: no record array around it.
+                    return f"({base_code})->{node.attr}", members[node.attr]
                 return f"({base_code}[0]).{node.attr}", members[node.attr]
 
         if isinstance(base_t, str):
@@ -3935,14 +3993,26 @@ class FunctionTranslator:
         kind, target = self_attr_kind(owner, func.attr)
         if kind == "method":
             args = [self._visit_expression(a) for a in node.args]
+            # A method that assigns to its receiver's members needs the receiver *by
+            # address*: a by-value structure is a copy, so `self.normal = ...` inside the
+            # method would be lost. `HitRecord.set_face_normal` is exactly that shape, and
+            # with a by-value receiver every normal stayed zero -- the GPU drew a uniform
+            # grey ball while the interpreter, which runs the method unchanged, was right.
+            receiver_param:str = (target.__code__.co_varnames[0]
+                                  if getattr(target, "__code__", None) else "self")
+            if writes_receiver(target, receiver_param):
+                if isinstance(base_t, tuple) and is_ptr(base_t):
+                    # Already a pointer (an object argument travelling as a record array):
+                    # it can be handed over as it is.
+                    receiver:(str, Any) = (base_code, base_t)
+                else:
+                    receiver = (f"&({base_code})", (PTR, base_t))
+                return self._emit_device_call(func.attr, target, [receiver] + args, node)
             return self._emit_device_call(func.attr, target,
                                           [(base_code, base_t)] + args, node)
         if kind == "staticmethod":
             args = [self._visit_expression(a) for a in node.args]
             return self._emit_device_call(func.attr, target, args, node)
-        print('METHOD-FAIL owner:', owner.__name__, 'id:', id(owner),
-              'has attr:', hasattr(owner, func.attr),
-              'file:', getattr(getattr(owner, func.attr, None), '__code__', None) and owner.__dict__.get(func.attr) is not None)
         self._error(
             f"cannot call '.{func.attr}()' on {owner.__name__}: it is "
             f"{self._why_not_callable(kind, func.attr)}", node)
@@ -4510,7 +4580,21 @@ class FunctionTranslator:
             return code
         if t == member_type:
             return code
+        if member_type == "uchar" and self._member_is_bool(struct_name, member):
+            # A bool member is stored as a byte, so assigning a float to it truncates --
+            # `front_face = 0.99` became 0, and the branch reading it took the wrong way,
+            # which showed as a missing colour channel. The conversion has to be boolean.
+            return f"(({code}) != 0)"
         return f"(({self._device_type(member_type)})({code}))"
+
+    def _member_is_bool(self, struct_name:str, member:str)->bool:
+        """Whether a structure member's layout type is a bool."""
+        from . import structs  # noqa: PLC0415
+
+        dtype:Any = structs.dtype_for(struct_name)
+        if dtype is None or member not in (dtype.names or ()):
+            return False
+        return np.dtype(dtype.fields[member][0]).name == "bool"
 
     def _emit_vec_constructor(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         cls:Any = _vec_registry()[name]
