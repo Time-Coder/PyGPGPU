@@ -62,7 +62,10 @@ dependencies = [
     # of raising ZeroDivisionError, and lets `equal`/`notEqual` take scalars like their
     # siblings. `rsqrt` and the six comparison builtins are pygf's objects here, so the host
     # interpreter would otherwise disagree with a GPU on those inputs.
-    "pygf>=0.1.8",
+    # 0.1.9 lets `trunc` take a numpy scalar. The scalar math intrinsics below are pygf's
+    # objects, and the `python` backend hands them numpy scalars read out of an array, which
+    # `math.trunc` used to reject for want of `__trunc__`.
+    "pygf>=0.1.9",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",

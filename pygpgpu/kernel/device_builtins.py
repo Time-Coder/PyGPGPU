@@ -141,6 +141,38 @@ GENERIC_BUILTINS:Dict[str, Tuple[str, str]] = {
 }
 
 
+# The scalar math intrinsics. OpenCL has a native vector overload for every one of
+# them; CUDA has only the scalar, `f`-suffixed spelling, so the translator expands a
+# vector argument per component (see FunctionTranslator._emit_generic_builtin).
+MATH_BUILTINS:Dict[str, Tuple[str, str]] = {
+    "sqrt": ("sqrt", "sqrtf"),
+    "sin": ("sin", "sinf"),
+    "cos": ("cos", "cosf"),
+    "tan": ("tan", "tanf"),
+    "asin": ("asin", "asinf"),
+    "acos": ("acos", "acosf"),
+    "atan": ("atan", "atanf"),
+    "atan2": ("atan2", "atan2f"),
+    "sinh": ("sinh", "sinhf"),
+    "cosh": ("cosh", "coshf"),
+    "tanh": ("tanh", "tanhf"),
+    "exp": ("exp", "expf"),
+    "log": ("log", "logf"),
+    "log2": ("log2", "log2f"),
+    "log10": ("log10", "log10f"),
+    "pow": ("pow", "powf"),
+    "floor": ("floor", "floorf"),
+    "ceil": ("ceil", "ceilf"),
+    "trunc": ("trunc", "truncf"),
+    "fabs": ("fabs", "fabsf"),
+    "fmod": ("fmod", "fmodf"),
+    "hypot": ("hypot", "hypotf"),
+    "cbrt": ("cbrt", "cbrtf"),
+}
+
+GENERIC_BUILTINS.update(MATH_BUILTINS)
+
+
 def dim_component(dim:int)->str:
     if dim not in (0, 1, 2):
         raise ValueError(f"dimension index must be 0, 1 or 2, got {dim}")

@@ -18,6 +18,7 @@ from .device_builtins import (
     ATOMIC_BUILTINS,
     GENERIC_BUILTINS,
     INDEX_BUILTINS,
+    MATH_BUILTINS,
     emit_atomic,
     emit_barrier,
     emit_index,
@@ -4353,6 +4354,33 @@ class FunctionTranslator:
                 return self._vec_componentwise(name, code, t), t
             code = f"{GENERIC_BUILTINS[name][1]}({code})" if self.backend == "cuda" else f"{name}({code})"
             return code, t
+
+        if name in MATH_BUILTINS:
+            # A scalar math intrinsic. OpenCL has a native vector overload for every one of
+            # them, so the call passes straight through; CUDA has only the `f`-suffixed
+            # scalar spelling, so a vector argument is expanded per component here.
+            if len(args) not in (1, 2):
+                self._error(f"gpu.{name}() takes 1 or 2 arguments", node)
+            cuda_name:str = MATH_BUILTINS[name][1]
+            result_t:Any = vec_t or args[0][1]
+            if self.backend == "opencl":
+                return f"{name}({', '.join(arg_codes)})", result_t
+            if vec_t is not None:
+                if len(args) == 1:
+                    return self._vec_componentwise(cuda_name, arg_codes[0], vec_t), vec_t
+                if is_vec(arg_types[0]):
+                    if is_vec(arg_types[1]):
+                        return self._vec_componentwise(cuda_name, arg_codes[0], vec_t,
+                                                       right=arg_codes[1]), vec_t
+                    return self._vec_componentwise(cuda_name, arg_codes[0], vec_t,
+                                                   scalar=arg_codes[1]), vec_t
+                # The vector is the second operand (`pow(2.0, v)`): expand on that side, and
+                # keep the operand order, which a non-commutative pair depends on.
+                components:List[str] = _vec_field_names(_vec_registry()[vec_t])
+                terms:str = ", ".join(
+                    f"{cuda_name}({arg_codes[0]}, {arg_codes[1]}.{c})" for c in components)
+                return self._vec_maker(vec_t, terms), vec_t
+            return f"{cuda_name}({', '.join(arg_codes)})", result_t
 
         if name == "clamp":
             if len(args) != 3:

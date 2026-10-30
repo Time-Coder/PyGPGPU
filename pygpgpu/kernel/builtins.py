@@ -60,6 +60,29 @@ from ..vec_types.funcs import rsqrt as rsqrt
 from ..vec_types.funcs import saturate as saturate
 from ..vec_types.funcs import select as select
 from ..vec_types.funcs import step as step
+from ..vec_types.funcs import sqrt as sqrt
+from ..vec_types.funcs import sin as sin
+from ..vec_types.funcs import cos as cos
+from ..vec_types.funcs import tan as tan
+from ..vec_types.funcs import asin as asin
+from ..vec_types.funcs import acos as acos
+from ..vec_types.funcs import atan as atan
+from ..vec_types.funcs import atan2 as atan2
+from ..vec_types.funcs import sinh as sinh
+from ..vec_types.funcs import cosh as cosh
+from ..vec_types.funcs import tanh as tanh
+from ..vec_types.funcs import exp as exp
+from ..vec_types.funcs import log as log
+from ..vec_types.funcs import log2 as log2
+from ..vec_types.funcs import log10 as log10
+from ..vec_types.funcs import pow as pow
+from ..vec_types.funcs import floor as floor
+from ..vec_types.funcs import ceil as ceil
+from ..vec_types.funcs import trunc as trunc
+from ..vec_types.funcs import fabs as fabs
+from ..vec_types.funcs import fmod as fmod
+from ..vec_types.funcs import hypot as hypot
+from ..vec_types.funcs import cbrt as cbrt
 
 from .host_runtime import atomic_in_place, local_extent, work_item, work_size_extent
 
@@ -81,6 +104,30 @@ __all__ = [
     "isless", "islessequal", "isordered", "isunordered",
     "abs_diff", "hadd", "rhadd", "mad24", "mul24",
     "dot", "cross", "normalize", "length", "distance",
+    # scalar math intrinsics (also from pygpgpu.vec_types.funcs)
+    "sqrt",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "sinh",
+    "cosh",
+    "tanh",
+    "exp",
+    "log",
+    "log2",
+    "log10",
+    "pow",
+    "floor",
+    "ceil",
+    "trunc",
+    "fabs",
+    "fmod",
+    "hypot",
+    "cbrt",
 ]
 
 
