@@ -233,7 +233,23 @@ def analyse(func: Callable, self_param: str = "") -> PythonAnalysis:
 
 
 def as_host_array(value: Any) -> Any:
-    """The array as the body should see it: vector elements are vector instances."""
+    """The value as the body should see it: records and vectors, not their carriers.
+
+    A `ctypes.Structure` instance is a structure *value*, and the body reads its members
+    with numpy's spelling (`p["i"]`) -- the same spelling a GPU body uses. Converting here
+    keeps one body working on every backend; an array of that dtype is left alone, since
+    its elements already read back as records.
+    """
+    import ctypes
+
+    import numpy as np
+
+    if isinstance(value, ctypes.Structure) and not isinstance(value, np.ndarray):
+        dtype: Any = np.dtype(type(value))
+        if dtype.fields is not None:
+            record: Any = np.zeros(1, dtype=dtype)
+            record[0] = tuple(getattr(value, name) for name, _ in value._fields_)
+            return record[0]
     return wrap_vector_array(value)
 
 

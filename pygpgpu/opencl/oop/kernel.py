@@ -560,9 +560,12 @@ class Kernel(CLObject):
                 is_struct = True
 
             if not arg_info.is_ptr:
-                if is_struct and isinstance(value, (np.void, bytes, bytearray)):
+                if is_struct and isinstance(value, (np.void, bytes, bytearray, Structure)):
                     # A numpy record holds exactly the bytes the dtype described, which is the
                     # layout the parsed structure has, so it can back the ctypes value directly.
+                    # A ctypes.Structure instance is the caller's own class, which is a
+                    # different type from the one the parser generated for the same layout,
+                    # so it goes through its bytes as well.
                     value = content_type.from_buffer_copy(bytes(value))
                 if isinstance(value, content_type):
                     used_value = value

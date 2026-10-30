@@ -517,9 +517,12 @@ class Kernel(CUObject):
                     packed:Any = self._pack_vec3_value(value, content_type)
                     return pointer(packed)
 
-                if is_struct and isinstance(value, (np.void, bytes, bytearray)):
+                if is_struct and isinstance(value, (np.void, bytes, bytearray, Structure)):
                     # A numpy record holds exactly the bytes the dtype described, which is the
                     # layout the parsed structure has, so it can back the ctypes value directly.
+                    # A ctypes.Structure instance is the caller's own class, which is a
+                    # different type from the one the parser generated for the same layout,
+                    # so it goes through its bytes as well.
                     value = content_type.from_buffer_copy(bytes(value))
 
                 if isinstance(value, content_type):

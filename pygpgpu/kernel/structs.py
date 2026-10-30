@@ -16,13 +16,25 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# Dtypes that a `ctypes.Structure` class declared. A dtype cannot say whether it means a
+# vector or a structure -- `{float x; float y;}` and `float2` compare and hash equal -- so the
+# only usable evidence is the dtype *object*: numpy marks a record built from a ctypes class
+# as aligned (`isalignedstruct`), which the vector dtypes this package ships are not.
+_DECLARED: Dict[np.dtype, type] = {}
+
 
 def is_record(dtype:Any)->bool:
-    """True for a structured dtype that is a *structure*, not a vector."""
+    """True for a structured dtype that is a *structure*, not a vector.
+
+    A dtype whose layout coincides with a vector type is a structure when a
+    `ctypes.Structure` class declared it -- the layout alone cannot tell the two apart.
+    """
     from ..vec_types.layout import _vector_dtype_name
 
     if not isinstance(dtype, np.dtype) or dtype.fields is None:
         return False
+    if is_declared_structure(dtype):
+        return True
     if _vector_dtype_name(dtype) is not None:
         return False
     return True
@@ -129,6 +141,83 @@ def register(dtype:Any) -> str:
     name:str = struct_name(np.dtype(dtype))
     _REGISTRY[name] = np.dtype(dtype)
     return name
+
+
+def register_class(cls:Any) -> Optional[np.dtype]:
+    """Record the dtype a `ctypes.Structure` class declares, and return it.
+
+    The class is kept as evidence: a dtype whose layout matches a vector type is still a
+    structure when the caller wrote a class for it, and member access then has to be the
+    structure's string subscript rather than a vector's component name.
+    """
+    import ctypes
+
+    if not (isinstance(cls, type) and issubclass(cls, ctypes.Structure)):
+        return None
+    try:
+        dtype:np.dtype = np.dtype(cls)
+    except TypeError:
+        return None
+    if dtype.fields is None:
+        return None
+    _DECLARED.setdefault(dtype, cls)
+    register(dtype)
+    return dtype
+
+
+def is_declared_structure(dtype:Any) -> bool:
+    """True when a `ctypes.Structure` class declared this dtype's layout.
+
+    Alignment is the evidence, not just the registry: `np.dtype(cls)` over a
+    `ctypes.Structure` always produces an *aligned* record (C layout), while the vector
+    dtypes this package ships are built with `np.dtype(_fields_)` and are not aligned. So a
+    record whose layout coincides with a vector -- `{float x; float y;}` against `float2` --
+    is a structure when it is aligned, and a vector when it is not.
+
+    Note the argument has to be the dtype *object*, not a value compared against one: an
+    aligned record and the vector's plain record compare equal and hash equal, so only the
+    ``isalignedstruct`` flag on the dtype you were handed tells them apart.
+    """
+    if not isinstance(dtype, np.dtype) or dtype.fields is None:
+        return False
+    return bool(dtype.isalignedstruct)
+
+
+def structure_dtype_of(value:Any) -> Optional[np.dtype]:
+    """The structure dtype a value denotes, or None, respecting how it was built.
+
+    A vector type is a `ctypes.Structure` as well, and its dtype carries the same alignment,
+    so a value that is one of the package's vectors has to be excluded first -- otherwise
+    every vector argument would be read as a structure.
+
+    An ndarray keeps the dtype object it was created with, so an aligned record array stays
+    distinguishable from a vector array whose layout happens to match.
+    """
+    import ctypes
+
+    from .translator import _vec_registry
+
+    if isinstance(value, np.ndarray):
+        dtype:np.dtype = value.dtype
+        return dtype if is_declared_structure(dtype) else None
+
+    cls:Any = type(value) if isinstance(value, ctypes.Structure) else value
+    if not (isinstance(cls, type) and issubclass(cls, ctypes.Structure)):
+        return None
+    if cls in _vec_registry().values() or _is_vector_alias(cls):
+        return None
+    return register_class(cls)
+
+
+def _is_vector_alias(cls:Any) -> bool:
+    """True when a class is a pygf vector or one of its aliases (`point3f`, `color3d`)."""
+    from ..vec_types.layout import _host_classes
+
+    try:
+        return any(cls is host or issubclass(cls, host)
+                   for host in _host_classes().values())
+    except (ImportError, TypeError):
+        return False
 
 
 def dtype_for(name:str) -> Optional[np.dtype]:

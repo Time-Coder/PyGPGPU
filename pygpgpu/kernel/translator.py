@@ -366,10 +366,19 @@ def _vec_registry()->Dict[str, Any]:
     except NameError:
         pass
     from ..opencl.driver import CLInfo
+    from . import structs
+
     _VEC_REGISTRY = dict(CLInfo.vec_types)
     for name, cls in _VEC_REGISTRY.items():
         for field_name, field_type in cls._fields_:
             _C_FIELD_TYPES[(name, field_name)] = _c_scalar_name(field_type)
+        # A vector is a `ctypes.Structure` with an aligned dtype, which is the evidence
+        # `is_declared_structure` uses for a structure; claiming the dtype first keeps the
+        # vector reading when a caller's class happens to have the same layout.
+        try:
+            structs.claim_vector_dtype(np.dtype(cls._fields_))
+        except Exception:
+            pass
     return _VEC_REGISTRY
 
 def _c_scalar_name(ctypes_type:Any)->str:
@@ -551,9 +560,21 @@ def infer_ctype(value:Any)->Any:
                 % value.dtype.name) from None
         return (IMAGE, value.channels, channel_type)
 
+    # A `ctypes.Structure` the caller declared is a structure value, before any of the
+    # vector lookups: its dtype compares equal to a vector of the same layout
+    # (`{float x; float y;}` *is* `float2`), and only the dtype object's alignment flag says
+    # which one the caller meant.
+    declared:Optional[np.dtype] = structs.structure_dtype_of(value)
+    if declared is not None and not isinstance(value, np.ndarray):
+        return structs.register(declared)
+
     if isinstance(value, np.void):
         # A structured scalar is either a vector element or a structure value: both are
         # described completely by the dtype, so both become a device type.
+        if structs.is_declared_structure(value.dtype):
+            # An element of a ctypes-declared array reaches here as a record, and the
+            # declaration wins over the coincidental vector layout.
+            return structs.register(value.dtype)
         vec_name:Optional[str] = _vector_dtype_name(value.dtype)
         if vec_name is not None:
             return vec_name
@@ -577,6 +598,9 @@ def infer_ctype(value:Any)->Any:
 
     if isinstance(value, np.ndarray):
         if value.dtype.fields is not None:
+            if structs.is_declared_structure(value.dtype):
+                # An array of a caller's `ctypes.Structure`: structured, whatever layout.
+                return (PTR, structs.register(value.dtype))
             vec_name = _vector_dtype_name(value.dtype)
             if vec_name is not None:
                 return (PTR, vec_name)
