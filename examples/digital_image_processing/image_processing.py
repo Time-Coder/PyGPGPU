@@ -1,5 +1,5 @@
 import numpy as np
-from pygpgpu import (atomic_add, barrier, get_global_id, get_local_id, get_local_size,
+from pygpgpu import (atomic_add, barrier, blockIdx, get_global_id, get_local_id, get_local_size,
                      kernel, local, work_size)
 
 
@@ -121,10 +121,12 @@ def hist(image:np.ndarray):
     bins = local(np.int32, 768)            # __shared__ bins[3 * 256], per work group
     dest_hist:np.ndarray = np.zeros((3, 256), dtype=np.int32)
 
-    # Clear the group's bins: each lane takes a strided slice of the 768 bins.
+    # Clear the group's bins: each lane takes a strided slice of the 768 bins. The first
+    # subscript names the group (`bins[blockIdx]`); on a device it selects storage the
+    # hardware already gave this group, so no offset is emitted for it.
     b = lane
     while b < 768:
-        bins[b] = 0
+        bins[blockIdx][b] = 0
         b += group_total
     barrier()                              # __syncthreads()
 
@@ -140,13 +142,13 @@ def hist(image:np.ndarray):
     channel = get_global_id(2)
     if i < image.shape[0] and j < image.shape[1]:
         value = int(image[i, j, channel])
-        atomic_add(bins, channel * HIST_BINS + value, 1)
+        atomic_add(bins[blockIdx], channel * HIST_BINS + value, 1)
     barrier()                              # __syncthreads()
 
     # Merge this group's bins into the global histogram, once per bin.
     b = lane
     while b < 768:
-        atomic_add(dest_hist, b, bins[b])
+        atomic_add(dest_hist, b, bins[blockIdx][b])
         b += group_total
 
     return dest_hist

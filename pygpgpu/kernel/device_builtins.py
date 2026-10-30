@@ -27,6 +27,28 @@ INDEX_BUILTINS:Dict[str, Tuple[str, str]] = {
     "get_num_groups": ("get_num_groups", "(int)gridDim{c}"),
 }
 
+# CUDA's index vectors: name -> the three expressions its axes stand for.
+#
+# They are values, not calls (`buf[blockIdx][j]`), so the translator resolves the *name* to
+# this table instead of going through `_builtin_call_name`. Each axis is the same number the
+# OpenCL spelling gives for that dimension, spelled in the backend's own terms, so a kernel
+# ported from CUDA means exactly what the `get_*` spelling means.
+INDEX_VECTOR_BUILTINS:Dict[str, Tuple[str, str]] = {
+    "blockIdx": ("int3", "make_int3((int)blockIdx.x, (int)blockIdx.y, (int)blockIdx.z)"),
+    "threadIdx": ("int3", "make_int3((int)threadIdx.x, (int)threadIdx.y, (int)threadIdx.z)"),
+    "blockDim": ("int3", "make_int3((int)blockDim.x, (int)blockDim.y, (int)blockDim.z)"),
+    "gridDim": ("int3", "make_int3((int)gridDim.x, (int)gridDim.y, (int)gridDim.z)"),
+}
+
+# OpenCL has no `make_int3`; a compound literal with a struct-vs-vector spelling is why the
+# expression above is CUDA-only. OpenCL builds the same value by construction instead.
+INDEX_VECTOR_OPENCL:Dict[str, Tuple[str, str]] = {
+    "blockIdx": ("int3", "(int3)(get_group_id(0), get_group_id(1), get_group_id(2))"),
+    "threadIdx": ("int3", "(int3)(get_local_id(0), get_local_id(1), get_local_id(2))"),
+    "blockDim": ("int3", "(int3)(get_local_size(0), get_local_size(1), get_local_size(2))"),
+    "gridDim": ("int3", "(int3)(get_num_groups(0), get_num_groups(1), get_num_groups(2))"),
+}
+
 # Atomic ops: (gpu name, opencl name, cuda name); integer element types only.
 # `atomic_cas` is the one with a different arity: (array, index, compare, value).
 ATOMIC_BUILTINS:Dict[str, Tuple[str, str]] = {

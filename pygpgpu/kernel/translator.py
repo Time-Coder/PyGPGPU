@@ -19,6 +19,8 @@ from .device_builtins import (
     ATOMIC_BUILTINS,
     GENERIC_BUILTINS,
     INDEX_BUILTINS,
+    INDEX_VECTOR_BUILTINS,
+    INDEX_VECTOR_OPENCL,
     MATH_BUILTINS,
     emit_atomic,
     emit_barrier,
@@ -2555,7 +2557,13 @@ class FunctionTranslator:
             if existing is not None and is_ptr(existing):
                 self._error(f"cannot assign to array parameter '{target.id}'", node)
             is_new:bool = (existing is None)
-            self._define(target.id, t, node)
+            # A local holding the block id stays marked as one, so `buf[blk]` later still
+            # reads as a group selection rather than an ordinary index (see
+            # _is_block_id_expression).
+            stored:Any = t
+            if self._is_block_id_expression(node.value):
+                stored = "blockid"
+            self._define(target.id, stored, node)
             decl:str = ""
             if is_new:
                 decl = self._device_type(t) + " "
@@ -2620,10 +2628,16 @@ class FunctionTranslator:
         return outer
 
     def _handle_local_declaration(self, node:ast.Assign)->None:
-        """buf = gpu.local(np.float32, 64) -> a local memory array.
+        """`buf = local(np.float32, 64)` -> a shared array, one slice per work group.
 
-        opencl: append a __local parameter to the kernel signature, pass byte size at launch;
-        cuda: declare a __shared__ array at the top of the function body.
+        A work item can only touch memory inside its own group, so the value the name
+        stands for is a **dictionary keyed by block id**: `buf[block_id(0)][j]` is this
+        group's slice. Indexing it with anything else is refused, because there is no
+        meaning for "the buffer of another group" inside a work item.
+
+        opencl: one `__local` parameter per buffer, sized for a single group, and the
+        kernel reads it through the group's own offset in that parameter;
+        cuda: a `__shared__` array, which is already per-group.
         """
         call:ast.Call = node.value
         if len(call.args) != 2 or call.keywords:
@@ -2659,14 +2673,22 @@ class FunctionTranslator:
         target:ast.expr = node.targets[0]
         if not isinstance(target, ast.Name):
             self._error("gpu.local() result must be assigned to a plain variable", node)
-        self._define(target.id, ("lptr", ctype, c_name, count_node.value), node)
+        self._define(target.id, ("shared", ctype, c_name, count_node.value), node)
 
     def _is_local_buffer(self, node:ast.expr)->bool:
-        """True when ``node`` names a `local(...)` buffer, i.e. work-group shared memory."""
+        """True when ``node`` reaches `local(...)` memory, i.e. work-group shared storage.
+
+        Both spellings count: the buffer itself (`bins`) and the group's slice of it
+        (`bins[blockIdx]`). The slice form is what an atomic call passes -- `atomic_add(
+        bins[blockIdx], i, 1)` -- and answering False there made the OpenCL cast say
+        `__global`, which the compiler rejects as a change of address space.
+        """
+        if isinstance(node, ast.Subscript):
+            node = node.value
         if not isinstance(node, ast.Name):
             return False
         t:Any = self._lookup(node.id)
-        return isinstance(t, tuple) and len(t) == 4 and t[0] == "lptr"
+        return isinstance(t, tuple) and len(t) == 4 and t[0] == "shared"
 
     def _builtin_call_name(self, node:ast.expr)->Optional[str]:
         """The builtin this call invokes, or None when it invokes something else.
@@ -3476,13 +3498,24 @@ class FunctionTranslator:
             return node.id, outer["type"]
         t:Any = self._lookup(node.id)
         if t is not None:
-            if isinstance(t, tuple) and len(t) == 4 and t[0] == "lptr":
-                return t[2], (PTR, t[1])
+            if isinstance(t, tuple) and len(t) == 4 and t[0] == "shared":
+                # A shared buffer is not itself a pointer: it is one slice per group, and
+                # only uf[block_id(d)] picks the caller's out (see _visit_shared_slice).
+                self._error(
+                    f"'{node.id}' is a local() buffer, which is one slice per work group: "
+                    f"index it with the group first, as '{node.id}[blockIdx]'", node)
             if isinstance(t, tuple) and len(t) == 4 and t[0] == "bodyarr":
                 # A private array created in the body is indexed like any array; its extents
                 # are constants (see _shape_var).
                 return node.id, (PTR, t[3])
             return node.id, t
+        # CUDA's index vectors are values, not calls (`buf[blockIdx][j]`), so the *name*
+        # resolves to the vector the backend builds from its own launch terms.
+        if node.id in INDEX_VECTOR_BUILTINS:
+            table:Dict[str, Tuple[str, str]] = (
+                INDEX_VECTOR_OPENCL if self.backend == "opencl" else INDEX_VECTOR_BUILTINS)
+            vector_type, code = table[node.id]
+            return code, vector_type
         value:Any = self.resolve_global(node.id)
         if isinstance(value, bool):
             return self._visit_constant(ast.Constant(value=value))
@@ -3783,11 +3816,70 @@ class FunctionTranslator:
         if member is not None:
             return member
 
+        # `buf[k]` on a `local(...)` value: the index selects a work group, and only the
+        # caller's own group is reachable from inside a work item, so `k` must be the block
+        # id. The result is that group's slice, which is then indexed normally.
+        shared:Optional[Tuple[str, Any]] = self._visit_shared_slice(node)
+        if shared is not None:
+            return shared
+
         base_code, base_t = self._visit_array_target(value)
         if is_image(base_t):
             return self._emit_image_read(base_code, base_t, node)
         index_code, _ = self._visit_subscript_index(node)
         return f"{base_code}[{index_code}]", base_t
+
+    def _visit_shared_slice(self, node:ast.Subscript)->Optional[Tuple[str, Any]]:
+        """`buf[blockIdx]` on a shared buffer: **this** group's storage, and nothing more.
+
+        The subscript picks *which* group's slice is meant, which is a real choice on the
+        host (where the value is a mapping) but not on a device: the hardware already
+        gives every group its own `__shared__`/`__local` storage, so the answer is always
+        the caller's own slice and **no index arithmetic is emitted at all**. `buf[blockIdx]`
+        folds to the buffer itself.
+
+        The subscript is therefore validated rather than computed: it must be a block id
+        (`blockIdx`, or `get_group_id(d)`), because any other expression would name a group
+        a work item cannot reach. Emitting that as an offset would be worse than refusing --
+        it would read the next group's copy, which is precisely the memory a work item must
+        never touch.
+        """
+        if not isinstance(node.value, ast.Name):
+            # The inner `buf[block_id(0)]` is already a pointer by the time the outer
+            # `[j]` is visited, so that subscript indexes an array and is not a group
+            # selection.
+            return None
+        t:Any = self._lookup(node.value.id)
+        if not (isinstance(t, tuple) and len(t) == 4 and t[0] == "shared"):
+            return None
+        ctype, c_name = t[1], t[2]
+        index:ast.expr = node.slice
+        if not self._is_block_id_expression(index):
+            self._error(
+                "a local() buffer is one slice per work group, and a work item can only "
+                "reach its own: index it with the group first, as `buf[blockIdx][j]` "
+                "(or `buf[get_group_id(0)][j]`)", index)
+        # Both backends give each work group its own copy of the buffer -- OpenCL allocates
+        # one `__local` parameter per group, CUDA/HIP a `__shared__` array per block -- so
+        # the slice a work item reaches is the whole buffer, and the block id only names
+        # which group is asking. No offset is added: doing so would read into the next
+        # group's copy, which is exactly the memory a work item must not touch.
+        return c_name, (PTR, ctype)
+
+    def _is_block_id_expression(self, node:ast.expr)->bool:
+        """Whether an expression names a work group, i.e. evaluates to the block id.
+
+        Both spellings qualify -- `block_id(d)` and `get_group_id(d)` -- and so does a local
+        the body assigned from one (`gid = block_id(0)`, then `buf[gid]`), because it is the
+        same number by another name.
+        """
+        if isinstance(node, ast.Name):
+            # `blockIdx` is the group vector itself; a local holding `block_id(0)` is the
+            # same axis under another name.
+            return node.id == "blockIdx" or self._lookup(node.id) == "blockid"
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            return False
+        return self._builtin_call_name(node) == "get_group_id"
 
     def _struct_member_access(self, node:ast.Subscript)->Optional[Tuple[str, Any]]:
         """`s["field"]` on a structure value, or `v["x"]` on a vector, or None.
@@ -5002,7 +5094,7 @@ class FunctionTranslator:
         if name in INDEX_BUILTINS:
             if len(args) != 1 or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, int):
                 self._error(f"gpu.{name}(dim) requires a constant integer dimension (0, 1 or 2)", node)
-            if name in ("get_global_id", "get_global_size"):
+            if name in ("get_global_id", "get_global_size", "global_id"):
                 self.uses_global_id = True
             return emit_index(name, node.args[0].value, self.backend), "int"
 

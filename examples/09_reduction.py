@@ -33,7 +33,9 @@ Run:
 """
 import numpy as np
 
-from pygpgpu import kernel, atomic_add, barrier, get_global_id, get_global_size, get_group_id, get_local_id, get_local_size, local, work_size
+from pygpgpu import (kernel, atomic_add, barrier, blockIdx, get_global_id,
+                     get_global_size, get_group_id, get_local_id, get_local_size, local,
+                     work_size)
 
 
 def launch_size(n, local=256):
@@ -90,21 +92,21 @@ def sum_local_tree(x: np.ndarray, out: np.ndarray, n: np.int32):
         j += stride
 
     # `local` needs a literal count, so this mirrors GROUP.
-    buf = local(np.int32, 256)
-    buf[l] = s
+    buf = local(np.int32, 256)      # shared memory, one slice per work group
+    buf[blockIdx][l] = s
     barrier()  # the whole group must finish writing before anyone reads
 
     # 2) Halve the active range each step: 256 -> 128 -> ... -> 1.
     offset = group_size // 2
     while offset > 0:
         if l < offset:
-            buf[l] = buf[l] + buf[l + offset]
+            buf[blockIdx][l] = buf[blockIdx][l] + buf[blockIdx][l + offset]
         barrier()
         offset = offset // 2
 
     # 3) Work item 0 of each group adds the group total to the global output.
     if l == 0:
-        atomic_add(out, 0, buf[0])
+        atomic_add(out, 0, buf[blockIdx][0])
 
 
 def main():

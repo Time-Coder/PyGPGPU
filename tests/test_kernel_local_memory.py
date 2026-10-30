@@ -12,7 +12,12 @@ device backend:
     __syncthreads();
     if (threadIdx.x < 256) atomicAdd(&global[tid], bins[tid]);
 
-Three things had to line up for it to work here: the CUDA spelling of the shared array
+A `local(...)` value stands for **every group's slice**, so it is indexed by the group first
+(`bins[blockIdx][lane]`) and only then by the slot. On a device that first subscript folds
+away -- the hardware already gives each group private storage -- but the spelling keeps the
+model honest, and it is what makes the same code meaningful on the host.
+
+Three things had to line up for the histogram to work: the CUDA spelling of the shared array
 (`uint` is not defined by NVRTC), the `__local` address space in the OpenCL atomic cast
 (casting `__local` to `__global` does not compile), and a barrier that fences local memory.
 """
@@ -24,7 +29,9 @@ import pytest
 from pygpgpu import (
     atomic_add,
     barrier,
+    blockIdx,
     get_global_id,
+    get_group_id,
     get_local_id,
     get_local_size,
     kernel,
@@ -40,16 +47,16 @@ def shared_histogram(pixels: np.ndarray, hist: np.ndarray):
     """One work item per pixel; counts accumulate in shared memory, then merge once."""
     work_size(pixels)              # bounds guard against the real pixel count
     lane = get_local_id(0)         # threadIdx.x
-    bins = local(np.uint32, 256)   # __shared__ uint bins[256]
+    bins = local(np.uint32, 256)   # __shared__ uint bins[256], per group
 
-    bins[lane] = 0                 # zero this group's bins (one lane per bin)
+    bins[blockIdx][lane] = 0       # zero this group's bins (one lane per bin)
     barrier()                      # __syncthreads()
 
-    atomic_add(bins, int(pixels[get_global_id(0)]), 1)
+    atomic_add(bins[blockIdx], int(pixels[get_global_id(0)]), 1)
     barrier()                      # __syncthreads()
 
     if lane < 256:
-        atomic_add(hist, lane, bins[lane])   # merge into the global histogram
+        atomic_add(hist, lane, bins[blockIdx][lane])   # merge into the global histogram
 
 
 @kernel
@@ -58,12 +65,12 @@ def shared_histogram_plus_equals(pixels: np.ndarray, hist: np.ndarray):
     work_size(pixels)
     lane = get_local_id(0)
     bins = local(np.uint32, 256)
-    bins[lane] = 0
+    bins[blockIdx][lane] = 0
     barrier()
-    bins[int(pixels[get_global_id(0)])] += 1
+    bins[blockIdx][int(pixels[get_global_id(0)])] += 1
     barrier()
     if lane < 256:
-        hist[lane] += bins[lane]
+        hist[lane] += bins[blockIdx][lane]
 
 
 @kernel
@@ -72,10 +79,10 @@ def shared_sums(x: np.ndarray, hist: np.ndarray):
     work_size(x)
     lane = get_local_id(0)
     slots = local(np.int32, 256)
-    slots[lane] = int(x[get_global_id(0)]) * 2
+    slots[blockIdx][lane] = int(x[get_global_id(0)]) * 2
     barrier()
     if lane < 256:
-        hist[lane] = slots[lane]
+        hist[lane] = slots[blockIdx][lane]
 
 
 def _launch_shared(function, backend, pixels, hist):
@@ -128,13 +135,45 @@ def test_the_local_count_must_be_a_literal(gpu_backend):
     def uses_a_global_count(out: np.ndarray):
         work_size(out)
         slots = local(np.float32, BINS)  # a module global, not a literal
-        slots[get_local_id(0)] = 0.0
+        slots[blockIdx][get_local_id(0)] = 0.0
         barrier()
-        out[get_global_id(0)] = slots[get_local_id(0)]
+        out[get_global_id(0)] = slots[blockIdx][get_local_id(0)]
 
     with pytest.raises(SyntaxError) as caught:
         uses_a_global_count[gpu_backend][(BINS, BINS)](np.zeros(BINS, dtype=np.float32))
     assert "constant" in str(caught.value)
+
+
+def test_a_shared_buffer_must_be_indexed_by_its_group(gpu_backend):
+    """`slots[lane]` names a group the work item cannot reach, so it is refused."""
+
+    @kernel
+    def wrong_index(pixels: np.ndarray, out: np.ndarray):
+        work_size(out)
+        lane = get_local_id(0)
+        slots = local(np.int32, 256)
+        slots[lane] = 1                    # a local id is not a group id
+        barrier()
+        out[get_global_id(0)] = slots[lane]
+
+    with pytest.raises(SyntaxError) as caught:
+        wrong_index[gpu_backend][(BINS, BINS)](np.zeros(BINS, dtype=np.int32),
+                                               np.zeros(BINS, dtype=np.int32))
+    assert "block" in str(caught.value).lower()
+
+
+def test_a_shared_buffer_cannot_be_used_without_a_group():
+    """Naming the buffer itself (`out[i] = slots`) is refused: it is a mapping on the host."""
+
+    @kernel
+    def bare(out: np.ndarray):
+        work_size(out)
+        slots = local(np.int32, 256)
+        out[get_global_id(0)] = slots
+
+    with pytest.raises(SyntaxError) as caught:
+        bare["cuda"][(BINS, BINS)](np.zeros(BINS, dtype=np.int32))
+    assert "block" in str(caught.value).lower()
 
 
 def test_the_interpreter_backend_refuses_shared_memory():
@@ -145,7 +184,21 @@ def test_the_interpreter_backend_refuses_shared_memory():
     assert "local" in str(caught.value)
 
 
-def test_local_size_reports_the_group_width(gpu_backend):
+def test_the_cuda_index_vector_is_the_opencl_scalar(gpu_backend):
+    """`blockIdx.x` and `get_group_id(0)` are the same number, spelled two ways."""
+
+    @kernel
+    def both(out: np.ndarray):
+        work_size(out)
+        i = get_global_id(0)
+        out[i] = 1 if blockIdx.x == get_group_id(0) else 0
+
+    out = np.zeros(BINS, dtype=np.int32)
+    both[gpu_backend][(BINS, BINS)](out)
+    np.testing.assert_array_equal(out, np.ones(BINS, dtype=np.int32))
+
+
+def test_a_local_size_reports_the_group_width(gpu_backend):
     """`get_local_size(0)` is blockDim.x, available for indexing a local buffer."""
 
     @kernel

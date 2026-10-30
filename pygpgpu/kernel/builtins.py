@@ -92,6 +92,8 @@ __all__ = [
     # work-item indexing
     "get_global_id", "get_local_id", "get_group_id",
     "get_global_size", "get_local_size", "get_num_groups",
+    # CUDA's index vectors (three axes each)
+    "blockIdx", "threadIdx", "blockDim", "gridDim",
     # synchronisation and launch shape
     "barrier", "work_size", "local",
     # atomics
@@ -170,6 +172,87 @@ def get_num_groups(dim: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# CUDA's index vectors
+# ---------------------------------------------------------------------------
+#
+# A CUDA programmer reaches for `blockIdx`, `threadIdx`, `blockDim` and `gridDim`, and these
+# are **vectors** there, not scalars: `blockIdx.x` / `.y` / `.z` are the three axes. Each is
+# published here as an `int3` **value**, not a function, so `buf[blockIdx][j]` reads like the
+# CUDA original.
+#
+# A value cannot hold a per-launch number, so it is a lazy one: the attributes are computed
+# from the current launch frame when they are read, exactly the numbers the OpenCL spellings
+# answer per axis (`blockIdx.x` is `get_group_id(0)`, `threadIdx.x` is `get_local_id(0)`,
+# `blockDim.x` is `get_local_size(0)`, `gridDim.x` is `get_num_groups(0)`). Reading the same
+# name twice in one launch therefore gives the same answer, and a serial run gives the serial
+# work item's -- there is no state to go stale.
+#
+# Indexing a `local()` buffer takes the **whole vector** -- `buf[blockIdx][j]`, never
+# `buf[blockIdx.x][j]` -- because the slice belongs to the work group, and a group is named
+# by all three of its axes at once.
+
+
+class _IndexVector:
+    """An `int3` whose components are read from the current launch frame.
+
+    Subscripting it (`blockIdx[0]`) and taking a component (`blockIdx.x`) both give the
+    axis's number, so a kernel can use it however it used to spell that axis. The device
+    side does not see this class at all: the translator recognizes the *name* and emits the
+    vector directly (see `INDEX_VECTOR_BUILTINS`), and this only has to be right on the
+    interpreter backend, where the body runs unchanged.
+    """
+
+    __slots__ = ("_readers",)
+
+    def __init__(self, **readers:Any)->None:
+        object.__setattr__(self, "_readers", readers)
+
+    def _value(self)->Any:
+        from pygf import int3
+
+        return int3(*[reader() for reader in self._readers.values()])
+
+    def __getitem__(self, axis:int)->int:
+        readers:Any = object.__getattribute__(self, "_readers")
+        if not isinstance(axis, int) or axis < 0 or axis >= len(readers):
+            raise IndexError(
+                f"an index vector has three axes; {axis} is out of range")
+        return list(readers.values())[axis]()
+
+    def __getattr__(self, name:str)->int:
+        readers:Any = object.__getattribute__(self, "_readers")
+        if name not in readers:
+            raise AttributeError(
+                f"an index vector has .x, .y and .z; it has no '{name}'")
+        return readers[name]()
+
+    def __setattr__(self, name:str, value:Any)->None:
+        raise TypeError(
+            "an index vector is read-only: it reports the launch, and cannot be assigned to")
+
+    def __repr__(self)->str:
+        # Never evaluates the readers: this object is a registry key (see
+        # `builtin_registry.BUILTIN_NAMES_BY_FUNCTION`), and hashing or printing it during
+        # import must not need a launch frame.
+        readers:Any = object.__getattribute__(self, "_readers")
+        axes:str = ", ".join(readers)
+        return f"<index vector: {axes}>"
+
+    def __hash__(self)->int:
+        return id(self)
+
+
+blockIdx:Any = _IndexVector(x=lambda: get_group_id(0), y=lambda: get_group_id(1),
+                            z=lambda: get_group_id(2))
+threadIdx:Any = _IndexVector(x=lambda: get_local_id(0), y=lambda: get_local_id(1),
+                             z=lambda: get_local_id(2))
+blockDim:Any = _IndexVector(x=lambda: get_local_size(0), y=lambda: get_local_size(1),
+                            z=lambda: get_local_size(2))
+gridDim:Any = _IndexVector(x=lambda: get_num_groups(0), y=lambda: get_num_groups(1),
+                           z=lambda: get_num_groups(2))
+
+
+# ---------------------------------------------------------------------------
 # Synchronisation and launch shape
 # ---------------------------------------------------------------------------
 
@@ -189,13 +272,27 @@ def work_size(*arrays: Any) -> None:
 
 
 def local(dtype: Any, count: int) -> Any:
-    """Allocate ``count`` elements of ``dtype`` in local (shared) memory.
+    """Shared (work-group) memory: ``count`` elements of ``dtype``, one slice per group.
 
-    Device-only, and the interpreter says so rather than guessing: a shared buffer is
-    meaningless without barriers, and ``barrier()`` is a no-op in a serial run, so an
-    algorithm that counts into shared memory and then merges would silently produce a
-    different number there. Run such a kernel on a device backend, or write the same
-    result with atomics straight into an array argument.
+    This is CUDA's ``__shared__`` / OpenCL's ``__local``, and the value stands for **all
+    groups' slices at once**, keyed by group:
+
+    * on the **host** it really is a mapping -- block id -> that group's array -- so
+      ``buf[blockIdx]`` selects the slice, and the model is honest about what a shared
+      buffer is;
+    * on the **device** no indexing happens at all: the emitted code is a plain
+      ``__shared__`` array (CUDA/HIP) or ``__local`` parameter (OpenCL), which the hardware
+      already gives each group privately, so ``buf[blockIdx][j]`` folds to ``buf[j]``.
+
+    That is why the translator requires the block id for the first subscript but emits
+    nothing for it: the index is a statement about *which* group's memory is meant, and
+    inside a work item only one answer is reachable.
+
+    A serial run cannot honour a work-group barrier, so this refuses on the interpreter
+    backend rather than returning a silently different number: an algorithm that counts
+    into shared memory and then merges would otherwise produce the wrong total. Use a
+    cuda/opencl/hip backend, or write the same result with ``atomic_add`` straight into an
+    array argument.
     """
     raise SyntaxError(
         "local() is not supported by the python backend: it needs a work-group barrier to "
