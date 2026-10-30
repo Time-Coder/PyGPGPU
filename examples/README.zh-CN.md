@@ -34,7 +34,7 @@
 | [11_returns_and_scope.py](11_returns_and_scope.py) | 返回值(以参数形式传递, 首个返回者胜出)与外层作用域变量(参数化, `nonlocal` 会写回) |
 | [12_print_in_kernel.py](12_print_in_kernel.py) | kernel 里的 `print()`: 自动翻译成设备端 `printf`, 输出与 Python 完全一致的文本 |
 | [13_image.py](13_image.py) | 与后端无关的 `Image` 类型: kernel 里像数组一样下标(`src[y, x]`), 在 CUDA 上翻译为 `tex2D`/`surf2Dwrite`, 在 OpenCL 上翻译为 `read_imagef`/`write_imagef`, 在 `python` 后端由宿主实现执行, 三者结果逐元素一致 |
-| [14_heterogeneous_data.py](14_heterogeneous_data.py) | kernel 能承载的每一种数据, 且每种都在三种角色下演示(传参 / 体内创建 / 返回值): 标量, 1/2/3 维标量数组, 按值传递的向量, 1/2/3 维向量数组, 包含各类成员的结构体, 以及 1/2/3 维结构体数组 |
+| [14_heterogeneous_data.py](14_heterogeneous_data.py) | kernel 能承载的每一种数据, 且每种都在三种角色下演示(传参 / 体内创建 / 返回值): 标量, 1/2/3 维标量数组, 按值传递的向量, 1/2/3 维向量数组, 继承自 `ctypes.Structure` 的结构体(成员含标量 / 向量 / 数组 / 嵌套结构体 / 结构体数组), 以及 1/2/3 维结构体数组 |
 
 `@kernel` 函数体支持 docstring(第一行的字符串字面量会被翻译器自动忽略,
 不会进入生成的 GPU 源码), 所以可以放心在装饰函数里写说明文字。

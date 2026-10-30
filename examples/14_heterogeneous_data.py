@@ -12,29 +12,48 @@ the body builds, and as a return value.
                           and arrays of structures
     1/2/3-D arrays        of structures
 
-A structure is a numpy record dtype -- ``np.dtype([("i", "<i4"), ("f", "<f4")])`` -- so the
-same dtype describes the host array and the device type. Member access keeps numpy's
-spelling: ``s["i"]``, ``s["inner"]["a"]``, and ``s["v"]["x"]`` for a vector member.
+A structure is a `ctypes.Structure` subclass, which is also how the handwritten `.cl` files
+describe one: `np.dtype(cls)` turns the class into the record a device type is generated
+from, so the same class describes the host array and the kernel parameter. A bare
+`np.dtype([...])` works too -- it is the same record -- but a class is the form a `.cl` file
+gives you, and it is what this file uses. Member access keeps numpy's spelling whatever the
+spelling of the declaration: ``s["i"]``, ``s["inner"]["a"]``, ``s["v"]["x"]`` for a vector
+member, and ``s["xs"][1]`` for an array member.
 
 The functions here are deliberately trivial; only the shapes of the data are interesting.
 
 Run:
     python examples/14_heterogeneous_data.py
 """
+import ctypes
+
 import numpy as np
 
 from pygpgpu import kernel, float3, get_default_device, set_print_info
 
-# A structure with one member of each kind it may hold.
-PAIR = np.dtype([("i", "<i4"), ("f", "<f4")])
-INNER = np.dtype([("a", "<i4"), ("b", "<i4")])
-RICH = np.dtype([
-    ("tag", "<i4"),                     # a scalar
-    ("v", float3.dtype),                # a vector
-    ("xs", "<f4", (3,)),                # a fixed-size array
-    ("inner", INNER),                   # another structure
-    ("rows", PAIR, (2,)),               # an array of structures
-])
+
+# A structure with one member of each kind it may hold. The classes are ordinary
+# `ctypes.Structure` subclasses, exactly as a handwritten kernel's header declares them.
+class Pair(ctypes.Structure):
+    _fields_ = [("i", ctypes.c_int), ("f", ctypes.c_float)]
+
+
+class Inner(ctypes.Structure):
+    _fields_ = [("a", ctypes.c_int), ("b", ctypes.c_int)]
+
+
+class Rich(ctypes.Structure):
+    _fields_ = [
+        ("tag", ctypes.c_int),                     # a scalar
+        ("v", float3),                             # a vector
+        ("xs", ctypes.c_float * 3),                # a fixed-size array
+        ("inner", Inner),                          # another structure
+        ("rows", Pair * 2),                        # an array of structures
+    ]
+
+
+PAIR = Pair          # the class is the dtype: `np.dtype(Pair)`, `np.zeros(n, dtype=Pair)`
+RICH = Rich
 
 
 # ---------------------------------------------------------------------------
@@ -260,12 +279,16 @@ def main() -> None:
     _show("3-D vector array", out[1, 1].tolist())
 
     # --- structures --------------------------------------------------------
-    record = np.zeros(1, dtype=RICH)[0]
+    # A member may be an array or a structure, and the record spells both the numpy way: the
+    # array member keeps its own axis after the element's, so `xs[0, 1]` is element 0's
+    # second component, and a nested structure keeps the element axis first.
+    record = np.zeros(1, dtype=RICH)
     record["tag"] = 100
     record["v"] = (1.0, 2.0, 3.0)
-    record["xs"][1] = 20.0
+    record["xs"][0, 1] = 20.0
     record["inner"]["a"] = 300
-    record["rows"][0]["i"] = 4000
+    record["rows"]["i"][0, 0] = 4000
+    record = record[0]
     out = np.zeros(1, dtype=np.float32)
     structure_argument(record, out)
     _show("structure by value", float(out[0]))
