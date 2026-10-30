@@ -442,6 +442,22 @@ def _vec_field_names(cls_or_name:Any)->List[str]:
 # vector types only have x/y/z/w, so the translator normalizes them for every backend.
 _VEC_COLOR_ALIASES:Dict[str, str] = {"r": "x", "g": "y", "b": "z", "a": "w"}
 
+def _math_device_name(attr:str, backend:str)->str:
+    """The device spelling of a `math.*` function.
+
+    OpenCL's C dialect has float overloads under the plain name. CUDA has both the
+    double and the `f`-suffixed float form, and asking for the plain name with a float
+    argument is ambiguous whenever the argument's type is not exactly `float` -- which is
+    how `floor` came to fail with "more than one instance of overloaded function".
+    """
+    if backend != "cuda":
+        return attr
+    # The three predicates are already type-generic in CUDA and take no `f` suffix.
+    if attr in ("isnan", "isinf", "isfinite"):
+        return attr
+    return attr if attr.endswith("f") else attr + "f"
+
+
 def _vec_component_name(text:str)->str:
     """`rgb` -> `xyz`: the device spelling of a component or swizzle."""
     return "".join(_VEC_COLOR_ALIASES.get(char, char) for char in text)
@@ -451,7 +467,13 @@ _MATH_FUNCS:Dict[str, Optional[str]] = {
     "sin": None, "cos": None, "tan": None, "asin": None, "acos": None,
     "atan": None, "atan2": None, "sinh": None, "cosh": None, "tanh": None,
     "fabs": None, "pow": None, "hypot": None, "erf": None,
+    "log1p": None, "expm1": None, "fmod": None, "cbrt": None,
+    "copysign": None, "ldexp": None, "degrees": None, "radians": None,
+    # python returns an int here; the *argument* stays a float (see _emit_math_call, where
+    # casting the argument made `ceil(2.1)` answer 2).
     "floor": "int", "ceil": "int", "trunc": "int",
+    # python returns a bool; the device answers 0/1, which is the same number.
+    "isnan": "int", "isinf": "int", "isfinite": "int",
 }
 
 _MATH_CONSTS:Dict[str, str] = {
@@ -3673,7 +3695,7 @@ class FunctionTranslator:
                 t:Any = {"int": "int", "float": "float", "bool": "bool"}[name]
                 return f"(({t})({arg_codes[0]}))", t
 
-            if name in ("abs", "min", "max", "round"):
+            if name in ("abs", "min", "max", "round", "pow"):
                 return self._emit_builtin(name, args, node)
 
             if name == "len":
@@ -3805,6 +3827,16 @@ class FunctionTranslator:
             f"{self._why_not_callable(kind, func.attr)}", node)
 
     def _emit_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+        if name == "pow":
+            # python's builtin, which differs from math.pow only in that integer arguments
+            # stay exact; the device form is the same floating-point power.
+            if len(args) != 2:
+                self._error("pow() takes exactly 2 arguments", node)
+            (lcode, lt), (rcode, rt) = args
+            t:Any = promote(lt, rt)
+            c_func:str = _math_device_name("pow", self.backend) if is_float(t) else "pow"
+            return f"{c_func}(({t})({lcode}), ({t})({rcode}))", t
+
         if name == "abs":
             if len(args) != 1:
                 self._error("abs() takes exactly 1 argument", node)
@@ -3988,10 +4020,43 @@ class FunctionTranslator:
         Returns None when ``attr`` is not one of them, so the caller can fall through to
         the math table (which rejects the name with its own message).
         """
-        if attr in ("clip", "where"):
+        if attr in ("clip", "where", "abs", "fabs", "power", "arctan2",
+                    "minimum", "maximum", "square", "reciprocal", "round"):
             for code, t in args:
                 if is_ptr(t) or is_image(t):
                     self._error_numpy_array_form(attr, node)
+        if attr in ("abs", "fabs"):
+            # numpy has two spellings; the device picks by type, as python's abs does.
+            code, t = args[0]
+            if is_float(t):
+                return f"fabs({code})", t
+            if is_int(t):
+                return f"abs({code})", t
+            self._error(f"np.{attr}() requires a numeric argument", node)
+        if attr == "square":
+            code, t = args[0]
+            return f"(({code}) * ({code}))", t
+        if attr == "reciprocal":
+            code, t = args[0]
+            return f"(1.0f / ((float)({code})))", "float"
+        if attr in ("minimum", "maximum"):
+            if len(args) != 2:
+                self._error(f"np.{attr}() takes exactly 2 arguments", node)
+            (lcode, lt), (rcode, rt) = args
+            t:Any = promote(lt, rt)
+            pick:str = "min" if attr == "minimum" else "max"
+            if is_float(t):
+                # `fmin`/`fmax` exist on both backends (`fminf` is the C spelling OpenCL
+                # does not provide); the plain min/max are the integer forms.
+                return f"{'fmin' if pick == 'min' else 'fmax'}(({t})({lcode}), ({t})({rcode}))", t
+            return f"{pick}(({t})({lcode}), ({t})({rcode}))", t
+        if attr in ("power", "arctan2"):
+            # Same operation as math.pow / math.atan2 under numpy's spelling.
+            return self._emit_math_call({"power": "pow", "arctan2": "atan2"}[attr],
+                                        args, node, module_name="np")
+        if attr == "round":
+            # numpy rounds halfway cases to even, which is python's round too.
+            return self._emit_builtin("round", args, node)
         if attr == "where":
             return self._emit_where(args, node)
         return None
@@ -4096,11 +4161,34 @@ class FunctionTranslator:
                 self._error(f"{module_name}.{attr}() on vectors takes exactly 1 vector argument", node)
             if self.backend == "opencl":
                 return f"{attr}({args[0][0]})", vec_arg
-            return self._vec_componentwise(attr, args[0][0], vec_arg), vec_arg
+            return self._vec_componentwise(_math_device_name(attr, "cuda"), args[0][0], vec_arg), vec_arg
+
+        if attr in ("degrees", "radians"):
+            # No CUDA intrinsic for either; the conversion factor is the definition.
+            factor:str = ("57.29577951308232f" if attr == "degrees"
+                          else "0.017453292519943295f")
+            if self.backend == "opencl":
+                return f"{attr}({args[0][0]})", ret
+            return f"(({args[0][0]}) * {factor})", ret
+
+        if attr in ("isnan", "isinf", "isfinite"):
+            # The predicate takes a float; casting it to the int result type is what made the
+            # CUDA call ambiguous. The device answers 0/1, which is the number python's bool
+            # stands for.
+            return f"({attr}((float)({args[0][0]})) != 0)", "bool"
+
+        if ret_override == "int" and attr in ("floor", "ceil", "trunc"):
+            # python's floor/ceil/trunc answer an int, but the *argument* is a float. Casting
+            # the argument instead (`floor((int)x)`) picked the integer overload -- CUDA
+            # rejects it as ambiguous, OpenCL has no such overload -- and it computed the
+            # wrong number wherever it did resolve: `ceil(2.1)` became `ceil(2)`, so 2.
+            code:str = args[0][0]
+            device:str = _math_device_name(attr, self.backend)
+            return f"((int){device}((float)({code})))", "int"
 
         for (code, t) in args:
             arg_codes.append(code if (t == ret or (is_float(t) and is_float(ret))) else f"(({ret})({code}))")
-        c_func:str = attr
+        c_func:str = _math_device_name(attr, self.backend)
         return f"{c_func}({', '.join(arg_codes)})", ret
 
     def _emit_numpy_cast(self, name:str, args:List[Tuple[str, Any]],
