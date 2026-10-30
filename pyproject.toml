@@ -58,7 +58,11 @@ dependencies = [
     # body writes for a structure member's component (`ray.direction.x` is `.x`, but the
     # subscript form `s["v"]["x"]` needs the name). The `python` backend runs that body
     # unchanged, so it depends on this.
-    "pygf>=0.1.7",
+    # 0.1.8 makes `inversesqrt` answer what a device answers for a zero (an infinity) instead
+    # of raising ZeroDivisionError, and lets `equal`/`notEqual` take scalars like their
+    # siblings. `rsqrt` and the six comparison builtins are pygf's objects here, so the host
+    # interpreter would otherwise disagree with a GPU on those inputs.
+    "pygf>=0.1.8",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",

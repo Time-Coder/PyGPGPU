@@ -179,13 +179,20 @@ def test_mad_and_rsqrt_on_the_device(runner):
     assert float(out[0]) == pytest.approx(0.5)
 
 
-def test_rsqrt_of_zero_differs_between_versions_of_the_host():
-    """Recorded, not asserted as correct: the device answers inf for `rsqrt(0)` while the
-    host raises, because the host expression is `1 / sqrt(x)`. The behaviour is the same
-    before and after the implementation moved to pygf, so it is out of scope here -- but a
-    kernel that relies on inf would differ between the interpreter and a GPU."""
-    with pytest.raises(ZeroDivisionError):
-        funcs.rsqrt(float4(0.0, 0.0, 0.0, 0.0))
+def test_rsqrt_answers_what_the_device_answers():
+    """The host used to raise ZeroDivisionError where a GPU returns an infinity, so a
+    kernel relying on it worked on a device and blew up in the interpreter. Both sides
+    now say the same thing, including the sign of a zero."""
+    assert funcs.rsqrt(4.0) == pytest.approx(0.5)
+    assert funcs.rsqrt(0.0) == float("inf")
+    assert funcs.rsqrt(-0.0) == float("-inf")
+    assert funcs.rsqrt(-1.0) != funcs.rsqrt(-1.0)  # NaN
+
+
+def test_rsqrt_of_zero_on_the_device_is_an_infinity(runner):
+    out = np.zeros(1, dtype=np.float32)
+    runner(reciprocal_sqrt, np.array([float4(0.0, 4.0, 4.0, 4.0)]), out)
+    assert float(out[0]) == float("inf")
 
 
 def test_the_exported_float3_is_the_pygf_one():
