@@ -253,6 +253,30 @@ def as_host_array(value: Any) -> Any:
     return wrap_vector_array(value)
 
 
+def prepare_structure_classes(func: Any) -> None:
+    """Give every `ctypes.Structure` class this function names a member subscript.
+
+    The interpreter runs the body unchanged, so `ray["origin"]` needs to work on the
+    instance the body constructed -- but nothing on this path inspects argument types, which
+    is where a class would otherwise be registered. The body's own names are the reliable
+    source: `Ray` is a global of the function, and its own module is what a body usually
+    refers to.
+    """
+    import ctypes
+    import sys
+
+    from . import structs
+
+    namespace: dict = getattr(func, "__globals__", {}) or {}
+    for value in list(namespace.values()):
+        if isinstance(value, type) and issubclass(value, ctypes.Structure):
+            structs.register_class(value)
+    for value in list(vars(sys.modules["builtins"]).values()):
+        # `ctypes.Structure` itself, which a body may name -- harmless, already a class.
+        if isinstance(value, type) and issubclass(value, ctypes.Structure):
+            structs.register_class(value)
+
+
 # ---------------------------------------------------------------------------
 # Per-call builtin state
 # ---------------------------------------------------------------------------
@@ -439,6 +463,10 @@ class PythonKernel:
     def _run(self, instance: Any, args: Tuple[Any, ...],
              global_size: Optional[Tuple[int, ...]],
              local_size: Optional[Tuple[int, ...]]) -> Any:
+        # A body that builds a structure reads its members by name (`ray["origin"]`), which
+        # the class has to answer: nothing else on this path would tell the class about it,
+        # because the interpreter never inspects argument types.
+        prepare_structure_classes(self.func)
         analysis: PythonAnalysis = self.analysis
 
         if analysis.magic_form is not None:

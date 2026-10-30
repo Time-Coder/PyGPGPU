@@ -14,6 +14,7 @@ import numpy as np
 from ..vec_types.layout import pack
 from ..utils import local_size_for_global, detect_work_size, device_limits
 from .python_backend import PythonKernel
+from . import structs
 from .translator import (
     FunctionTranslator,
     infer_ctype,
@@ -1375,7 +1376,20 @@ class PyKernel:
         # is finished *after* the helper that calls it). Emit leaves first.
         dependency_codes:List[str] = [entry["code"] for entry in _dependency_order(device_cache)]
 
+        # Structure types come first, once, before every device function and the kernel: a
+        # helper's signature may name one as well, and C++ rejects the same struct defined
+        # twice. Collect them from the kernel and from each helper.
+        structure_dtypes:List[Any] = list(translator.structure_dtypes())
+        for entry in device_cache.values():
+            for dtype in entry.get("structs", ()):
+                if dtype not in structure_dtypes:
+                    structure_dtypes.append(dtype)
+        typedefs:str = (structs.render_structures(structure_dtypes, translator.backend)
+                        if structure_dtypes else "")
+
         source:str = ("\n".join(dependency_codes) + "\n\n" + kernel_code) if dependency_codes else kernel_code
+        if typedefs:
+            source = typedefs + "\n" + source
 
         source_path:str = self._write_source(sig, source, backend)
         kernel:Any = self._backend_compile(source_path, c_name, backend, device_obj)

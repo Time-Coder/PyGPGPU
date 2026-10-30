@@ -3640,8 +3640,16 @@ class FunctionTranslator:
 
             target:Any = self.resolve_global(name)
             if isinstance(target, type):
-                # Constructing a class would need a device-side object. Device code has none:
-                # it has scalars, vectors and (for handwritten kernels) ctypes structures.
+                # A `ctypes.Structure` subclass is not an object in the python sense: it is a
+                # layout, and a device type is generated from it, so `Ray(origin, direction)`
+                # is a structure value -- a compound literal keyed by member name. Every
+                # other class stays refused: there is nothing on the device to instantiate.
+                from . import structs
+
+                structure:Optional[np.dtype] = structs.structure_dtype_of(target)
+                if structure is not None:
+                    return self._emit_structure_constructor(structs.register(structure),
+                                                            structure, args, node)
                 self._error(
                     f"'{name}' is a class: device code has no objects, so it cannot be "
                     f"constructed inside a kernel. Keep the values in separate scalar or "
@@ -4050,6 +4058,95 @@ class FunctionTranslator:
             if base.__name__ in _vec_registry():
                 return base.__name__
         return None
+
+    def _emit_structure_constructor(self, name:str, dtype:np.dtype,
+                                    args:List[Tuple[str, Any]], node:ast.expr)->Tuple[str, Any]:
+        """`Ray(origin, direction)` as a compound literal keyed by member name.
+
+        A `ctypes.Structure` class describes a layout, so a call to it is a structure *value*
+        -- what `np.zeros(1, dtype=Ray)` builds, without the array around it. The arguments
+        are positional in declaration order, which is also the order python's
+        `ctypes.Structure.__init__` assigns them.
+        """
+        from . import structs
+
+        if dtype not in self.private_structs:
+            # The typedef has to be emitted even when the structure never appears in the
+            # signature: a body that builds one locally still needs the type declared.
+            self.private_structs.append(dtype)
+        members:Dict[str, Any] = structs.member_types(dtype, self.backend)
+        order:List[str] = list(dtype.names or ())
+        supplied:Dict[str, Tuple[str, Any]] = {}
+
+        if len(args) > len(order):
+            self._error(
+                f"{name}() takes at most {len(order)} arguments "
+                f"({', '.join(order)}), got {len(args)}", node)
+        for position, (code, t) in enumerate(args):
+            supplied[order[position]] = (code, t)
+
+        parts:List[str] = []
+        positional_parts:List[str] = []
+        for member in order:
+            if member not in supplied:
+                # A missing member is zero, which is what a C aggregate does with an
+                # unmentioned field; it keeps `Ray(origin)` working. CUDA/HIP are C++ and
+                # cannot skip a field in a positional initialiser, so they spell the zero
+                # out; OpenCL uses designated initialisers and simply omits it.
+                positional_parts.append(self._zero_value(members[member]))
+                continue
+            code, t = supplied[member]
+            converted:str = self._structure_member_value(name, member, members[member],
+                                                         code, t, node)
+            parts.append(f".{member} = {converted}")
+            positional_parts.append(converted)
+
+        if self.backend == "opencl":
+            # OpenCL C is C99, so a designated initialiser names the members it sets.
+            return f"(({name}){{{', '.join(parts)}}})", name
+        # CUDA and HIP compile as C++, where designated initialisers arrived only in C++20
+        # (NVRTC is older); a braced aggregate takes its members in declaration order.
+        return f"({name}{{{', '.join(positional_parts)}}})", name
+
+    def _zero_value(self, member_type:Any)->str:
+        """The zero of a member's device type, for an omitted constructor argument."""
+        from . import structs
+
+        if is_ptr(member_type):
+            return "0"
+        if is_vec(member_type):
+            return self._vec_maker(member_type,
+                                   ", ".join("0" for _ in _vec_field_names(member_type)))
+        if isinstance(member_type, str) and structs.dtype_for(member_type) is not None:
+            dtype:Any = structs.dtype_for(member_type)
+            inner:str = ", ".join(self._zero_value(structs.member_types(dtype, self.backend)[m])
+                                  for m in dtype.names or ())
+            return f"({member_type}{{{inner}}})"
+        return f"(({self._device_type(member_type)})(0))"
+
+    def _structure_member_value(self, struct_name:str, member:str, member_type:Any,
+                                code:str, t:Any, node:ast.expr)->str:
+        """Coerce one constructor argument to the member's own device type."""
+        from . import structs
+
+        if is_ptr(member_type):
+            self._error(
+                f"{struct_name}(...): member '{member}' is an array; assign its elements "
+                f"after construction instead", node)
+        if is_vec(member_type):
+            if t != member_type:
+                self._error(
+                    f"{struct_name}(...): member '{member}' is a {member_type}, got {t}", node)
+            return code
+        if isinstance(member_type, str) and structs.dtype_for(member_type) is not None:
+            if t != member_type:
+                self._error(
+                    f"{struct_name}(...): member '{member}' needs a structure value, "
+                    f"got {t}", node)
+            return code
+        if t == member_type:
+            return code
+        return f"(({self._device_type(member_type)})({code}))"
 
     def _emit_vec_constructor(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         cls:Any = _vec_registry()[name]
@@ -4579,6 +4676,9 @@ class FunctionTranslator:
                 "code": callee.render_device(c_name, shape_params),
                 "shape_codes": shape_codes,
                 "outer_codes": outer_codes,
+                # Structure types this helper's signature or body mentions: the caller emits
+                # their typedefs once, ahead of every device function.
+                "structs": list(callee.private_structs),
             }
             self.device_cache[sig_key] = entry
         except Exception:
@@ -4665,6 +4765,18 @@ class FunctionTranslator:
                 params.append(f"{self._device_type(t[1])}* {name}")
             else:
                 params.append(f"{self._device_type(t)} {name}")
+        # A structure in the signature needs its typedef emitted too, and this helper's own
+        # `private_structs` is what the caller collects.
+        from . import structs
+
+        for candidate in [t[1] if is_ptr(t) else t for _, t in self.params]:
+            dtype:Any = structs.dtype_for(candidate) if isinstance(candidate, str) else None
+            if dtype is not None and dtype not in self.private_structs:
+                self.private_structs.append(dtype)
+        if isinstance(self.return_type, str):
+            dtype = structs.dtype_for(self.return_type)
+            if dtype is not None and dtype not in self.private_structs:
+                self.private_structs.append(dtype)
         for array_name, dim in (shape_params or []):
             params.append(f"const int {self._shape_var(array_name, dim)}")
         # Outer-scope parameters come last, matching the call site (see _emit_device_call),
@@ -4673,6 +4785,9 @@ class FunctionTranslator:
         ret:str = (self.return_type or "void")
         header:str = f"{self._device_qualifier()}{self._device_type(ret)} {c_name}({', '.join(params)})"
         body:str = "\n".join(self.lines)
+        # No typedef block here: the caller emits every structure type once, ahead of all
+        # the device functions (see PyKernel._compile). Repeating it per helper would define
+        # the same struct twice, which C++ rejects.
         return f"{header} {{\n{body}\n}}"
 
     def _outer_param_declarations(self, device:bool=False)->List[str]:
@@ -4778,10 +4893,34 @@ class FunctionTranslator:
                     f"__shared__ {self._device_type(lc_type)} {lc_name}[{lc_count}];")
         body_lines.extend(self.lines)
         body:str = "\n".join(body_lines)
-        typedefs:str = self.render_structure_typedefs()
-        if typedefs:
-            return f"{typedefs}\n{header} {{\n{body}\n}}"
+        # The structure types are emitted once by the caller, ahead of the whole source (see
+        # PyKernel._compile): a helper may need them too, and two copies of the same struct
+        # is an error in C++.
         return f"{header} {{\n{body}\n}}"
+
+    def structure_dtypes(self)->List[Any]:
+        """Every structure dtype this translation mentions, in no particular order.
+
+        The caller emits one typedef block for the whole source, so the kernel and each
+        helper contribute their own set and duplicates are dropped.
+        """
+        from . import structs
+
+        dtypes:List[Any] = []
+        for name, t in list(self.params):
+            candidate:Any = t[1] if is_ptr(t) else t
+            dtype:Any = structs.dtype_for(candidate) if isinstance(candidate, str) else None
+            if dtype is not None and dtype not in dtypes:
+                dtypes.append(dtype)
+        for dtype in self.private_structs:
+            if dtype not in dtypes:
+                dtypes.append(dtype)
+        for entry in (self.return_layout or []):
+            candidate = entry["type"]
+            dtype = structs.dtype_for(candidate) if isinstance(candidate, str) else None
+            if dtype is not None and dtype not in dtypes:
+                dtypes.append(dtype)
+        return dtypes
 
     def render_structure_typedefs(self)->str:
         """The `typedef`s for every structure this kernel's signature mentions.

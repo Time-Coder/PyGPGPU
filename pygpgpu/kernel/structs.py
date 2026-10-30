@@ -149,10 +149,21 @@ def register_class(cls:Any) -> Optional[np.dtype]:
     The class is kept as evidence: a dtype whose layout matches a vector type is still a
     structure when the caller wrote a class for it, and member access then has to be the
     structure's string subscript rather than a vector's component name.
+
+    The class also gains numpy's member spelling (`instance["i"]`) if it does not already
+    accept one. A kernel body writes `p["i"]` -- the spelling that works on every backend --
+    so the interpreter backend, which runs the body unchanged, must see the same thing: a
+    `ctypes.Structure` instance answers `["i"]` exactly as a record element does.
     """
     import ctypes
 
+    from .translator import _vec_registry
+
     if not (isinstance(cls, type) and issubclass(cls, ctypes.Structure)):
+        return None
+    # A vector type is a `ctypes.Structure` too, and it already answers a positional
+    # subscript (`v[0]`); installing a member-name subscript on it would replace that.
+    if cls in _vec_registry().values() or _is_vector_alias(cls):
         return None
     try:
         dtype:np.dtype = np.dtype(cls)
@@ -162,7 +173,27 @@ def register_class(cls:Any) -> Optional[np.dtype]:
         return None
     _DECLARED.setdefault(dtype, cls)
     register(dtype)
+    _add_subscript_access(cls)
     return dtype
+
+
+def _add_subscript_access(cls:Any) -> None:
+    """Let a structure instance read a member by name (`s["i"]`), like a record element.
+
+    Only installed when the class has no subscript of its own, so a user's `__getitem__`
+    is never shadowed.
+    """
+    if "__getitem__" in cls.__dict__:
+        return
+
+    def __getitem__(self:Any, key:Any)->Any:
+        if isinstance(key, str):
+            return getattr(self, key)
+        raise TypeError(
+            f"{type(self).__name__} is indexed by member name, not by position: "
+            f"use s['{list(np.dtype(cls).names or ())[0]}']")
+
+    cls.__getitem__ = __getitem__
 
 
 def is_declared_structure(dtype:Any) -> bool:
