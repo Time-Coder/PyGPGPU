@@ -271,14 +271,23 @@ def work_size(*arrays: Any) -> None:
     return None
 
 
-def zeros_per_group(dtype: Any, count: int) -> Any:
-    """Shared (work-group) memory: ``count`` elements of ``dtype``, zeroed, one slice per group.
+def zeros_per_group(shape: Any, dtype: Any = "float32") -> Any:
+    """Shared (work-group) memory: a zeroed array of ``shape``/``dtype``, one slice per group.
+
+    The arguments are ``np.zeros``' own, in its own order: the **shape first** (an int or a
+    tuple of ints) and the **dtype second** (defaulting to float32, as an array of no declared
+    dtype would be). So ``zeros_per_group(256, np.int32)`` and
+    ``zeros_per_group((64, 64), np.float32)`` read like the numpy call they replace.
 
     The name says what it builds -- zeros, one per group -- so it cannot be confused with a
     kernel-local variable, which ``local()`` invited. ``zeros_per_block`` is the same function
     under CUDA's word for a group; both spellings are published because a CUDA reader looks
     for "block" and an OpenCL reader for "group", and requiring one of them would make half
     the readers hunt for an alias.
+
+    The shape has to be a **compile-time constant**: the buffer is a fixed-size
+    ``__shared__`` array (CUDA/HIP) or one ``__local`` parameter (OpenCL), so a size known
+    only at launch cannot declare it.
 
     This is CUDA's ``__shared__`` / OpenCL's ``__local``, and the value stands for **all
     groups' slices at once**, keyed by group:

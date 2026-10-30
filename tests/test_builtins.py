@@ -146,7 +146,7 @@ def test_work_size_and_barrier_are_no_ops_on_the_host():
 
 def test_zeros_per_group_is_refused_on_the_host():
     with pytest.raises(SyntaxError) as caught:
-        zeros_per_group(np.float32, 16)
+        zeros_per_group(16, np.float32)
     assert "zeros_per_group" in str(caught.value)
 
 

@@ -403,6 +403,9 @@ DTYPE_MAP:Dict[str, str] = {
 
 PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string means a scalar
 
+# A zeros_per_group() slice: that group's storage, plus the shape it was declared with.
+SHARED_SLICE = "shared_slice"
+
 # The internal type names use OpenCL's spellings, because one generator serves every backend.
 # CUDA C does not define uchar/ushort/uint/ulong (NVRTC rejects them; char/short/int/long
 # and the full unsigned forms are fine), so the CUDA path writes those out in full. HIP
@@ -2494,7 +2497,7 @@ class FunctionTranslator:
                 f"cannot assign to self.{target.attr}: host attributes cannot be written by device code; "
                 f"write into an array element (self.{target.attr}[i] = ...) or use a local variable", node)
 
-        # shared memory declaration: buf = zeros_per_group(np.float32, 64)
+        # shared memory declaration: buf = zeros_per_group(64, np.float32)
         if (isinstance(node.value, ast.Call)
                 and self._builtin_call_name(node.value) in ("zeros_per_group",
                                                         "zeros_per_block")):
@@ -2585,6 +2588,13 @@ class FunctionTranslator:
                         pass
                 self._emit(f"{member[0]} = {code};")
                 return
+            # A store into a zeros_per_group() slice flattens like the read side, and has
+            # to be recognized before the array path (a slice is not a pointer parameter).
+            slice_code, slice_t = self._visit_expression(target.value)
+            if isinstance(slice_t, tuple) and slice_t and slice_t[0] == SHARED_SLICE:
+                store_code, store_t = self._visit_shared_index(slice_code, slice_t, target)
+                self._emit(f"{store_code} = {code};")
+                return
             base_code, base_t = self._visit_array_target(target.value)
             if is_image(base_t):
                 self._emit_image_write(base_code, base_t, target, code)
@@ -2629,7 +2639,7 @@ class FunctionTranslator:
         return outer
 
     def _handle_local_declaration(self, node:ast.Assign)->None:
-        """`buf = zeros_per_group(np.float32, 64)` -> a shared array, one slice per work group.
+        """`buf = zeros_per_group(64, np.float32)` -> a shared array, one slice per work group.
 
         A work item can only touch memory inside its own group, so the value the name
         stands for is a **dictionary keyed by block id**: `buf[block_id(0)][j]` is this
@@ -2642,9 +2652,19 @@ class FunctionTranslator:
         """
         call:ast.Call = node.value
         if len(call.args) != 2 or call.keywords:
-            self._error("zeros_per_group(dtype, count) takes exactly 2 arguments", call)
+            self._error("zeros_per_group(shape, dtype) takes exactly 2 arguments", call)
 
-        dtype_node:ast.expr = call.args[0]
+        # `np.zeros(shape, dtype)`, argument for argument: the shape comes first and may be
+        # an int (`256`) or a tuple (`(64, 64)`), and the dtype second.
+        shape_node:ast.expr = call.args[0]
+        extents:Optional[List[int]] = self._constant_shape(shape_node, "zeros_per_group()")
+        if extents is None:
+            self._error(
+                "zeros_per_group() shape must be a constant positive integer or a tuple of "
+                "them: the buffer is a fixed-size __shared__/__local array, so a launch-time "
+                "shape cannot size it", shape_node)
+
+        dtype_node:ast.expr = call.args[1]
         dtype_name:str = ""
         if isinstance(dtype_node, ast.Attribute) and isinstance(dtype_node.value, ast.Name):
             module:Any = self.resolve_global(dtype_node.value.id)
@@ -2664,17 +2684,37 @@ class FunctionTranslator:
         if ctype == "half":
             self._error("zeros_per_group() does not support half (fp16)", dtype_node)
 
-        count_node:ast.expr = call.args[1]
-        if not (isinstance(count_node, ast.Constant) and isinstance(count_node.value, int) and count_node.value > 0):
-            self._error("zeros_per_group() count must be a constant positive integer", count_node)
-
+        total:int = 1
+        for extent in extents:
+            total *= extent
         c_name:str = f"_local{len(self.local_buffers)}"
-        self.local_buffers.append((c_name, ctype, count_node.value))
+        self.local_buffers.append((c_name, ctype, total))
 
         target:ast.expr = node.targets[0]
         if not isinstance(target, ast.Name):
             self._error("zeros_per_group() result must be assigned to a plain variable", node)
-        self._define(target.id, ("shared", ctype, c_name, count_node.value), node)
+        self._define(target.id, ("shared", ctype, c_name, total, tuple(extents)), node)
+
+    def _constant_shape(self, node:ast.expr, what:str)->Optional[List[int]]:
+        """The extents of a constant shape: an int, or a tuple of positive ints."""
+        def one(candidate:ast.expr)->Optional[int]:
+            if isinstance(candidate, ast.Constant) and isinstance(candidate.value, int) \
+                    and candidate.value > 0:
+                return candidate.value
+            return None
+
+        single:Optional[int] = one(node)
+        if single is not None:
+            return [single]
+        if isinstance(node, ast.Tuple) and node.elts:
+            extents:List[int] = []
+            for element in node.elts:
+                extent:Optional[int] = one(element)
+                if extent is None:
+                    return None
+                extents.append(extent)
+            return extents
+        return None
 
     def _is_local_buffer(self, node:ast.expr)->bool:
         """True when ``node`` reaches `zeros_per_group(...)` memory, i.e. work-group shared storage.
@@ -2689,7 +2729,7 @@ class FunctionTranslator:
         if not isinstance(node, ast.Name):
             return False
         t:Any = self._lookup(node.id)
-        return isinstance(t, tuple) and len(t) == 4 and t[0] == "shared"
+        return isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"
 
     def _builtin_call_name(self, node:ast.expr)->Optional[str]:
         """The builtin this call invokes, or None when it invokes something else.
@@ -3186,6 +3226,22 @@ class FunctionTranslator:
             return
 
         target:ast.Subscript = node.target  # type: ignore[assignment]
+        # `bins[blockIdx][value] += 1` on shared memory: the slice is the array, and any
+        # offset already consumed folds into the index.
+        slice_code, slice_t = self._visit_expression(target.value)
+        if isinstance(slice_t, tuple) and slice_t and slice_t[0] == SHARED_SLICE:
+            pending:str = slice_t[3] if len(slice_t) > 3 else ""
+            index_code, _ = self._visit_shared_index("", slice_t, target)
+            base_code:str = slice_code
+            element_t:Any = slice_t[1]
+            flat:int = index_code.find("[")
+            inner:str = index_code[flat + 1:-1] if flat >= 0 else "0"
+            if pending:
+                inner = f"({pending}) + ({inner})"
+            self._emit_atomic_update(node, op_name, atomic_name, element_t,
+                                     array_code=base_code, index_code=inner,
+                                     is_local=True)
+            return
         # _visit_array_target already narrows a pointer to its element type.
         base_code, element_t = self._visit_array_target(target.value)
         if is_image(element_t):
@@ -3315,6 +3371,10 @@ class FunctionTranslator:
             member:Optional[Tuple[str, Any]] = self._struct_member_access(target)
             if member is not None:
                 return member
+            # A store into a zeros_per_group() slice: the same flattening as the read side.
+            slice_code, slice_t = self._visit_expression(target.value)
+            if isinstance(slice_t, tuple) and slice_t and slice_t[0] == SHARED_SLICE:
+                return self._visit_shared_index(slice_code, slice_t, target)
             base_code, base_t = self._visit_array_target(target.value)
             index_code, _ = self._visit_subscript_index(target)
             return f"{base_code}[{index_code}]", base_t
@@ -3499,7 +3559,7 @@ class FunctionTranslator:
             return node.id, outer["type"]
         t:Any = self._lookup(node.id)
         if t is not None:
-            if isinstance(t, tuple) and len(t) == 4 and t[0] == "shared":
+            if isinstance(t, tuple) and len(t) == 5 and t[0] == "shared":
                 # A shared buffer is not itself a pointer: it is one slice per group, and
                 # only uf[block_id(d)] picks the caller's out (see _visit_shared_slice).
                 self._error(
@@ -3824,11 +3884,57 @@ class FunctionTranslator:
         if shared is not None:
             return shared
 
+        # A zeros_per_group() slice remembers the shape it was declared with, so a
+        # multidimensional subscript can be flattened exactly like an array parameter's.
+        readonly_code, readonly_t = self._visit_expression(value)
+        if isinstance(readonly_t, tuple) and readonly_t and readonly_t[0] == SHARED_SLICE:
+            return self._visit_shared_index(readonly_code, readonly_t, node)
+
         base_code, base_t = self._visit_array_target(value)
         if is_image(base_t):
             return self._emit_image_read(base_code, base_t, node)
         index_code, _ = self._visit_subscript_index(node)
         return f"{base_code}[{index_code}]", base_t
+
+    def _visit_shared_index(self, code:str, t:Any, node:ast.Subscript)->Tuple[str, Any]:
+        """Index a shared slice: `buf[blockIdx][i]`, `[i, j]`, and `[i][j]` all flatten.
+
+        A tuple subscript consumes several axes at once; a single subscript consumes one and
+        hands back a slice with the remaining axes, so a nested spelling reaches the same
+        element (`buf[blockIdx][row][col]` is `buf[row * 4 + col]`).
+        """
+        ctype:Any = t[1]
+        shape:Tuple[int, ...] = tuple(t[2])
+        offset_base:int = t[3] if len(t) > 3 else 0
+        index:ast.expr = node.slice
+        if isinstance(index, ast.Tuple):
+            elements:List[ast.expr] = list(index.elts)
+        else:
+            elements = [index]
+        if len(elements) > len(shape):
+            self._error(
+                f"this zeros_per_group() buffer has {len(shape)} dimension(s) "
+                f"({', '.join(str(e) for e in shape)}), so it cannot be indexed with "
+                f"{len(elements)}", index)
+        terms:List[str] = []
+        for position, element in enumerate(elements):
+            element_code, element_t = self._visit_expression(element)
+            if not is_int(element_t):
+                self._error("an index into a zeros_per_group() buffer must be an integer",
+                            element)
+            term:str = element_code
+            for extent in shape[position + 1:len(shape)]:
+                term = f"({term}) * {extent}"
+            terms.append(term)
+        flat:str = " + ".join(terms) if terms else "0"
+        remaining:Tuple[int, ...] = shape[len(elements):]
+        if not remaining:
+            if offset_base:
+                return f"{code}[({offset_base}) + ({flat})]", ctype
+            return f"{code}[{flat}]", ctype
+        # Partly indexed: the caller's code keeps the running offset and the axes left.
+        combined:str = f"({offset_base}) + ({flat})" if offset_base else flat
+        return f"{code}", (SHARED_SLICE, ctype, remaining, combined)
 
     def _visit_shared_slice(self, node:ast.Subscript)->Optional[Tuple[str, Any]]:
         """`buf[blockIdx]` on a shared buffer: **this** group's storage, and nothing more.
@@ -3851,9 +3957,9 @@ class FunctionTranslator:
             # selection.
             return None
         t:Any = self._lookup(node.value.id)
-        if not (isinstance(t, tuple) and len(t) == 4 and t[0] == "shared"):
+        if not (isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"):
             return None
-        ctype, c_name = t[1], t[2]
+        ctype, c_name, shape = t[1], t[2], t[4]
         index:ast.expr = node.slice
         if not self._is_block_id_expression(index):
             self._error(
@@ -3865,7 +3971,7 @@ class FunctionTranslator:
         # the slice a work item reaches is the whole buffer, and the block id only names
         # which group is asking. No offset is added: doing so would read into the next
         # group's copy, which is exactly the memory a work item must not touch.
-        return c_name, (PTR, ctype)
+        return c_name, (SHARED_SLICE, ctype, shape)
 
     def _is_block_id_expression(self, node:ast.expr)->bool:
         """Whether an expression names a work group, i.e. evaluates to the block id.
@@ -5118,6 +5224,13 @@ class FunctionTranslator:
                         "arguments", node)
                 self._error(f"gpu.{name}(array, index, value) takes exactly 3 arguments", node)
             (arr_code, arr_t), (idx_code, idx_t) = args[0], args[1]
+            if isinstance(arr_t, tuple) and arr_t and arr_t[0] == SHARED_SLICE:
+                # `atomic_add(bins[blockIdx], i, 1)`: the group's slice is the array the atomic
+                # indexes into, and any offset already consumed is folded into the index.
+                pending:str = arr_t[3] if len(arr_t) > 3 else ""
+                if pending:
+                    idx_code = f"({pending}) + ({idx_code})"
+                arr_code, arr_t = arr_code, (PTR, arr_t[1])
             val_code, val_t = args[-1]
             compare_code:Optional[str] = (args[2][0] if name == "atomic_cas" else None)
             if not is_ptr(arr_t):

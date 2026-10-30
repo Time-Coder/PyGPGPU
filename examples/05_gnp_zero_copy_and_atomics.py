@@ -63,7 +63,7 @@ def group_reduce(x: np.ndarray, out: np.ndarray):
     for j in range(l * 4, l * 4 + 4):
         s += x[base + j]
 
-    buf = zeros_per_group(np.int32, 256)  # shared memory, one slice per work group
+    buf = zeros_per_group(256, np.int32)  # shared memory, one slice per work group
     buf[blockIdx][l] = s
     barrier()  # the whole group must finish writing before anyone reads
 
