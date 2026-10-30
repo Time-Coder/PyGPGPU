@@ -1,4 +1,12 @@
-from pygf import point3f, quatf, float3, color3f, conjugate
+from pygf import (
+    point3f,
+    quatf,
+    float3,
+    color3f,
+    conjugate,
+    normalize,
+    mix
+)
 import numpy as np
 from ray import Ray
 from pygpgpu import kernel
@@ -66,4 +74,6 @@ class Camera:
         self.image[i, j, 2] = 255 * color.b
 
     def ray_color(self, ray: Ray)->color3f:
-        return color3f()
+        unit_direction = normalize(ray.direction)
+        weight = 0.5*(unit_direction.y + 1.0)
+        return mix(color3f(1), color3f(0.5, 0.7, 1.0), weight)
