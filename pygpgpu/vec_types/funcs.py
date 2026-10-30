@@ -1,9 +1,14 @@
-"""Vector math functions (host-side implementation).
+"""Vector math functions, dual-sided: they run on the host and translate to device builtins.
 
-These functions run directly in the Python interpreter (on genVec instances or
-scalars); when used inside an @kernel, the translator maps them to the
-corresponding device builtins (the same namespace as pygpgpu.kernel.gpu), so
-one code base works on both sides.
+One implementation serves both sides. A function that pygf also publishes *is* pygf's object
+here -- not a copy -- because the translator recognizes a builtin by the identity of the
+callee, so two implementations of one name would leave whichever copy a kernel imported
+translated as an ordinary device helper, and its body has no device meaning.
+
+What is left defined below is the set with no pygf counterpart: the OpenCL-only builtins
+(`mad24`/`mul24` are 24-bit, `hadd`/`rhadd` carry, the ordered comparisons are not GLSL), plus
+`dot`, whose host contract is wider than pygf's (a device `dot` on scalars is a multiply) and
+which is registered as an alias so both spellings still translate.
 """
 from __future__ import annotations
 
@@ -54,77 +59,6 @@ def dot(a:Any, b:Any)->Any:
     return float(sum(x * y for x, y in zip(a_components, b_components)))
 
 
-def cross(a:genVec, b:genVec)->genVec:
-    a_components, b_components = _components(a), _components(b)
-    if a_components is None or b_components is None:
-        raise TypeError("cross() requires vector arguments")
-    if len(a_components) not in (3, 4) or len(a_components) != len(b_components):
-        raise ValueError("cross() requires 3 or 4 component vectors of the same type")
-    ax, ay, az = a_components[0], a_components[1], a_components[2]
-    bx, by, bz = b_components[0], b_components[1], b_components[2]
-    values:List[Any] = [ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx]
-    if len(a_components) == 4:
-        values.append(0.0)
-    return type(a)(*values)
-
-
-def length(v:Any)->Any:
-    components = _components(v)
-    if components is None:
-        return abs(v)
-    return math.sqrt(sum(c * c for c in components))
-
-
-def distance(a:Any, b:Any)->Any:
-    _check_same_shape(a, b)
-    if _components(a) is None:
-        return abs(a - b)
-    return length(a - b)
-
-
-def normalize(v:genVec)->genVec:
-    components = _components(v)
-    if components is None:
-        l:Any = abs(v)
-        return v / l if l != 0 else 0.0
-    l:Any = math.sqrt(sum(c * c for c in components))
-    if l == 0:
-        return type(v)(*[c * 0.0 for c in components])
-    return type(v)(*[c / l for c in components])
-
-
-def clamp(x:Any, lo:Any, hi:Any)->Any:
-    x_components, lo_components, hi_components = _components(x), _components(lo), _components(hi)
-    if x_components is None:
-        return min(max(x, lo), hi)
-
-    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
-        return values[i] if components is not None else values
-
-    result:List[Any] = []
-    for i in range(len(x_components)):
-        result.append(min(max(x_components[i],
-                              value_at(lo, lo_components, i)),
-                          value_at(hi, hi_components, i)))
-    return type(x)(*result)
-
-
-def mix(a:Any, b:Any, t:Any)->Any:
-    a_components, b_components, t_components = _components(a), _components(b), _components(t)
-
-    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
-        return values[i] if components is not None else values
-
-    if a_components is None:
-        return a * (1.0 - value_at(t, t_components, 0)) + b * value_at(t, t_components, 0)
-
-    result:List[Any] = []
-    for i in range(len(a_components)):
-        t_v:Any = value_at(t, t_components, i)
-        result.append(a_components[i] * (1.0 - t_v) + b_components[i] * t_v)
-    return type(a)(*result)
-
-
 def mad(a:Any, b:Any, c:Any)->Any:
     a_components, b_components, c_components = _components(a), _components(b), _components(c)
 
@@ -141,39 +75,11 @@ def mad(a:Any, b:Any, c:Any)->Any:
     return type(a)(*result)
 
 
-def saturate(x:Any)->Any:
-    return clamp(x, 0.0, 1.0)
-
-
-def step(edge:Any, x:Any)->Any:
-    edge_components, x_components = _components(edge), _components(x)
-
-    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
-        return values[i] if components is not None else values
-
-    counts:List[int] = [len(c) for c in (edge_components, x_components) if c is not None]
-    count:int = (max(counts) if counts else 1)
-    result_type:Any = type(edge if edge_components is not None else x)
-    result:List[Any] = []
-    for i in range(count):
-        e_v:Any = value_at(edge, edge_components, i)
-        x_v:Any = value_at(x, x_components, i)
-        result.append(0.0 if x_v < e_v else 1.0)
-    return result_type(*result)
-
-
 def rsqrt(x:Any)->Any:
     components = _components(x)
     if components is None:
         return 1.0 / math.sqrt(x)
     return type(x)(*[1.0 / math.sqrt(c) for c in components])
-
-
-def exp2(x:Any)->Any:
-    components = _components(x)
-    if components is None:
-        return math.pow(2.0, x)
-    return type(x)(*[math.pow(2.0, c) for c in components])
 
 
 def select(a:Any, b:Any, cond:Any)->Any:
@@ -191,20 +97,6 @@ def select(a:Any, b:Any, cond:Any)->Any:
     for i in range(len(a_components)):
         result.append(value_at(b, b_components, i) if value_at(cond, cond_components, i) else value_at(a, a_components, i))
     return result_type(*result)
-
-
-def any(cond:Any)->int:
-    components = _components(cond)
-    if components is None:
-        return int(cond != 0)
-    return int(any(c != 0 for c in components))
-
-
-def all(cond:Any)->int:
-    components = _components(cond)
-    if components is None:
-        return int(cond != 0)
-    return int(all(c != 0 for c in components))
 
 
 def _relation(name:str, op:Callable, a:Any, b:Any)->Any:
@@ -322,31 +214,26 @@ def mad24(a:Any, b:Any, c:Any)->Any:
 # implementation of one name leaves whichever copy the user imported translated as a device
 # helper, and its body (`length(x)`, a `_div` helper, ...) has no device meaning.
 #
-# pygf's versions are stricter about what they accept -- `dot` there refuses scalars, which a
-# device `dot` reduces to a multiply -- and the two names that take the wider contract keep
-# their implementation here (see the loop below), registering pygf's alongside them so both
-# spellings translate.
-from pygf import funcs as _pygf_funcs  # noqa: E402
-
-# These admit more in the host interpreter than pygf's do, so their own body stays.
-_WIDER_THAN_PYGF:frozenset = frozenset({"dot"})
+# `dot` is the one exception. pygf's refuses a scalar pair, while a device `dot` on scalars is
+# a multiply and callers here rely on that, so its body above stays and pygf's object is
+# registered beside it as an alias -- both spellings still translate.
+from pygf.funcs import (  # noqa: E402  (after the definitions it shadows)
+    all,
+    any,
+    clamp,
+    cross,
+    distance,
+    exp2,
+    length,
+    mix,
+    normalize,
+    saturate,
+    step,
+)
+from pygf.funcs import dot as _pygf_dot  # noqa: E402
 
 # (name, our implementation, pygf's) for the names whose host contract is wider than pygf's.
-_ALIASES:List[Tuple[str, Any, Any]] = []
-
-for _name in list(__all__):
-    _shared:Any = getattr(_pygf_funcs, _name, None)
-    if _shared is None:
-        continue
-    if _name in _WIDER_THAN_PYGF:
-        _own:Any = globals()[_name]
-        # Recorded here, not imported at module scope: `builtins` imports this module, so
-        # reaching for its registry now would close the cycle mid-initialisation.
-        _ALIASES.append((_name, _own, _shared))
-        continue
-    globals()[_name] = _shared
-
-del _name, _shared, _pygf_funcs
+_ALIASES:List[Tuple[str, Any, Any]] = [("dot", dot, _pygf_dot)]
 
 
 def _register_aliases() -> None:
