@@ -1111,7 +1111,7 @@ class PyKernel:
         writable:List[Dict[str, Any]] = []
         for name, outer in outer_vars.items():
             kind:str = outer["kind"]
-            value:Any = self._read_outer(name, kind)
+            value:Any = self._read_outer(name, kind, outer.get("scope"))
             if is_ptr(outer["type"]):
                 if value is None:
                     raise ValueError(
@@ -1132,8 +1132,15 @@ class PyKernel:
                              "type": outer["type"]})
         return {"args": args, "writable": writable, "full": full}
 
-    def _read_outer(self, name:str, kind:str)->Any:
-        """The current value of an outer name, read the way python would resolve it."""
+    def _read_outer(self, name:str, kind:str,
+                    scope:Optional[Dict[str, Any]] = None)->Any:
+        """The current value of an outer name, read the way python would resolve it.
+
+        ``scope`` is the namespace the translator resolved the name in, which is the
+        kernel's module for a name the body reads itself and the *helper's* module for one
+        a device helper reads. Both are read live so a changed value is seen on the next
+        call, which is why the namespace is carried rather than the value.
+        """
         if kind == "closure":
             cells:Dict[str, Any] = {}
             for cell_name, cell in zip(self.raw_func.__code__.co_freevars,
@@ -1143,6 +1150,8 @@ class PyKernel:
             if cell is None:
                 raise ValueError(f"outer variable '{name}' is not in the kernel's closure")
             return cell.cell_contents
+        if scope is not None:
+            return scope.get(name, None)
         return self.raw_func.__globals__.get(name, None)
 
     def _write_back_outer(self, outer_state:Dict[str, Any])->None:

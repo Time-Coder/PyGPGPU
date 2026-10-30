@@ -159,6 +159,33 @@ def _class_attr(owner:Optional[type], name:str)->Any:
 _MISSING:Any = object()
 
 
+def _helper_globals(func:Callable, fallback:Callable[[str], Any])->Callable[[str], Any]:
+    """The name resolver a device helper is translated with.
+
+    A helper is an ordinary python function, so a name it reads resolves in *its own* module
+    first -- `ray.py`'s `hit_sphere` sees the `dot` that `ray.py` imported. Falling back to
+    the caller's resolver is what keeps outer-scope variables working: a helper that reads a
+    global of the *kernel's* module, or a name from the enclosing scope, still finds it and
+    has it forwarded as a parameter at the call site.
+
+    Resolving everything against the kernel's module instead used to work only because
+    helpers lived beside the kernel; a method defined in the structure's own module is the
+    first case where they do not.
+    """
+    own:Dict[str, Any] = getattr(func, "__globals__", None) or {}
+
+    def resolve(name:str)->Any:
+        if name in own:
+            return own[name]
+        return fallback(name)
+
+    # The host has to read an outer value from the same place this resolver found it, or a
+    # name that lives in the helper's module reads back as None at launch. Recorded on the
+    # resolver rather than in a signature so `_bind_outer_variables` can pass it along.
+    setattr(resolve, "source_globals", own)
+    return resolve
+
+
 def self_attr_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
     """Classify what ``self.name`` refers to on the kernel's own class.
 
@@ -1135,6 +1162,10 @@ class FunctionTranslator:
             entry:Optional[Dict[str, Any]] = self._outer_var_entry(name, value, code, declared)
             if entry is None:
                 continue
+            # Which module's namespace the name came from. A helper imported from its own
+            # module may read a global of *that* module, and the host has to look there --
+            # reading the kernel's globals would find nothing and pass None.
+            entry["scope"] = getattr(self.resolve_global, "source_globals", None)
             self.outer_vars[name] = entry
             if entry["writable"]:
                 self.params.append((name, (PTR, entry["type"])))
@@ -3675,8 +3706,11 @@ class FunctionTranslator:
                 return self._emit_device_call(name, target, args, node)
             self._error(f"unknown function '{name}'", node)
 
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            if self.self_param and func.value.id == self.self_param:
+        if isinstance(func, ast.Attribute):
+            receiver_name:Optional[str] = (func.value.id
+                                           if isinstance(func.value, ast.Name) else None)
+            if (receiver_name is not None and self.self_param
+                    and receiver_name == self.self_param):
                 kind:str
                 target:Any
                 kind, target = _self_member_call_kind(self.self_owner, func.attr)
@@ -3686,13 +3720,14 @@ class FunctionTranslator:
                 self._error(
                     f"calling self.{func.attr}() from device code is not supported: "
                     f"self.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
-            module:Any = self.resolve_global(func.value.id)
+            module:Any = (self.resolve_global(receiver_name)
+                          if receiver_name is not None else None)
             if module is math or module is np:
                 if module is np and func.attr in ("clip", "where"):
                     # np.clip/np.where read their own arguments: a None bound means "no
                     # bound" and must not be evaluated as a device expression.
                     return self._emit_numpy_elementwise_nodes(func.attr, node)
-                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                args = [self._visit_expression(a) for a in node.args]
                 if module is np:
                     if func.attr in _NUMPY_DEVICE_TYPES:
                         # np.float32(x): a cast, exactly what `(float)x` means on the device.
@@ -3701,7 +3736,7 @@ class FunctionTranslator:
                         func.attr, args, node)
                     if elementwise is not None:
                         return elementwise
-                return self._emit_math_call(func.attr, args, node, module_name=func.value.id)
+                return self._emit_math_call(func.attr, args, node, module_name=receiver_name or "")
             if isinstance(module, type):
                 # Class.static_method(...): a class name is not a device value, so the
                 # only reachable form is a staticmethod, resolved to its plain function.
@@ -3709,19 +3744,64 @@ class FunctionTranslator:
                 if kind in ("staticmethod", "method"):
                     # A plain function taken off its class is just a function; the
                     # receiver of "method" stays an explicit first argument.
-                    args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                    args = [self._visit_expression(a) for a in node.args]
                     return self._emit_device_call(func.attr, target, args, node)
                 self._error(
-                    f"cannot call {func.value.id}.{func.attr}() from device code: "
+                    f"cannot call {receiver_name}.{func.attr}() from device code: "
                     f"only static methods of a class are usable there, and "
-                    f"{func.value.id}.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
-            if callable(getattr(module, func.attr, None)):
+                    f"{receiver_name}.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
+            if inspect.ismodule(module) and callable(getattr(module, func.attr, None)):
                 # module.function(...): a plain helper reached through its module.
-                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                args = [self._visit_expression(a) for a in node.args]
                 return self._emit_device_call(func.attr, getattr(module, func.attr), args, node)
-            self._error(f"unsupported method call: .{func.attr}", node)
+            # Anything else is a receiver that is a *value*: `ray.hit_sphere(...)` on a
+            # structure, or a method reached through one of its members.
+            return self._emit_method_on_value(func, node)
 
         self._error("unsupported call expression", node)
+
+    def _emit_method_on_value(self, func:ast.Attribute, node:ast.Call)->Tuple[str, Any]:
+        """`value.method(args)` as a device call whose first argument is the value.
+
+        A structure's methods are ordinary python functions defined in the class the caller
+        declared, and their first parameter is the receiver -- which is exactly what `self`
+        already is in a device helper. So there is nothing new to translate: the call becomes
+        a device function whose first argument is the receiver expression, and the body then
+        reads `self.origin` the way any structure-typed parameter would.
+
+        The class has to be reachable, which is why only a `ctypes.Structure` subclass
+        qualifies: a bare record dtype has no methods, and two classes with one layout share
+        a dtype, so the dtype alone cannot say whose methods to compile.
+        """
+        from . import structs
+
+        base_code, base_t = self._visit_expression(func.value)
+        owner:Optional[type] = None
+        if isinstance(base_t, str):
+            dtype:Optional[np.dtype] = structs.dtype_for(base_t)
+            if dtype is not None:
+                owner = structs.declared_class(dtype)
+            elif base_t in _vec_registry():
+                owner = _vec_registry()[base_t]
+        if owner is None:
+            self._error(
+                f"cannot call '.{func.attr}()' on a value of type {base_t}: methods are "
+                f"translated from the class they are defined on, and only a "
+                f"ctypes.Structure subclass or a vector type carries one", node)
+
+        kind:str
+        target:Any
+        kind, target = self_attr_kind(owner, func.attr)
+        if kind == "method":
+            args = [self._visit_expression(a) for a in node.args]
+            return self._emit_device_call(func.attr, target,
+                                          [(base_code, base_t)] + args, node)
+        if kind == "staticmethod":
+            args = [self._visit_expression(a) for a in node.args]
+            return self._emit_device_call(func.attr, target, args, node)
+        self._error(
+            f"cannot call '.{func.attr}()' on {owner.__name__}: it is "
+            f"{self._why_not_callable(kind, func.attr)}", node)
 
     def _emit_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         if name == "abs":
@@ -4670,7 +4750,8 @@ class FunctionTranslator:
         self.device_cache[sig_key] = {"status": "in_progress"}
         try:
             callee:FunctionTranslator = FunctionTranslator(
-                raw_func, param_types, self.backend, self.resolve_global, self.device_cache,
+                raw_func, param_types, self.backend, _helper_globals(raw_func, self.resolve_global),
+                self.device_cache,
                 is_kernel=False, self_param=self_param, self_attr_types=self_types,
                 self_owner=self.self_owner, launch_backend=self.launch_backend)
             callee.translate()

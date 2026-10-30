@@ -177,6 +177,15 @@ def register_class(cls:Any) -> Optional[np.dtype]:
     return dtype
 
 
+def declared_class(dtype:Any) -> Optional[type]:
+    """The `ctypes.Structure` class a registered structure dtype came from, or None.
+
+    A caller's methods live on that class, and a dtype alone cannot name it -- two classes
+    with the same layout share one dtype.
+    """
+    return _DECLARED.get(np.dtype(dtype)) if isinstance(dtype, (np.dtype, type)) else None
+
+
 def _add_subscript_access(cls:Any) -> None:
     """Let a structure instance read a member by name (`s["i"]`), like a record element.
 
