@@ -1406,28 +1406,24 @@ class PyKernel:
         typedefs:str = (structs.render_structures(structure_dtypes, translator.backend)
                         if structure_dtypes else "")
 
-        # Quaternion arithmetic lives in a fixed header, copied into the cache folder beside
-        # the generated source. Each structure/vector pair also gets a small shim that names
-        # the generated type for the header; the source includes the shim, and the preprocessor
-        # folds both into the text before the backend compiler runs.
-        all_quaternion_includes:Dict[Tuple[str, str], Any] = dict(translator.quaternion_includes)
+        # Quaternion structures and their arithmetic both come from a fixed header, copied
+        # into the cache's include folder beside the generated source. The source needs only
+        # the enable macros for the widths in use, then one include -- no declaration of its
+        # own, because the header spells the two type names in advance.
+        quaternion_needs:Set[str] = set(translator.quaternion_needs)
         for entry in device_cache.values():
-            all_quaternion_includes.update(entry.get("quaternion_includes") or {})
+            quaternion_needs.update(entry.get("quaternion_needs") or ())
         include_lines:str = ""
-        if all_quaternion_includes:
+        if quaternion_needs:
             from . import quaternion as quaternion_header
 
-            # The headers live in an `include/` folder beside the generated sources; the
-            # caller passes the cache directory and `include_line` does the placing.
-            cache:str = self._cache_dir(backend)
-            include_lines = "\n".join(
-                quaternion_header.include_line(name, dtype, vector_name, backend, cache)
-                for (name, vector_name), dtype in sorted(all_quaternion_includes.items()))
+            include_lines = quaternion_header.include_line(
+                tuple(sorted(quaternion_needs)), backend, self._cache_dir(backend))
 
         source:str = ("\n".join(dependency_codes) + "\n\n" + kernel_code) if dependency_codes else kernel_code
         if include_lines:
-            # The include has to come after the type block: the shim names a structure, and
-            # the header's functions take it by value.
+            # The header declares the types, so it goes after the ordinary typedef block and
+            # ahead of every function that names a quaternion.
             source = include_lines + "\n" + source
         if typedefs:
             source = typedefs + "\n" + source

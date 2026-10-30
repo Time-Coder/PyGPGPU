@@ -93,7 +93,7 @@ include = ["pygpgpu*"]
 # The device headers are real files the translator copies into a kernel's cache folder
 # (`kernel/headers/pygpgpu_quat.h`), so they have to travel with the package or an installed
 # copy would fail to find them.
-pygpgpu = ["py.typed", "**/*.pyi", "**/*.pyi.in", "kernel/headers/*.h"]
+pygpgpu = ["py.typed", "**/*.pyi", "**/*.pyi.in", "kernel/include/*.h"]
 
 # What the sdist carries beyond the package itself is declared in MANIFEST.in: the
 # numbered scripts under examples/ ship as worked examples, while doc/ (4.6 MB of

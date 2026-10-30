@@ -41,7 +41,18 @@ def is_record(dtype:Any)->bool:
 
 
 def struct_name(dtype:np.dtype)->str:
-    """A stable C identifier for the structure a dtype describes."""
+    """A stable C identifier for the structure a dtype describes.
+
+    A quaternion is the one exception, and it is a deliberate one: its declaration lives in
+    the fixed quaternion header, so the name has to be one the header can spell -- a content
+    hash cannot be written in advance. Two quaternion layouts exist, so two fixed names cover
+    every case, and `render_structures` then leaves them out of its typedef block.
+    """
+    from .quaternion import quat_type_name  # noqa: PLC0415 (import cycle)
+
+    fixed:Optional[str] = quat_type_name(np.dtype(dtype))
+    if fixed is not None:
+        return fixed
     digest:str = hashlib.md5(repr(np.dtype(dtype)).encode("utf-8")).hexdigest()[:10]
     return f"_st_{digest}"
 
@@ -118,6 +129,8 @@ def nested_dtypes(dtype:np.dtype)->List[np.dtype]:
 
 def render_structures(dtypes:List[np.dtype], backend:str)->str:
     """The typedef block for every structure the kernel uses, members before containers."""
+    from .quaternion import quat_type_name  # noqa: PLC0415 (import cycle)
+
     ordered:List[np.dtype] = []
     for dtype in dtypes:
         for inner in nested_dtypes(dtype):
@@ -129,6 +142,10 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
     lines:List[str] = []
     for dtype in ordered:
         name:str = struct_name(dtype)
+        # A quaternion is declared by the fixed quaternion header, which a source using one
+        # always includes; emitting it here too would define the type twice, which C++ rejects.
+        if quat_type_name(dtype) is not None:
+            continue
         members:str = " ".join(f"{member};" for member in structure_fields(dtype, backend))
         if backend == "opencl":
             lines.append(f"typedef struct {{ {members} }} {name};")

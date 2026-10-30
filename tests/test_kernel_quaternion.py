@@ -18,7 +18,7 @@ import ctypes
 
 import numpy as np
 import pytest
-from pygf import quatf, vector3f, conjugate
+from pygf import conjugate, quatd, quatf, vector3f
 
 from pygpgpu import kernel
 
@@ -165,29 +165,56 @@ def test_quaternion_conjugate(runner):
         [expected.w, expected.x, expected.y, expected.z], abs=1e-5)
 
 
+# ---------------------------------------------------------------------------
+# A fixed name, so the header can declare the structure itself
+# ---------------------------------------------------------------------------
+
+
+def test_a_quaternion_gets_a_fixed_name_not_a_hash():
+    """Other structures get a content hash; a quaternion gets a name the header can spell.
+
+    That is what lets `quat.h` declare the type, so a generated source needs no declaration of
+    its own. Two layouts exist, so two names cover every case.
+    """
+    from pygpgpu.kernel import structs
+    from pygf import quatd
+
+    assert structs.struct_name(np.dtype(quatf)) == "quatf"
+    assert structs.struct_name(np.dtype(quatd)) == "quatd"
+    # A quaternion is not a caller's structure, so it is excluded from the typedef block --
+    # emitting it there as well would define the type twice.
+    assert structs.render_structures([np.dtype(quatf)], "cuda") == ""
+    assert structs.render_structures([np.dtype(quatd)], "opencl") == ""
+
+
+def test_the_header_declares_both_structures():
+    from pygpgpu.kernel import quaternion
+
+    text = quaternion.header_source()
+    assert "typedef struct { float w; float x; float y; float z; } quatf;" in text
+    assert "typedef struct { double w; double x; double y; double z; } quatd;" in text
+    # Normalised by the quaternion's own magnitude, not the product's: getting this wrong
+    # showed up as a factor-of-three difference from the interpreter.
+    assert "sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z)" in text
+    # OpenCL has no `sqrtf`, only `sqrt`; the header is shared by every backend.
+    assert "sqrtf(" not in text
+
+
 def test_the_header_is_a_real_file_in_the_package():
-    """The fixed header lives in the source tree, so it can be read and edited like any
-    other source -- and `pyproject.toml` has to ship it, or an installed copy would look for
-    a file that is not there."""
+    """The header lives in the source tree, so it can be read and edited like any other
+    source -- and `pyproject.toml` has to ship it, or an installed copy would look for a file
+    that is not there."""
     import pathlib
 
     from pygpgpu.kernel import quaternion
 
     source = pathlib.Path(quaternion.HEADER_SOURCE)
     assert source.is_file(), f"missing header: {source}"
-    assert source.parent.name == "headers"
-    text = source.read_text(encoding="utf-8")
-    assert "PYGPGPU_QUAT_FN(_rotate)" in text
-    # The package-data entry is what carries it into a wheel.
+    assert source.parent.name == "include"
+    assert source.name == "quat.h"
     pyproject = (pathlib.Path(quaternion.__file__).parents[2] / "pyproject.toml").read_text(
         encoding="utf-8")
-    assert "kernel/headers/*.h" in pyproject
-
-
-def read_text(path:str)->str:
-    """The text of a file, read as UTF-8."""
-    with open(path, "r", encoding="utf-8") as file:
-        return file.read()
+    assert "kernel/include/*.h" in pyproject
 
 
 def test_installing_copies_the_header_verbatim(tmp_path):
@@ -199,43 +226,32 @@ def test_installing_copies_the_header_verbatim(tmp_path):
     assert installed == str(tmp_path / "include" / quaternion.HEADER_NAME)
 
 
-def test_the_header_is_fixed_and_the_shim_names_the_type(tmp_path):
-    """The arithmetic is one fixed header; a per-type shim feeds it the generated C name.
+def read_text(path:str)->str:
+    """The text of a file, read as UTF-8."""
+    with open(path, "r", encoding="utf-8") as file:
+        return file.read()
 
-    A structure's C name is a content hash, so the header cannot spell it. The shim defines
-    the four macros and includes the header, and the generated source includes the shim --
-    the preprocessor folds both into the text before the backend compiler runs.
-    """
+
+def test_the_include_line_enables_only_the_widths_in_use(tmp_path):
+    """A source says which blocks it needs, then includes the header once."""
     from pygpgpu.kernel import quaternion
 
-    line = quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "cuda",
-                                   str(tmp_path))
-    # Both files sit in the cache's include folder, so the line is relative to the generated
-    # source and points into it.
-    assert line == '#include "include/pygpgpu_quat__st_abc123_float3_cuda.h"'
-    folder = tmp_path / "include"
-    header = (folder / quaternion.HEADER_NAME).read_text(encoding="utf-8")
-    assert "PYGPGPU_QUAT_FN(_rotate)" in header
-    # Normalised by the quaternion's own magnitude, not the product's: getting this wrong
-    # showed up as a factor-of-three difference from the interpreter.
-    assert "sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z)" in header
-    shim = line.split('"')[1].split("/")[-1]
-    body = (folder / shim).read_text(encoding="utf-8")
-    assert "#define PYGPGPU_QUAT_NAME _st_abc123" in body
-    assert "#define PYGPGPU_QUAT_QUAL __device__" in body
-    # The shim reaches the header by its bare name, in the same folder.
-    assert f'#include "{quaternion.HEADER_NAME}"' in body
+    float_only = quaternion.include_line(("QUAT_NEED_FLOAT",), "cuda", str(tmp_path))
+    assert float_only == ('#define QUAT_QUAL __device__\n'
+                          '#define QUAT_NEED_FLOAT\n'
+                          '#include "include/quat.h"')
+    # The header is placed next to the sources that include it.
+    assert (tmp_path / "include" / quaternion.HEADER_NAME).is_file()
+    # A double block would not compile where the width is absent, so it is not asked for.
+    assert "QUAT_NEED_DOUBLE" not in float_only
 
 
-def test_the_shim_has_no_device_qualifier_on_opencl(tmp_path):
+def test_opencl_gets_no_execution_space_qualifier(tmp_path):
     from pygpgpu.kernel import quaternion
 
-    line = quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "opencl",
-                                   str(tmp_path))
-    shim = line.split('"')[1].split("/")[-1]
-    body = (tmp_path / "include" / shim).read_text(encoding="utf-8")
+    line = quaternion.include_line(("QUAT_NEED_FLOAT",), "opencl", str(tmp_path))
     # OpenCL C has no execution-space annotation; `__device__` there does not compile.
-    assert "#define PYGPGPU_QUAT_QUAL \n" in body
+    assert line.splitlines()[0] == "#define QUAT_QUAL "
 
 
 def test_a_cache_carries_its_own_headers(tmp_path):
@@ -244,8 +260,8 @@ def test_a_cache_carries_its_own_headers(tmp_path):
 
     first = tmp_path / "__cucache__"
     second = tmp_path / "__clcache__"
-    quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "cuda", str(first))
-    quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "opencl", str(second))
+    quaternion.include_line(("QUAT_NEED_FLOAT",), "cuda", str(first))
+    quaternion.include_line(("QUAT_NEED_FLOAT",), "opencl", str(second))
     for cache in (first, second):
         assert (cache / "include" / quaternion.HEADER_NAME).is_file()
     # Nothing is written outside the two caches.
@@ -257,3 +273,74 @@ def test_a_non_quaternion_is_not_quaternion_arithmetic():
 
     assert quaternion.quat_member_names(np.dtype(Pair)) is None
     assert quaternion.quat_member_names(np.dtype(quatf)) == ("w", "x", "y", "z")
+    assert quaternion.quat_type_name(np.dtype(Pair)) is None
+    assert quaternion.needs(np.dtype(Pair)) is None
+
+
+# ---------------------------------------------------------------------------
+# A float and a double operand mix, and the result is the double form
+# ---------------------------------------------------------------------------
+
+
+@kernel
+def mix_multiply(a, b, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = (a * b).x
+
+
+@kernel
+def mix_add(a, b, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = (a + b).x
+
+
+@kernel
+def mix_rotate(q, v, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = (q * v).x
+
+
+def test_a_float_and_a_double_quaternion_answer_a_double(runner):
+    """pygf answers the double form; widening only ever goes one way."""
+    from pygf import quatd
+
+    float_quat = quatf(0.7071, 0.7071, 0.0, 0.0)
+    double_quat = quatd(0.7071, 0.7071, 0.0, 0.0)
+    for kernel_function, arithmetic in ((mix_multiply, lambda a, b: a * b),
+                                        (mix_add, lambda a, b: a + b)):
+        expected = arithmetic(float_quat, double_quat)
+        out = np.zeros(1, np.float64)
+        runner(kernel_function, float_quat, double_quat, out)
+        assert float(out[0]) == pytest.approx(expected.x, abs=1e-5)
+
+
+def test_a_float_quaternion_rotating_a_double_vector_answers_a_double(runner):
+    from pygf import double3
+
+    float_quat = quatf(0.7071, 0.7071, 0.0, 0.0)
+    double_vector = double3(1.0, 2.0, 3.0)
+    expected = float_quat * double_vector
+    out = np.zeros(1, np.float64)
+    runner(mix_rotate, float_quat, double_vector, out)
+    assert float(out[0]) == pytest.approx(expected.x, abs=1e-6)
+
+
+def test_a_double_quaternion_rotating_a_float_vector_answers_a_double(runner):
+    from pygf import vector3f
+
+    double_quat = quatd(0.7071, 0.7071, 0.0, 0.0)
+    float_vector = vector3f(1.0, 2.0, 3.0)
+    expected = double_quat * float_vector
+    out = np.zeros(1, np.float64)
+    runner(mix_rotate, double_quat, float_vector, out)
+    assert float(out[0]) == pytest.approx(expected.x, abs=1e-6)
+
+
+def test_the_mixed_block_needs_both_widths():
+    """The header only compiles the mixed functions when both names are present, so a source
+    that uses one asks for both."""
+    from pygpgpu.kernel import quaternion
+
+    assert quaternion.mixed_needs() == ("QUAT_NEED_FLOAT", "QUAT_NEED_DOUBLE")
+    assert quaternion.wider(np.dtype(quatf), np.dtype(quatd)).fields["w"][0].name == "float64"
+

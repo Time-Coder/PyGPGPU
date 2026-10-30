@@ -1003,9 +1003,9 @@ class FunctionTranslator:
         # Generated quaternion device functions, keyed by (name, body) so one definition is
         # emitted however many call sites ask for it.
         self.quaternion_helpers:Dict[str, str] = {}
-        # The quaternion shims a generated source needs: (structure name, vector name) -> the
-        # quaternion dtype. The compile step turns each into a header file and an #include.
-        self.quaternion_includes:Dict[Tuple[str, str], np.dtype] = {}
+        # The quaternion blocks a generated source needs, as the `QUAT_NEED_*` macro names. One
+        # header serves both widths; only the blocks in use have to be compiled.
+        self.quaternion_needs:Set[str] = set()
         # The array whose whole shape a `np.ndindex(arr.shape)` loop iterates, when that is
         # how the domain was spelled: the launch checks its rank against the loop's names.
         self.nd_whole_shape_param:str = ""
@@ -3412,13 +3412,16 @@ class FunctionTranslator:
 
     def _emit_quaternion_binop(self, operator:str, left:str, lt:Any, right:str, rt:Any,
                                node:ast.BinOp)->Optional[Tuple[str, Any]]:
-        """A quaternion operation, as a call to a generated device function.
+        """A quaternion operation, as a call to one of the header's functions.
 
         `pygf` gives a quaternion three meanings: `q * q` composes two rotations, `q * v`
-        rotates a vector, and a scalar scales it. None is a C operator on a structure, so
-        each becomes a small device function (see `quaternion.py`) and the expression
-        becomes a call. Anything else is left to the caller, which refuses a structure
-        operand with an explanation.
+        rotates a vector, and a scalar scales it. None is a C operator on a structure, so each
+        becomes a function from the fixed header and the expression becomes a call.
+
+        A float and a double operand mix freely, and pygf's rule is that the result is the
+        **double** form -- `quatf * quatd` is a `quatd`, `quatf * double3` is a `double3`,
+        `quatd * float3` is a `double3`. Widening only ever goes that way, so nothing is
+        rounded down; each mixed combination has its own function in the header.
         """
         from . import quaternion  # noqa: PLC0415
 
@@ -3429,47 +3432,73 @@ class FunctionTranslator:
         if operator not in ("Add", "Sub", "Mult", "Div"):
             return None
 
-        def call(operation:str, dtype:np.dtype, args:str, result:Any,
-                 vec_name:str = "") -> Tuple[str, Any]:
-            name:str = structs_name(dtype)
-            # The arithmetic lives in a fixed header; a per-type shim names the generated
-            # structure for it. Record the shim, not a body: the compile step writes the files
-            # into the cache folder and the header is expanded by the preprocessor.
-            self._require_quaternion_header(name, dtype, vec_name or "float3")
-            return f"{name}_{operation}({args})", result
+        def call(name:str, dtype:np.dtype, args:str, result:Any,
+                 mixed:bool = False) -> Tuple[str, Any]:
+            # The types and their arithmetic both come from the fixed header; all this records
+            # is which widths are in use, so the compile step can enable their blocks. A mixed
+            # operation touches both, because its body widens one width to the other.
+            if mixed:
+                self.quaternion_needs.update(quaternion.mixed_needs())
+            else:
+                self._require_quaternion_header(dtype)
+            return f"{name}({args})", result
+
+        def widen(left_dtype:np.dtype, right_dtype:np.dtype, operation:str) -> str:
+            """The header function for an operation on these two operand types.
+
+            The same width is `<type>_<operation>`; a mixed pair is
+            `<left type>_<operation>_<right type>`, which is how the header spells every mixed
+            combination. Deriving the name keeps the two in step without a table.
+            """
+            left_name:str = structs_name(left_dtype)
+            if left_name == structs_name(right_dtype):
+                return f"{left_name}_{operation}"
+            return f"{left_name}_{operation}_{structs_name(right_dtype)}"
 
         if operator == "Mult":
             if left_quat is not None and right_quat is not None:
-                if structs_name(left_quat) != structs_name(right_quat):
-                    self._error(
-                        f"quaternion operands must have the same type, got {lt} and {rt}",
-                        node)
-                return call("mul", left_quat, f"{left}, {right}", lt)
+                name:str = widen(left_quat, right_quat, "mul")
+                # A mixed pair answers the double form, which is a real structure the header
+                # declares, so it is registered under its fixed name like any other.
+                result:Any = (lt if structs_name(left_quat) == structs_name(right_quat)
+                              else structs_name(quaternion.double_dtype()))
+                return call(name, quaternion.wider(left_quat, right_quat),
+                            f"{left}, {right}", result,
+                            mixed=structs_name(left_quat) != structs_name(right_quat))
             if left_quat is not None and is_vec(rt):
-                return call("rotate", left_quat, f"{left}, {right}", rt, vec_name=rt)
+                # A float quaternion rotating a double vector answers a double vector, and a
+                # double one rotating a float vector likewise; only the matching pair is the
+                # plain `_rotate`.
+                same:bool = quaternion.matches_vector(left_quat, rt)
+                name = (f"{structs_name(left_quat)}_rotate" if same
+                        else f"{structs_name(left_quat)}_rotate_{rt}")
+                result_vec:Any = rt if same else (
+                    "double3" if rt.startswith("float") else rt)
+                # A widened rotation needs the double block too, since it answers a double3.
+                return call(name, left_quat, f"{left}, {right}", result_vec, mixed=not same)
             if left_quat is not None and is_float(rt):
-                return call("scale", left_quat, f"{left}, {right}", lt)
+                return call(f"{structs_name(left_quat)}_scale", left_quat,
+                            f"{left}, {right}", lt)
             if right_quat is not None and is_float(lt):
                 # `2.0 * q` multiplies the same way, and the scalar comes first in C.
-                return call("scale", right_quat, f"{right}, {left}", rt)
+                return call(f"{structs_name(right_quat)}_scale", right_quat,
+                            f"{right}, {left}", rt)
             return None
 
         if operator == "Div" and left_quat is not None and is_float(rt):
-            return call("scale", left_quat, f"{left}, (1.0f / ({right}))", lt)
+            return call(f"{structs_name(left_quat)}_scale", left_quat,
+                        f"{left}, (1.0f / ({right}))", lt)
 
         if operator in ("Add", "Sub"):
-            # Component-wise, which is what the base class would do: add or subtract every
-            # member in turn.
+            # Component-wise, which is what the base class would do.
             if left_quat is None or right_quat is None:
                 return None
-            if structs_name(left_quat) != structs_name(right_quat):
-                self._error(
-                    f"quaternion operands must have the same type, got {lt} and {rt}", node)
-            name = structs_name(left_quat)
-            # The header provides both `_add` and `_sub`; the shim is the same for either.
-            self._require_quaternion_header(name, left_quat, "float3")
-            suffix:str = "_add" if operator == "Add" else "_sub"
-            return f"{name}{suffix}({left}, {right})", lt
+            suffix:str = "add" if operator == "Add" else "sub"
+            name = widen(left_quat, right_quat, suffix)
+            result = (lt if structs_name(left_quat) == structs_name(right_quat)
+                      else structs_name(quaternion.double_dtype()))
+            return call(name, quaternion.wider(left_quat, right_quat), f"{left}, {right}",
+                        result, mixed=structs_name(left_quat) != structs_name(right_quat))
 
         return None
 
@@ -3951,10 +3980,17 @@ class FunctionTranslator:
 
     # ---------- calls ----------
 
-    def _require_quaternion_header(self, quat_name:str, dtype:np.dtype,
-                                   vector_name:str)->None:
-        """Record the shim a generated source needs to reach the quaternion header."""
-        self.quaternion_includes[(quat_name, vector_name)] = dtype
+    def _require_quaternion_header(self, dtype:np.dtype)->None:
+        """Record that this source uses a quaternion of this width.
+
+        One header serves both widths; what the compile step needs to know is which blocks to
+        enable, because a `double` block does not compile on a device without fp64.
+        """
+        from . import quaternion  # noqa: PLC0415
+
+        need:Optional[str] = quaternion.needs(dtype)
+        if need is not None:
+            self.quaternion_needs.add(need)
 
     def _emit_quaternion_call(self, node:ast.Call)->Optional[Tuple[str, Any]]:
         """`conjugate(q)` as the generated device function for the same meaning.
@@ -3992,7 +4028,7 @@ class FunctionTranslator:
             self._error(
                 f"conjugate() needs a quaternion, got {argument[1]}", node)
         type_name:str = structs_name(dtype)
-        self._require_quaternion_header(type_name, dtype, "float3")
+        self._require_quaternion_header(dtype)
         return f"{type_name}_conjugate({argument[0]})", type_name
 
     def _visit_call(self, node:ast.Call)->Tuple[str, Any]:
@@ -5332,7 +5368,7 @@ class FunctionTranslator:
                 # A helper's body may use quaternion arithmetic too; its generated functions
                 # travel with the entry so the compile step can emit them once.
                 "quaternion_helpers": dict(callee.quaternion_helpers),
-                "quaternion_includes": dict(callee.quaternion_includes),
+                "quaternion_needs": set(callee.quaternion_needs),
             }
             self.device_cache[sig_key] = entry
         except Exception:

@@ -1,23 +1,23 @@
-"""The fixed quaternion header, and the per-type shim that names a structure for it.
+"""Quaternion structures and arithmetic on the device.
 
-The arithmetic lives once, in ordinary C, in `headers/pygpgpu_quat.h` beside this module. A
-generated source gets a quaternion type whose C name is a content hash (`_st_<digest>`), so the
-header cannot spell that name itself; it takes the name, the scalar type, the vector type and
-the execution-space qualifier from macros, which a small generated **shim** defines before
-including the header. One shim per (quaternion type, vector type, backend).
+`pygf` gives a quaternion arithmetic the C operators cannot express: `q * q` composes two
+rotations, `q * v` rotates a vector, `conjugate(q)` flips the axis. Those meanings live in one
+fixed C header (`include/quat.h`) that declares both quaternion structures and every operation
+on them, so a generated source that includes it needs no declaration of its own.
 
-Both files are copied into an `include/` folder beside the generated sources -- one per cache,
-so a cache stays self-contained: copy a project to another machine and it still compiles, and
-the kernels keep working when a user cache is cleared or its location differs.
+The structures carry **fixed** C names (`quatf` / `quatd`) rather than the content hashes other
+structures get. That is deliberate: a hash cannot be spelled in advance, and the header has to
+declare the type it operates on. Two quaternion layouts exist, so two fixed names suffice, and
+the translator maps a quaternion dtype onto the right one.
 
-`#include` is expanded by the C preprocessor *before* the backend compiler runs
-(`macros_expand` with `-I{path}`), so the header is plain text folded into the generated file.
-The driver never resolves an include path of its own, which is why the header has to sit next
-to the source that includes it.
+A generated source chooses which blocks it needs through two macros:
+`QUAT_NEED_FLOAT` / `QUAT_NEED_DOUBLE`. The guards matter because a `double` block only
+compiles where the width does -- an OpenCL device without `cl_khr_fp64` rejects a `double`
+variable even inside an unused function.
 
-The bodies mirror `genQuat._op` line for line. A rotation is `q * v * conj(q) / |q|`,
-normalised by **q**'s magnitude rather than the product's -- that is what makes the device
-answer match the interpreter, and getting it wrong showed up as a factor-of-three difference.
+`#include` is expanded by the C preprocessor *before* the backend compiler runs, so the header
+is plain text folded into the generated file. The driver never resolves an include path of its
+own, which is why the header is copied into the cache beside the sources that include it.
 """
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ import numpy as np
 __all__ = [
     "quat_member_names",
     "is_quaternion",
+    "quat_type_name",
+    "needs",
     "HEADER_NAME",
     "HEADER_SOURCE",
     "header_source",
@@ -40,16 +42,23 @@ __all__ = [
 # Component names in the order `pygf` declares them.
 _MEMBERS:Tuple[str, ...] = ("w", "x", "y", "z")
 
-HEADER_NAME:str = "pygpgpu_quat.h"
+HEADER_NAME:str = "quat.h"
 
-# The fixed header is a real file beside this module, so it can be read and edited like any
-# other source. `install_header` copies it into the cache's include folder, because a quoted
+# The header is a real file beside this module, so it can be read and edited like any other
+# source. `install_header` copies it into the cache's include folder, because a quoted
 # `#include` resolves relative to the including file.
 HEADER_SOURCE:str = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "headers", HEADER_NAME)
+    os.path.dirname(os.path.abspath(__file__)), "include", HEADER_NAME)
 
 # The folder a cache keeps its device headers in.
 INCLUDE_FOLDER:str = "include"
+
+# The two fixed C names the header declares, keyed by the scalar width.
+_TYPE_NAMES:dict = {"float32": "quatf", "float64": "quatd"}
+
+# The macro that enables each block, keyed by the same widths.
+_NEED_MACROS:dict = {"float32": "QUAT_NEED_FLOAT",
+                     "float64": "QUAT_NEED_DOUBLE"}
 
 
 def quat_member_names(dtype:np.dtype)->Optional[Tuple[str, ...]]:
@@ -81,8 +90,68 @@ def is_quaternion(type_name:Any)->Optional[np.dtype]:
     return dtype if quat_member_names(dtype) is not None else None
 
 
-def _scalar_name(dtype:np.dtype)->str:
-    return "double" if np.dtype(dtype.fields["w"][0]).name == "float64" else "float"
+def _scalar_width(dtype:np.dtype)->Optional[str]:
+    if quat_member_names(dtype) is None:
+        return None
+    return np.dtype(dtype.fields["w"][0]).name
+
+
+def quat_type_name(dtype:np.dtype)->Optional[str]:
+    """The fixed C type name a quaternion dtype translates to, or None.
+
+    A quaternion gets a name the header already knows instead of the content hash every other
+    structure gets, which is what lets the header declare it.
+    """
+    width:Optional[str] = _scalar_width(dtype)
+    return _TYPE_NAMES.get(width) if width is not None else None
+
+
+def needs(dtype:np.dtype)->Optional[str]:
+    """The macro a generated source defines to compile this quaternion's block."""
+    width:Optional[str] = _scalar_width(dtype)
+    return _NEED_MACROS.get(width) if width is not None else None
+
+
+def mixed_needs()->tuple:
+    """Both macros, for the mixed float/double block.
+
+    A mixed operation widens to the double form, so its body touches both widths and the header
+    only compiles it when neither name is missing -- which is also when it is legal, since a
+    device without fp64 cannot do either.
+    """
+    return tuple(_NEED_MACROS[name] for name in ("float32", "float64"))
+
+
+def double_dtype()->np.dtype:
+    """The double quaternion dtype, which is what a mixed operation answers."""
+    return np.dtype([(name, "<f8") for name in _MEMBERS])
+
+
+def wider(first:Optional[np.dtype], second:Optional[np.dtype])->Optional[np.dtype]:
+    """The quaternion dtype a mixed pair promotes to; None when neither operand is one.
+
+    `pygf` answers the double form for every mixed combination, so this only ever widens: a
+    float quaternion meeting a double operand becomes the double one.
+    """
+    for candidate in (first, second):
+        if candidate is not None and _scalar_width(candidate) == "float64":
+            return candidate
+    for candidate in (first, second):
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def matches_vector(dtype:np.dtype, vector_name:str)->bool:
+    """Whether a quaternion's width is the same as a vector type's.
+
+    A float quaternion rotates a `float3` directly and a double one rotates a `double3`; a
+    mixed pair goes through the header's widened function, which is a separate name.
+    """
+    width:Optional[str] = _scalar_width(dtype)
+    if width is None:
+        return False
+    return width == ("float64" if vector_name.startswith("double") else "float32")
 
 
 def _write_if_changed(path:str, text:str)->None:
@@ -96,7 +165,7 @@ def _write_if_changed(path:str, text:str)->None:
 
 
 def header_source()->str:
-    """The fixed header's text, read from the file beside this module.
+    """The header's text, read from the file beside this module.
 
     Read on demand rather than cached: the file is a normal source a user may edit while
     debugging, and a stale copy would make the cache silently disagree with it.
@@ -111,7 +180,7 @@ def include_directory(source_directory:str)->str:
 
 
 def install_header(source_directory:str)->str:
-    """Put the fixed header in the cache's `include/` folder and return its path.
+    """Put the header in the cache's `include/` folder and return its path.
 
     Refreshed whenever the package copy changed, so editing the header and re-running a
     kernel picks the new text up instead of compiling a stale one.
@@ -123,24 +192,19 @@ def install_header(source_directory:str)->str:
     return path
 
 
-def include_line(quat_name:str, dtype:np.dtype, vector_name:str, backend:str,
-                 directory:str)->str:
-    """Write the per-type shim into the cache's `include/` folder and return the include line.
+def include_line(backends_needed:Tuple[str, ...], backend:str, directory:str)->str:
+    """Return the lines a generated source needs to reach the header.
 
-    The shim names a generated structure for the fixed header: four macros, then the include.
-    Both files sit in the same folder, so the shim reaches the header by its bare name and the
-    generated source reaches the shim through that folder -- relative paths throughout, nothing
-    outside the cache referenced.
+    Here is the whole of it: the enable macros for the widths in use, then one include. The
+    structure declarations and the arithmetic both come from the header, so a source that
+    includes it has nothing else to say about a quaternion.
+
+    The caller passes the **cache directory**; this function places the file, so do not
+    pre-append `include/` at the call site or the folder nests twice.
     """
-    qualifier:str = "__device__" if backend in ("cuda", "hip") else ""
     install_header(directory)
-    body:str = (
-        f"/* Generated: names a quaternion structure for {HEADER_NAME}. Do not edit. */\n"
-        f"#define PYGPGPU_QUAT_NAME {quat_name}\n"
-        f"#define PYGPGPU_QUAT_SCALAR {_scalar_name(dtype)}\n"
-        f"#define PYGPGPU_QUAT_VEC {vector_name}\n"
-        f"#define PYGPGPU_QUAT_QUAL {qualifier}\n"
-        f'#include "{HEADER_NAME}"\n')
-    name:str = f"pygpgpu_quat_{quat_name}_{vector_name or 'scalar'}_{backend}.h"
-    _write_if_changed(os.path.join(include_directory(directory), name), body)
-    return f'#include "{INCLUDE_FOLDER}/{name}"'
+    qualifier:str = "__device__" if backend in ("cuda", "hip") else ""
+    macros:str = "".join(f"#define {need}\n" for need in backends_needed)
+    return (f"#define QUAT_QUAL {qualifier}\n"
+            f"{macros}"
+            f'#include "{INCLUDE_FOLDER}/{HEADER_NAME}"')
