@@ -165,6 +165,39 @@ def test_quaternion_conjugate(runner):
         [expected.w, expected.x, expected.y, expected.z], abs=1e-5)
 
 
+def test_the_header_is_a_real_file_in_the_package():
+    """The fixed header lives in the source tree, so it can be read and edited like any
+    other source -- and `pyproject.toml` has to ship it, or an installed copy would look for
+    a file that is not there."""
+    import pathlib
+
+    from pygpgpu.kernel import quaternion
+
+    source = pathlib.Path(quaternion.HEADER_SOURCE)
+    assert source.is_file(), f"missing header: {source}"
+    assert source.parent.name == "headers"
+    text = source.read_text(encoding="utf-8")
+    assert "PYGPGPU_QUAT_FN(_rotate)" in text
+    # The package-data entry is what carries it into a wheel.
+    pyproject = (pathlib.Path(quaternion.__file__).parents[2] / "pyproject.toml").read_text(
+        encoding="utf-8")
+    assert "kernel/headers/*.h" in pyproject
+
+
+def pathlib_content(path:str)->str:
+    """The text of a file, read as UTF-8."""
+    with open(path, "r", encoding="utf-8") as file:
+        return file.read()
+
+
+def test_installing_copies_the_header_verbatim(tmp_path):
+    """The copy has to match the file, since the driver never sees the source tree."""
+    from pygpgpu.kernel import quaternion
+
+    installed = quaternion.install_header(str(tmp_path))
+    assert pathlib_content(installed) == quaternion.header_source()
+
+
 def test_the_header_is_fixed_and_the_shim_names_the_type(tmp_path):
     """The arithmetic is one fixed header; a per-type shim feeds it the generated C name.
 
