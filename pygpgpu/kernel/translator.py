@@ -1000,6 +1000,11 @@ class FunctionTranslator:
         # Structure dtypes a private array created in the body mentions: their typedefs
         # have to be emitted even though they are not parameters.
         self.private_structs:List[Any] = []
+        # Dtypes synthesized from a plain class the body constructs (`ray = Ray(...)` on a
+        # class that is not a ctypes.Structure). Their members are what the body reads, so a
+        # construction may hand over more than that and the unread arguments are dropped --
+        # a declared structure, whose layout is fixed, still refuses them.
+        self.plain_class_dtypes:Set[np.dtype] = set()
         # Generated quaternion device functions, keyed by (name, body) so one definition is
         # emitted however many call sites ask for it.
         self.quaternion_helpers:Dict[str, str] = {}
@@ -4100,6 +4105,15 @@ class FunctionTranslator:
                 if structure is not None:
                     return self._emit_structure_constructor(structs.register(structure),
                                                             structure, args, node)
+                # A plain class whose value the body builds and then reads is a layout too,
+                # decided by what the body does with it: the members it reads and the methods
+                # it calls, typed from the arguments at this call site. Nothing here parses
+                # the class's `__init__` or its annotations.
+                implied:Optional[np.dtype] = self._structure_from_construction(target)
+                if implied is not None:
+                    self.plain_class_dtypes.add(implied)
+                    return self._emit_structure_constructor(structs.register(implied),
+                                                            implied, args, node)
                 self._error(
                     f"'{name}' is a class: device code has no objects, so it cannot be "
                     f"constructed inside a kernel. Keep the values in separate scalar or "
@@ -4650,6 +4664,21 @@ class FunctionTranslator:
                 return base.__name__
         return None
 
+    def _structure_from_construction(self, target:type)->Optional[np.dtype]:
+        """The structure a value built by this class call should become, or None.
+
+        The members come from the body -- what it reads off the value and which methods it
+        hands it to -- and the types from the constructor's own arguments. That work happens
+        once, before the translator runs, in the same scan that handles an object argument;
+        this only looks the answer up.
+        """
+        from . import objects  # noqa: PLC0415
+
+        dtype:Optional[np.dtype] = objects.constructed_structure(target)
+        if dtype is None:
+            return None
+        return dtype
+
     def _is_structure_class(self, candidate:Any)->bool:
         """Whether a global name is a `ctypes.Structure` subclass with a device layout."""
         from . import structs  # noqa: PLC0415
@@ -4716,7 +4745,15 @@ class FunctionTranslator:
         order:List[str] = list(dtype.names or ())
         if supplied is None:
             supplied = {}
-            if len(args) > len(order):
+            # For a *declared* structure the layout is fixed, so too many arguments is the
+            # clear error it always was. For a structure a body's plain class was synthesized
+            # into, the members are what the body reads -- `Ray(origin, direction)` builds
+            # two, and a body reading only `origin` describes a one-member structure -- so
+            # the unread arguments are dropped, the way python itself leaves an attribute
+            # nobody mentions unassigned.
+            if dtype in self.plain_class_dtypes and len(args) > len(order):
+                args = args[:len(order)]
+            elif len(args) > len(order):
                 self._error(
                     f"{name}() takes at most {len(order)} arguments "
                     f"({', '.join(order)}), got {len(args)}", node)

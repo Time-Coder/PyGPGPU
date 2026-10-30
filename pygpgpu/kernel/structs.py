@@ -208,6 +208,19 @@ def declared_class(dtype:Any) -> Optional[type]:
     return _DECLARED.get(np.dtype(dtype)) if isinstance(dtype, (np.dtype, type)) else None
 
 
+def register_declared_class(dtype:np.dtype, cls:type) -> None:
+    """Record the class a synthesized structure came from.
+
+    A plain python class a kernel body builds has no `np.dtype(cls)` -- it is not a
+    `ctypes.Structure` -- so its layout comes from the members the body reads, and the class
+    is paired with that dtype here. The pairing is what lets a member method resolve:
+    `ray.at(t)` needs the class the method is defined on, and a bare record dtype cannot say
+    whose methods to compile.
+    """
+    _DECLARED.setdefault(np.dtype(dtype), cls)
+    register(dtype)
+
+
 def reregister_class(cls:Any) -> Optional[np.dtype]:
     """Register `cls` for its dtype, replacing any class recorded earlier.
 

@@ -89,6 +89,8 @@ class Scan:
         self.methods:Dict[str, List[Tuple[str, Any]]] = {}
         self.lists:Dict[str, List[Any]] = {}
         self.written:List[str] = []
+        # The values the body builds itself and hands around, keyed by its own local name.
+        self.constructed:Dict[str, Any] = {}
         self.visited:set = set()
 
     def add_path(self, path:str, value:Any)->None:
@@ -360,6 +362,14 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
             member_path:str = _member_path(current_path, attr)
             parent_value:Any = scan.values.get(current_path)
             value:Any = (getattr(parent_value, attr, None) if parent_value is not None else None)
+            if index < len(hops) - 1 and isinstance(value, ctypes.Structure):
+                # A vector member read through (`ray.origin.x`): the member *is* the payload,
+                # with a device type of its own, so it is noted and the walk stops here.
+                # Opening a path inside it would treat the vector as a nested structure,
+                # which it is not -- and that refusal is what broke a constructed value whose
+                # members are vectors.
+                scan.note(current_path, attr)
+                break
             if index < len(hops) - 1 and looks_like_object(value):
                 # An object member that is read *through*: its path opens and the walk
                 # continues inside it.
@@ -423,7 +433,31 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
         # recursively, and its member reads land on the same origin -- `ray_color` calling
         # `self.hit` reading `self.hittables` is one chain, and the element reads inside
         # `hit` describe the element structure of `self.hittables`.
-        _scan_function(function, {"self": origin}, scan)
+        #
+        # The arguments are forwarded as well: `scene.ray_color(ray)` hands the caller's own
+        # value to `ray_color`'s `ray` parameter, and what that method -- and the ones it
+        # calls in turn -- reads through it is what the value has to carry. Without this,
+        # `Sphere.hit`'s `ray.origin` had no path to land on.
+        bound:Dict[str, str] = {"self": origin}
+        try:
+            parameters:List[str] = list(
+                function.__code__.co_varnames[:function.__code__.co_argcount])
+        except AttributeError:
+            parameters = []
+        # `parameters[0]` is the receiver, which `node.args` does not carry, so the call's
+        # first argument lines up with `parameters[1]` -- skipping index 0 here aligned the
+        # two wrong ways and `scene.ray_color(ray)` never reached its `ray` parameter.
+        call_parameters:List[str] = parameters[1:] if parameters else []
+        for index, argument in enumerate(node.args):
+            if index >= len(call_parameters):
+                continue
+            if isinstance(argument, ast.Name) and argument.id in tracked:
+                bound[call_parameters[index]] = tracked[argument.id]
+        for keyword in node.keywords:
+            if keyword.arg and isinstance(keyword.value, ast.Name) \
+                    and keyword.value.id in tracked:
+                bound[keyword.arg] = tracked[keyword.value.id]
+        _scan_function(function, bound, scan)
         scan.note_method(origin, node.func.attr, function)
 
     # `helper(p)`: the helper's parameter becomes another name for the same object.
@@ -477,12 +511,196 @@ def _writes_to(tree:ast.Module, tracked:Dict[str, str])->List[str]:
     return written
 
 
+def _constructs_a_class(func:Any, resolve:Callable[[str], Any])->bool:
+    """Whether the body assigns a value from a class it defines elsewhere."""
+    tree:Optional[ast.Module] = _parse(func)
+    if tree is None:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value:ast.expr = node.value
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+            continue
+        cls:Any = resolve(value.func.id)
+        if isinstance(cls, type) and not issubclass(cls, (ctypes.Structure, list, tuple)):
+            return True
+    return False
+
+
+def constructed_locals(func:Any, objects:Dict[str, Any],
+                       resolve:Callable[[str], Any]) -> Dict[str, Any]:
+    """The values the body builds itself, as though they were arguments.
+
+    `ray = Ray(a, b)` in a kernel body is a value the device will hold, and what it has to
+    carry is decided exactly like an object argument's shape: by the members the body -- and
+    the methods it hands the value to -- read off it. So it is registered under the body\'s
+    own local name and the scan walks it like any other path.
+
+    The value itself is a template: the class is called with placeholders of the call\'s own
+    argument types, which is where every member\'s type comes from. A class whose
+    constructor refuses them, or which the body never reads, contributes nothing.
+
+    Only a class defined outside this module counts -- a local class has no device meaning --
+    and only a call assigned to a plain local name, because an unnamed temporary has no path
+    for the scan to bind.
+    """
+    found:Dict[str, Any] = {}
+    tree:Optional[ast.Module] = _parse(func)
+    if tree is None:
+        return found
+    for statement in ast.walk(tree):
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target:ast.expr = statement.targets[0]
+        value:ast.expr = statement.value
+        if not (isinstance(target, ast.Name) and isinstance(value, ast.Call)):
+            continue
+        callee:ast.expr = value.func
+        if not isinstance(callee, ast.Name):
+            continue
+        cls:Any = resolve(callee.id)
+        if not isinstance(cls, type) or issubclass(cls, (ctypes.Structure, list, tuple)):
+            continue
+        kinds:List[Any] = []
+        for argument in value.args:
+            kind:Optional[Any] = _argument_kind(argument, objects, resolve, tree)
+            if kind is None:
+                kinds = []
+                break
+            kinds.append(kind)
+        if not kinds:
+            continue
+        template:Any = _template_from(kinds, cls)
+        if template is not None:
+            found[target.id] = template
+    return found
+
+
+def _argument_kind(argument:ast.expr, objects:Dict[str, Any],
+                   resolve:Callable[[str], Any],
+                   tree:Optional[ast.Module] = None) -> Optional[Any]:
+    """The `ctypes` type an argument expression carries, when that can be told.
+
+    A kernel parameter's type is the value the caller passed; a member of one is that
+    member's type; a literal is a float. Anything else is unknown, and the construction is
+    left alone rather than guessed at.
+    """
+    if isinstance(argument, ast.Name):
+        value:Any = objects.get(argument.id)
+        if value is not None:
+            return type(value) if not isinstance(value, (int, float, bool)) else ctypes.c_float
+        # A local the body assigned carries whatever its right-hand side did.
+        return _assigned_kind(argument.id, objects, resolve, tree)
+    if isinstance(argument, ast.Attribute) and isinstance(argument.value, ast.Name):
+        holder:Any = objects.get(argument.value.id)
+        if holder is not None and hasattr(holder, argument.attr):
+            member:Any = getattr(holder, argument.attr)
+            return type(member) if not isinstance(member, (int, float, bool)) else ctypes.c_float
+        return None
+    if isinstance(argument, ast.Constant) and isinstance(argument.value, (int, float)):
+        return ctypes.c_float
+    return None
+
+
+def _assigned_kind(name:str, objects:Dict[str, Any],
+                   resolve:Callable[[str], Any],
+                   tree:Optional[ast.Module])->Optional[Any]:
+    """The `ctypes` type a local name carries, from what the body assigned to it.
+
+    Only the shapes a construction actually uses are followed: the result of a binary
+    operation over known types (which is what `ray_dir = a - b` is), a member of the
+    receiver, or another known name. The first assignment to the name in the body is the one
+    that counts, and a type that cannot be pinned leaves the construction alone -- guessing
+    would put a member of the wrong width on the device.
+    """
+    if tree is None:
+        return None
+    for statement in ast.walk(tree):
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target:ast.expr = statement.targets[0]
+        if not isinstance(target, ast.Name) or target.id != name:
+            continue
+        return _expression_kind(statement.value, objects, resolve, tree)
+    return None
+
+
+def _expression_kind(node:ast.expr, objects:Dict[str, Any],
+                     resolve:Callable[[str], Any],
+                     tree:Optional[ast.Module])->Optional[Any]:
+    """The `ctypes` type an expression yields, for the shapes a construction uses."""
+    if isinstance(node, ast.Name):
+        value:Any = objects.get(node.id)
+        if value is not None:
+            return type(value) if not isinstance(value, (int, float, bool)) else ctypes.c_float
+        return _assigned_kind(node.id, objects, resolve, tree)
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        holder:Any = objects.get(node.value.id)
+        if holder is not None:
+            member:Any = getattr(holder, node.attr, None)
+            if member is not None:
+                return type(member) if not isinstance(member, (int, float, bool)) \
+                    else ctypes.c_float
+        return None
+    if isinstance(node, ast.BinOp):
+        # An operation over known operands keeps the wider one: a float3 minus a point is a
+        # vector of the same width, and that is all the member's layout needs.
+        left:Optional[Any] = _expression_kind(node.left, objects, resolve, tree)
+        right:Optional[Any] = _expression_kind(node.right, objects, resolve, tree)
+        for candidate in (left, right):
+            if isinstance(candidate, type) and issubclass(candidate, ctypes.Structure):
+                return candidate
+        if left is not None or right is not None:
+            return ctypes.c_float
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return ctypes.c_float
+    return None
+
+
+def _template_from(kinds:Sequence[Any], cls:type)->Any:
+    """An instance of `cls` built from placeholders of the given types."""
+    values:List[Any] = []
+    for kind in kinds:
+        try:
+            values.append(kind())
+        except Exception:  # noqa: BLE001 -- an unusable placeholder means "no template"
+            return None
+    try:
+        return cls(*values)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# The structures built for values a body constructs, keyed by the class: the translator asks
+# this when it reaches the constructor call, and the scan above is what filled it in.
+_CONSTRUCTED:Dict[type, Any] = {}
+
+
+def constructed_structure(cls:type)->Optional[Any]:
+    """The structure dtype a class the body constructs was given, or None."""
+    return _CONSTRUCTED.get(cls)
+
+
+def forget_constructed()->None:
+    """Drop the recorded constructions, so a new scan cannot see a previous one."""
+    _CONSTRUCTED.clear()
+
+
 def scan_object(func:Any, objects:Dict[str, Any],
                 resolve:Callable[[str], Any])->Scan:
     """Scan `func` for the members and methods each object parameter needs."""
     scan:Scan = Scan(resolve)
     transitive:Dict[str, str] = {}
-    for name, value in objects.items():
+    # A value the body builds itself joins the same scan, so a member read one method further
+    # down -- `scene.ray_color(ray)` handing `ray` to `Sphere.hit` -- lands on the value\'s
+    # own path instead of vanishing.
+    constructed:Dict[str, Any] = constructed_locals(func, objects, resolve)
+    scan.constructed = dict(constructed)
+    # The registry describes this scan only: a stale entry would make a later kernel see a
+    # structure from an earlier one.
+    _CONSTRUCTED.clear()
+    for name, value in {**constructed, **objects}.items():
         if isinstance(value, list):
             scan.add_list(name, value)
         else:
@@ -683,7 +901,8 @@ class ObjectBinding:
 def convert_object_arguments(func:Any, args:Sequence[Any],
                              resolve:Callable[[str], Any],
                              self_param:str = '',
-                             binding:Any = None)->Tuple[Any, ...]:
+                             binding:Any = None,
+                             self_value:Any = None)->Tuple[Any, ...]:
     """Replace every object argument with an instance of its synthesized structure.
 
     Called before the argument types are inferred, because the structure *is* the type: the
@@ -693,15 +912,22 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
     ``self_param`` is the kernel's receiver name, when the kernel is a method: the receiver
     travels outside ``args``, so it is skipped when the parameters are lined up with the
     arguments, or `scene` in `render(self, scene)` would line up with the name `self`.
+
+    ``self_value`` is that receiver, when the kernel has one. It is not a structure argument,
+    but a body that builds its own value types the construction's arguments from what the
+    receiver's members are -- `Ray(self.position, ray_dir)` needs to know what `self.position`
+    *is* -- so the receiver joins the scan as a source of types, never as an argument.
     """
     hits:List[int] = [index for index, value in enumerate(args) if looks_like_object(value)]
-    if not hits:
+    # A body that builds its own value still needs the scan, even with no object argument:
+    # what that value carries is what the scan discovers.
+    if not hits and not _constructs_a_class(func, resolve):
         return tuple(args)
 
     parameters:List[str] = list(func.__code__.co_varnames[:func.__code__.co_argcount])
     if self_param and parameters and parameters[0] == self_param:
-        # The receiver travels outside rgs, so it is dropped from the names that index
-        # into it -- and ll_parameters is the same list, used only for the positions.
+        # The receiver travels outside args, so it is dropped from the names that index
+        # into it -- and all_parameters is the same list, used only for the positions.
         parameters = parameters[1:]
     all_parameters:List[str] = list(parameters)
     named:Dict[str, Any] = {}
@@ -712,8 +938,37 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
                 f"parameter, so its members cannot be discovered")
         named[parameters[index]] = args[index]
 
-    scan:Scan = scan_object(func, named, resolve)
+    # The constructor's arguments are typed from the caller's values, so the scan needs those
+    # parameters too -- but only the ones that could be a structure member. An array is not
+    # one, and registering it would make the scan ask for members of it. The receiver joins
+    # under its own name: reading `self.position` off it answers the construction's argument
+    # types, and the scan's own path machinery decides what else the body reads through it.
+    scan_inputs:Dict[str, Any] = {}
+    for index, name in enumerate(parameters):
+        if index >= len(args) or name in named:
+            continue
+        value:Any = args[index]
+        if isinstance(value, (int, float, bool, ctypes.Structure)):
+            scan_inputs[name] = value
+    if self_value is not None and self_param:
+        scan_inputs.setdefault(self_param, self_value)
+    scan_inputs.update(named)
+
+    scan:Scan = scan_object(func, scan_inputs, resolve)
     out:List[Any] = list(args)
+
+    # The receiver joined the scan as a source of types, but the structure it *is* here is
+    # still the declared class the body method mechanism already handles. A member the body
+    # reads off it that is an array (`self.image`) travels the self-attribute way, not as a
+    # structure field, so it leaves the synthesized member list -- `member_type` would refuse
+    # it, and the refusal is right for a real object argument but not for the receiver.
+    if self_value is not None and self_param:
+        receiver_members:List[str] = scan.members.get(self_param, [])
+        instance_values:Any = self_value
+        for member in list(receiver_members):
+            attribute:Any = getattr(instance_values, member, None)
+            if isinstance(attribute, np.ndarray):
+                receiver_members.remove(member)
 
     # An object nothing reads has no structure to build: an empty one is not a portable
     # device type (CUDA accepts it, OpenCL rejects the launch), and there would be nothing to
@@ -779,7 +1034,8 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
     # the structure of the member it carries.
     nested_of:Dict[str, List[Tuple[str, type]]] = {}
     for path in sorted(scan.members, key=len, reverse=True):
-        if path in named and "." not in path and path not in scan.lists:
+        if (path in named or path in scan.constructed) and "." not in path \
+                and path not in scan.lists:
             continue                     # top-level paths are built below, with merging
         if _list_root(path) in scan.lists and path != _list_root(path):
             pass                         # an element path; built with its list above
@@ -807,9 +1063,15 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
             if parent not in scan.lists:
                 nested_of.setdefault(parent, []).append((member, structure_of[path]))
 
+    # Both a caller\'s object and a value the body built describe a structure the same way:
+    # the members the scan found, typed from the template the value carries. They differ only
+    # in what happens next -- an argument is replaced in place, a constructed value is looked
+    # up by the translator at its call site -- so the structure itself is built together.
+    holders:Dict[str, Any] = dict(scan.constructed)
+    holders.update(named)
     by_class:Dict[type, List[str]] = {}
-    for name in named:
-        by_class.setdefault(type(named[name]), []).append(name)
+    for name in holders:
+        by_class.setdefault(type(holders[name]), []).append(name)
     for _cls, names in by_class.items():
         specs:List[List[Tuple[str, type]]] = []
         for name in names:
@@ -821,7 +1083,7 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
                 elif member_path in list_array_types:
                     fields.append((member, list_array_types[member_path]))
                 else:
-                    fields.append((member, member_type(getattr(named[name], member), member)))
+                    fields.append((member, member_type(getattr(holders[name], member), member)))
             fields.extend((m, k) for m, k in nested_of.get(name, [])
                           if m not in {n for n, _ in fields})
             specs.append(fields)
@@ -830,6 +1092,18 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
         for name, fields in zip(names, specs):
             chosen:List[Tuple[str, type]] = merged if merged is not None else fields
             structure:type = _structure_for(chosen, scan.methods[name])
+            if name in scan.constructed:
+                # A value the body built has no argument to replace: the structure is all it
+                # needs, and the translator looks it up at the constructor call. The class is
+                # recorded as the dtype\'s declaring class, so a method the body calls on the
+                # value -- `ray.at(t)` -- resolves to the class it is defined on.
+                cls:type = type(scan.constructed[name])
+                dtype:np.dtype = np.dtype(structure)
+                from .structs import register_declared_class  # noqa: PLC0415
+
+                register_declared_class(dtype, cls)
+                _CONSTRUCTED[cls] = dtype
+                continue
 
             def build(source:Any)->Any:
                 """An instance of ``structure`` carrying ``source``'s values, recursively."""
@@ -907,4 +1181,18 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
         out[index] = records
     if binding is not None:
         binding.written = list(scan.written)
+
+    # Record what each constructed value became, so the translator can answer the constructor
+    # call it meets: the class was scanned here, and its structure is `structure_of` under the
+    # body's own name for the value.
+    for name, value in scan.constructed.items():
+        cls:type = type(value)
+        path:str = name
+        if path in structure_of:
+            _CONSTRUCTED[cls] = np.dtype(structure_of[path])
     return tuple(out)
+
+
+# ---------------------------------------------------------------------------
+# A class the body builds itself
+# ---------------------------------------------------------------------------

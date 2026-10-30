@@ -894,9 +894,13 @@ class PyKernel:
         # inferred: the structure *is* the argument type, and every step after this sees the
         # same `ctypes.Structure` a caller would have declared by hand. The binding records
         # the pairing, so member writes travel back to the caller's object after the launch.
+        # The receiver travels along too: a body that builds its own value (`ray = Ray(...)`)
+        # types the construction's arguments from what the receiver's members are, and the
+        # receiver's instance is the only place that answer lives.
         object_binding:ObjectBinding = ObjectBinding()
         args = convert_object_arguments(self.raw_func, args, self._resolve_global,
-                                        self._self_param, object_binding)
+                                        self._self_param, object_binding,
+                                        self_value=instance)
         arg_types:List[Any] = [infer_ctype(a) for a in args]
         self_types:List[Any] = []
         for name, value in zip(self_attrs, self_values):

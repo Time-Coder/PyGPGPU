@@ -177,10 +177,14 @@ def builds_a_ray(origin: point3f, direction: float3, out: np.ndarray):
         out[i] = ray.origin.x
 
 
-def test_constructing_a_class_is_refused_with_a_reason(gpu_backend, runner):
+def test_constructing_a_plain_class_becomes_a_structure(gpu_backend, runner):
+    """A plain class a body builds is a layout, decided by what the body does with it.
+
+    The members are the attributes the kernel actually reads (`ray.origin` here), typed from
+    the constructor's arguments; `direction` is read by nothing, so the device structure has
+    one member and the second argument is dropped -- python's own rule for an attribute
+    nobody mentions.
+    """
     out = np.zeros(1, dtype=np.float32)
-    with pytest.raises(SyntaxError) as caught:
-        runner(builds_a_ray, point3f(0.0, 0.0, 0.0), float3(0.0, 0.0, 1.0), out)
-    message: str = str(caught.value)
-    assert "is a class" in message
-    assert "no objects" in message
+    runner(builds_a_ray, point3f(0.0, 0.0, 0.0), float3(0.0, 0.0, 1.0), out)
+    assert float(out[0]) == 0.0
