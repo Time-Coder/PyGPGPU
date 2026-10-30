@@ -184,7 +184,7 @@ def test_the_header_is_a_real_file_in_the_package():
     assert "kernel/headers/*.h" in pyproject
 
 
-def pathlib_content(path:str)->str:
+def read_text(path:str)->str:
     """The text of a file, read as UTF-8."""
     with open(path, "r", encoding="utf-8") as file:
         return file.read()
@@ -195,7 +195,8 @@ def test_installing_copies_the_header_verbatim(tmp_path):
     from pygpgpu.kernel import quaternion
 
     installed = quaternion.install_header(str(tmp_path))
-    assert pathlib_content(installed) == quaternion.header_source()
+    assert read_text(installed) == quaternion.header_source()
+    assert installed == str(tmp_path / "include" / quaternion.HEADER_NAME)
 
 
 def test_the_header_is_fixed_and_the_shim_names_the_type(tmp_path):
@@ -209,19 +210,21 @@ def test_the_header_is_fixed_and_the_shim_names_the_type(tmp_path):
 
     line = quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "cuda",
                                    str(tmp_path))
-    # The include names the shim inside the folder, because the generated source sits one
-    # level above it and a quoted include resolves relative to the including file.
-    assert line.startswith('#include "')
-    assert line.endswith('_cuda.h"')
-    header = (tmp_path / quaternion.HEADER_NAME).read_text(encoding="utf-8")
+    # Both files sit in the cache's include folder, so the line is relative to the generated
+    # source and points into it.
+    assert line == '#include "include/pygpgpu_quat__st_abc123_float3_cuda.h"'
+    folder = tmp_path / "include"
+    header = (folder / quaternion.HEADER_NAME).read_text(encoding="utf-8")
     assert "PYGPGPU_QUAT_FN(_rotate)" in header
     # Normalised by the quaternion's own magnitude, not the product's: getting this wrong
     # showed up as a factor-of-three difference from the interpreter.
     assert "sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z)" in header
     shim = line.split('"')[1].split("/")[-1]
-    body = (tmp_path / shim).read_text(encoding="utf-8")
+    body = (folder / shim).read_text(encoding="utf-8")
     assert "#define PYGPGPU_QUAT_NAME _st_abc123" in body
     assert "#define PYGPGPU_QUAT_QUAL __device__" in body
+    # The shim reaches the header by its bare name, in the same folder.
+    assert f'#include "{quaternion.HEADER_NAME}"' in body
 
 
 def test_the_shim_has_no_device_qualifier_on_opencl(tmp_path):
@@ -230,9 +233,23 @@ def test_the_shim_has_no_device_qualifier_on_opencl(tmp_path):
     line = quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "opencl",
                                    str(tmp_path))
     shim = line.split('"')[1].split("/")[-1]
-    body = (tmp_path / shim).read_text(encoding="utf-8")
+    body = (tmp_path / "include" / shim).read_text(encoding="utf-8")
     # OpenCL C has no execution-space annotation; `__device__` there does not compile.
     assert "#define PYGPGPU_QUAT_QUAL \n" in body
+
+
+def test_a_cache_carries_its_own_headers(tmp_path):
+    """One include folder per cache, not a shared one: a copied project still compiles."""
+    from pygpgpu.kernel import quaternion
+
+    first = tmp_path / "__cucache__"
+    second = tmp_path / "__clcache__"
+    quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "cuda", str(first))
+    quaternion.include_line("_st_abc123", np.dtype(quatf), "float3", "opencl", str(second))
+    for cache in (first, second):
+        assert (cache / "include" / quaternion.HEADER_NAME).is_file()
+    # Nothing is written outside the two caches.
+    assert not (tmp_path / quaternion.HEADER_NAME).exists()
 
 
 def test_a_non_quaternion_is_not_quaternion_arithmetic():

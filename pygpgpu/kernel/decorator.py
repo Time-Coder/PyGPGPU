@@ -1417,9 +1417,11 @@ class PyKernel:
         if all_quaternion_includes:
             from . import quaternion as quaternion_header
 
-            shared:str = os.path.join(self._cache_dir(backend), "pygpgpu_headers")
+            # The headers live in an `include/` folder beside the generated sources; the
+            # caller passes the cache directory and `include_line` does the placing.
+            cache:str = self._cache_dir(backend)
             include_lines = "\n".join(
-                quaternion_header.include_line(name, dtype, vector_name, backend, shared)
+                quaternion_header.include_line(name, dtype, vector_name, backend, cache)
                 for (name, vector_name), dtype in sorted(all_quaternion_includes.items()))
 
         source:str = ("\n".join(dependency_codes) + "\n\n" + kernel_code) if dependency_codes else kernel_code
