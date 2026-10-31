@@ -56,7 +56,11 @@ def struct_name(dtype:np.dtype)->str:
         return fixed
     hint:Optional[str] = _NAME_HINTS.get(dtype)
     if hint is not None:
-        return hint
+        holder:Optional[np.dtype] = _REGISTRY.get(hint)
+        if holder is None or holder == dtype:
+            return hint
+        # Another layout compiled under this name first: this dtype keeps its hash.
+        _NAME_HINTS.pop(dtype, None)
     digest:str = hashlib.md5(repr(dtype).encode("utf-8")).hexdigest()[:10]
     return f"_st_{digest}"
 
@@ -187,10 +191,14 @@ def register_name_hint(dtype:Any, cls:type) -> None:
         return
     name = _safe_identifier(name)
     dtype:np.dtype = np.dtype(dtype)
-    existing:Optional[np.dtype] = _REGISTRY.get(name)
-    if existing is not None and existing != dtype:
-        return                     # the name is taken by a different layout
-    _NAME_HINTS.setdefault(dtype, name)
+    # The name may be taken by a different layout in either table: the registry holds what
+    # has been compiled, the hints what earlier classes asked for. Two kernels in one
+    # process can each see a class called `Point` with different members, and the second
+    # hint must not rename the first one's structure behind its back.
+    for table in (_REGISTRY, _NAME_HINTS):
+        if name in table and table[name] != dtype:
+            return
+    _NAME_HINTS[dtype] = name
 
 
 def _safe_identifier(name:str) -> str:
