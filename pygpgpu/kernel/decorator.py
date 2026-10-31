@@ -863,7 +863,9 @@ class PyKernel:
                          carried_slots:Dict[str, Any], gap_slots:Dict[str, Any],
                          globalns:Optional[Dict[str, Any]]=None,
                          localns:Optional[Dict[str, Any]]=None,
-                         created_objects:Optional[Dict[str, Any]]=None)->Any:
+                         created_objects:Optional[Dict[str, Any]]=None,
+                         outer_state:Optional[Dict[str, Any]]=None,
+                         writable_outer:Optional[Dict[str, np.ndarray]]=None)->Any:
         """Run one region of python statements on the host, and return a tail `return`.
 
         A region is the statements between two passes, or after the last one. A statement
@@ -885,6 +887,20 @@ class PyKernel:
             receiver:str = _receiver_name(self.raw_func)
             if receiver and instance is not None:
                 localns[receiver] = instance
+        # Closure cells the body reads (a factory returning a @kernel is the common shape)
+        # and the outer-scope values the launch carries. A writable outer slot holds the
+        # value the device may have updated, and a host write back into it travels to the
+        # scope through the same buffer _write_back_outer copies from.
+        for name, cell in zip(self.raw_func.__code__.co_freevars,
+                              self.raw_func.__closure__ or ()):
+            try:
+                localns.setdefault(name, cell.cell_contents)
+            except ValueError:
+                continue                  # an empty cell: python would raise too
+        for slot in (outer_state or {}).get("writable", []):
+            localns[slot["name"]] = slot["buffer"][0]
+        for name, buffer in (writable_outer or {}).items():
+            localns[name] = buffer[0]
         # The slots the launch shares with the device: a carried scalar or a gap value that
         # an earlier phase updated is the current value, not the initial one. A created
         # array is the object itself -- indexing it would hand the statements its first row.
@@ -908,7 +924,14 @@ class PyKernel:
                 # A tail `return` is evaluated after every statement has run, not compiled
                 # as part of the exec body: a bare `return` is illegal outside a function.
                 continue
-            target:Optional[str] = _assigned_name_of(statement)
+            if isinstance(statement, ast.AugAssign):
+                # `count += 1` in a region updates the slot it names, the same way an
+                # assignment does; the shared helper does not answer for this spelling.
+                target_node:ast.expr = statement.target
+                target:Optional[str] = (target_node.id
+                                        if isinstance(target_node, ast.Name) else None)
+            else:
+                target:Optional[str] = _assigned_name_of(statement)
             # compile() needs a Module node, and the statement is one entry of the body.
             module:ast.Module = ast.Module(body=[statement], type_ignores=[])
             exec(compile(module, "<kernel gap>", "exec"), globalns, localns)  # noqa: S102 - the kernel source itself
@@ -926,6 +949,8 @@ class PyKernel:
                     slot:Optional[np.ndarray] = (gap_slots.get(target)
                                                  if gap_slots.get(target) is not None
                                                  else carried_slots.get(target))
+                    if slot is None:
+                        slot = (writable_outer or {}).get(target)
                     if slot is not None:
                         slot[0] = int(value)
                         localns[target] = slot[0]
@@ -1035,6 +1060,7 @@ class PyKernel:
         phase_param_names:List[List[str]] = list(
             launch_meta.get("phase_param_names") or [[] for _ in active_kernels])
 
+        outer_writable:List[Dict[str, Any]] = []
         carried_slots:Dict[str, Any] = {}
         # The names `full` holds, in order: the caller's arguments, then the carried slots.
         # `build_phase_args` aligns each phase's signature against these names.
@@ -1099,6 +1125,7 @@ class PyKernel:
         created_objects:Dict[str, Any] = {name: created[name] for name in created_all
                                           if name in created}
 
+        outer_writable = list(outer_state["writable"])
         runtime_values:List[Any] = list(outer_state["full"]) + _created_arguments(created)
         return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
                                       if returns else {})
@@ -1313,11 +1340,14 @@ class PyKernel:
                 self._sync_device(backend, device_obj)
                 regions:List[List[ast.stmt]] = list(launch_meta.get("phase_gaps") or [])
                 if position - 1 < len(regions):
+                    region_writable:Dict[str, np.ndarray] = {
+                        entry["name"]: entry["buffer"] for entry in outer_writable}
                     self._run_host_region(regions[position - 1], args, instance,
                                           carried_slots, gap_slots,
                                           gap_namespaces[position - 1][0],
                                           gap_namespaces[position - 1][1],
-                                          created_objects)
+                                          created_objects, outer_state,
+                                          region_writable)
             # A phase kernel declares only the shapes *it* indexes, so its argument list is
             # rebuilt from the same sources with its own extents -- a later phase commonly
             # indexes an array the first one never named.
@@ -1346,9 +1376,13 @@ class PyKernel:
                 bound_kernel(*build_phase_args(phase_shapes, phase_created_names, position))
         # The statements after the last loop are python: they run once, on the host, now that
         # every work item has finished -- the same moment python would run them.
+        tail_writable:Dict[str, np.ndarray] = {
+            entry["name"]: entry["buffer"] for entry in outer_state.get("writable", [])} \
+            if outer_state else {}
         tail_result:Any = self._run_host_region(
             list(launch_meta.get("body_tail") or []), args, instance,
-            carried_slots, gap_slots, created_objects=created_objects)
+            carried_slots, gap_slots, created_objects=created_objects,
+            outer_state=outer_state, writable_outer=tail_writable)
         for packed_value, unpack in unpackers:
             unpack(packed_value)
         if return_state and int(return_state["claim"][0]):
