@@ -931,6 +931,9 @@ class PyKernel:
             launch_meta.get("kernel_shapes") or [[] for _ in active_kernels])
         kernel_created:List[List[str]] = list(
             launch_meta.get("kernel_created") or [[] for _ in active_kernels])
+        # The parameters each phase declares beyond the shared prefix (the gap values).
+        phase_carried:List[List[str]] = list(
+            launch_meta.get("phase_carried") or [[] for _ in active_kernels])
 
         carried_slots:Dict[str, Any] = {}
         full:List[Any] = [_kernel_scalar_argument(value, t)
@@ -956,6 +959,16 @@ class PyKernel:
         # instance is bound too.
         created:Dict[str, Any] = _host_created_values(
             self.raw_func, tuple(args), instance)[0]
+        # A statement between two magic loops runs on the host, so its value is computed here
+        # and travels to the pass that reads it. It is a scalar, so it travels as a
+        # one-element slot, exactly like a carried scalar.
+        gap_names:List[str] = list(launch_meta.get("gap_names") or [])
+        gap_slots:Dict[str, Any] = {}
+        for name, value in _host_scalar_values(
+                self.raw_func, gap_names, tuple(args), instance).items():
+            slot = np.zeros(1, dtype=np.int32)
+            slot[0] = int(value)
+            gap_slots[name] = slot
 
         runtime_values:List[Any] = list(outer_state["full"]) + _created_arguments(created)
         return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
@@ -972,7 +985,8 @@ class PyKernel:
         _check_shape_indices(self.__name__, full, shape_sources, work_size_dims, launch_meta)
 
         def build_phase_args(extents:List[Tuple[int, int]],
-                             extra_created:Optional[List[str]])->List[Any]:
+                             extra_created:Optional[List[str]],
+                             phase_index:int=0)->List[Any]:
             """The launch arguments for one phase kernel.
 
             The shared prefix is the device parameter list up to `own_count`; the extents
@@ -981,7 +995,14 @@ class PyKernel:
             parameter of the pass that reads it and of no other -- so `extra_created` names
             the ones this kernel expects.
             """
+            print('TRACE build extents', extents, 'own_count', own_count)
             phase_args:List[Any] = list(full[:own_count])
+            # A gap value is one of this pass's own parameters: it has no place in `full`
+            # (which holds the parameters the *kernel* declares), so it is appended here, in
+            # the position the signature gives it -- before the shape extents.
+            for gap_name in (phase_carried[phase_index]
+                             if phase_index < len(phase_carried) else []):
+                phase_args.append(gap_slots.get(gap_name, 0))
             for param_index, dim in extents:
                 phase_args.append(int(full[param_index].shape[dim]))
             # The signature declares the sampler and local-memory arguments right after the
@@ -1143,11 +1164,18 @@ class PyKernel:
             # A phase is described by its extents *and* by the objects it created: a pass
             # that reads an array built between the loops declares it, one that does not
             # must not receive it.
+            # The fast path is only safe when the phase declares exactly the parameters the
+            # first kernel does: a gap value (`factor = 10` between two loops) is one pass's
+            # own parameter, and reusing the first kernel's argument list there would leave
+            # every later argument one slot short.
+            phase_own:List[str] = (phase_carried[position]
+                                   if position < len(phase_carried) else [])
             if (phase_shapes == shape_sources
-                    and phase_created_names == list(created)):
+                    and phase_created_names == list(created)
+                    and not phase_own):
                 bound_kernel(*launch_args)
             else:
-                bound_kernel(*build_phase_args(phase_shapes, phase_created_names))
+                bound_kernel(*build_phase_args(phase_shapes, phase_created_names, position))
         for packed_value, unpack in unpackers:
             unpack(packed_value)
         result:Any = (self._finish_returns(return_state, returns, full, created)
@@ -1574,6 +1602,11 @@ class PyKernel:
                 {"param_names": {position: name for name, position in param_index.items()},
                  # Every kernel this body produced, in launch order: one per magic loop.
                  "carried": list(translator.carried_scalars),
+                 "gap_names": list(translator.gap_names),
+                 # The extra parameters each phase declares beyond the shared prefix: a gap
+                 # value belongs to the pass that reads it (see _translate_phase_kernels).
+                 "phase_carried": [list(phase.carried_scalars)
+                                   for phase in translator.phase_translators],
                  "kernels": kernels,
                  # The trailing extent arguments each phase kernel needs, by phase.
                  "kernel_shapes": extra_shapes,
@@ -1963,6 +1996,20 @@ def _kernel_scalar_argument(value:Any, t:Any)->Any:
     return value
 
 
+def _host_regions(func:Any)->List[Any]:
+    """The statements a kernel body runs on the host, before and between its magic loops."""
+    from .translator import _parse_kernel_source, _outside_loops, get_dedented_source
+
+    try:
+        tree:Any = _parse_kernel_source(get_dedented_source(func))
+    except SyntaxError:
+        return []
+    if not (tree.body and isinstance(tree.body[0], ast.ImportFrom)):
+        pass
+    body:List[Any] = tree.body[0].body if tree.body else []
+    return list(_outside_loops(body))
+
+
 def _host_scalar_values(func:Any, names:List[str], args:Optional[Tuple[Any, ...]]=None,
                         instance:Any=None)->Dict[str, Any]:
     """Evaluate the initializers a carried scalar needs, on the host.
@@ -1973,7 +2020,7 @@ def _host_scalar_values(func:Any, names:List[str], args:Optional[Tuple[Any, ...]
     here in body order, sharing one namespace so a later initializer can read an earlier
     name, exactly as python would.
     """
-    from .translator import _assigned_name_of, _creation_assignments
+    from .translator import _assigned_name_of
 
     values:Dict[str, Any] = {}
     if not names:
@@ -1992,10 +2039,10 @@ def _host_scalar_values(func:Any, names:List[str], args:Optional[Tuple[Any, ...]
             localns[name] = cell.cell_contents
         except ValueError:
             pass
-    try:
-        statements:List[Any] = _creation_assignments(func)
-    except SyntaxError:
-        return values
+    # Every statement that runs on the host, in body order: a gap statement is host code even
+    # when the translator cannot lift it for a creation's sake, which is why the whole
+    # host region is walked rather than only the statements a creation needs.
+    statements = _host_regions(func)
     for statement in statements:
         target:Optional[str] = _assigned_name_of(statement)
         if target is None:

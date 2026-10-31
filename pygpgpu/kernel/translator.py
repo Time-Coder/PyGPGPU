@@ -1111,6 +1111,9 @@ class FunctionTranslator:
         # Locals initialized above the magic loop and written inside it: one location for the
         # whole launch, carried as a one-element buffer (see _bind_carried_scalars).
         self.carried_scalars:List[str] = []
+        # Names a statement between two magic loops computed on the host: each travels to the
+        # pass that reads it as its own parameter (see _translate_phase_kernels).
+        self.gap_names:List[str] = []
         # By-value arguments the body returns, promoted to pointers so the return reuses the
         # parameter instead of allocating a slot for a copy (see _promote_returned_parameters).
         self.promoted_parameters:Set[str] = set()
@@ -1396,10 +1399,19 @@ class FunctionTranslator:
         for index in range(len(self.phases) - 1):
             gap:List[ast.stmt] = self.phases[index][_magic_loop_end(self.phases[index]):]
             for stmt in gap:
-                if self._is_device_creation(stmt):
-                    header.append(stmt)
-                else:
+                # Every gap statement runs on the host: python executes it once, between the
+                # two passes. A creation is bound by _bind_host_values, which already runs on
+                # the host; anything else is a value the next pass receives as a parameter.
+                header.append(stmt)
+                if not self._is_device_creation(stmt) and _assigned_name_of(stmt) is not None:
                     carried.append(stmt)
+
+        # The names a gap computed on the host: each is a parameter of the pass that reads
+        # it, so it is declared (and marked like a carried slot) before the body is visited.
+        gap_values:List[str] = [
+            name for name in (_assigned_name_of(stmt) for stmt in carried)
+            if name is not None]
+        self.gap_names = list(gap_values)
 
         for index, phase_body in enumerate(self.phases):
             # The gap that follows this phase belongs to the *next* one (it is either a
@@ -1408,10 +1420,7 @@ class FunctionTranslator:
             # has no device form.
             body:List[ast.stmt] = (list(phase_body[:_magic_loop_index(phase_body) + 1]
                                         if index < len(self.phases) - 1 else phase_body))
-            if index:
-                # A later phase sees what earlier passes assigned: the plain scalars are
-                # recomputed here, and the created arrays were bound as parameters.
-                body = list(carried) + body
+
             phase:FunctionTranslator = FunctionTranslator(
                 self.func, self.param_types, self.backend, self.resolve_global,
                 self.device_cache, is_kernel=True, self_param=self.self_param,
@@ -1425,8 +1434,21 @@ class FunctionTranslator:
             # A later phase does not contain the shared creations, so it binds them here;
             # the object is the same host object for every phase.
             phase._bind_host_values(header + body if index else body)
+            used:Set[str] = {node.id for node in ast.walk(ast.Module(body=body, type_ignores=[]))
+                             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                             and node.id in gap_values}
+            # A gap value is one of the pass's own parameters, but it must be declared
+            # *after* the body is visited: the shape extents are appended while translating,
+            # and inserting a parameter ahead of them shifts every later argument.
+            for name in gap_values:
+                if name in used and name not in phase.scopes[-1]:
+                    phase.scopes[-1][name] = ("carried", name)
             phase.has_returns = _returns_a_value(body)
             phase._translate_magic_loop(body)
+            for name in gap_values:
+                if name in used and name not in dict(phase.params):
+                    phase.params.append((name, (PTR, "int")))
+                    phase.carried_scalars.append(name)
             self.phase_translators.append(phase)
             # The host builds one argument list for the whole call, so every phase's
             # parameters have to be known here: a value only a later phase needs (an array

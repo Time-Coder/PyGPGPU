@@ -133,6 +133,48 @@ def test_three_phases_run_in_order():
         np.testing.assert_array_equal(result, np.array([3, 9, 15, 21], dtype=np.int32))
 
 
+def test_a_host_only_expression_between_two_loops_runs_on_the_host():
+    """The gap is python code: `np.sum(x)` over a real array has no device form at all.
+
+    Before this, a gap statement was copied into the pass that reads it and recomputed by
+    every work item -- which is wrong for a value python computes once, and impossible when
+    the expression cannot be translated.
+    """
+
+    @kernel
+    def host_computed(a: np.ndarray, b: np.ndarray):
+        for i in range(a.shape[0]):
+            b[i] = a[i]
+        total = int(np.sum(a))
+        for i in range(a.shape[0]):
+            b[i] = b[i] + total
+
+    values = np.arange(1, 5, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        result = np.zeros(4, dtype=np.int32)
+        host_computed[backend](values, result)
+        np.testing.assert_array_equal(result, values + int(values.sum()))
+
+
+def test_two_values_between_two_loops_build_on_each_other():
+    """The second gap statement reads what the first computed, on the host."""
+
+    @kernel
+    def chained(a: np.ndarray, b: np.ndarray):
+        for i in range(a.shape[0]):
+            b[i] = a[i]
+        base = int(np.max(a))
+        extra = base + 1
+        for i in range(a.shape[0]):
+            b[i] = b[i] + extra
+
+    values = np.arange(1, 5, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        result = np.zeros(4, dtype=np.int32)
+        chained[backend](values, result)
+        np.testing.assert_array_equal(result, values + (int(values.max()) + 1))
+
+
 def test_a_scalar_assigned_between_two_loops_reaches_the_second():
     """A plain assignment between the passes is copied into the pass that reads it."""
 
