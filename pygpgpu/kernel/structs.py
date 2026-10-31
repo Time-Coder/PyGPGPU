@@ -56,11 +56,7 @@ def struct_name(dtype:np.dtype)->str:
         return fixed
     hint:Optional[str] = _NAME_HINTS.get(dtype)
     if hint is not None:
-        holder:Optional[np.dtype] = _REGISTRY.get(hint)
-        if holder is None or holder == dtype:
-            return hint
-        # Another layout compiled under this name first: this dtype keeps its hash.
-        _NAME_HINTS.pop(dtype, None)
+        return hint
     digest:str = hashlib.md5(repr(dtype).encode("utf-8")).hexdigest()[:10]
     return f"_st_{digest}"
 
@@ -189,16 +185,28 @@ def register_name_hint(dtype:Any, cls:type) -> None:
     name:str = getattr(cls, "__name__", "")
     if not name:
         return
-    name = _safe_identifier(name)
     dtype:np.dtype = np.dtype(dtype)
-    # The name may be taken by a different layout in either table: the registry holds what
-    # has been compiled, the hints what earlier classes asked for. Two kernels in one
-    # process can each see a class called `Point` with different members, and the second
-    # hint must not rename the first one's structure behind its back.
-    for table in (_REGISTRY, _NAME_HINTS):
-        if name in table and table[name] != dtype:
-            return
-    _NAME_HINTS[dtype] = name
+    _NAME_HINTS[dtype] = _free_name(_safe_identifier(name), dtype)
+
+
+def _free_name(base:str, dtype:np.dtype) -> str:
+    """The first name in ``base``, ``base_alter1``, ... that no other layout holds.
+
+    Two classes can carry one python name with different members (two modules both
+    defining `Point`, once imported), and every layout needs a name of its own: the C name
+    is the key member lookups resolve through. The numbered spelling keeps the family
+    visible -- `Point` and `Point_alter1` read as related, which a hash never does.
+    """
+    candidate:str = base
+    index:int = 0
+    while True:
+        holder:Optional[np.dtype] = _REGISTRY.get(candidate)
+        if holder is None or holder == dtype:
+            hinted:Optional[np.dtype] = _NAME_HINTS.get(candidate)
+            if hinted is None or hinted == dtype:
+                return candidate
+        index += 1
+        candidate = f"{base}_alter{index}"
 
 
 def _safe_identifier(name:str) -> str:
@@ -213,10 +221,9 @@ def register(dtype:Any) -> str:
     name:str = struct_name(dtype)
     existing:Optional[np.dtype] = _REGISTRY.get(name)
     if existing is not None and existing != dtype:
-        # A hint gave this name to another layout: fall back to the hashed name so the
-        # member lookups of both stay correct.
-        digest:str = hashlib.md5(repr(dtype).encode("utf-8")).hexdigest()[:10]
-        name = f"_st_{digest}"
+        # The name is taken by another layout (a hashed dtype a hint later renamed): pick
+        # the next free numbered spelling of this dtype's own hint base.
+        name = _free_name(_NAME_HINTS.get(dtype) or name, dtype)
     _REGISTRY[name] = dtype
     return name
 
