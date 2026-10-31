@@ -7,6 +7,7 @@ accumulate one element and the "answer" is one work item's partial sum.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pygpgpu import kernel
 
@@ -59,6 +60,56 @@ eturn total inside the loop returns what *this* work item accumulated, and that 
     for backend in ("python", "cuda"):
         out = np.zeros(4, dtype=np.int32)
         assert float(per_item_scratch[backend](values, out)) == 1.0
+
+
+@kernel
+def sum_and_return(x: np.ndarray):
+    """Return the accumulated total *after* the loop."""
+    total = 0
+    for i in range(x.shape[0]):
+        total += int(x[i])
+    return total
+
+
+@kernel
+def count_and_return(x: np.ndarray):
+    """A conditional `+=` -- still one shared slot, so the return is still the call's."""
+    hits = 0
+    for i in range(x.shape[0]):
+        if int(x[i]) > 2:
+            hits += 1
+    return hits
+
+
+@kernel
+def store_in_the_loop(x: np.ndarray):
+    """A plain store into the shared slot races, so it must be refused."""
+    best = 0
+    for i in range(x.shape[0]):
+        if int(x[i]) > best:
+            best = int(x[i])
+    return best
+
+
+def test_a_shared_scalar_can_be_returned_after_the_loop():
+    """The slot is one location, so every work item computes the same answer."""
+    values = np.arange(1, 5, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        assert int(sum_and_return[backend](values)) == 10
+        assert int(count_and_return[backend](values)) == 2
+
+
+def test_a_plain_store_into_the_shared_slot_is_refused():
+    """`best = x[i]` overwrites the one location from every work item: it has to be said.
+
+    Only `+=` becomes an atomic, so a conditional assignment is a race -- and it compiles.
+    """
+    values = np.arange(1, 5, dtype=np.int32)
+    with pytest.raises(SyntaxError) as caught:
+        store_in_the_loop["cuda"](values)
+    message: str = str(caught.value)
+    assert "shared by every work item" in message
+    assert "+=" in message
 
 
 def test_a_read_only_scalar_above_the_loop_is_unchanged():

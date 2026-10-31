@@ -350,11 +350,19 @@ def test_array_or_value_by_branch(runner):
     assert float(runner(array_or_value_by_branch, x, out, False)) == 0.0
 
 def test_return_after_the_magic_loop_is_rejected(gpu_backend, runner):
-    """The body after the magic loop runs once per work item, so it cannot return one value."""
+    """A per-work-item value cannot be returned after the loop; a shared one can.
+
+    `return_after_magic_loop` accumulates with a plain `total = total + x[i]`, so each work
+    item would compute its own partial sum and there is no single value to claim. The error
+    names that race rather than the return, because the *store* is what is wrong -- the
+    `+=` spelling makes it one shared slot and the return legal (see
+    `test_a_scalar_written_in_the_loop_is_one_location`).
+    """
     with pytest.raises(SyntaxError) as caught:
         runner(return_after_magic_loop, np.array([1.0, 2.0, 3.0], dtype=np.float32))
     message = str(caught.value)
-    assert "magic loop" in message and "return" in message
+    assert "shared by every work item" in message
+    assert "+=" in message
 
 
 @pytest.mark.parametrize(

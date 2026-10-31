@@ -1347,6 +1347,13 @@ class FunctionTranslator:
             # A local initialized above the loop and written inside it is one location for
             # the whole launch, not one per work item -- see _carried_scalars.
             self._bind_carried_scalars(body)
+            for offender in self._non_atomic_writes(body, self.carried_scalars):
+                self._error(
+                    "this variable is one location shared by every work item (it is "
+                    "accumulated inside the loop and read after it), so a plain store here "
+                    "races: whichever work item finishes last decides the value. Use `+=` "
+                    "(which becomes a device atomic), or keep the per-work-item value in a "
+                    "different variable and reduce it afterwards", offender)
             # A body with several magic loops is several *passes* over the work items. Each
             # one is translated on its own into a kernel of its own, because a second loop
             # inside one kernel would be run by every work item instead of once. They are
@@ -2134,6 +2141,32 @@ class FunctionTranslator:
                 carried.append(name)
         return carried
 
+    def _non_atomic_writes(self, body:List[ast.stmt], names:List[str]) -> List[ast.stmt]:
+        """The statements inside the loop that *store* one of ``names`` without `+=`.
+
+        A carried slot is one location for the whole launch, so a plain store there is a
+        race: every work item overwrites it, and the value that survives is whichever
+        finished last. `total += x[i]` is fine (it becomes an atomic), and so is a
+        conditional update built on it; `best = x[i]` inside an `if` is not, and it has to be
+        refused because it compiles and then answers one work item's number.
+        """
+        if not names:
+            return []
+        magic_index:int = _magic_loop_index(body)
+        if magic_index >= len(body) or not isinstance(body[magic_index], ast.For):
+            # A gid-style body has no magic loop, so there is no per-item region to check.
+            return []
+        loop:ast.For = body[magic_index]
+        offenders:List[ast.stmt] = []
+        for stmt in loop.body:
+            for node in ast.walk(stmt):
+                if not isinstance(node, ast.Assign):
+                    continue
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in names:
+                        offenders.append(node)
+        return offenders
+
     def _is_secondary_magic_loop(self, node:ast.For)->bool:
         """True for a `for` shaped like the work-item dispatch, at the top level.
 
@@ -2450,15 +2483,46 @@ class FunctionTranslator:
             return [self._return_position(item) for item in node.value.elts]
         return [self._return_position(node.value)]
 
+    def _return_is_shared(self, node:ast.Return)->bool:
+        """True when every name a post-loop return reads is a launch-wide slot.
+
+        A carried scalar (written inside the loop, read after it) is one location for the
+        whole launch, so a work item's copy of the expression is the call's result -- there
+        is nothing per-item left for the claim to arbitrate. A kernel argument is shared for
+        the same reason. Anything else (a local assigned below the loop) is one work item's
+        value, which is what the refusal is about.
+        """
+        if node.value is None:
+            return True
+        values:List[ast.expr] = (list(node.value.elts) if isinstance(node.value, ast.Tuple)
+                                else [node.value])
+        for value in values:
+            for name in ast.walk(value):
+                if not isinstance(name, ast.Name) or not isinstance(name.ctx, ast.Load):
+                    continue
+                if name.id in self.carried_scalars:
+                    continue
+                if is_ptr(self._lookup(name.id)):
+                    continue
+                return False
+        return True
+
     def _visit_kernel_return(self, node:ast.Return)->None:
         """Translate a `return` in a kernel body into a claim plus slot stores."""
         positions:List[Dict[str, Any]] = self._return_site(node)
         if self.after_magic_loop and any(position["kind"] == "value" for position in positions):
-            self._error(
-                "a value-returning return cannot appear after the magic loop: the "
-                "statements after the loop run once per work item, so a value accumulated "
-                "there belongs to one work item, not to the whole call. Return from inside "
-                "the loop, or reduce into an array argument and return that array", node)
+            # The statements after the loop run once per work item, so a value accumulated
+            # there is that work item's -- unless it is read from a *carried* slot, which is
+            # one location for the whole launch. `total = 0; for ...: total += x[i];
+            # return total` therefore answers the same thing in every work item, and the
+            # claim word hands back the one value the call computed.
+            if not self._return_is_shared(node):
+                self._error(
+                    "a value-returning return cannot appear after the magic loop: the "
+                    "statements after the loop run once per work item, so a value computed "
+                    "there belongs to one work item, not to the whole call. Accumulate it in "
+                    "a scalar above the loop with `+=` (one shared slot), return from inside "
+                    "the loop, or reduce into an array argument and return that array", node)
         site:int = len(self.return_sites)
         self.return_sites.append(positions)
         self._record_return_slots(site, positions, node)
