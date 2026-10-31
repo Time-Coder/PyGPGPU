@@ -924,6 +924,11 @@ class PyKernel:
             self._cache[cache_key] = entry
         (kernel_obj, shape_sources, work_size_dims, local_sizes, uses_global_id,
          image_samplers, returns, outer_vars, launch_meta) = entry
+        # One entry per magic loop, launched in order; a single-loop body has exactly one.
+        active_kernels:List[Any] = list(launch_meta.get("kernels") or [kernel_obj])
+        # The extent arguments each phase kernel declares, in phase order.
+        kernel_shapes:List[List[Tuple[int, int]]] = list(
+            launch_meta.get("kernel_shapes") or [[] for _ in active_kernels])
 
         full:List[Any] = [_kernel_scalar_argument(value, t)
                           for value, t in zip(list(args) + list(self_values),
@@ -952,28 +957,35 @@ class PyKernel:
         # used to raise a bare `IndexError: tuple index out of range`, which says nothing
         # about which array or loop was wrong.
         _check_shape_indices(self.__name__, full, shape_sources, work_size_dims, launch_meta)
-        launch_args:List[Any] = list(full[:own_count])
-        for param_index, dim in shape_sources:
-            launch_args.append(int(full[param_index].shape[dim]))
-        # The signature declares the sampler and local-memory arguments right after the
-        # shape extents, and the outer/created values last (see render_kernel), so they are
-        # appended in that order here. Getting this wrong shifts every later argument: the
-        # local pointer would land where an outer scalar is expected.
-        if backend == "opencl":
-            # A sampler per sampled image, in the order the signature declares them.
-            for param_index in image_samplers:
-                launch_args.append(_image_sampler(full[param_index]))
-        if backend == "opencl":
-            # cuda local memory is a static __shared__ declaration; only opencl needs the byte size passed
-            for local_bytes in local_sizes:
-                launch_args.append(local_bytes)
-        launch_args.extend(runtime_values)
-        if return_state:
-            # Return slots last: they are appended to the device signature after every
-            # parameter the work size, samplers and local sizes derive from.
-            launch_args.extend(return_state["buffers"])
-            launch_args.append(return_state["claim"])
-            launch_args.append(return_state["site"])
+
+        def build_phase_args(extents:List[Tuple[int, int]])->List[Any]:
+            """The launch arguments for one phase kernel.
+
+            The shared prefix is the device parameter list up to `own_count`; the extents
+            follow it because the translator appends them to each kernel's signature. A
+            phase that indexes more arrays than the first one needs its own set, which is
+            why this is a function rather than one assembled list.
+            """
+            phase_args:List[Any] = list(full[:own_count])
+            for param_index, dim in extents:
+                phase_args.append(int(full[param_index].shape[dim]))
+            # The signature declares the sampler and local-memory arguments right after the
+            # shape extents, and the outer/created values last (see render_kernel), so they
+            # are appended in that order here. Getting this wrong shifts every later
+            # argument: the local pointer would land where an outer scalar is expected.
+            if backend == "opencl":
+                for param_index in image_samplers:
+                    phase_args.append(_image_sampler(full[param_index]))
+                for local_bytes in local_sizes:
+                    phase_args.append(local_bytes)
+            phase_args.extend(runtime_values)
+            if return_state:
+                phase_args.extend(return_state["buffers"])
+                phase_args.append(return_state["claim"])
+                phase_args.append(return_state["site"])
+            return phase_args
+
+        launch_args:List[Any] = build_phase_args(shape_sources)
         # Vector values travel in the layout the backend's ABI defines: OpenCL pads a
         # 3-component vector to four slots, CUDA/HIP take the host's three. The host keeps
         # the three-component form everywhere, so each argument is converted here and its
@@ -1082,23 +1094,36 @@ class PyKernel:
                     raise ValueError(
                         f"global work size {global_size} must be divisible by local {local_size}; "
                         f"use None for an automatically derived local size")
-            if backend in ("cuda", "hip"):
-                # cuda/hip gridDim is a block count, derived from total/local
-                grid = tuple(g // l for g, l in zip(global_size, local_size))
-                kernel_obj = kernel_obj[(grid, local_size)]
-            else:
-                kernel_obj = kernel_obj[(global_size, local_size)]
+            geometry = (tuple(g // l for g, l in zip(global_size, local_size))
+                        if backend in ("cuda", "hip") else global_size)
+            phase_geometry = (geometry, local_size)
+        else:
+            phase_geometry = None
+        # Every phase of the body gets the same geometry: they are passes over one domain.
+        # Each is launched in turn on the stream this call owns, so the arrays that travel
+        # between them stay on the device instead of going back to the host and returning.
         if launch == "submit":
-            future = kernel_obj.submit(*launch_args)
+            future = active_kernels[0].submit(*launch_args)
             if return_state or outer_state["writable"]:
                 return self._with_returns(future, return_state, returns, full, outer_state, created)
             return future
         if launch == "async":
-            future = kernel_obj.async_call(*launch_args)
+            future = active_kernels[0].async_call(*launch_args)
             if return_state or outer_state["writable"]:
                 return self._with_returns(future, return_state, returns, full, outer_state, created)
             return future
-        kernel_obj(*launch_args)
+        for position, phase_kernel in enumerate(active_kernels):
+            # A phase kernel declares only the shapes *it* indexes, so its argument list is
+            # rebuilt from the same sources with its own extents -- a later phase commonly
+            # indexes an array the first one never named.
+            phase_shapes:List[Tuple[int, int]] = (
+                kernel_shapes[position] if position < len(kernel_shapes) else [])
+            bound_kernel = (phase_kernel[phase_geometry] if phase_geometry is not None
+                            else phase_kernel)
+            if position == 0 or phase_shapes == shape_sources:
+                bound_kernel(*launch_args)
+            else:
+                bound_kernel(*build_phase_args(phase_shapes))
         for packed_value, unpack in unpackers:
             unpack(packed_value)
         result:Any = (self._finish_returns(return_state, returns, full, created)
@@ -1393,7 +1418,10 @@ class PyKernel:
             self_owner=owner, launch_backend=backend,
             host_creation_values=creation_values)
         translator.translate()
-        kernel_code:str = translator.render_kernel(c_name)
+        # One kernel per magic loop: a body with several renders several, launched in order
+        # so the arrays stay on the device between them.
+        rendered:List[Tuple[str, str]] = translator.render_kernels(c_name)
+        kernel_code:str = "\n\n".join(source for _, source in rendered)
 
         # Device helper functions must be emitted in dependency order: C requires a callee to
         # be declared before its caller, and the cache is filled depth-first (a nested helper
@@ -1438,8 +1466,22 @@ class PyKernel:
             source = typedefs + "\n" + source
 
         source_path:str = self._write_source(sig, source, backend)
-        kernel:Any = self._backend_compile(source_path, c_name, backend, device_obj,
-                                           linked=translator.nests_a_launch)
+        linked:bool = translator.nests_a_launch
+        kernels:List[Any] = [
+            self._backend_compile(source_path, name, backend, device_obj, linked=linked)
+            for name, _ in rendered]
+        # A phase kernel declares only the shapes it indexes itself, so its launch needs its
+        # own trailing extent arguments rather than the ones the first kernel wants.
+        extra_shapes:List[List[Tuple[int, int]]] = []
+        for phase in translator.phase_translators:
+            phase_index:Dict[str, int] = {
+                name: position for position, (name, _) in enumerate(phase.params)}
+            extra_shapes.append([(phase_index[array_name], dim)
+                                 for array_name, dim in phase.shapes_used])
+        if not extra_shapes:
+            extra_shapes = [[] for _ in kernels]
+
+        kernel:Any = kernels[0]
 
         # Atomic targets: static analysis cannot recognize pointer-cast writes, so force them to writable
         from ..constants import KernelFlags
@@ -1448,17 +1490,25 @@ class PyKernel:
                 kernel._args[target_name].kernel_flags = (kernel._args[target_name].kernel_flags | KernelFlags.Writed)
 
         param_index:Dict[str, int] = {name: i for i, (name, _) in enumerate(translator.params)}
-        shape_sources:List[Tuple[int, int]] = [(param_index[array_name], dim) for array_name, dim in translator.shapes_used]
+        # A multi-phase body is translated per phase, so the main translator indexes nothing;
+        # the first phase's shapes are the ones this launch derives its work size from.
+        shapes_owner:Any = (translator.phase_translators[0]
+                            if translator.phase_translators else translator)
+        shape_index:Dict[str, int] = {
+            name: position for position, (name, _) in enumerate(shapes_owner.params)}
+        shape_sources:List[Tuple[int, int]] = [
+            (shape_index[array_name], dim) for array_name, dim in shapes_owner.shapes_used]
         # Each entry is (parameter index, dimension) for an array-sourced extent, or
         # (None, count) for a literal one (np.ndindex(2, 3)).
         work_size_dims:List[Tuple[Optional[int], int]] = [
-            (param_index[name], dim) if name else (None, dim)
-            for name, dim in translator.work_size_dims]
+            (shape_index[name], dim) if name else (None, dim)
+            for name, dim in shapes_owner.work_size_dims]
         # An explicit gpu.work_size(x) declaration: expand each named array into its own
         # dimensions. The rank is only known at call time, so record (param, -1) markers and
         # let _invoke substitute the real per-dimension indices.
-        if not work_size_dims and translator.declared_work_arrays:
-            work_size_dims = [(param_index[name], -1) for name in translator.declared_work_arrays]
+        if not work_size_dims and shapes_owner.declared_work_arrays:
+            work_size_dims = [(shape_index[name], -1)
+                              for name in shapes_owner.declared_work_arrays]
         # local memory: opencl passes byte sizes at launch by parameter position; cuda uses __shared__ declarations and needs nothing passed
         ctype_sizes:Dict[str, int] = {"bool": 1, "char": 1, "uchar": 1, "short": 2, "ushort": 2,
                                       "int": 4, "uint": 4, "long": 8, "ulong": 8,
@@ -1479,10 +1529,14 @@ class PyKernel:
             "arg_indices": {name: position for name, position in param_index.items()},
         }
         return (kernel, shape_sources, work_size_dims, local_sizes,
-                translator.uses_global_id, image_samplers,
+                shapes_owner.uses_global_id, image_samplers,
                 returns if translator.has_returns else None,
                 translator.outer_vars,
                 {"param_names": {position: name for name, position in param_index.items()},
+                 # Every kernel this body produced, in launch order: one per magic loop.
+                 "kernels": kernels,
+                 # The trailing extent arguments each phase kernel needs, by phase.
+                 "kernel_shapes": extra_shapes,
                  "subscript_indices": dict(translator.subscript_indices),
                  # How many index names the magic loop unpacks: the launch checks it against
                  # the number of dimensions its iteration domain actually has.

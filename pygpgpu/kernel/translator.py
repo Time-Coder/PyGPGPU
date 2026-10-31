@@ -1059,6 +1059,9 @@ class FunctionTranslator:
         self.resolve_global:Callable[[str], Any] = resolve_global
         self.device_cache:Dict[Any, Any] = device_cache
         self.is_kernel:bool = is_kernel
+        # The argument types the kernel was specialized for; kept so a phase translator can
+        # be built with the same signature (see _translate_phase_kernels).
+        self.param_types:List[Any] = list(param_types)
         # Kernels launched from this kernel's device code (`inner[(n,)](args)`). Each entry is
         # one rendered `__global__` function, emitted ahead of the outer kernel because C
         # requires a callee before its caller.
@@ -1067,6 +1070,9 @@ class FunctionTranslator:
         self.nested_seen:Dict[Callable, str] = {}
         # Device helpers a nested kernel needs, emitted once for the whole source.
         self.nested_helpers:List[str] = []
+        # One entry per magic loop when a body has several; each becomes its own kernel.
+        self.phases:List[List[ast.stmt]] = []
+        self.phase_translators:List["FunctionTranslator"] = []
         self.self_param:str = self_param
         self.self_attr_types:Dict[str, Any] = dict(self_attr_types or {})
         # The class the translated method belongs to, for deciding whether `self.name`
@@ -1293,12 +1299,39 @@ class FunctionTranslator:
             # that is known only after the whole body has been seen; every site's code
             # depends on it, so the body is scanned once first.
             self.has_returns = _returns_a_value(body)
-            self._translate_magic_loop(body)
+            # A body with several magic loops is several *passes* over the work items. Each
+            # one is translated on its own into a kernel of its own, because a second loop
+            # inside one kernel would be run by every work item instead of once. They are
+            # launched back to back on the same stream, so the arrays stay on the device.
+            self.phases = self.magic_loop_phases(body)
+            if len(self.phases) == 1:
+                self._translate_magic_loop(body)
+            else:
+                self._translate_phase_kernels()
         else:
             for stmt in body:
                 self._visit_statement(stmt)
             if self.return_type is None:
                 self.return_type = "void"
+
+    def _translate_phase_kernels(self)->None:
+        """Translate one kernel per magic loop, each owning its own statements."""
+        for index, phase_body in enumerate(self.phases):
+            phase:FunctionTranslator = FunctionTranslator(
+                self.func, self.param_types, self.backend, self.resolve_global,
+                self.device_cache, is_kernel=True, self_param=self.self_param,
+                self_attr_types=self.self_attr_types, self_owner=self.self_owner,
+                launch_backend=self.launch_backend,
+                host_creation_values=self.host_creation_values)
+            # The tree is the same function, so the phase is visited by transplanting its
+            # statements onto the phase translator's own tree.
+            phase.tree.body = phase_body
+            phase._bind_outer_variables()
+            phase._bind_host_values(phase_body)
+            phase.has_returns = _returns_a_value(phase_body)
+            phase._translate_magic_loop(phase_body)
+            self.phase_translators.append(phase)
+
     # ---------- outer-scope variables ----------
 
     def _bind_outer_variables(self)->None:
@@ -1632,6 +1665,36 @@ class FunctionTranslator:
                 term = f"{term} * {self._shape_var(param, inner)}"
             terms.append(term)
         return " + ".join(terms)
+
+    def magic_loop_phases(self, body:List[ast.stmt])->List[List[ast.stmt]]:
+        """Split a kernel body into one statement list per magic loop.
+
+        A body with a single magic loop is one phase and the split is trivial. Two or more
+        are separate *passes* over the work items, and they are translated as consecutive
+        launches rather than one kernel: a second loop inside one kernel would be executed
+        by every work item instead of once (see the refusal in _visit_statement).
+
+        The statements before the first loop stay with it, since they belong to the first
+        pass, and everything from the last loop to the end of the body is the last phase.
+        Each returned list has exactly one magic loop, which is what the single-phase
+        translation below expects.
+        """
+        # Only loops *shaped* like a magic loop count, and only from the second one on: the
+        # first is the work-item dispatch, so the phases start at it and each later one adds
+        # a boundary.
+        loops:List[int] = [
+            index for index, stmt in enumerate(body)
+            if isinstance(stmt, ast.For) and self._is_secondary_magic_loop(stmt)]
+        if len(loops) < 2:
+            return [body]
+        boundaries:List[int] = loops[1:]
+        phases:List[List[ast.stmt]] = []
+        start:int = 0
+        for boundary in boundaries:
+            phases.append(body[start:boundary])
+            start = boundary
+        phases.append(body[start:])
+        return phases
 
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
         magic_index:Optional[int] = None
@@ -6192,6 +6255,21 @@ class FunctionTranslator:
         # PyKernel._compile): a helper may need them too, and two copies of the same struct
         # is an error in C++.
         return f"{header} {{\n{body}\n}}"
+
+    def render_kernels(self, c_name:str)->List[Tuple[str, str]]:
+        """Every kernel this translation produces, as (name, rendered source).
+
+        A body with one magic loop renders one kernel. A body with several renders one per
+        phase, each named after the phase so the host can launch them in order; they share
+        the source, so a phase's helpers and typedefs are emitted once alongside the first.
+        """
+        if not self.phase_translators:
+            return [(c_name, self.render_kernel(c_name))]
+        rendered:List[Tuple[str, str]] = []
+        for index, phase in enumerate(self.phase_translators):
+            phase_name:str = f"{c_name}_p{index}"
+            rendered.append((phase_name, phase.render_kernel(phase_name)))
+        return rendered
 
     def structure_dtypes(self)->List[Any]:
         """Every structure dtype this translation mentions, in no particular order.

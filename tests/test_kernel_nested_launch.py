@@ -91,12 +91,13 @@ def test_a_kernel_called_without_a_work_size_is_refused():
     assert "work size" in message
 
 
-def test_a_second_magic_loop_is_refused():
-    """Only the first magic loop becomes the dispatch; a second would repeat per item.
+def test_two_magic_loops_are_two_passes():
+    """Each magic loop becomes its own kernel, launched in order over one domain.
 
-    Before this was refused, the second loop was emitted as an ordinary serial loop *inside*
-    every work item, so N items each ran the whole phase and raced on the same array -- and
-    the shape that happened to agree still read as correct.
+    Before this, only the first loop became the work-item dispatch and the second was emitted
+    as an ordinary serial loop *inside* every work item -- so N items each ran the whole
+    phase and raced on the same array, and a shape that happened to agree still read as
+    correct.
     """
 
     @kernel
@@ -107,11 +108,47 @@ def test_a_second_magic_loop_is_refused():
             b[i] = b[i] + 1
 
     values = np.arange(4, dtype=np.int32)
-    with pytest.raises(SyntaxError) as caught:
-        two_phases["cuda"](values, np.zeros(4, dtype=np.int32))
-    message: str = str(caught.value)
-    assert "more than one magic loop" in message
-    assert "own @kernel" in message
+    for backend in ("python", "cuda"):
+        result = np.zeros(4, dtype=np.int32)
+        two_phases[backend](values, result)
+        np.testing.assert_array_equal(result, np.array([1, 3, 5, 7], dtype=np.int32))
+
+
+def test_three_phases_run_in_order():
+    """Three loops are three passes, each seeing what the previous one wrote."""
+
+    @kernel
+    def three_phases(a: np.ndarray, b: np.ndarray):
+        for i in range(a.shape[0]):
+            b[i] = a[i] * 2
+        for i in range(a.shape[0]):
+            b[i] = b[i] + 1
+        for i in range(a.shape[0]):
+            b[i] = b[i] * 3
+
+    values = np.arange(4, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        result = np.zeros(4, dtype=np.int32)
+        three_phases[backend](values, result)
+        np.testing.assert_array_equal(result, np.array([3, 9, 15, 21], dtype=np.int32))
+
+
+def test_phases_may_index_different_arrays():
+    """A later pass may need a shape the first one never named."""
+
+    @kernel
+    def phases(a: np.ndarray, b: np.ndarray, c: np.ndarray):
+        for i in range(a.shape[0]):
+            b[i] = a[i] * 2
+        for i in range(c.shape[0]):
+            c[i] = b[i] + 100
+
+    values = np.arange(4, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        inner = np.zeros(4, dtype=np.int32)
+        outer = np.zeros(2, dtype=np.int32)
+        phases[backend](values, inner, outer)
+        np.testing.assert_array_equal(outer, np.array([100, 102], dtype=np.int32))
 
 
 def test_an_ordinary_loop_inside_the_work_item_stays_allowed():
