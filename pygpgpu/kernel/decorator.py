@@ -929,6 +929,8 @@ class PyKernel:
         # The extent arguments each phase kernel declares, in phase order.
         kernel_shapes:List[List[Tuple[int, int]]] = list(
             launch_meta.get("kernel_shapes") or [[] for _ in active_kernels])
+        kernel_created:List[List[str]] = list(
+            launch_meta.get("kernel_created") or [[] for _ in active_kernels])
 
         full:List[Any] = [_kernel_scalar_argument(value, t)
                           for value, t in zip(list(args) + list(self_values),
@@ -958,13 +960,15 @@ class PyKernel:
         # about which array or loop was wrong.
         _check_shape_indices(self.__name__, full, shape_sources, work_size_dims, launch_meta)
 
-        def build_phase_args(extents:List[Tuple[int, int]])->List[Any]:
+        def build_phase_args(extents:List[Tuple[int, int]],
+                             extra_created:Optional[List[str]])->List[Any]:
             """The launch arguments for one phase kernel.
 
             The shared prefix is the device parameter list up to `own_count`; the extents
-            follow it because the translator appends them to each kernel's signature. A
-            phase that indexes more arrays than the first one needs its own set, which is
-            why this is a function rather than one assembled list.
+            follow it because the translator appends them to each kernel's signature. The
+            created objects differ per phase -- `mid = np.zeros(4)` between two loops is a
+            parameter of the pass that reads it and of no other -- so `extra_created` names
+            the ones this kernel expects.
             """
             phase_args:List[Any] = list(full[:own_count])
             for param_index, dim in extents:
@@ -978,14 +982,17 @@ class PyKernel:
                     phase_args.append(_image_sampler(full[param_index]))
                 for local_bytes in local_sizes:
                     phase_args.append(local_bytes)
-            phase_args.extend(runtime_values)
+            phase_args.extend(outer_state["full"])
+            for name, value in created.items():
+                if extra_created is None or name in extra_created:
+                    phase_args.append(_kernel_scalar_argument(value, infer_ctype(value)))
             if return_state:
                 phase_args.extend(return_state["buffers"])
                 phase_args.append(return_state["claim"])
                 phase_args.append(return_state["site"])
             return phase_args
 
-        launch_args:List[Any] = build_phase_args(shape_sources)
+        launch_args:List[Any] = build_phase_args(shape_sources, None)
         # Vector values travel in the layout the backend's ABI defines: OpenCL pads a
         # 3-component vector to four slots, CUDA/HIP take the host's three. The host keeps
         # the three-component form everywhere, so each argument is converted here and its
@@ -1120,10 +1127,16 @@ class PyKernel:
                 kernel_shapes[position] if position < len(kernel_shapes) else [])
             bound_kernel = (phase_kernel[phase_geometry] if phase_geometry is not None
                             else phase_kernel)
-            if position == 0 or phase_shapes == shape_sources:
+            phase_created_names:List[str] = (
+                kernel_created[position] if position < len(kernel_created) else [])
+            # A phase is described by its extents *and* by the objects it created: a pass
+            # that reads an array built between the loops declares it, one that does not
+            # must not receive it.
+            if (phase_shapes == shape_sources
+                    and phase_created_names == list(created)):
                 bound_kernel(*launch_args)
             else:
-                bound_kernel(*build_phase_args(phase_shapes))
+                bound_kernel(*build_phase_args(phase_shapes, phase_created_names))
         for packed_value, unpack in unpackers:
             unpack(packed_value)
         result:Any = (self._finish_returns(return_state, returns, full, created)
@@ -1473,13 +1486,15 @@ class PyKernel:
         # A phase kernel declares only the shapes it indexes itself, so its launch needs its
         # own trailing extent arguments rather than the ones the first kernel wants.
         extra_shapes:List[List[Tuple[int, int]]] = []
+        # The created objects each phase declares: mid = np.zeros(4) between two loops is
+        # a parameter of the pass that reads it and of no other.
+        phase_created:List[List[str]] = []
         for phase in translator.phase_translators:
             phase_index:Dict[str, int] = {
                 name: position for position, (name, _) in enumerate(phase.params)}
             extra_shapes.append([(phase_index[array_name], dim)
                                  for array_name, dim in phase.shapes_used])
-        if not extra_shapes:
-            extra_shapes = [[] for _ in kernels]
+            phase_created.append(list(phase.host_values))
 
         kernel:Any = kernels[0]
 
@@ -1498,6 +1513,9 @@ class PyKernel:
             name: position for position, (name, _) in enumerate(shapes_owner.params)}
         shape_sources:List[Tuple[int, int]] = [
             (shape_index[array_name], dim) for array_name, dim in shapes_owner.shapes_used]
+        if not extra_shapes:
+            # A single kernel: its own extents are the launch's.
+            extra_shapes = [list(shape_sources)]
         # Each entry is (parameter index, dimension) for an array-sourced extent, or
         # (None, count) for a literal one (np.ndindex(2, 3)).
         work_size_dims:List[Tuple[Optional[int], int]] = [
@@ -1537,6 +1555,7 @@ class PyKernel:
                  "kernels": kernels,
                  # The trailing extent arguments each phase kernel needs, by phase.
                  "kernel_shapes": extra_shapes,
+                 "kernel_created": phase_created,
                  "subscript_indices": dict(translator.subscript_indices),
                  # How many index names the magic loop unpacks: the launch checks it against
                  # the number of dimensions its iteration domain actually has.

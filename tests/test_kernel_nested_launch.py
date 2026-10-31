@@ -133,6 +133,60 @@ def test_three_phases_run_in_order():
         np.testing.assert_array_equal(result, np.array([3, 9, 15, 21], dtype=np.int32))
 
 
+def test_a_scalar_assigned_between_two_loops_reaches_the_second():
+    """A plain assignment between the passes is copied into the pass that reads it."""
+
+    @kernel
+    def scaled(a: np.ndarray, b: np.ndarray):
+        for i in range(a.shape[0]):
+            b[i] = a[i] * 2
+        factor = 10
+        for i in range(a.shape[0]):
+            b[i] = b[i] + factor
+
+    values = np.arange(4, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        result = np.zeros(4, dtype=np.int32)
+        scaled[backend](values, result)
+        np.testing.assert_array_equal(result, np.array([10, 12, 14, 16], dtype=np.int32))
+
+
+def test_an_array_created_between_two_loops_is_a_parameter():
+    """A creation between the passes is built once and travels as an argument."""
+
+    @kernel
+    def with_middle(a: np.ndarray, b: np.ndarray):
+        for i in range(a.shape[0]):
+            b[i] = a[i] * 2
+        middle: np.ndarray = np.zeros(4, dtype=np.int32)
+        for i in range(a.shape[0]):
+            b[i] = b[i] + middle[i] + 1
+
+    values = np.arange(4, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        result = np.zeros(4, dtype=np.int32)
+        with_middle[backend](values, result)
+        np.testing.assert_array_equal(result, np.array([1, 3, 5, 7], dtype=np.int32))
+
+
+def test_an_array_created_above_the_first_loop_is_shared():
+    """A creation above the first pass is read by every pass after it."""
+
+    @kernel
+    def shared_table(a: np.ndarray, b: np.ndarray):
+        table: np.ndarray = np.arange(4, dtype=np.int32)
+        for i in range(a.shape[0]):
+            b[i] = table[i] * 2
+        for i in range(a.shape[0]):
+            b[i] = b[i] + table[i]
+
+    values = np.arange(4, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        result = np.zeros(4, dtype=np.int32)
+        shared_table[backend](values, result)
+        np.testing.assert_array_equal(result, np.array([0, 3, 6, 9], dtype=np.int32))
+
+
 def test_phases_may_index_different_arrays():
     """A later pass may need a shape the first one never named."""
 

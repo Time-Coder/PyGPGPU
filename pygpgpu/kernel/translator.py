@@ -775,6 +775,42 @@ _HOST_CREATION_FUNCTIONS:Set[str] = {
 
 # The statements a kernel body may execute on the host: assignments above the magic loop
 # whose right-hand side only builds data.
+def _magic_loop_end(statements:List[ast.stmt])->int:
+    """The index just past the statements that belong to the magic loop's body.
+
+    A phase is `[header..., for-loop, after...]`, so everything from the loop onwards except
+    its own body is the *gap* before the next phase -- the statements a body places between
+    two magic loops.
+    """
+    for index, stmt in enumerate(statements):
+        if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt):
+            return index + 1
+    return len(statements)
+
+
+def _outside_loops(body:List[ast.stmt])->List[ast.stmt]:
+    """The top-level statements that are not a magic loop.
+
+    A single-loop body places all of them before the loop, but a body with several loops
+    may also place one *between* two of them (`mid = np.zeros(4)` in a two-pass body), and
+    the pass that reads such a value needs it bound on the host just the same.
+    """
+    loops:List[int] = [
+        index for index, stmt in enumerate(body)
+        if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt)]
+    if not loops:
+        return list(body)
+    # Everything before the first loop, plus the gap between consecutive loops: those are
+    # the statements a body places outside its work-item dispatch, and a value bound there
+    # (a created array, a scalar) is read by a later pass. Statements *after* the last loop
+    # are excluded -- `return out` lives there and must keep its device meaning.
+    outside:List[ast.stmt] = list(body[:loops[0]])
+    for start, end in zip(loops, loops[1:]):
+        outside.extend(stmt for stmt in body[start + 1:end]
+                       if not isinstance(stmt, (ast.For, ast.Return)))
+    return outside
+
+
 def _creation_assignments(func:Callable)->List[ast.stmt]:
     """The statements the host runs before the launch, in body order.
 
@@ -820,7 +856,7 @@ def _creation_assignments(func:Callable)->List[ast.stmt]:
     # the host does not run unrelated device code -- and everything lifted here is still
     # emitted for the work items as well.
     creations:List[ast.stmt] = [
-        stmt for stmt in body[:magic_index]
+        stmt for stmt in _outside_loops(body)
         if _creation_target_of(stmt) is not None and is_creation(_creation_target_of(stmt))]
     needed:set = set()
     for stmt in creations:
@@ -829,7 +865,7 @@ def _creation_assignments(func:Callable)->List[ast.stmt]:
                 needed.add(node.id)
 
     bound_above:Dict[str, ast.stmt] = {}
-    for stmt in body[:magic_index]:
+    for stmt in _outside_loops(body):
         name:Optional[str] = _assigned_name_of(stmt)
         if name is not None:
             bound_above.setdefault(name, stmt)
@@ -846,7 +882,7 @@ def _creation_assignments(func:Callable)->List[ast.stmt]:
             if name in fitting or name in creation_names:
                 continue
             stmt:Optional[ast.stmt] = bound_above.get(name)
-            if stmt is None or stmt not in body[:magic_index]:
+            if stmt is None or stmt not in _outside_loops(body):
                 continue
             if not _is_host_evaluable(stmt.value if stmt.value is not None else stmt):
                 continue
@@ -857,7 +893,7 @@ def _creation_assignments(func:Callable)->List[ast.stmt]:
             changed = True
 
     chosen:List[ast.stmt] = []
-    for stmt in body[:magic_index]:
+    for stmt in _outside_loops(body):
         value:Optional[ast.expr] = _creation_target_of(stmt)
         name:Optional[str] = _assigned_name_of(stmt)
         if value is not None and is_creation(value):
@@ -1315,8 +1351,43 @@ class FunctionTranslator:
                 self.return_type = "void"
 
     def _translate_phase_kernels(self)->None:
-        """Translate one kernel per magic loop, each owning its own statements."""
+        """Translate one kernel per magic loop, each owning its own statements.
+
+        A phase is a separate kernel, so a name it reads has to be one of its own
+        parameters. The names a *different* phase computes therefore have to cross the
+        boundary, and how depends on what the name holds:
+
+        * a **created array** (`mid = np.zeros(4)`) is built once on the host and travels as
+          a trailing parameter, exactly as it does in a single-phase body -- whether it sits
+          above the first loop or between two of them;
+        * a **plain scalar** (`scale = 10`) is copied into the body of every later phase and
+          recomputed there. It is a value each work item can derive for itself, so shipping
+          it as a parameter would add an argument nothing needs, and it is what keeps a
+          body's `k = 2 * factor` readable across the split.
+        """
+        # The statements every phase shares: those above the first loop, plus the gaps
+        # between the loops (a creation there has to exist before the pass that reads it).
+        header:List[ast.stmt] = self.phases[0][:_magic_loop_index(self.phases[0])]
+        carried:List[ast.stmt] = []
+        for index in range(len(self.phases) - 1):
+            gap:List[ast.stmt] = self.phases[index][_magic_loop_end(self.phases[index]):]
+            for stmt in gap:
+                if self._is_device_creation(stmt):
+                    header.append(stmt)
+                else:
+                    carried.append(stmt)
+
         for index, phase_body in enumerate(self.phases):
+            # The gap that follows this phase belongs to the *next* one (it is either a
+            # creation the host builds or a value the next pass recomputes), so it is cut
+            # from this phase's body: emitted here it would be device code, and a creation
+            # has no device form.
+            body:List[ast.stmt] = (list(phase_body[:_magic_loop_index(phase_body) + 1]
+                                        if index < len(self.phases) - 1 else phase_body))
+            if index:
+                # A later phase sees what earlier passes assigned: the plain scalars are
+                # recomputed here, and the created arrays were bound as parameters.
+                body = list(carried) + body
             phase:FunctionTranslator = FunctionTranslator(
                 self.func, self.param_types, self.backend, self.resolve_global,
                 self.device_cache, is_kernel=True, self_param=self.self_param,
@@ -1325,12 +1396,30 @@ class FunctionTranslator:
                 host_creation_values=self.host_creation_values)
             # The tree is the same function, so the phase is visited by transplanting its
             # statements onto the phase translator's own tree.
-            phase.tree.body = phase_body
+            phase.tree.body = body
             phase._bind_outer_variables()
-            phase._bind_host_values(phase_body)
-            phase.has_returns = _returns_a_value(phase_body)
-            phase._translate_magic_loop(phase_body)
+            # A later phase does not contain the shared creations, so it binds them here;
+            # the object is the same host object for every phase.
+            phase._bind_host_values(header + body if index else body)
+            phase.has_returns = _returns_a_value(body)
+            phase._translate_magic_loop(body)
             self.phase_translators.append(phase)
+            # The host builds one argument list for the whole call, so every phase's
+            # parameters have to be known here: a value only a later phase needs (an array
+            # created between the loops) is still a parameter of this translation.
+            for name, value_type in phase.params:
+                if name not in dict(self.params):
+                    self.params.append((name, value_type))
+            # The same for outer-scope values: the host builds one launch, so every name any
+            # phase reads has to be known here.
+            for name, outer in phase.outer_vars.items():
+                if name not in self.outer_vars:
+                    self.outer_vars[name] = outer
+
+    def _is_device_creation(self, stmt:ast.stmt)->bool:
+        """True when ``stmt`` builds data, as opposed to computing a value."""
+        value:Optional[ast.expr] = _creation_target_of(stmt)
+        return value is not None and self._is_creation_expression(value)
 
     # ---------- outer-scope variables ----------
 
@@ -1730,7 +1819,7 @@ class FunctionTranslator:
         # The magic loop already fixes the iteration domain, so a gpu.work_size(...) declaration
         # among them would be redundant: flag it before visiting so the check sees the conflict.
         self.magic_loop_present = True
-        for stmt in body[:magic_index]:
+        for stmt in _outside_loops(body):
             # A creation the device cannot perform is executed by the interpreter instead
             # and becomes a parameter; that is only possible here, above the loop, because
             # below it the statement would run once per work item.
