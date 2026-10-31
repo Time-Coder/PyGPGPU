@@ -858,35 +858,42 @@ class PyKernel:
             from ..hip.driver import HIP
             HIP.hipDeviceSynchronize()
 
-    def _run_host_region(self, launch_meta:Dict[str, Any], position:int,
+    def _run_host_region(self, statements:List[ast.stmt],
                          args:Tuple[Any, ...], instance:Any,
-                         carried_slots:Dict[str, Any], gap_slots:Dict[str, Any])->None:
-        """Run the python statements that sit between two passes, on the host.
+                         carried_slots:Dict[str, Any], gap_slots:Dict[str, Any],
+                         globalns:Optional[Dict[str, Any]]=None,
+                         localns:Optional[Dict[str, Any]]=None,
+                         created_objects:Optional[Dict[str, Any]]=None)->Any:
+        """Run one region of python statements on the host, and return a tail `return`.
 
-        Phase ``position`` is about to launch; the statements that follow the pass before it
-        run here. A statement reads the launch arguments and whatever earlier statements and
-        slots hold, exactly as python would. An array it touches is pulled back to the host
-        first (the previous pass wrote it on the device) and marked dirty again afterwards,
-        so the next launch pushes the changed values back.
+        A region is the statements between two passes, or after the last one. A statement
+        reads the launch arguments and whatever earlier statements and slots hold, exactly
+        as python would. An array it touches is pulled back to the host first (the previous
+        pass wrote it on the device) and marked dirty again afterwards, so the next launch
+        pushes the changed values back. ``globalns``/``localns`` may pass a namespace in so
+        consecutive regions share one scope, the way python's function body does.
         """
-        regions:List[List[ast.stmt]] = list(launch_meta.get("phase_gaps") or [])
-        if position - 1 >= len(regions):
-            return
-        statements:List[ast.stmt] = regions[position - 1]
         if not statements:
-            return
+            return None
 
-        globalns:Dict[str, Any] = dict(self.raw_func.__globals__)
-        localns:Dict[str, Any] = {}
-        for name, value in zip(_positional_argument_names(self.raw_func), args):
-            localns[name] = value
-        receiver:str = _receiver_name(self.raw_func)
-        if receiver and instance is not None:
-            localns[receiver] = instance
+        if globalns is None:
+            globalns = dict(self.raw_func.__globals__)
+        if localns is None:
+            localns = {}
+            for name, value in zip(_positional_argument_names(self.raw_func), args):
+                localns[name] = value
+            receiver:str = _receiver_name(self.raw_func)
+            if receiver and instance is not None:
+                localns[receiver] = instance
         # The slots the launch shares with the device: a carried scalar or a gap value that
-        # an earlier phase updated is the current value, not the initial one.
+        # an earlier phase updated is the current value, not the initial one. A created
+        # array is the object itself -- indexing it would hand the statements its first row.
         for name, slot in list(carried_slots.items()) + list(gap_slots.items()):
             localns[name] = slot[0]
+        # A created array is the object itself: unwrapping it would hand the statements its
+        # first element (or row), which is not what python's name means.
+        for name, value in (created_objects or {}).items():
+            localns[name] = value
 
         touched:List[Any] = []
         for statement in statements:
@@ -897,6 +904,10 @@ class PyKernel:
                         value.to_host()
                         if value not in touched:
                             touched.append(value)
+            if isinstance(statement, ast.Return):
+                # A tail `return` is evaluated after every statement has run, not compiled
+                # as part of the exec body: a bare `return` is illegal outside a function.
+                continue
             target:Optional[str] = _assigned_name_of(statement)
             # compile() needs a Module node, and the statement is one entry of the body.
             module:ast.Module = ast.Module(body=[statement], type_ignores=[])
@@ -908,7 +919,7 @@ class PyKernel:
                 elif isinstance(value, np.ndarray) and value.ndim > 0:
                     # A creation the gap statement built: the object itself is what the next
                     # pass receives, exactly as it does for a creation above the loops.
-                    gap_slots[target] = value
+                    (created_objects if created_objects is not None else {})[target] = value
                 elif not isinstance(value, gnp):
                     # `or` cannot pick the slot: bool(np.array([0])) is False, which made a
                     # zero-valued slot read as missing and silently skipped the write-back.
@@ -920,6 +931,14 @@ class PyKernel:
                         localns[target] = slot[0]
         for value in touched:
             value._set_host_dirty()
+        for statement in statements:
+            if isinstance(statement, ast.Return):
+                if statement.value is None:
+                    return None
+                return eval(  # noqa: S307 - the kernel source itself
+                    compile(ast.Expression(body=statement.value), "<kernel tail>", "eval"),
+                    globalns, localns)
+        return None
 
     def _invoke_inner(self, instance:Any, args:Tuple[Any, ...],
                       backend_sel:Optional[str], device_sel:Optional[str],
@@ -1054,6 +1073,18 @@ class PyKernel:
         # and travels to the pass that reads it. A scalar travels as a one-element slot,
         # exactly like a carried scalar; a creation the pass declares travels as the object
         # itself, exactly like any other created array.
+        # One shared namespace per gap region: a later region reads what an earlier one
+        # assigned, the way consecutive statements of a function body do.
+        gap_namespaces:List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        for _ in (launch_meta.get("phase_gaps") or []):
+            region_globals:Dict[str, Any] = dict(self.raw_func.__globals__)
+            region_locals:Dict[str, Any] = {}
+            for name, value in zip(_positional_argument_names(self.raw_func), args):
+                region_locals[name] = value
+            receiver:str = _receiver_name(self.raw_func)
+            if receiver and instance is not None:
+                region_locals[receiver] = instance
+            gap_namespaces.append((region_globals, region_locals))
         gap_names:List[str] = list(launch_meta.get("gap_names") or [])
         created_all:List[str] = list(launch_meta.get("kernel_created_all") or [])
         gap_slots:Dict[str, Any] = {}
@@ -1065,9 +1096,8 @@ class PyKernel:
             gap_slots[name] = slot
         # The created objects the device signature declares: the aligned prefix picks the
         # real array from here rather than a scalar slot.
-        for name in created_all:
-            if name in created:
-                gap_slots[name] = created[name]
+        created_objects:Dict[str, Any] = {name: created[name] for name in created_all
+                                          if name in created}
 
         runtime_values:List[Any] = list(outer_state["full"]) + _created_arguments(created)
         return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
@@ -1281,8 +1311,13 @@ class PyKernel:
                 # a stream callback that may not have run yet. The gap statements read those
                 # slots on the host, so they must wait for the copies to land first.
                 self._sync_device(backend, device_obj)
-                self._run_host_region(launch_meta, position, args, instance,
-                                      carried_slots, gap_slots)
+                regions:List[List[ast.stmt]] = list(launch_meta.get("phase_gaps") or [])
+                if position - 1 < len(regions):
+                    self._run_host_region(regions[position - 1], args, instance,
+                                          carried_slots, gap_slots,
+                                          gap_namespaces[position - 1][0],
+                                          gap_namespaces[position - 1][1],
+                                          created_objects)
             # A phase kernel declares only the shapes *it* indexes, so its argument list is
             # rebuilt from the same sources with its own extents -- a later phase commonly
             # indexes an array the first one never named.
@@ -1309,10 +1344,21 @@ class PyKernel:
                 bound_kernel(*launch_args)
             else:
                 bound_kernel(*build_phase_args(phase_shapes, phase_created_names, position))
+        # The statements after the last loop are python: they run once, on the host, now that
+        # every work item has finished -- the same moment python would run them.
+        tail_result:Any = self._run_host_region(
+            list(launch_meta.get("body_tail") or []), args, instance,
+            carried_slots, gap_slots, created_objects=created_objects)
         for packed_value, unpack in unpackers:
             unpack(packed_value)
-        result:Any = (self._finish_returns(return_state, returns, full, created)
-                      if return_state else None)
+        if return_state and int(return_state["claim"][0]):
+            # A work item reached an in-loop return first: python's "first return wins".
+            result:Any = self._finish_returns(return_state, returns, full, created)
+        elif tail_result is not None:
+            result:Any = tail_result
+        else:
+            result:Any = (self._finish_returns(return_state, returns, full, created)
+                          if return_state else None)
         self._write_back_outer(outer_state)
         if object_binding.written:
             object_binding.write_back()
@@ -1779,6 +1825,9 @@ class PyKernel:
                  "phase_param_names": (phase_param_names if phase_param_names else
                                        [list(dict(phase.params))
                                         for phase in translator.phase_translators]),
+                 # The statements after the last magic loop of a single-phase body: the host
+                 # runs them once, after the launch (see _run_host_region).
+                 "body_tail": getattr(translator, "body_tail", []),
                  "kernels": kernels,
                  # The trailing extent arguments each phase kernel needs, by phase.
                  "kernel_shapes": extra_shapes,

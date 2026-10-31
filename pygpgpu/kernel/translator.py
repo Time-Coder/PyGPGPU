@@ -1117,6 +1117,9 @@ class FunctionTranslator:
         # The statements of the gap that follows this phase's loop (set by
         # _translate_phase_kernels before the body is visited).
         self.phase_gap:List[ast.stmt] = []
+        # The statements after the last magic loop of a single-phase body: host code, run
+        # once after the launch (see _translate_magic_loop and PyKernel._run_host_region).
+        self.body_tail:List[ast.stmt] = []
         # The whole-body carried set the main translator computed, so a phase that writes
         # one of these names keeps the shared slot (see _bind_carried_scalars).
         self.phase_carried_hint:List[str] = []
@@ -1891,6 +1894,12 @@ class FunctionTranslator:
             self._define(name, ("carried", name), body[0])
 
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
+        # The statements after the loop are python: they run once on the host, after the
+        # launch, reading whatever the work items wrote (see PyKernel._run_host_region).
+        # Recorded here so every dispatch shape treats the tail the same way.
+        self.body_tail = list(body[[n for n, stmt in enumerate(body)
+                                    if isinstance(stmt, ast.For)][-1] + 1:]
+                              if any(isinstance(stmt, ast.For) for stmt in body) else [])
         magic_index:Optional[int] = None
         enumerate_form:Optional[Tuple[str, Any]] = None
         nd_form:Optional[Tuple[str, str, str]] = None
@@ -1952,7 +1961,6 @@ class FunctionTranslator:
             self._emit(f"{elem_t} {value_name} = {param}[{index_name}];")
 
             self._visit_work_item_body(loop.body)
-            self._visit_region(body[magic_index + 1:], after_magic_loop=True)
             self.work_size_dims = [(param, 0)]
             return
 
@@ -2014,7 +2022,6 @@ class FunctionTranslator:
                 self._emit(f"{elem_t} {value_name} = {param}[{self._nd_flat_index(names, param)}];")
 
             self._visit_work_item_body(loop.body)
-            self._visit_region(body[magic_index + 1:], after_magic_loop=True)
             # The launch sizes dimensions fastest-first, which is the reverse of the order
             # the loop unpacks them: gid 0 is the last index. Getting this backwards used
             # to launch a 2x3 domain as 3x2, so the last column or row was never written.
@@ -2050,7 +2057,6 @@ class FunctionTranslator:
 
         # The loop body is the work-item body; nested range loops translate as real serial loops
         self._visit_work_item_body(loop.body)
-        self._visit_region(body[magic_index + 1:], after_magic_loop=True)
         self.work_size_dims = [(array_name, 0)]
 
     # ---------- statements ----------
