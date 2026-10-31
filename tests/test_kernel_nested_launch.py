@@ -91,6 +91,45 @@ def test_a_kernel_called_without_a_work_size_is_refused():
     assert "work size" in message
 
 
+def test_a_second_magic_loop_is_refused():
+    """Only the first magic loop becomes the dispatch; a second would repeat per item.
+
+    Before this was refused, the second loop was emitted as an ordinary serial loop *inside*
+    every work item, so N items each ran the whole phase and raced on the same array -- and
+    the shape that happened to agree still read as correct.
+    """
+
+    @kernel
+    def two_phases(a: np.ndarray, b: np.ndarray):
+        for i in range(a.shape[0]):
+            b[i] = a[i] * 2
+        for i in range(a.shape[0]):
+            b[i] = b[i] + 1
+
+    values = np.arange(4, dtype=np.int32)
+    with pytest.raises(SyntaxError) as caught:
+        two_phases["cuda"](values, np.zeros(4, dtype=np.int32))
+    message: str = str(caught.value)
+    assert "more than one magic loop" in message
+    assert "own @kernel" in message
+
+
+def test_an_ordinary_loop_inside_the_work_item_stays_allowed():
+    """A `for` in the loop body is an ordinary loop and must keep working."""
+
+    @kernel
+    def sums(out: np.ndarray, row: np.ndarray):
+        for i in range(out.shape[0]):
+            total = 0
+            for j in range(4):
+                total = total + row[j]
+            out[i] = total
+
+    result = np.zeros(2, dtype=np.int32)
+    sums["cuda"](result, np.array([1, 2, 3, 4], dtype=np.int32))
+    assert result.tolist() == [10, 10]
+
+
 def test_a_nested_launch_cannot_pick_a_backend():
     """The device is already running, so only the work size may be given."""
 

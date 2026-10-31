@@ -1908,6 +1908,23 @@ class FunctionTranslator:
             self.after_magic_loop = previous
             self.creation_below_loop = previous_creation
 
+    def _is_secondary_magic_loop(self, node:ast.For)->bool:
+        """True for a `for` shaped like the work-item dispatch, at the top level.
+
+        The shape is the one the first loop has -- `range(arr.shape[0])`, `enumerate(arr)`,
+        `np.ndindex(...)` -- but its position is what matters: only the first one is the
+        launch.
+        """
+        iterator:ast.expr = node.iter
+        if isinstance(iterator, ast.Call):
+            func:ast.expr = iterator.func
+            if isinstance(func, ast.Name) and func.id in ("range", "enumerate"):
+                return True
+            if (isinstance(func, ast.Attribute) and func.attr in ("ndindex", "ndenumerate")
+                    and isinstance(func.value, ast.Name)):
+                return True
+        return False
+
     def _visit_region(self, statements:List[ast.stmt], after_magic_loop:bool)->None:
         """Visit a run of statements, marking whether they run once per work item.
 
@@ -1950,6 +1967,20 @@ class FunctionTranslator:
             self._push_scope_block(node.body)
             self._emit("}")
         elif isinstance(node, ast.For):
+            # A second *top-level* magic loop would silently become an ordinary serial loop
+            # inside every work item -- each item running the whole phase, all of them racing
+            # on the same array. That is a different computation, so it is refused here
+            # rather than emitted; splitting the body across several @kernel calls is what
+            # this means. A `for` inside the work-item body (`creation_below_loop`) is an
+            # ordinary loop and stays allowed.
+            if (self.is_kernel and not self.creation_below_loop
+                    and self._is_secondary_magic_loop(node)):
+                self._error(
+                    "this kernel body has more than one magic loop, and only the first "
+                    "becomes the work-item dispatch: a second one would run inside every "
+                    "work item instead of once, so several work items would repeat the same "
+                    "phase and race on the same array. Give each phase its own @kernel and "
+                    "call them in order, which keeps the data on the device", node)
             self._visit_for(node)
         elif isinstance(node, ast.Return):
             self._visit_return(node)
