@@ -1108,6 +1108,9 @@ class FunctionTranslator:
         self.nested_helpers:List[str] = []
         # One entry per magic loop when a body has several; each becomes its own kernel.
         self.phases:List[List[ast.stmt]] = []
+        # Locals initialized above the magic loop and written inside it: one location for the
+        # whole launch, carried as a one-element buffer (see _bind_carried_scalars).
+        self.carried_scalars:List[str] = []
         self.phase_translators:List["FunctionTranslator"] = []
         self.self_param:str = self_param
         self.self_attr_types:Dict[str, Any] = dict(self_attr_types or {})
@@ -1279,6 +1282,12 @@ class FunctionTranslator:
         host:Optional[Dict[str, Any]] = self.host_values.get(name)
         if host is not None:
             return host["type"]
+        for scope in reversed(self.scopes):
+            if name in scope:
+                declared:Any = scope[name]
+                if isinstance(declared, tuple) and len(declared) == 2 and declared[0] == "carried":
+                    return declared
+                break
         outer:Optional[Dict[str, Any]] = self.outer_vars.get(name)
         if outer is not None:
             # A declared outer scalar is a pointer on the device (see _visit_name).
@@ -1335,6 +1344,9 @@ class FunctionTranslator:
             # that is known only after the whole body has been seen; every site's code
             # depends on it, so the body is scanned once first.
             self.has_returns = _returns_a_value(body)
+            # A local initialized above the loop and written inside it is one location for
+            # the whole launch, not one per work item -- see _carried_scalars.
+            self._bind_carried_scalars(body)
             # A body with several magic loops is several *passes* over the work items. Each
             # one is translated on its own into a kernel of its own, because a second loop
             # inside one kernel would be run by every work item instead of once. They are
@@ -1785,6 +1797,21 @@ class FunctionTranslator:
         phases.append(body[start:])
         return phases
 
+    def _bind_carried_scalars(self, body:List[ast.stmt])->None:
+        """Give every `carried` local a one-element buffer parameter instead of a device `T`.
+
+        The parameter is appended in the same trailing position an outer value uses, and it
+        is writable, so the body reads and writes it through the pointer and the host reads
+        the final value back after the launch.
+        """
+        for name in self._carried_scalars(body):
+            declared:Any = self._lookup(name)
+            if declared is not None:
+                continue
+            self.carried_scalars.append(name)
+            self.params.append((name, (PTR, "int")))
+            self._define(name, ("carried", name), body[0])
+
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
         magic_index:Optional[int] = None
         enumerate_form:Optional[Tuple[str, Any]] = None
@@ -2060,6 +2087,53 @@ class FunctionTranslator:
             self.after_magic_loop = previous
             self.creation_below_loop = previous_creation
 
+    def _carried_scalars(self, body:List[ast.stmt])->List[str]:
+        """The locals assigned *above* the magic loop and written *inside* it.
+
+        Such a name is a device `T` today, so every work item accumulates into its own copy
+        and the result is one work item's partial sum rather than the whole one -- silently,
+        because nothing about the shape of the program looks wrong. Python has one `total`:
+        it is initialized once, then updated by every iteration in turn.
+
+        Carrying it as a one-element array is the same shape the framework already uses for a
+        writable outer scalar (`T*`, read and written through the pointer), so the device
+        shares one location across the whole launch and the host can read the final value.
+        The statements above the loop still run on the host -- that is where the initial
+        `total = 0` comes from -- and the kernel receives the slot, not the value.
+        """
+        magic_index:int = _magic_loop_index(body)
+        initialized:Dict[str, ast.stmt] = {}
+        for stmt in body[:magic_index]:
+            name:Optional[str] = _assigned_name_of(stmt)
+            if name is None:
+                continue
+            initialized[name] = stmt
+        written:set = set()
+        for stmt in body[magic_index:]:
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                    written.add(node.target.id)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            written.add(target.id)
+        # Only a name the loop's *result* carries needs the shared location: one whose value
+        # is still read after the loop. A name used only inside the loop is each work item's
+        # own scratch, and making it shared would turn a per-item value into a race -- the
+        # behaviour is deterministic today and would stop being so.
+        # Everything after the loop *itself*: the loop's body runs once per work item, so a
+        # name read there is per-item scratch, while one read after the loop is the value the
+        # launch is supposed to have produced.
+        after:List[ast.stmt] = body[magic_index + 1:]
+        used_after:set = {
+            node.id for stmt in after for node in ast.walk(stmt)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+        carried:List[str] = []
+        for name in initialized:
+            if name in written and name in used_after:
+                carried.append(name)
+        return carried
+
     def _is_secondary_magic_loop(self, node:ast.For)->bool:
         """True for a `for` shaped like the work-item dispatch, at the top level.
 
@@ -2102,6 +2176,13 @@ class FunctionTranslator:
         if self.is_kernel and self._host_created_assignment(node):
             return
         if isinstance(node, ast.Assign):
+            # An initializer for a carried scalar already ran on the host, and the slot that
+            # travels is the buffer it filled: re-emitting 	otal = 0 would overwrite the
+            # parameter's type and reset the shared location for every work item.
+            target:Any = node.targets[0] if len(node.targets) == 1 else None
+            if (isinstance(target, ast.Name) and target.id in self.carried_scalars
+                    and not self.creation_below_loop):
+                return
             self._visit_assign(node)
         elif isinstance(node, ast.AugAssign):
             self._visit_augassign(node)
@@ -2754,6 +2835,11 @@ class FunctionTranslator:
                 self._emit(f"{target.id}[0] = {code};")
                 return
             existing:Any = self._lookup(target.id)
+            if isinstance(existing, tuple) and len(existing) == 2 and existing[0] == "carried":
+                # One location for the whole launch: store through the pointer, exactly as
+                # the outer-scalar path does.
+                self._emit(f"{target.id}[0] = {code};")
+                return
             if existing is not None and is_ptr(existing):
                 self._error(f"cannot assign to array parameter '{target.id}'", node)
             is_new:bool = (existing is None)
@@ -3492,9 +3578,14 @@ class FunctionTranslator:
         outer:Optional[Dict[str, Any]] = (
             self.outer_vars.get(node.target.id)
             if isinstance(node.target, ast.Name) else None)
+        carried:bool = (isinstance(node.target, ast.Name)
+                        and self._lookup(node.target.id) is not None
+                        and isinstance(self._lookup(node.target.id), tuple)
+                        and self._lookup(node.target.id)[0] == "carried")
         racy:bool = ((isinstance(node.target, ast.Subscript)
                       and not self._augassign_is_race_free(node.target))
-                     or (outer is not None and bool(outer["writable"])))
+                     or (outer is not None and bool(outer["writable"]))
+                     or carried)
         if racy:
             atomic_name:Optional[str] = self.ATOMIC_ASSIGN_OPS.get(op_name)
             if atomic_name is None:
@@ -3506,6 +3597,12 @@ class FunctionTranslator:
                     f"for it. Write the update explicitly, e.g. use atomic_add for a sum, "
                     f"or accumulate per work item and reduce afterwards "
                     f"(see examples/09_reduction.py)", node)
+            if carried:
+                # One location shared by every work item, updated through its own buffer.
+                self._emit_atomic_update(node, op_name, atomic_name, "int",
+                                         array_code=node.target.id, index_code="0",
+                                         pointer_code=node.target.id)
+                return
             pointer:Optional[str] = node.target.id if outer is not None else None
             self._visit_atomic_augassign(node, op_name, atomic_name, pointer_code=pointer)
             return
@@ -3804,6 +3901,11 @@ class FunctionTranslator:
                 return f"(*{node.id})", outer["type"]
             return node.id, outer["type"]
         t:Any = self._lookup(node.id)
+        if isinstance(t, tuple) and len(t) == 2 and t[0] == "carried":
+            # One location for the whole launch. A subscript rather than (*name) for the
+            # same reason an outer scalar uses one: the read/write analysis only recognizes
+            # that form as a write, so the host reads the final value back.
+            return f"{t[1]}[0]", "int"
         if t is not None:
             if isinstance(t, tuple) and len(t) == 5 and t[0] == "shared":
                 # A shared buffer is not itself a pointer: it is one slice per group, and

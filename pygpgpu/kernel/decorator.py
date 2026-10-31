@@ -932,10 +932,20 @@ class PyKernel:
         kernel_created:List[List[str]] = list(
             launch_meta.get("kernel_created") or [[] for _ in active_kernels])
 
+        carried_slots:Dict[str, Any] = {}
         full:List[Any] = [_kernel_scalar_argument(value, t)
                           for value, t in zip(list(args) + list(self_values),
                                               arg_types + self_types)]
+        # A carried scalar is one of the kernel's own parameters (declared before the shape
+        # extents), so its slot joins ull here rather than the trailing created values.
+        for name in launch_meta.get("carried") or []:
+            slot = np.zeros(1, dtype=np.int32)
+            slot[0] = int(_host_scalar_values(
+                self.raw_func, [name], tuple(args), instance).get(name, 0))
+            full.append(slot)
+            carried_slots[name] = slot
         own_count:int = len(full)
+
         # Outer-scope values are read before the launch arguments are built: a shape
         # source can name an outer array, and `full` is indexed by the device parameter
         # order (see _build_launch_args), so the outer values have to be part of it.
@@ -946,6 +956,7 @@ class PyKernel:
         # instance is bound too.
         created:Dict[str, Any] = _host_created_values(
             self.raw_func, tuple(args), instance)[0]
+
         runtime_values:List[Any] = list(outer_state["full"]) + _created_arguments(created)
         return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
                                       if returns else {})
@@ -1552,6 +1563,7 @@ class PyKernel:
                 translator.outer_vars,
                 {"param_names": {position: name for name, position in param_index.items()},
                  # Every kernel this body produced, in launch order: one per magic loop.
+                 "carried": list(translator.carried_scalars),
                  "kernels": kernels,
                  # The trailing extent arguments each phase kernel needs, by phase.
                  "kernel_shapes": extra_shapes,
@@ -1939,6 +1951,55 @@ def _kernel_scalar_argument(value:Any, t:Any)->Any:
     if t == "bool":
         return np.uint8(1 if value else 0)
     return value
+
+
+def _host_scalar_values(func:Any, names:List[str], args:Optional[Tuple[Any, ...]]=None,
+                        instance:Any=None)->Dict[str, Any]:
+    """Evaluate the initializers a carried scalar needs, on the host.
+
+    A carried scalar (`total = 0` above the magic loop, `total = total + x[i]` inside it) is
+    one location for the whole launch, so its starting value has to be a real python object
+    -- the same one the interpreter would have made. The statements above the loop are run
+    here in body order, sharing one namespace so a later initializer can read an earlier
+    name, exactly as python would.
+    """
+    from .translator import _assigned_name_of, _creation_assignments
+
+    values:Dict[str, Any] = {}
+    if not names:
+        return values
+    globalns:Dict[str, Any] = dict(func.__globals__)
+    localns:Dict[str, Any] = {}
+    from .decorator import _positional_argument_names
+    for arg_name, value in zip(_positional_argument_names(func), args or ()):
+        localns[arg_name] = value
+    from .decorator import _receiver_name
+    receiver:str = _receiver_name(func)
+    if receiver and instance is not None:
+        localns[receiver] = instance
+    for name, cell in zip(func.__code__.co_freevars, func.__closure__ or ()):
+        try:
+            localns[name] = cell.cell_contents
+        except ValueError:
+            pass
+    try:
+        statements:List[Any] = _creation_assignments(func)
+    except SyntaxError:
+        return values
+    for statement in statements:
+        target:Optional[str] = _assigned_name_of(statement)
+        if target is None:
+            continue
+        try:
+            localns[target] = eval(  # noqa: S307 - the kernel source itself
+                compile(ast.Expression(body=statement.value), "<kernel scalar>", "eval"),
+                globalns, localns)
+        except Exception:
+            continue
+    for name in names:
+        if name in localns:
+            values[name] = localns[name]
+    return values
 
 
 def _host_created_values(func:Any,
