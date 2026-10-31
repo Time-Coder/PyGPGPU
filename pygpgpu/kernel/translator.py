@@ -1114,6 +1114,12 @@ class FunctionTranslator:
         # Names a statement between two magic loops computed on the host: each travels to the
         # pass that reads it as its own parameter (see _translate_phase_kernels).
         self.gap_names:List[str] = []
+        # The statements of the gap that follows this phase's loop (set by
+        # _translate_phase_kernels before the body is visited).
+        self.phase_gap:List[ast.stmt] = []
+        # The whole-body carried set the main translator computed, so a phase that writes
+        # one of these names keeps the shared slot (see _bind_carried_scalars).
+        self.phase_carried_hint:List[str] = []
         # By-value arguments the body returns, promoted to pointers so the return reuses the
         # parameter instead of allocating a slot for a copy (see _promote_returned_parameters).
         self.promoted_parameters:Set[str] = set()
@@ -1412,6 +1418,11 @@ class FunctionTranslator:
             name for name in (_assigned_name_of(stmt) for stmt in carried)
             if name is not None]
         self.gap_names = list(gap_values)
+        # The statements after each phase's loop, in phase order: the host runs region i
+        # between launch i and launch i + 1 (see PyKernel._run_host_region).
+        self.phase_gaps:List[List[ast.stmt]] = [
+            list(self.phases[index][_magic_loop_end(self.phases[index]):])
+            for index in range(len(self.phases) - 1)]
 
         for index, phase_body in enumerate(self.phases):
             # The gap that follows this phase belongs to the *next* one (it is either a
@@ -1430,7 +1441,23 @@ class FunctionTranslator:
             # The tree is the same function, so the phase is visited by transplanting its
             # statements onto the phase translator's own tree.
             phase.tree.body = body
+            # The gap this phase precedes is host code, but the phase still has to see the
+            # names it feeds: a scalar the loop accumulates and the gap reads keeps its
+            # shared slot in the writing phase (see _carried_scalars).
+            phase.phase_gap = list(self.phases[index][_magic_loop_end(self.phases[index]):])
             phase._bind_outer_variables()
+            phase.phase_carried_hint = list(self.carried_scalars)
+            # A phase skips the main translate() walk, so the shared-slot binding has to run
+            # here: without it, a scalar the loop accumulates compiles as per-item scratch
+            # and the reduction silently loses every contribution but one work item's.
+            phase._bind_carried_scalars(body)
+            for offender in phase._non_atomic_writes(body, phase.carried_scalars):
+                phase._error(
+                    "this variable is one location shared by every work item (it is "
+                    "accumulated inside the loop and read after it), so a plain store here "
+                    "races: whichever work item finishes last decides the value. Use `+=` "
+                    "(which becomes a device atomic), or keep the per-work-item value in a "
+                    "different variable and reduce it afterwards", offender)
             # A later phase does not contain the shared creations, so it binds them here;
             # the object is the same host object for every phase.
             phase._bind_host_values(header + body if index else body)
@@ -1838,7 +1865,24 @@ class FunctionTranslator:
         is writable, so the body reads and writes it through the pointer and the host reads
         the final value back after the launch.
         """
-        for name in self._carried_scalars(body):
+        names:List[str] = list(self._carried_scalars(body))
+        # Names the whole body carried that this phase initializes or writes: the read that
+        # made them shared lives in a later pass, which this phase's slice no longer shows.
+        hint:Set[str] = set(getattr(self, "phase_carried_hint", []) or [])
+        magic_index:int = _magic_loop_index(body)
+        written:Set[str] = set()
+        for stmt in body[magic_index if magic_index < len(body) else len(body):]:
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                    written.add(node.target.id)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            written.add(target.id)
+        for name in sorted(hint):
+            if name not in names and name in written:
+                names.append(name)
+        for name in names:
             declared:Any = self._lookup(name)
             if declared is not None:
                 continue
@@ -2199,13 +2243,18 @@ class FunctionTranslator:
 
         The shape is the one the first loop has -- `range(arr.shape[0])`, `enumerate(arr)`,
         `np.ndindex(...)` -- but its position is what matters: only the first one is the
-        launch.
+        launch. A `range` over something that is not an array's shape (`range(8)`) does not
+        name a work-item domain, so it is an ordinary serial loop and stays allowed, exactly
+        as it was before the several-pass split existed.
         """
         iterator:ast.expr = node.iter
         if isinstance(iterator, ast.Call):
             func:ast.expr = iterator.func
-            if isinstance(func, ast.Name) and func.id in ("range", "enumerate"):
+            if isinstance(func, ast.Name) and func.id == "enumerate":
                 return True
+            if isinstance(func, ast.Name) and func.id == "range":
+                # Only a data-shaped range is a dispatch; a literal count is a plain loop.
+                return self._shape0_range_param(iterator) is not None
             if (isinstance(func, ast.Attribute) and func.attr in ("ndindex", "ndenumerate")
                     and isinstance(func.value, ast.Name)):
                 return True

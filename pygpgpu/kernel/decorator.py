@@ -16,8 +16,10 @@ from ..vec_types.layout import pack
 from ..utils import local_size_for_global, detect_work_size, device_limits
 from .python_backend import PythonKernel
 from . import structs
+from ..numpy import ndarray as gnp
 from .translator import (
     FunctionTranslator,
+    _assigned_name_of,
     infer_ctype,
     is_ptr,
     scan_self_attrs,
@@ -842,6 +844,83 @@ class PyKernel:
             caller = _caller_traceback(caught.__traceback__)
             raise caught.with_traceback(caller) from None
 
+    def _sync_device(self, backend:str, device_obj:Any)->None:
+        """Wait until every launch this backend has queued has finished, callbacks included.
+
+        The statements between two passes read shared slots on the host; the copies that
+        fill them are stream callbacks, so a device-level sync is the one wait that is
+        correct regardless of which stream each launch used.
+        """
+        if backend == "cuda":
+            from ..cuda.driver import CUDA
+            CUDA.cuCtxSynchronize()
+        elif backend == "hip":
+            from ..hip.driver import HIP
+            HIP.hipDeviceSynchronize()
+
+    def _run_host_region(self, launch_meta:Dict[str, Any], position:int,
+                         args:Tuple[Any, ...], instance:Any,
+                         carried_slots:Dict[str, Any], gap_slots:Dict[str, Any])->None:
+        """Run the python statements that sit between two passes, on the host.
+
+        Phase ``position`` is about to launch; the statements that follow the pass before it
+        run here. A statement reads the launch arguments and whatever earlier statements and
+        slots hold, exactly as python would. An array it touches is pulled back to the host
+        first (the previous pass wrote it on the device) and marked dirty again afterwards,
+        so the next launch pushes the changed values back.
+        """
+        regions:List[List[ast.stmt]] = list(launch_meta.get("phase_gaps") or [])
+        if position - 1 >= len(regions):
+            return
+        statements:List[ast.stmt] = regions[position - 1]
+        if not statements:
+            return
+
+        globalns:Dict[str, Any] = dict(self.raw_func.__globals__)
+        localns:Dict[str, Any] = {}
+        for name, value in zip(_positional_argument_names(self.raw_func), args):
+            localns[name] = value
+        receiver:str = _receiver_name(self.raw_func)
+        if receiver and instance is not None:
+            localns[receiver] = instance
+        # The slots the launch shares with the device: a carried scalar or a gap value that
+        # an earlier phase updated is the current value, not the initial one.
+        for name, slot in list(carried_slots.items()) + list(gap_slots.items()):
+            localns[name] = slot[0]
+
+        touched:List[Any] = []
+        for statement in statements:
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Name) and node.id in localns:
+                    value:Any = localns[node.id]
+                    if isinstance(value, gnp):
+                        value.to_host()
+                        if value not in touched:
+                            touched.append(value)
+            target:Optional[str] = _assigned_name_of(statement)
+            # compile() needs a Module node, and the statement is one entry of the body.
+            module:ast.Module = ast.Module(body=[statement], type_ignores=[])
+            exec(compile(module, "<kernel gap>", "exec"), globalns, localns)  # noqa: S102 - the kernel source itself
+            if target is not None and target in localns:
+                value:Any = localns[target]
+                if isinstance(value, gnp) and value not in touched:
+                    touched.append(value)
+                elif isinstance(value, np.ndarray) and value.ndim > 0:
+                    # A creation the gap statement built: the object itself is what the next
+                    # pass receives, exactly as it does for a creation above the loops.
+                    gap_slots[target] = value
+                elif not isinstance(value, gnp):
+                    # `or` cannot pick the slot: bool(np.array([0])) is False, which made a
+                    # zero-valued slot read as missing and silently skipped the write-back.
+                    slot:Optional[np.ndarray] = (gap_slots.get(target)
+                                                 if gap_slots.get(target) is not None
+                                                 else carried_slots.get(target))
+                    if slot is not None:
+                        slot[0] = int(value)
+                        localns[target] = slot[0]
+        for value in touched:
+            value._set_host_dirty()
+
     def _invoke_inner(self, instance:Any, args:Tuple[Any, ...],
                       backend_sel:Optional[str], device_sel:Optional[str],
                       global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
@@ -931,16 +1010,27 @@ class PyKernel:
             launch_meta.get("kernel_shapes") or [[] for _ in active_kernels])
         kernel_created:List[List[str]] = list(
             launch_meta.get("kernel_created") or [[] for _ in active_kernels])
-        # The parameters each phase declares beyond the shared prefix (the gap values).
-        phase_carried:List[List[str]] = list(
-            launch_meta.get("phase_carried") or [[] for _ in active_kernels])
+        # Each phase's parameters in order, so the launch can align values to the signature
+        # instead of assuming the shared prefix: a phase may declare a carried name the
+        # first kernel does not, or skip one it does.
+        phase_param_names:List[List[str]] = list(
+            launch_meta.get("phase_param_names") or [[] for _ in active_kernels])
 
         carried_slots:Dict[str, Any] = {}
+        # The names `full` holds, in order: the caller's arguments, then the carried slots.
+        # `build_phase_args` aligns each phase's signature against these names.
+        # The `_self_<attr>` parameters sit in `full` right after the caller's arguments,
+        # so the prefix names must include them or the aligned loop would look up an
+        # attribute value in the wrong place.
+        self_attr_names:List[str] = [f"_self_{name}" for name in self_attrs]
+        prefix_names:List[str] = (list(_positional_argument_names(self.raw_func))[:len(args)]
+                                  + self_attr_names
+                                  + list(launch_meta.get("carried") or []))
         full:List[Any] = [_kernel_scalar_argument(value, t)
                           for value, t in zip(list(args) + list(self_values),
                                               arg_types + self_types)]
         # A carried scalar is one of the kernel's own parameters (declared before the shape
-        # extents), so its slot joins ull here rather than the trailing created values.
+        # extents), so its slot joins full here rather than the trailing created values.
         for name in launch_meta.get("carried") or []:
             slot = np.zeros(1, dtype=np.int32)
             slot[0] = int(_host_scalar_values(
@@ -958,17 +1048,26 @@ class PyKernel:
         # A method's creation may read `self` (`np.zeros((self.height, ...))`), so the
         # instance is bound too.
         created:Dict[str, Any] = _host_created_values(
-            self.raw_func, tuple(args), instance)[0]
+            self.raw_func, tuple(args), instance,
+            required_created=list(launch_meta.get("kernel_created_all") or []))[0]
         # A statement between two magic loops runs on the host, so its value is computed here
-        # and travels to the pass that reads it. It is a scalar, so it travels as a
-        # one-element slot, exactly like a carried scalar.
+        # and travels to the pass that reads it. A scalar travels as a one-element slot,
+        # exactly like a carried scalar; a creation the pass declares travels as the object
+        # itself, exactly like any other created array.
         gap_names:List[str] = list(launch_meta.get("gap_names") or [])
+        created_all:List[str] = list(launch_meta.get("kernel_created_all") or [])
         gap_slots:Dict[str, Any] = {}
         for name, value in _host_scalar_values(
-                self.raw_func, gap_names, tuple(args), instance).items():
+                self.raw_func, [n for n in gap_names if n not in created_all],
+                tuple(args), instance).items():
             slot = np.zeros(1, dtype=np.int32)
             slot[0] = int(value)
             gap_slots[name] = slot
+        # The created objects the device signature declares: the aligned prefix picks the
+        # real array from here rather than a scalar slot.
+        for name in created_all:
+            if name in created:
+                gap_slots[name] = created[name]
 
         runtime_values:List[Any] = list(outer_state["full"]) + _created_arguments(created)
         return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
@@ -995,14 +1094,30 @@ class PyKernel:
             parameter of the pass that reads it and of no other -- so `extra_created` names
             the ones this kernel expects.
             """
-            print('TRACE build extents', extents, 'own_count', own_count)
-            phase_args:List[Any] = list(full[:own_count])
-            # A gap value is one of this pass's own parameters: it has no place in `full`
-            # (which holds the parameters the *kernel* declares), so it is appended here, in
-            # the position the signature gives it -- before the shape extents.
-            for gap_name in (phase_carried[phase_index]
-                             if phase_index < len(phase_carried) else []):
-                phase_args.append(gap_slots.get(gap_name, 0))
+            # The prefix `full[:own_count]` holds the caller's arguments and the carried
+            # slots by name; a phase's own signature may name a different subset (a gap
+            # value only one pass reads, or a carried scalar this pass writes). Align the
+            # values to the signature rather than assuming the prefix matches it.
+            prefix_values:List[Any] = list(full[:own_count])
+            by_name:Dict[str, Any] = dict(zip(prefix_names, prefix_values))
+            # Only the names declared *before* the shape extents participate in the aligned
+            # prefix: outer-scope values and host-created objects are declared after them and
+            # the blocks below append those, so including them here would shift the extents.
+            declared:List[str] = [name for name in (
+                phase_param_names[phase_index]
+                if phase_index < len(phase_param_names) else [])
+                if name not in outer_vars and name not in created]
+            if declared:
+                # Align the values to this phase's own signature: a gap value only one pass
+                # reads, or a carried scalar this pass writes, is not in the shared prefix.
+                # Outer-scope names are excluded here -- the signature declares them last,
+                # and the block below appends them in the host's own order.
+                phase_args:List[Any] = [by_name.get(name, gap_slots.get(name, 0))
+                                        for name in declared]
+            else:
+                # No per-phase metadata (a gid-style body): the shared prefix *is* the
+                # parameter list, in order.
+                phase_args:List[Any] = prefix_values
             for param_index, dim in extents:
                 phase_args.append(int(full[param_index].shape[dim]))
             # The signature declares the sampler and local-memory arguments right after the
@@ -1016,7 +1131,12 @@ class PyKernel:
                     phase_args.append(local_bytes)
             phase_args.extend(outer_state["full"])
             for name, value in created.items():
-                if extra_created is None or name in extra_created:
+                # A created name this phase's own signature already declares (a gap creation
+                # reads like `middle = np.zeros(4)` and the pass that uses it declares it)
+                # has been passed in the aligned prefix above; adding it again here would
+                # shift every later argument.
+                if (extra_created is None or name in extra_created) and \
+                        name not in declared:
                     phase_args.append(_kernel_scalar_argument(value, infer_ctype(value)))
             if return_state:
                 phase_args.extend(return_state["buffers"])
@@ -1024,6 +1144,10 @@ class PyKernel:
                 phase_args.append(return_state["site"])
             return phase_args
 
+        # The read-back of a previous launch is a stream callback, and the caller may have
+        # written the host arrays since. The upload below reads those arrays' memory, so it
+        # must see the callbacks' result: wait once, before anything is uploaded.
+        self._sync_device(backend, device_obj)
         launch_args:List[Any] = build_phase_args(shape_sources, None)
         # Vector values travel in the layout the backend's ABI defines: OpenCL pads a
         # 3-component vector to four slots, CUDA/HIP take the host's three. The host keeps
@@ -1152,6 +1276,13 @@ class PyKernel:
                 return self._with_returns(future, return_state, returns, full, outer_state, created)
             return future
         for position, phase_kernel in enumerate(active_kernels):
+            if position:
+                # The previous pass wrote the shared slots on the device; the read-back is
+                # a stream callback that may not have run yet. The gap statements read those
+                # slots on the host, so they must wait for the copies to land first.
+                self._sync_device(backend, device_obj)
+                self._run_host_region(launch_meta, position, args, instance,
+                                      carried_slots, gap_slots)
             # A phase kernel declares only the shapes *it* indexes, so its argument list is
             # rebuilt from the same sources with its own extents -- a later phase commonly
             # indexes an array the first one never named.
@@ -1168,11 +1299,13 @@ class PyKernel:
             # first kernel does: a gap value (`factor = 10` between two loops) is one pass's
             # own parameter, and reusing the first kernel's argument list there would leave
             # every later argument one slot short.
-            phase_own:List[str] = (phase_carried[position]
-                                   if position < len(phase_carried) else [])
+            phase_names:List[str] = (phase_param_names[position]
+                                     if position < len(phase_param_names) else [])
+            first_names:List[str] = (phase_param_names[0]
+                                     if phase_param_names else [])
             if (phase_shapes == shape_sources
                     and phase_created_names == list(created)
-                    and not phase_own):
+                    and phase_names == first_names):
                 bound_kernel(*launch_args)
             else:
                 bound_kernel(*build_phase_args(phase_shapes, phase_created_names, position))
@@ -1307,12 +1440,17 @@ class PyKernel:
                 # The value already lives in the argument the body returned, so the caller
                 # gets it back from there -- no slot was allocated for it.
                 # The parameter travels as a one-element buffer, so the value it holds is
-                # what the caller passed -- and what the body may have updated.
+                # what the caller passed -- and what the body may have updated. A numpy
+                # record (`np.void`) is a parameter too, but indexing a record reads its
+                # first *field*, so only a real 0-d/1-element array is unwrapped.
                 shared_slot:Any = full[returns["arg_indices"][entry["reused"]]]
-                try:
-                    values.append(shared_slot[0])
-                except (IndexError, TypeError):
+                if isinstance(shared_slot, np.void):
                     values.append(shared_slot)
+                else:
+                    try:
+                        values.append(shared_slot[0])
+                    except (IndexError, TypeError):
+                        values.append(shared_slot)
             else:
                 dtype:Any = returns["slot_types"][entry["slot"]]
                 kind:str = returns["slot_kinds"][entry["slot"]]
@@ -1538,12 +1676,37 @@ class PyKernel:
         # The created objects each phase declares: mid = np.zeros(4) between two loops is
         # a parameter of the pass that reads it and of no other.
         phase_created:List[List[str]] = []
-        for phase in translator.phase_translators:
+        # The per-phase parameter metadata (empty for a single-phase body, which never
+        # enters _translate_phase_kernels; the fallback below fills it from the translator).
+        # A gid-style body has no phases and no magic loop: its launch arguments are the
+        # shared prefix plus the extents, which the fast path already builds, and inventing
+        # a per-phase list here would double-count the outer-scope parameters.
+        is_magic_body:bool = bool(getattr(translator, "phases", None)) and \
+            len(getattr(translator, "phases", [])) == 1 and \
+            any(isinstance(stmt, ast.For) for stmt in translator.tree.body)
+        phase_carried:List[List[str]] = []
+        phase_param_names:List[List[str]] = []
+        if translator.phase_translators:
+            for phase in translator.phase_translators:
+                phase_index:Dict[str, int] = {
+                    name: position for position, (name, _) in enumerate(phase.params)}
+                extra_shapes.append([(phase_index[array_name], dim)
+                                     for array_name, dim in phase.shapes_used])
+                phase_created.append(list(phase.host_values))
+        else:
+            # One magic loop: the main translator *is* the only phase, and it binds the
+            # created objects on itself.
             phase_index:Dict[str, int] = {
-                name: position for position, (name, _) in enumerate(phase.params)}
+                name: position for position, (name, _) in enumerate(translator.params)}
             extra_shapes.append([(phase_index[array_name], dim)
-                                 for array_name, dim in phase.shapes_used])
-            phase_created.append(list(phase.host_values))
+                                 for array_name, dim in translator.shapes_used])
+            phase_created.append(list(translator.host_values))
+            # The one phase is the main translator: its parameters and carried slots are
+            # the launch's, and the per-phase metadata would otherwise stay empty (the
+            # launch then aligns against nothing and drops every argument after the first).
+            if is_magic_body:
+                phase_carried.append(list(translator.carried_scalars))
+                phase_param_names.append(list(dict(translator.params)))
 
         kernel:Any = kernels[0]
 
@@ -1605,12 +1768,25 @@ class PyKernel:
                  "gap_names": list(translator.gap_names),
                  # The extra parameters each phase declares beyond the shared prefix: a gap
                  # value belongs to the pass that reads it (see _translate_phase_kernels).
-                 "phase_carried": [list(phase.carried_scalars)
-                                   for phase in translator.phase_translators],
+                 "phase_carried": (phase_carried if phase_carried else
+                                   [list(phase.carried_scalars)
+                                    for phase in translator.phase_translators]),
+                 # The statements between two passes: the host runs region i between
+                 # launch i and launch i+1 (see _run_host_region).
+                 "phase_gaps": getattr(translator, "phase_gaps", []),
+                 # Each phase's parameters in order, so the launch aligns values to the
+                 # signature (a phase may declare a carried name the first kernel does not).
+                 "phase_param_names": (phase_param_names if phase_param_names else
+                                       [list(dict(phase.params))
+                                        for phase in translator.phase_translators]),
                  "kernels": kernels,
                  # The trailing extent arguments each phase kernel needs, by phase.
                  "kernel_shapes": extra_shapes,
                  "kernel_created": phase_created,
+                 # Every created name any phase declares, so the host knows which objects
+                 # the launch has to supply (a returned creation below the loop included).
+                 "kernel_created_all": sorted({name
+                                               for names in phase_created for name in names}),
                  "subscript_indices": dict(translator.subscript_indices),
                  # How many index names the magic loop unpacks: the launch checks it against
                  # the number of dimensions its iteration domain actually has.
@@ -2059,9 +2235,15 @@ def _host_scalar_values(func:Any, names:List[str], args:Optional[Tuple[Any, ...]
     return values
 
 
+def _reads_name(node:Any, name:str)->bool:
+    """Whether an expression reads the given plain name."""
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
+
+
 def _host_created_values(func:Any,
                          args:Optional[Tuple[Any, ...]]=None,
-                         instance:Any=None
+                         instance:Any=None,
+                         required_created:Optional[List[str]]=None
                          )->Tuple[Dict[str, Any], List[str]]:
     """Build the objects a kernel creates above its magic loop.
 
@@ -2097,10 +2279,17 @@ def _host_created_values(func:Any,
             localns[name] = cell.cell_contents
         except ValueError:
             pass
+    wanted:set = set(required_created or [])
     for assignment in assignments:
         target:Optional[str] = _assigned_name_of(assignment)
         if target is None:
             continue
+        if target not in wanted and _creation_target_of(assignment) is None:
+            # A plain assignment is lifted only when a creation needs it (or a creation
+            # it feeds was asked for by name).
+            if not (target in localns and any(
+                    _reads_name(other.value, target) for other in assignments)):
+                continue
         try:
             value:Any = eval(  # noqa: S307 - the kernel source itself
                 compile(ast.Expression(body=assignment.value), "<kernel creation>", "eval"),
@@ -2112,8 +2301,15 @@ def _host_created_values(func:Any,
         # A plain assignment lifted for the creation's sake stays in the namespace alone --
         # the work items compute it themselves, so shipping it would add an argument nothing
         # reads (and shift every later launch argument by one).
-        if _creation_target_of(assignment) is not None and _is_creation_expression(
-                assignment.value, func):
+        if _creation_target_of(assignment) is None and target not in wanted:
+            continue
+        if target in wanted or (_creation_target_of(assignment) is not None
+                                and _is_creation_expression(assignment.value, func)):
+            if _creation_target_of(assignment) is None:
+                # A plain assignment the caller asked for feeds a creation below the loop;
+                # it stays out of the launch values, it only fills the namespace.
+                localns.setdefault(target, value)
+                continue
             values[target] = value
             names.append(target)
     return values, names

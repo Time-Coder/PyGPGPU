@@ -288,11 +288,13 @@ class Kernel(CUObject):
         # shared ArgInfo objects, which two threads launching the same kernel
         # would overwrite under each other -- producing silently wrong results.
         bound:Dict[str, Any] = {}
+        seen_arrays:Dict[int, Tuple[MemObject, Any]] = {}
         value_ptrs = (c_void_p * len(self._args))()
         i = 0
         for key, arg_info in self._args.items():
             value = used_kwargs[key]
-            value_ptrs[i] = cast(self._process_arg(stream, arg_info, value, bound), c_void_p)
+            value_ptrs[i] = cast(self._process_arg(
+                stream, arg_info, value, bound, seen_arrays), c_void_p)
             i += 1
 
         if global_work_size is None or local_work_size is None:
@@ -458,7 +460,8 @@ class Kernel(CUObject):
 
         return grid_dims, block_dims
 
-    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any, bound:Dict[str, Any])->Any:
+    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any, bound:Dict[str, Any],
+                     seen_arrays:Optional[Dict[int, Tuple[MemObject, Any]]]=None)->Any:
         arg_type_str = arg_info.type_str        
         base_type_str = arg_info.base_type_str
 
@@ -560,7 +563,18 @@ class Kernel(CUObject):
                 if not used_value.flags['C_CONTIGUOUS']:
                     used_value = np.ascontiguousarray(used_value)
 
-                buffer, event = arg_info.use_buffer(stream, used_value)
+                if isinstance(used_value, gnp.ndarray) and seen_arrays is not None:
+                    root_key = id(used_value._root)
+                    if root_key in seen_arrays:
+                        # The same array travels under two names (`k(b, b)`): one buffer backs
+                        # both, so the body reads and writes the one location it names.
+                        shared_buffer, _ = seen_arrays[root_key]
+                        bound[arg_info.name] = (shared_buffer, value, used_value)
+                        return pointer(c_void_p(shared_buffer.id.value))
+                    buffer, event = arg_info.use_buffer(stream, used_value)
+                    seen_arrays[root_key] = (buffer, used_value)
+                else:
+                    buffer, event = arg_info.use_buffer(stream, used_value)
                 bound[arg_info.name] = (buffer, value, used_value)
                 return pointer(c_void_p(buffer.id.value))
         else:

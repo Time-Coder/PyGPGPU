@@ -8,7 +8,6 @@ from typing_extensions import override
 import numpy as np
 
 from ..driver import CUDA, CUdeviceptr
-from ...constants import KernelFlags
 from .stream import Stream
 from .event import Event
 from .mem_object import MemObject
@@ -65,9 +64,9 @@ class Buffer(MemObject):
         self._host_ptr = host_ptr
         self._data = data
 
-        event = None
-        if self.kernel_flags & KernelFlags.Readed:
-            event = self.write(stream, 0, size, host_ptr)
-
-        return event
+        # The caller hands over data the host owns (a fresh argument upload, or a gnp array
+        # whose dirty_on_host flag the caller already checked), so it is always copied in:
+        # gating on Readed here dropped a host-side write to a write-only argument, and the
+        # device then saw whatever the buffer pool had left in it.
+        return self.write(stream, 0, size, host_ptr)
         
