@@ -1059,6 +1059,14 @@ class FunctionTranslator:
         self.resolve_global:Callable[[str], Any] = resolve_global
         self.device_cache:Dict[Any, Any] = device_cache
         self.is_kernel:bool = is_kernel
+        # Kernels launched from this kernel's device code (`inner[(n,)](args)`). Each entry is
+        # one rendered `__global__` function, emitted ahead of the outer kernel because C
+        # requires a callee before its caller.
+        self.nested_kernels:List[str] = []
+        # callee -> the name its definition was given, so two launches share one definition.
+        self.nested_seen:Dict[Callable, str] = {}
+        # Device helpers a nested kernel needs, emitted once for the whole source.
+        self.nested_helpers:List[str] = []
         self.self_param:str = self_param
         self.self_attr_types:Dict[str, Any] = dict(self_attr_types or {})
         # The class the translated method belongs to, for deciding whether `self.name`
@@ -1266,6 +1274,11 @@ class FunctionTranslator:
         return get_dedented_source(self.func)
 
     # ---------- translation entry ----------
+
+    @property
+    def nests_a_launch(self)->bool:
+        """True when this kernel launches another kernel, i.e. needs linked device code."""
+        return bool(self.nested_kernels)
 
     def translate(self)->None:
         body:List[ast.stmt] = self.tree.body
@@ -4560,7 +4573,111 @@ class FunctionTranslator:
             # structure, or a method reached through one of its members.
             return self._emit_method_on_value(func, node)
 
+        # `inner[(n,)](args)`: one work item launches another kernel. Left until here so a
+        # structure constructor and a helper's keyword call are already resolved.
+        if self._emit_nested_launch(node):
+            return "", "void"
+
         self._error("unsupported call expression", node)
+
+    def _emit_nested_launch(self, node:ast.Call)->bool:
+        """`inner[(global, local)](args)` -> a device-side launch; True when this was one."""
+        func:ast.expr = node.func
+        if not isinstance(func, ast.Subscript):
+            return False
+        # Peel every bracket: child[(n,)] and the invalid child["cuda"][(n,)] both reach
+        # a Name at the bottom, and the second has to be named as the mistake it is.
+        callee:ast.expr = func.value
+        while isinstance(callee, ast.Subscript):
+            callee = callee.value
+        if not isinstance(callee, ast.Name):
+            return False
+        target:Any = self.resolve_global(callee.id)
+        if not getattr(target, "is_pykernel", False):
+            return False
+        self._render_nested_launch(callee.id, target, func.slice, node)
+        return True
+
+    def _render_nested_launch(self, name:str, target:Any, work:ast.expr,
+                              node:ast.Call)->None:
+        """Emit the device-side launch statement for one nested call."""
+        if self.launch_backend != "cuda":
+            # CUDA calls this dynamic parallelism; the OpenCL kernel language has no
+            # nested-launch statement at all, and HIP does not offer it on this platform.
+            self._error(
+                f"'{name}' is a @kernel launched from device code, which {self.launch_backend} "
+                f"does not support: device-side launch needs CUDA's dynamic parallelism. Run "
+                f"this kernel on cuda, or call a plain device helper instead", node)
+        entries:List[ast.expr] = []
+        probe:ast.expr = node.func
+        while isinstance(probe, ast.Subscript):
+            entries.append(probe.slice)
+            probe = probe.value
+        for entry in entries:
+            if isinstance(entry, ast.Constant) and isinstance(entry.value, str):
+                self._error(
+                    f"'{name}' is launched from device code, where the backend and the device "
+                    f"cannot be chosen: the device is already running. Give only the work "
+                    f"size, as `{name}[(global, local)](...)`", node)
+
+        if isinstance(work, ast.Tuple):
+            if len(work.elts) > 2:
+                self._error(
+                    f"a device-side launch takes at most (global, local): '{name}' was given "
+                    f"{len(work.elts)} work sizes", work)
+            parts:List[Tuple[str, Any]] = [self._visit_expression(e) for e in work.elts]
+            global_code, global_type = parts[0]
+            local_code, local_type = parts[1] if len(parts) > 1 else ("", None)
+        else:
+            global_code, global_type = self._visit_expression(work)
+            local_code, local_type = "", None
+        if not is_int(global_type):
+            self._error(f"the work size of '{name}' must be an integer", work)
+        if local_code and not is_int(local_type):
+            self._error(f"the local work size of '{name}' must be an integer", work)
+
+        call_args:str = ", ".join(self._visit_expression(a)[0] for a in node.args)
+        c_name:str = self._translate_nested_kernel(name, target, node)
+        block:str = local_code if local_code else "1"
+        grid:str = f"(({global_code}) / ({block}))"
+        self._emit(f"{c_name}<<<{grid}, {block}>>>({call_args});")
+
+    def _translate_nested_kernel(self, name:str, target:Any, node:ast.Call)->str:
+        """Render the launched kernel as another `__global__` function of this source."""
+        raw_func:Callable = target.raw_func
+        known:Optional[str] = self.nested_seen.get(raw_func)
+        if known is not None:
+            return known
+        param_types:List[Any] = [self._visit_expression(a)[1] for a in node.args]
+        from .decorator import _positional_argument_names
+
+        expected:int = len(_positional_argument_names(raw_func))
+        if len(param_types) != expected:
+            self._error(
+                f"'{name}' takes {expected} argument(s) but a device-side launch gave "
+                f"{len(param_types)}", node)
+        digest:str = hashlib.md5(
+            (raw_func.__name__ + repr(param_types)).encode("utf-8")).hexdigest()[:8]
+        c_name:str = f"pyk_nested{len(self.nested_kernels)}_{digest}"
+        # Registered before translating, so a kernel that launches itself is refused rather
+        # than recursed into.
+        self.nested_seen[raw_func] = c_name
+        callee:FunctionTranslator = FunctionTranslator(
+            raw_func, param_types, self.backend, _helper_globals(raw_func, self.resolve_global),
+            self.device_cache, is_kernel=True, self_param="", self_attr_types={},
+            self_owner=None, launch_backend=self.launch_backend)
+        callee.translate()
+        self.nested_kernels.append(callee.render_kernel(c_name))
+        for deeper in callee.nested_kernels:
+            if deeper not in self.nested_kernels:
+                self.nested_kernels.append(deeper)
+        from .decorator import _dependency_order
+
+        for entry in _dependency_order(self.device_cache):
+            code:str = entry["code"]
+            if code not in self.nested_helpers:
+                self.nested_helpers.append(code)
+        return c_name
 
     def _emit_method_on_value(self, func:ast.Attribute, node:ast.Call)->Tuple[str, Any]:
         """`value.method(args)` as a device call whose first argument is the value.
@@ -5754,7 +5871,12 @@ class FunctionTranslator:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
         if is_kernel_ref:
-            self._error(f"'{name}' is a @kernel function and cannot be called from device code; use a plain python function instead", node)
+            # A @kernel with a work size is a nested launch, handled in _visit_call before
+            # this point; reaching here means it was called as if it were a helper.
+            self._error(
+                f"'{name}' is a @kernel function: from device code it is a *launch*, so give "
+                f"it a work size -- `{name}[(total, local)](...)` -- rather than calling it "
+                f"as a helper", node)
         if not isinstance(raw_func, types.FunctionType):
             # A builtin or a bound builtin method has no python source to translate, so it
             # cannot become a device function. Say which name it was rather than failing

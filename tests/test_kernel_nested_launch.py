@@ -1,0 +1,103 @@
+"""A kernel body that launches another kernel (CUDA's dynamic parallelism).
+
+This is the one feature that needs a *device-code link*: the child kernel is resolved
+through the device runtime, which NVRTC does not link in, so a source that nests a launch
+is built by nvcc instead. Everything else keeps using NVRTC, and the tests below therefore
+mark CUDA specifically rather than going through `gpu_backend`.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from pygpgpu import get_global_id, kernel
+
+
+@kernel
+def child(out: np.ndarray):
+    """Doubles its index into ``out``; launched from inside another kernel."""
+    out[get_global_id(0)] = get_global_id(0) * 2
+
+
+@kernel
+def parent(out: np.ndarray):
+    """A work item launches ``child`` over the same span."""
+    child[(out.shape[0],)](out)
+
+
+@kernel
+def parent_with_group(out: np.ndarray):
+    """The bracket's second entry is the local work size."""
+    child[(out.shape[0], 4)](out)
+
+
+@kernel
+def two_children(first: np.ndarray, second: np.ndarray):
+    """Two launches of one kernel: the definition is shared, not duplicated."""
+    child[(first.shape[0],)](first)
+    child[(second.shape[0],)](second)
+
+
+def test_a_kernel_can_launch_a_kernel():
+    """The child's writes come back, so the device-side launch really ran."""
+    out = np.zeros(8, dtype=np.int32)
+    parent["cuda"](out)
+    np.testing.assert_array_equal(out, np.arange(8, dtype=np.int32) * 2)
+
+
+def test_a_nested_launch_takes_a_work_size_and_a_group():
+    """`child[(n, local)]` splits the same span, exactly as a host launch would."""
+    out = np.zeros(8, dtype=np.int32)
+    parent_with_group["cuda"](out)
+    np.testing.assert_array_equal(out, np.arange(8, dtype=np.int32) * 2)
+
+
+def test_two_launches_of_one_kernel_share_its_definition():
+    """Both arrays are filled, and the child is emitted once rather than per call site."""
+    first = np.zeros(4, dtype=np.int32)
+    second = np.zeros(4, dtype=np.int32)
+    two_children["cuda"](first, second)
+    np.testing.assert_array_equal(first, np.arange(4, dtype=np.int32) * 2)
+    np.testing.assert_array_equal(second, np.arange(4, dtype=np.int32) * 2)
+
+
+def test_the_interpreter_runs_a_nested_launch_too():
+    """A serial run has no device to launch onto, so the call is just a call."""
+    out = np.zeros(8, dtype=np.int32)
+    parent["python"](out)
+    np.testing.assert_array_equal(out, np.arange(8, dtype=np.int32) * 2)
+
+
+@pytest.mark.parametrize("backend", ["opencl", "hip"])
+def test_a_backend_without_nested_launch_says_so(backend):
+    """OpenCL has no nested-launch statement, and HIP does not offer it here."""
+    with pytest.raises(SyntaxError) as caught:
+        parent[backend](np.zeros(8, dtype=np.int32))
+    message: str = str(caught.value)
+    assert "dynamic parallelism" in message
+
+
+def test_a_kernel_called_without_a_work_size_is_refused():
+    """From device code a @kernel is a launch, so a plain call is a mistake worth naming."""
+
+    @kernel
+    def calls_a_kernel_as_a_helper(out: np.ndarray):
+        child(out)
+
+    with pytest.raises(SyntaxError) as caught:
+        calls_a_kernel_as_a_helper["cuda"](np.zeros(4, dtype=np.int32))
+    message: str = str(caught.value)
+    assert "launch" in message
+    assert "work size" in message
+
+
+def test_a_nested_launch_cannot_pick_a_backend():
+    """The device is already running, so only the work size may be given."""
+
+    @kernel
+    def picks_a_backend(out: np.ndarray):
+        child["opencl"][(out.shape[0],)](out)
+
+    with pytest.raises(SyntaxError) as caught:
+        picks_a_backend["cuda"](np.zeros(4, dtype=np.int32))
+    assert "cannot be chosen" in str(caught.value)
