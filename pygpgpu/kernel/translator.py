@@ -1111,6 +1111,11 @@ class FunctionTranslator:
         # Locals initialized above the magic loop and written inside it: one location for the
         # whole launch, carried as a one-element buffer (see _bind_carried_scalars).
         self.carried_scalars:List[str] = []
+        # By-value arguments the body returns, promoted to pointers so the return reuses the
+        # parameter instead of allocating a slot for a copy (see _promote_returned_parameters).
+        self.promoted_parameters:Set[str] = set()
+        # The promoted parameters a return site lands in, so no slot is allocated for them.
+        self.promoted_returns:Set[str] = set()
         self.phase_translators:List["FunctionTranslator"] = []
         self.self_param:str = self_param
         self.self_attr_types:Dict[str, Any] = dict(self_attr_types or {})
@@ -2465,7 +2470,23 @@ class FunctionTranslator:
                 # A host-created array is a parameter too, just not a python argument.
                 if name not in self.host_values:
                     self._error(f"cannot return the array '{name}': it is not a parameter", node)
+            # A carried slot is a pointer to one value, so returning it hands back that value
+            # -- not an array. The parameter already holds it, so no slot is allocated.
+            if name in self.carried_scalars:
+                return {"kind": "value", "type": t[1], "code": f"{name}[0]",
+                        "slot_parameter": name}
+            if name in self.promoted_parameters:
+                # Promoted for the return's sake: it is a *value*, and the parameter it now
+                # travels as is the slot it lands in -- no extra argument.
+                self.promoted_returns.add(name)
+                return {"kind": "value", "type": t[1], "code": f"{name}[0]",
+                        "slot_parameter": name}
             return {"kind": "array", "name": name, "type": t}
+        if isinstance(node, ast.Name) and (
+                node.id in self.carried_scalars or node.id in self.promoted_parameters):
+            # Both are one location the kernel already carries: the parameter *is* the slot.
+            return {"kind": "value", "type": t, "code": code,
+                    "slot_parameter": node.id}
         return {"kind": "value", "type": t, "code": code}
 
     def _return_site(self, node:ast.Return)->List[Dict[str, Any]]:
@@ -2482,6 +2503,35 @@ class FunctionTranslator:
                         "a returned tuple position must be a single value, not a nested tuple", item)
             return [self._return_position(item) for item in node.value.elts]
         return [self._return_position(node.value)]
+
+    def _promote_returned_parameters(self, node:ast.Return)->None:
+        """Turn a by-value parameter the body returns into a pointer parameter.
+
+        A scalar argument travels by value, so the device only holds a copy and there is
+        nothing for a return slot to point at -- the kernel would allocate a second
+        parameter just to carry a number the caller already passed. Passing such an
+        argument by pointer instead gives the return slot the parameter itself: one
+        location, no extra argument, and the same value on both sides.
+        """
+        if node.value is None:
+            return
+        values:List[ast.expr] = (list(node.value.elts) if isinstance(node.value, ast.Tuple)
+                                else [node.value])
+        for value in values:
+            if not isinstance(value, ast.Name):
+                continue
+            for index, (name, t) in enumerate(self.params):
+                if name != value.id or is_ptr(t) or is_image(t):
+                    continue
+                # A writable carried slot is already a pointer; this only reaches an ordinary
+                # scalar argument (`scale: int`).
+                self.params[index] = (name, (PTR, t))
+                # The scope has to follow, or a later lookup still reports the by-value type
+                # and the layout allocates a slot for a value that already has one.
+                for scope in self.scopes:
+                    if name in scope:
+                        scope[name] = (PTR, t)
+                self.promoted_parameters.add(name)
 
     def _return_is_shared(self, node:ast.Return)->bool:
         """True when every name a post-loop return reads is a launch-wide slot.
@@ -2502,13 +2552,20 @@ class FunctionTranslator:
                     continue
                 if name.id in self.carried_scalars:
                     continue
-                if is_ptr(self._lookup(name.id)):
+                # A kernel argument is launch-wide too: every work item reads the same value,
+                # so returning one answers the same thing everywhere. A pointer argument (an
+                # array) was already allowed by the array-return rule.
+                if name.id in dict(self.params) or is_ptr(self._lookup(name.id)):
                     continue
                 return False
         return True
 
     def _visit_kernel_return(self, node:ast.Return)->None:
         """Translate a `return` in a kernel body into a claim plus slot stores."""
+        # Promotion comes first: it decides the parameter's type, and the layout below reads
+        # that type to tell a reused parameter from a value needing a slot of its own.
+        if self.is_kernel:
+            self._promote_returned_parameters(node)
         positions:List[Dict[str, Any]] = self._return_site(node)
         if self.after_magic_loop and any(position["kind"] == "value" for position in positions):
             # The statements after the loop run once per work item, so a value accumulated
@@ -2547,6 +2604,10 @@ class FunctionTranslator:
         for slot, position in self._site_slots(site):
             if position["kind"] != "value":
                 continue
+            if slot < 0:
+                # The value already lives in the parameter it travels in: there is no slot to
+                # store it into, and the host reads it from the argument it passed.
+                continue
             self._emit(f"    {self._return_slot(slot)}[0] = {position['code']};")
         self._emit("}")
         self._emit("return;")
@@ -2564,6 +2625,12 @@ class FunctionTranslator:
         """
         for ordinal, position in enumerate(positions):
             if position["kind"] != "value":
+                continue
+            if position.get("slot_parameter"):
+                # The value already has a location of its own -- the parameter it travels
+                # in -- so no slot is allocated for it: there is nothing to copy and the
+                # host reads it from the argument it passed.
+                self._site_slot_map.setdefault(site, []).append((ordinal, -1))
                 continue
             ctype:str = self._return_param_type(position["type"])
             slot:Optional[int] = self._slot_for_type(ctype)
@@ -2643,8 +2710,13 @@ class FunctionTranslator:
         """
         layout:List[Dict[str, Any]] = []
         for site, positions in enumerate(self.return_sites):
-            entries:List[Dict[str, Any]] = [{"kind": "value", "ordinal": ordinal, "slot": slot}
-                                            for ordinal, slot in self._site_slot_map.get(site, [])]
+            entries:List[Dict[str, Any]] = [
+                {"kind": "value", "ordinal": ordinal, "slot": slot,
+                 # A negative slot means the value already lives in the parameter it
+                 # travelled in, so the host reads it from the launch arguments.
+                 **({"reused": positions[ordinal]["slot_parameter"]}
+                    if slot < 0 else {})}
+                for ordinal, slot in self._site_slot_map.get(site, [])]
             for ordinal, position in enumerate(positions):
                 if position["kind"] == "array":
                     entries.append({"kind": "array", "ordinal": ordinal, "name": position["name"]})

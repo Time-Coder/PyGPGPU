@@ -91,6 +91,38 @@ def store_in_the_loop(x: np.ndarray):
     return best
 
 
+@kernel
+def return_a_parameter(x: np.ndarray, scale: int):
+    """Return a by-value argument."""
+    total = 0
+    for i in range(x.shape[0]):
+        total += int(x[i])
+    return scale
+
+
+@kernel
+def return_a_computed_value(x: np.ndarray):
+    """A value that is no parameter still needs a slot of its own."""
+    total = 0
+    for i in range(x.shape[0]):
+        total += int(x[i])
+    return total + 5
+
+
+def test_returning_a_parameter_reuses_it():
+    """A parameter the body returns already has a location: no extra slot is allocated."""
+    values = np.arange(1, 5, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        assert int(return_a_parameter[backend](values, np.int32(7))) == 7
+
+
+def test_a_computed_return_still_gets_a_slot():
+    """Only a value with no location of its own needs one."""
+    values = np.arange(1, 5, dtype=np.int32)
+    for backend in ("python", "cuda"):
+        assert int(return_a_computed_value[backend](values)) == 15
+
+
 def test_a_shared_scalar_can_be_returned_after_the_loop():
     """The slot is one location, so every work item computes the same answer."""
     values = np.arange(1, 5, dtype=np.int32)

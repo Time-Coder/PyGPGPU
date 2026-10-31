@@ -1275,6 +1275,16 @@ class PyKernel:
                     values.append(created[name])
                 else:
                     values.append(full[returns["arg_indices"][name]])
+            elif entry.get("reused"):
+                # The value already lives in the argument the body returned, so the caller
+                # gets it back from there -- no slot was allocated for it.
+                # The parameter travels as a one-element buffer, so the value it holds is
+                # what the caller passed -- and what the body may have updated.
+                shared_slot:Any = full[returns["arg_indices"][entry["reused"]]]
+                try:
+                    values.append(shared_slot[0])
+                except (IndexError, TypeError):
+                    values.append(shared_slot)
             else:
                 dtype:Any = returns["slot_types"][entry["slot"]]
                 kind:str = returns["slot_kinds"][entry["slot"]]
