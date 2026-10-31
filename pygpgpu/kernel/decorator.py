@@ -18,6 +18,7 @@ from .python_backend import PythonKernel
 from . import structs
 from ..numpy import ndarray as gnp
 from .translator import (
+    PTR,
     FunctionTranslator,
     _assigned_name_of,
     infer_ctype,
@@ -993,6 +994,8 @@ class PyKernel:
         self_values:List[Any] = []
         self_attrs:List[str] = []
         owner:Optional[type] = None
+        self_struct_members:Dict[str, str] = {}
+        self_struct_type:Any = None
         if self._is_method:
             if instance is None:
                 raise TypeError(f"{self.__name__}() requires an instance")
@@ -1013,6 +1016,46 @@ class PyKernel:
                         f"self.{name} is a function, not a value: a function cannot be passed "
                         f"to a device (call it as self.{name}(...) instead)") from None
                 self_values.append(value)
+            # The scalar members travel as ONE structure the body reads through (the way a
+            # device helper already takes `Scene self`); an ndarray member stays its own
+            # argument, because the read/write analysis and the shape plumbing need it
+            # separately. The record is one element long so `self.<attr> = ...` writes
+            # through it, and the struct pointer is read-only when the body never assigns
+            # a member.
+            struct_attrs:List[str] = [name for name in self_attrs
+                                      if not isinstance(getattr(instance, name), np.ndarray)]
+            array_attrs:List[str] = [name for name in self_attrs
+                                     if isinstance(getattr(instance, name), np.ndarray)]
+            if struct_attrs:
+                from .objects import _structure_for, member_type  # noqa: PLC0415 (import cycle)
+
+                self_struct:type = _structure_for(
+                    [(name, member_type(getattr(instance, name), name))
+                     for name in struct_attrs], [])
+                from .structs import register_name_hint  # noqa: PLC0415 (import cycle)
+
+                register_name_hint(np.dtype(self_struct), owner)
+                # Each attribute is a member of the same name: the mapping is the identity,
+                # never a zip against the dtype's names. numpy sorts a record's field names
+                # alphabetically, so zipping them against the attribute order paired
+                # `image_height` with `du_in_world` and every member read the wrong field.
+                self_struct_members = {name: name for name in struct_attrs}
+                from . import structs as _structs  # noqa: PLC0415 (import cycle)
+
+                self_struct_type = (PTR, _structs.register(np.dtype(self_struct)))
+                # The value that travels is the ctypes structure itself: the launch packs
+                # its bytes through the parsed layout, which handles vector members (whose
+                # numpy record view uses a sub-array form that would misread the bytes).
+                # A body that assigns `self.<attr> = ...` writes through the device buffer,
+                # and the host copies the members home afterwards.
+                holder:Any = self_struct()
+                for name in struct_attrs:
+                    setattr(holder, name, getattr(instance, name))
+                self_attrs = array_attrs
+                self_types = [self_struct_type] + [
+                    infer_ctype(getattr(instance, name)) for name in array_attrs]
+                self_values = [holder] + [
+                    getattr(instance, name) for name in array_attrs]
 
         # An arbitrary python object becomes a synthesized structure before its type is
         # inferred: the structure *is* the argument type, and every step after this sees the
@@ -1026,12 +1069,13 @@ class PyKernel:
                                         self._self_param, object_binding,
                                         self_value=instance)
         arg_types:List[Any] = [infer_ctype(a) for a in args]
-        self_types:List[Any] = []
-        for name, value in zip(self_attrs, self_values):
-            try:
-                self_types.append(infer_ctype(value))
-            except SyntaxError as e:
-                raise SyntaxError(f"self.{name}: {e}") from None
+        if not self_struct_members:
+            self_types = []
+            for name, value in zip(self_attrs, self_values):
+                try:
+                    self_types.append(infer_ctype(value))
+                except SyntaxError as e:
+                    raise SyntaxError(f"self.{name}: {e}") from None
 
         sig:str = type_sig(arg_types + self_types)
         cache_key:str = f"{backend}|{device_key}|{sig}"
@@ -1043,7 +1087,9 @@ class PyKernel:
             # image bound after compilation would never get its device storage.
             self._bind_images(full_values=args, backend=backend)
             entry = self._compile(args, arg_types, self_types, self_attrs, owner, sig,
-                                  backend, device_obj, instance)
+                                  backend, device_obj, instance,
+                      self_struct_members=self_struct_members,
+                      self_struct_type=self_struct_type)
             self._cache[cache_key] = entry
         (kernel_obj, shape_sources, work_size_dims, local_sizes, uses_global_id,
          image_samplers, returns, outer_vars, launch_meta) = entry
@@ -1067,9 +1113,13 @@ class PyKernel:
         # The `_self_<attr>` parameters sit in `full` right after the caller's arguments,
         # so the prefix names must include them or the aligned loop would look up an
         # attribute value in the wrong place.
+        # When the receiver travels as a structure, it is the first entry of self_values
+        # and the first device parameter: name it so the aligned loop finds the holder.
+        receiver_name:List[str] = ([self._self_param]
+                                   if self_struct_members else [])
         self_attr_names:List[str] = [f"_self_{name}" for name in self_attrs]
         prefix_names:List[str] = (list(_positional_argument_names(self.raw_func))[:len(args)]
-                                  + self_attr_names
+                                  + receiver_name + self_attr_names
                                   + list(launch_meta.get("carried") or []))
         full:List[Any] = [_kernel_scalar_argument(value, t)
                           for value, t in zip(list(args) + list(self_values),
@@ -1222,6 +1272,7 @@ class PyKernel:
             # all of its dimensions, matching what np.ndindex(x.shape) would give. An entry
             # with no parameter index is a literal count, as in np.ndindex(2, 3).
             extents_list:List[int] = []
+            member_index:int = 0
             for pi, dim in work_size_dims:
                 if pi is None:
                     extents_list.append(dim)
@@ -1230,6 +1281,13 @@ class PyKernel:
                     # A host-side integer supplied as an argument, used as an extent:
                     # `np.ndindex(self.image_height, self.image_width)`.
                     extents_list.append(int(full[pi]))
+                    continue
+                if dim == -3:
+                    # The extent is a receiver-struct member: full[pi] is the ctypes
+                    # structure the caller handed over, and the member holds the count.
+                    member_name = launch_meta.get("work_size_members", [])[member_index]
+                    member_index += 1
+                    extents_list.append(int(getattr(full[pi], member_name)))
                     continue
                 shape:Tuple[int, ...] = tuple(int(s) for s in full[pi].shape)
                 if dim >= 0:
@@ -1671,7 +1729,9 @@ class PyKernel:
 
     def _compile(self, args:List[Any], arg_types:List[Any], self_types:List[Any],
                  self_attrs:List[str], owner:Optional[type], sig:str,
-                 backend:str, device_obj:Any, instance:Any=None)->Tuple[Any, List[str]]:
+                 backend:str, device_obj:Any, instance:Any=None,
+                 self_struct_members:Optional[Dict[str, str]]=None,
+                 self_struct_type:Any=None)->Tuple[Any, List[str]]:
         if backend in ("cuda", "hip"):
             for t in list(arg_types) + list(self_types):
                 base:str = (t[1] if isinstance(t, tuple) else t)
@@ -1682,7 +1742,10 @@ class PyKernel:
 
         c_name:str = self._c_kernel_name(sig, backend)
         device_cache:Dict[Any, Any] = {}
-        self_attr_types:Dict[str, Any] = dict(zip(self_attrs, self_types))
+        # self_types leads with the receiver struct when the receiver travels as one, so
+        # the attribute map pairs the array attributes with the types after it.
+        self_attr_types:Dict[str, Any] = dict(zip(
+            self_attrs, self_types[1:] if self_struct_members else self_types))
 
         # hip accepts CUDA syntax (threadIdx/atomicAdd/make_float4 etc.), so codegen goes through cuda
         codegen_backend:str = ("cuda" if backend == "hip" else backend)
@@ -1696,6 +1759,8 @@ class PyKernel:
             self._resolve_global, device_cache, is_kernel=True,
             self_param=self._self_param, self_attr_types=self_attr_types,
             self_owner=owner, launch_backend=backend,
+            self_struct_members=self_struct_members,
+            self_struct_type=self_struct_type,
             host_creation_values=creation_values)
         translator.translate()
         # One kernel per magic loop: a body with several renders several, launched in order
@@ -1819,6 +1884,8 @@ class PyKernel:
         # Each entry is (parameter index, dimension) for an array-sourced extent, or
         # (None, count) for a literal one (np.ndindex(2, 3)).
         work_size_dims:List[Tuple[Optional[int], int]] = [
+            (param_index.get("self"), dim)
+            if name.startswith("(self)->") else
             (shape_index[name], dim) if name else (None, dim)
             for name, dim in shapes_owner.work_size_dims]
         # An explicit gpu.work_size(x) declaration: expand each named array into its own
@@ -1867,6 +1934,9 @@ class PyKernel:
                  "phase_param_names": (phase_param_names if phase_param_names else
                                        [list(dict(phase.params))
                                         for phase in translator.phase_translators]),
+                 # The receiver-struct members whose values are loop extents, in the
+                 # order the -3 markers appear in work_size_dims (see _invoke's -3 branch).
+                 "work_size_members": list(getattr(translator, "work_size_members", [])),
                  # The statements after the last magic loop of a single-phase body: the host
                  # runs them once, after the launch (see _run_host_region).
                  "body_tail": getattr(translator, "body_tail", []),

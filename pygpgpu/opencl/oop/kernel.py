@@ -600,24 +600,44 @@ class Kernel(CLObject):
                     CL.clSetKernelArg(self.id, index, bytes_per_group, None)
                     bound[arg_info.name] = (None, value, None)
                 else:
-                    if isinstance(value, np.ndarray):
+                    if is_struct and isinstance(value, (Structure, np.void)):
+                        # A pointer-to-structure parameter: the caller hands over the
+                        # structure value itself, and the launch needs a device address.
+                        # Allocate a buffer, upload the bytes, and pass that pointer; a
+                        # body that writes the members reads the buffer back like any
+                        # written array.
+                        packed:Any = (value if isinstance(value, np.void)
+                                      else content_type.from_buffer_copy(bytes(value)))
+                        data:np.ndarray = np.frombuffer(bytes(packed), dtype=np.uint8)
+                        buffer, event = arg_info.use_buffer(cmd_queue, data)
+                        CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                        bound[arg_info.name] = (buffer, value, packed)
+                    elif isinstance(value, np.ndarray):
                         used_value = value
-                        content_dtype = getattr(content_type, "dtype", None) if is_struct else None
+                        content_dtype = (getattr(content_type, "dtype", None)
+                                         if is_struct else None)
                         if content_dtype is not None:
                             if value.dtype != content_dtype:
                                 used_value = np.ascontiguousarray(value).view(content_dtype)
                         elif value.dtype != content_type:
                             used_value = value.astype(_element_dtype(content_type))
+
+                        if not used_value.flags['C_CONTIGUOUS']:
+                            used_value = np.ascontiguousarray(used_value)
+
+                        buffer, event = arg_info.use_buffer(cmd_queue, used_value)
+                        CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                        bound[arg_info.name] = (buffer, value, used_value)
                     else:
                         ProgramParser._apply_structure_pointers(value, cmd_queue)
                         used_value = np.array(value, dtype=content_type)
 
-                    if not used_value.flags['C_CONTIGUOUS']:
-                        used_value = np.ascontiguousarray(used_value)
+                        if not used_value.flags['C_CONTIGUOUS']:
+                            used_value = np.ascontiguousarray(used_value)
 
-                    buffer, event = arg_info.use_buffer(cmd_queue, used_value)
-                    CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
-                    bound[arg_info.name] = (buffer, value, used_value)
+                        buffer, event = arg_info.use_buffer(cmd_queue, used_value)
+                        CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
+                        bound[arg_info.name] = (buffer, value, used_value)
         elif arg_type_str in CLInfo.image_types:
             image_type = CLInfo.image_types[arg_type_str]
             # A backend-neutral Image becomes the descriptor this backend binds, with

@@ -447,6 +447,21 @@ class Kernel(HIPObject):
 
             is_vec3:bool = (len(getattr(content_type, "_fields_", ())) == 3 and base_type_str in HIPInfo.vec_types)
 
+            if arg_info.is_ptr and is_struct and isinstance(
+                    value, (Structure, np.void)):
+                # A pointer-to-structure parameter: the caller hands over the structure
+                # value itself, and the launch needs a device address. Allocate a buffer,
+                # upload the bytes, and pass that pointer; a body that writes the members
+                # reads the buffer back like any written array.
+                packed:Any = value if isinstance(value, np.void) else \
+                    content_type.from_buffer_copy(bytes(value))
+                data:np.ndarray = np.frombuffer(bytes(packed), dtype=np.uint8)
+                buffer = stream.context.get_buffer(data.nbytes)
+                buffer.kernel_flags = arg_info.kernel_flags
+                event = buffer.set_data(stream, data)
+                bound[arg_info.name] = (buffer, value, packed)
+                return pointer(c_void_p(buffer.id.value))
+
             if not arg_info.is_ptr:
                 if is_vec3:
                     # HIP like CUDA: 3-component vectors are passed in a compact layout, and

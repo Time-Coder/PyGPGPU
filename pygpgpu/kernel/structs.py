@@ -20,7 +20,10 @@ import numpy as np
 # vector or a structure -- `{float x; float y;}` and `float2` compare and hash equal -- so the
 # only usable evidence is the dtype *object*: numpy marks a record built from a ctypes class
 # as aligned (`isalignedstruct`), which the vector dtypes this package ships are not.
+# Every class that declared this layout, in registration order. Two classes can share one
+# dtype, and a member call has to find the one that actually carries the method.
 _DECLARED: Dict[np.dtype, type] = {}
+_DECLARED_ALL: Dict[np.dtype, List[type]] = {}
 
 
 def is_record(dtype:Any)->bool:
@@ -257,6 +260,9 @@ def register_class(cls:Any) -> Optional[np.dtype]:
     if dtype.fields is None:
         return None
     _DECLARED.setdefault(dtype, cls)
+    _DECLARED_ALL.setdefault(dtype, [])
+    if cls not in _DECLARED_ALL[dtype]:
+        _DECLARED_ALL[dtype].append(cls)
     register(dtype)
     _add_subscript_access(cls)
     return dtype
@@ -269,6 +275,26 @@ def declared_class(dtype:Any) -> Optional[type]:
     with the same layout share one dtype.
     """
     return _DECLARED.get(np.dtype(dtype)) if isinstance(dtype, (np.dtype, type)) else None
+
+
+def declared_classes(dtype:Any) -> List[type]:
+    """Every class registered for this layout, in registration order."""
+    if not isinstance(dtype, (np.dtype, type)):
+        return []
+    return list(_DECLARED_ALL.get(np.dtype(dtype), ()))
+
+
+def declared_class_carrying(dtype:Any, attribute:str) -> Optional[type]:
+    """The registered class for this layout that defines `attribute`, or None.
+
+    Two classes can share one dtype (two `Ray`s with the same two members, defined in two
+    modules), and only the one that defines the method being called can answer it. Without
+    this the call reported the other class as having no such method.
+    """
+    for cls in declared_classes(dtype):
+        if hasattr(cls, attribute):
+            return cls
+    return None
 
 
 def register_declared_class(dtype:np.dtype, cls:type) -> None:

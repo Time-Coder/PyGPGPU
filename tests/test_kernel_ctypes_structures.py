@@ -55,7 +55,7 @@ class Vec2Like(ctypes.Structure):
 
 
 def test_a_ctypes_class_is_a_structure_value():
-    assert infer_ctype(Pair(3, 0.5)) == structs.register(Pair)
+    assert infer_ctype(Pair(3, 0.5)) == ("*", structs.register(Pair))
 
 
 def test_a_ctypes_class_argument_is_registered_by_its_class():
@@ -70,7 +70,7 @@ def test_a_ctypes_array_is_a_structure_array():
 def test_a_structure_that_looks_like_a_vector_stays_a_structure():
     """`Vec2Like` and `float2` have byte-identical layouts; the declaration decides."""
     assert infer_ctype(np.zeros(1, dtype=Vec2Like)) == ("*", structs.register(Vec2Like))
-    assert infer_ctype(Vec2Like(1.0, 2.0)) == structs.register(Vec2Like)
+    assert infer_ctype(Vec2Like(1.0, 2.0)) == ("*", structs.register(Vec2Like))
 
 
 def test_a_vector_is_still_a_vector():

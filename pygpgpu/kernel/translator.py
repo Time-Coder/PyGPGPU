@@ -664,7 +664,28 @@ def infer_ctype(value:Any)->Any:
     # which one the caller meant.
     declared:Optional[np.dtype] = structs.structure_dtype_of(value)
     if declared is not None and not isinstance(value, np.ndarray):
-        return structs.register(declared)
+        from ..vec_types.layout import _vector_dtype_name, _host_classes
+
+        declared_class:type = type(value)
+        is_vector_value:bool = (
+            _vector_dtype_name(declared) is not None
+            and (declared_class in _host_classes().values()
+                 or any(issubclass(declared_class, host)
+                        for host in _host_classes().values())))
+        if is_vector_value:
+            # A vector type is a ctypes.Structure with a vector layout: it travels by
+            # value, because the device reads its components directly. A caller-declared
+            # class with a vector-identical layout (Vec2Like) is NOT one of the package's
+            # vectors, so it keeps the structure treatment.
+            return structs.register(declared)
+        if isinstance(value, type):
+            # The class itself (a spelling for the layout, not a value): it names the
+            # structure, and travels by value like any type.
+            return structs.register(declared)
+        # A structure argument always travels as a pointer: copying a struct per launch is
+        # work the device never needs, a write through it reaches the caller's object, and
+        # one spelling covers both read-only (the signature adds `const`) and written.
+        return (PTR, structs.register(declared))
 
     if isinstance(value, np.void):
         # A structured scalar is either a vector element or a structure value: both are
@@ -672,12 +693,12 @@ def infer_ctype(value:Any)->Any:
         if structs.is_declared_structure(value.dtype):
             # An element of a ctypes-declared array reaches here as a record, and the
             # declaration wins over the coincidental vector layout.
-            return structs.register(value.dtype)
+            return (PTR, structs.register(value.dtype))
         vec_name:Optional[str] = _vector_dtype_name(value.dtype)
         if vec_name is not None:
             return vec_name
         if structs.is_record(value.dtype):
-            return structs.register(value.dtype)
+            return (PTR, structs.register(value.dtype))
         raise SyntaxError(f"unsupported numpy structured scalar: {value.dtype}") from None
 
     for vec_name, cls in registry.items():
@@ -1084,7 +1105,10 @@ class FunctionTranslator:
                  is_kernel:bool=False, self_param:str="",
                  self_attr_types:Optional[Dict[str, Any]]=None,
                  self_owner:Optional[type]=None, launch_backend:Optional[str]=None,
-                 host_creation_values:Optional[Dict[str, Any]]=None):
+                 host_creation_values:Optional[Dict[str, Any]]=None,
+                 self_struct_members:Optional[Dict[str, str]]=None,
+                 self_struct_type:Any=None,
+                 receiver_as_argument:bool=False):
         self.func:Callable = func
         self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
         self.backend:str = backend
@@ -1135,6 +1159,16 @@ class FunctionTranslator:
         # is a data attribute, an instance method, or a staticmethod. None for the
         # decoration-time body scan, where the class does not exist yet.
         self.self_owner:Optional[type] = self_owner
+        # The receiver travels as one structure: member name -> the attribute it holds.
+        # A member read of `self.<attr>` becomes a field read of the struct parameter, and
+        # an ndarray attribute stays a separate `_self_<attr>` argument (the read/write
+        # analysis and the shape plumbing need it apart).
+        self.self_struct_members:Dict[str, str] = dict(self_struct_members or {})
+        self.self_struct_type:Any = self_struct_type
+        # True when this function's receiver is its own first positional parameter
+        # (`def at(self, t)` called as `ray.at(t)`), rather than a field-carrying struct
+        # the caller packs separately (see _emit_device_call).
+        self.receiver_as_argument:bool = receiver_as_argument
         # Objects the host already built for statements above the magic loop, keyed by the
         # name the body assigns them to (see _host_created_assignment).
         self.host_creation_values:Dict[str, Any] = dict(host_creation_values or {})
@@ -1153,8 +1187,12 @@ class FunctionTranslator:
 
         self.params:List[Tuple[str, Any]] = []
         self.shapes_used:List[Tuple[str, int]] = []
+        # Structure parameters whose members the body assigns: a parameter in this set is
+        # emitted without `const` (see render_kernel / render_device).
+        self.member_writes:Set[str] = set()
         self.gid_param:Optional[str] = None
         self.work_size_dims:List[Tuple[str, int]] = []
+        self.work_size_members:List[str] = []
         # One (array, dimension) source per dimension of the ndindex magic loop, in the
         # order the loop unpacks them (see _ndindex_extents). None for the other forms.
         self._nd_loop_extents:Optional[List[Tuple[str, int]]] = None
@@ -1248,13 +1286,27 @@ class FunctionTranslator:
         # Default values are accepted: a kernel argument is always supplied by the
         # caller, so a default is a convenience for reading the signature rather than
         # something the device code has to represent.
+        receiver_type:Any = None
         if self_param and args and args[0].arg == self_param:
+            if self.receiver_as_argument:
+                # The receiver travels as this function's own first argument: take its
+                # type off the front and name it before the remaining parameters.
+                receiver_type = param_types[0] if param_types else None
+                param_types = list(param_types[1:])
             args = args[1:]
-        expected:int = len(args) + len(self.self_attr_types)
+        # `param_types` holds the positional arguments, then the receiver struct, then one
+        # type per ndarray attribute (see PyKernel._invoke_inner and _emit_device_call).
+        expected:int = len(args) + len(self.self_attr_types) + (
+            1 if self.self_struct_members else 0)
         if expected != len(param_types):
             raise SyntaxError(f"{func.__name__}() takes {expected} device arguments but {len(param_types)} types were given") from None
 
         scope:Dict[str, Any] = {}
+        if receiver_type is not None:
+            # The receiver is not a `_self_` field set: it is one structure pointer,
+            # spelled by the function's own first parameter name.
+            scope[self.self_param] = receiver_type
+            self.params.append((self.self_param, receiver_type))
         for arg, t in zip(args, param_types):
             # Annotations are accepted but ignored: the device type comes from the
             # actual argument at call time (see infer_ctype), because one kernel is
@@ -1262,8 +1314,20 @@ class FunctionTranslator:
             # function be read by editors and type checkers.
             scope[arg.arg] = t
             self.params.append((arg.arg, t))
-        # self.xxx attributes -> extra device parameters _self_xxx, filled from the instance at call time
+        # self.xxx attributes -> the receiver struct (scalar members) plus one parameter
+        # per ndarray member, filled from the instance at call time. The struct comes first
+        # among them, because that is the order the host packs `self_values` in
+        # (see PyKernel._invoke_inner); the parameter indices the launch derives from this
+        # list have to agree with that order.
+        if self.self_struct_members:
+            struct_type:Any = (param_types[len(args)] if len(param_types) > len(args)
+                               else self.self_struct_type)
+            if self.self_struct_type is None:
+                self.self_struct_type = struct_type
+            self.params.append((self.self_param, struct_type))
         for attr, t in self.self_attr_types.items():
+            if attr in self.self_struct_members:
+                continue                  # carried inside the receiver struct
             pname:str = f"_self_{attr}"
             scope[pname] = t
             self.params.append((pname, t))
@@ -1290,21 +1354,34 @@ class FunctionTranslator:
         self.lines.append("    " * self._indent + line)
 
     def _render_body(self, lines:Optional[List[str]]=None)->str:
-        """The emitted lines with blank separators collapsed and the edges trimmed.
+        """The emitted lines with separators placed where a reader expects them.
 
-        The walkers record a blank line after every closed block and between statement runs;
-        two blanks in a row read as one, and none may lead the body or survive at its end.
+        The walkers record a blank line after every closed block and between statement
+        runs. This pass keeps one where a *new statement at the same scope* follows a run
+        or a block, and drops one where the scope simply ends (the next line dedents back
+        to the parent), because there is nothing more in this scope to separate. Doubles
+        collapse, and no blank may lead the body or survive at its end.
         """
         rendered:List[str] = []
         for line in (self.lines if lines is None else lines):
             if line == "" and (not rendered or rendered[-1] == ""):
                 continue
             rendered.append(line)
-        while rendered and rendered[0] == "":
-            rendered.pop(0)
-        while rendered and rendered[-1] == "":
-            rendered.pop()
-        return "\n".join(rendered)
+        kept:List[str] = []
+        for index, line in enumerate(rendered):
+            if line == "" and index + 1 < len(rendered):
+                previous_indent:str = rendered[index - 1][:len(rendered[index - 1])
+                                                          - len(rendered[index - 1].lstrip())]
+                next_indent:str = rendered[index + 1][:len(rendered[index + 1])
+                                                      - len(rendered[index + 1].lstrip())]
+                if len(next_indent) <= len(previous_indent):
+                    continue          # the scope ends here; no separator is needed
+            kept.append(line)
+        while kept and kept[0] == "":
+            kept.pop(0)
+        while kept and kept[-1] == "":
+            kept.pop()
+        return "\n".join(kept)
 
     def _emit_blank(self)->None:
         """A separator line, recorded so the renderer can collapse or trim it."""
@@ -1346,6 +1423,40 @@ class FunctionTranslator:
                 self.scopes[-1][name] = t
             else:
                 self._error(f"variable '{name}' changes type from {existing} to {t}", node)
+
+    def _is_const_struct(self, name:str)->bool:
+        """Whether a name denotes a structure parameter the body never writes.
+
+        Its signature carries `const`, so an alias of it cannot be mutable.
+        """
+        binding:Any = self._lookup(name)
+        if not (isinstance(binding, tuple) and is_ptr(binding)
+                and isinstance(binding[1], str)):
+            return False
+        from . import structs as _structs_module  # noqa: PLC0415
+
+        if _structs_module.dtype_for(binding[1]) is None:
+            return False
+        return name not in self.member_writes
+
+    def _record_member_write(self, member_code:str)->None:
+        """Remember that this structure parameter's members are written.
+
+        The generated expression is `(base)->field` or `(base[0]).field`; the base is the
+        parameter name, and that parameter must not be declared `const`.
+        """
+        import re as _re
+
+        # The base is the parameter name, optionally wrapped and optionally indexed
+        # (`(g[0]).field` is a record-array element of the parameter `g`).
+        match = _re.search(r"(?:\*?&&?)?\(?([A-Za-z_]\w*)", member_code)
+        base:str = match.group(1) if match else ""
+        if base:
+            self.member_writes.add(base)
+            # The alias case (`q = p; q.a = ...`) writes the same buffer.
+            alias:Any = self.scopes[-1].get(base) if self.scopes else None
+            if isinstance(alias, tuple) and len(alias) == 2 and alias[0] == "alias":
+                self.member_writes.add(alias[1])
 
     def _shape_var(self, array_name:str, dim:int)->str:
         # A private array created in the work-item body has a constant shape, so its extents
@@ -1691,7 +1802,11 @@ class FunctionTranslator:
             self._emit(f"const int {index_name} = get_global_id(0);")
         else:
             self._emit(f"const int {index_name} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
-        self._emit(f"if ({index_name} >= {gid_bound}) return;")
+        self._emit(f"if ({index_name} >= {gid_bound})")
+        self._emit("{")
+        self._emit("    return;")
+        self._emit("}")
+        self._emit_blank()
 
     def _nd_magic_target(self, iter_node:ast.expr)->Optional[Tuple[str, str, str]]:
         """Parse the np.ndindex(...) / np.ndenumerate(...) magic loops.
@@ -1725,6 +1840,9 @@ class FunctionTranslator:
         if form == "ndindex":
             explicit:Optional[List[Tuple[str, int]]] = self._ndindex_extents(iter_node)
             if explicit is None:
+                import sys as _sys
+                print(f"DBG ndindex extents None: members={self.self_struct_members} "
+                      f"attr_types={list(self.self_attr_types)}", file=_sys.stdout)
                 return None
             self._nd_loop_extents = explicit or None
             # A literal-only domain (np.ndindex(2, 3)) names no array, which is valid: the
@@ -1798,6 +1916,20 @@ class FunctionTranslator:
             attribute_type:Any = self.self_attr_types.get(node.attr)
             if attribute_type is not None and is_int(attribute_type):
                 return f"_self_{node.attr}", -2
+            if node.attr in self.self_struct_members:
+                # The attribute travels inside the receiver struct: the extent reads the
+                # member through the pointer (the -3 marker in _nd_bound_code, and the
+                # member name in work_size_members for the host).
+                member:str = self.self_struct_members[node.attr]
+                from . import structs as _structs_module  # noqa: PLC0415
+
+                struct_dtype:Optional[np.dtype] = _structs_module.dtype_for(
+                    self.self_struct_type[1])
+                member_type:Any = _structs_module.member_types(
+                    struct_dtype, self.backend).get(member)
+                if member_type is not None and is_int(member_type):
+                    self.work_size_members.append(node.attr)
+                    return f"(self)->{member}", -3
             return None
         if not isinstance(node, ast.Subscript):
             return None
@@ -1820,6 +1952,9 @@ class FunctionTranslator:
             # `np.ndindex(self.image_height, ...)`: the extent is the value of that argument
             # itself, which travels as a plain scalar parameter.
             return name
+        if dim == -3:
+            # The extent is a receiver-struct member: read it through the pointer.
+            return name
         return self._shape_var(name, dim)
 
     def _emit_nd_head(self, names:List[str], param:str)->None:
@@ -1840,7 +1975,11 @@ class FunctionTranslator:
                 c:str = (".x" if component == 0 else ".y" if component == 1 else ".z")
                 self._emit(f"const int {name} = (int)(blockIdx{c} * blockDim{c} + threadIdx{c});")
             checks.append(f"{name} >= {bound}")
-        self._emit(f"if ({' || '.join(checks)}) return;")
+        self._emit(f"if ({' || '.join(checks)})")
+        self._emit("{")
+        self._emit("    return;")
+        self._emit("}")
+        self._emit_blank()
 
     def _nd_flat_index(self, names:List[str], param:str)->str:
         """Row-major flat index expression: n0*s1*s2 + n1*s2 + n2."""
@@ -2048,6 +2187,10 @@ class FunctionTranslator:
             # the loop unpacks them: gid 0 is the last index. Getting this backwards used
             # to launch a 2x3 domain as 3x2, so the last column or row was never written.
             self.work_size_dims = list(reversed(sources))
+            # The launch sizes dimensions fastest-first, which is the reverse of the loop's
+            # unpack order -- the member names read by the host follow the same reversal, or
+            # `image_height` would be read for the fastest axis.
+            self.work_size_members = list(reversed(self.work_size_members))
             return
 
         loop:ast.For = body[magic_index]
@@ -2075,7 +2218,11 @@ class FunctionTranslator:
             self._emit(f"const int {target} = get_global_id(0);")
         else:
             self._emit(f"const int {target} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
-        self._emit(f"if ({target} >= {gid_bound}) return;")
+        self._emit(f"if ({target} >= {gid_bound})")
+        self._emit("{")
+        self._emit("    return;")
+        self._emit("}")
+        self._emit_blank()
 
         # The loop body is the work-item body; nested range loops translate as real serial loops
         self._visit_work_item_body(loop.body)
@@ -2351,6 +2498,12 @@ class FunctionTranslator:
             # ordinary loop and stays allowed.
             if (self.is_kernel and not self.creation_below_loop
                     and self._is_secondary_magic_loop(node)):
+                import sys as _sys
+                import traceback as _tb
+                print(f"DBG refusal in {self.func.__name__} kernel={self.is_kernel} "
+                      f"line={node.lineno} magic_present={self.magic_loop_present}",
+                      file=_sys.stdout)
+                _tb.print_stack(file=_sys.stdout)
                 self._error(
                     "this kernel body has more than one magic loop, and only the first "
                     "becomes the work-item dispatch: a second one would run inside every "
@@ -2504,9 +2657,12 @@ class FunctionTranslator:
         index:str = f"_{name}_idx"
         self._emit(f"for (int {index} = 0; {index} < {stop}; {index}++)")
         self._emit("{")
-        self._emit(f"{self._device_type(element_t)} {name} = {code}[{index}];")
+        # The declaration belongs to the loop body, so it is emitted after the indent step:
+        # before it, the line landed at the `for` line's own level and every element loop in
+        # a generated source read as if the copy lived outside its block.
         self._define(name, element_t, node.target)
         self._indent += 1
+        self._emit(f"{self._device_type(element_t)} {name} = {code}[{index}];")
         for statement in node.body:
             self._visit_statement(statement)
         self._indent -= 1
@@ -3013,9 +3169,32 @@ class FunctionTranslator:
                 "object per work item. Create it above the loop, or give it a constant "
                 "shape (e.g. np.zeros(4, dtype=np.float32))", node)
 
-        # self.xxx = ... : host attributes cannot be written back from device code
+        # self.xxx = ... : a scalar member of the receiver structure is a field of the
+        # pointer, so the store lands in the caller's structure -- the shape
+        # `HitRecord.set_face_normal` needs. A host attribute (an ndarray, or the receiver's
+        # own state) is still refused: device code has nowhere to write it back from.
         if (self.self_param and isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
                 and target.value.id == self.self_param):
+            from . import structs as _structs_module  # noqa: PLC0415
+
+            member:str = self.self_struct_members.get(target.attr, target.attr)
+            receiver_t:Any = self._lookup(self.self_param)
+            receiver_dtype:Optional[np.dtype] = (
+                _structs_module.dtype_for(receiver_t[1])
+                if isinstance(receiver_t, tuple) and is_ptr(receiver_t) else None)
+            is_member:bool = (receiver_dtype is not None
+                              and member in _structs_module.member_types(
+                                  receiver_dtype, self.backend))
+            if is_member:
+                value_code, value_t = self._visit_expression(node.value)
+                if np.dtype(receiver_dtype.fields[member][0]).name == "bool":
+                    # A bool member is a byte on the device: a float assigned straight into
+                    # it truncates (`0.99` became 0), and the branch reading it went the
+                    # wrong way -- the sphere lost its blue channel and came out grey.
+                    value_code = f"(({value_code}) != 0)"
+                self.member_writes.add(self.self_param)
+                self._emit(f"({self.self_param})->{member} = {value_code};")
+                return
             self._error(
                 f"cannot assign to self.{target.attr}: host attributes cannot be written by device code; "
                 f"write into an array element (self.{target.attr}[i] = ...) or use a local variable", node)
@@ -3066,8 +3245,12 @@ class FunctionTranslator:
                 self._emit(f"{decl}{name} = {tmp};")
             return
         code, t = self._visit_expression(node.value)
-        if is_ptr(t):
-            # Rebinding an outer array is refused earlier, while binding the outer
+        from . import structs as _structs_module
+
+        if is_ptr(t) and not (isinstance(t, tuple) and _structs_module.dtype_for(t[1]) is not None):
+            # A pointer to a *structure* is an aliasable handle (`q = item; q.a` counts as a
+            # read of `item.a`), so it copies like a scalar. An array pointer is different:
+            # rebinding an outer array is refused earlier, while binding the outer
             # variables, so this message only covers a local/parameter target.
             if isinstance(target, ast.Name) and target.id in self.outer_vars:
                 self._error(
@@ -3098,7 +3281,15 @@ class FunctionTranslator:
             self._define(target.id, stored, node)
             decl:str = ""
             if is_new:
-                decl = self._device_type(t) + " "
+                if isinstance(t, tuple) and is_ptr(t):
+                    # A structure pointer alias: declared with the *same* const qualification
+                    # the source expression has, because a `const Struct*` parameter cannot
+                    # initialise a mutable `Struct*`.
+                    const:str = ("const " if isinstance(node.value, ast.Name)
+                                 and self._is_const_struct(node.value.id) else "")
+                    decl = f"{const}{self._kernel_scalar_type(t[1])}* "
+                else:
+                    decl = self._device_type(t) + " "
             self._emit(f"{decl}{target.id} = {code};")
         elif isinstance(target, ast.Subscript):
             # A string subscript on a structure value writes a member: `s["i"] = 1` becomes
@@ -3106,6 +3297,9 @@ class FunctionTranslator:
             # because a structure is a value, not a pointer.
             member:Optional[Tuple[str, Any]] = self._struct_member_access(target)
             if member is not None:
+                # A member store makes the structure parameter writable: it must not be
+                # declared `const` (see render_kernel / render_device).
+                self._record_member_write(member[0])
                 # The generated field assignment goes through a parenthesised member
                 # expression, which the static read/write analysis does not attribute to the
                 # array; record the target so the host still reads the array back.
@@ -3137,6 +3331,17 @@ class FunctionTranslator:
             # path is only reached for synthesized object arguments, whose host side copies
             # the final member values home after the launch.
             target_code, target_t = self._visit_target(target)
+            # A member store on a structure parameter makes it writable, exactly as the
+            # string-subscript store does; without this the parameter was declared `const`
+            # and the generated store failed to compile.
+            self._record_member_write(target_code)
+            if isinstance(target.value, ast.Subscript):
+                # A record-array element store (`rows[i].i = ...`) writes the array the
+                # parameter names, so the parameter is not read-only either.
+                try:
+                    self.member_writes.add(self._array_name(target.value.value))
+                except SyntaxError:
+                    pass
             if self._target_is_bool_member(target, target_t, t):
                 # A bool member is a byte on the device, so a float would truncate
                 # (`front_face = 0.99` -> 0). The store keeps boolean semantics instead.
@@ -4227,6 +4432,12 @@ class FunctionTranslator:
         """
         from . import quaternion  # noqa: PLC0415
 
+        # A structure operand travels as a pointer, so a quaternion variable is `quatf*`:
+        # unwrap it for the type, and dereference it in the emitted expression.
+        if isinstance(lt, tuple) and is_ptr(lt) and structs_dtype_for(lt[1]) is not None:
+            lt, left = lt[1], f"(*{left})"
+        if isinstance(rt, tuple) and is_ptr(rt) and structs_dtype_for(rt[1]) is not None:
+            rt, right = rt[1], f"(*{right})"
         left_quat:Optional[np.dtype] = quaternion.is_quaternion(lt)
         right_quat:Optional[np.dtype] = quaternion.is_quaternion(rt)
         if left_quat is None and right_quat is None:
@@ -4305,7 +4516,12 @@ class FunctionTranslator:
         return None
 
     def _is_structure_operand(self, t:Any)->bool:
-        """Whether a translated type is a structure value (a quaternion is one too)."""
+        """Whether a translated type is a structure value (a quaternion is one too).
+
+        A structure argument travels as a pointer, so the pointer type names one as well.
+        """
+        if isinstance(t, tuple) and is_ptr(t):
+            return structs_dtype_for(t[1]) is not None
         if not isinstance(t, str) or is_vec(t):
             return False
         return structs_dtype_for(t) is not None
@@ -4639,6 +4855,8 @@ class FunctionTranslator:
             return f"({base_code}).{component}", _C_FIELD_TYPES[(base_t, component)]
 
         dtype:Optional[Any] = structs.dtype_for(base_t) if isinstance(base_t, str) else None
+        if dtype is None and (isinstance(base_t, tuple) and is_ptr(base_t)):
+            dtype = structs.dtype_for(base_t[1])
         if dtype is None:
             return None
         members:Dict[str, Any] = structs.member_types(dtype, self.backend)
@@ -4646,8 +4864,14 @@ class FunctionTranslator:
             self._error(
                 f"structure value has no member '{field}' "
                 f"(available: {', '.join(members)})", node)
-        # The parenthesised member expression is what C expects; a sub-array member then
-        # takes a plain index, and a vector member takes a component.
+        # The parenthesised member expression is what C expects; a pointer (a structure
+        # argument always travels as one) goes through '->', a value through '.'. A record
+        # array's element (`g[0]`) is a value, so its own store form is `.`, while the
+        # parameter itself is the pointer.
+        if isinstance(base_t, tuple) and is_ptr(base_t) and not base_code.startswith("&"):
+            if re.search(r"\]\s*$", base_code):
+                return f"({base_code}).{field}", members[field]
+            return f"({base_code})->{field}", members[field]
         return f"({base_code}).{field}", members[field]
 
     def _reject_hip_image(self, node:ast.expr, writing:bool)->None:
@@ -4830,9 +5054,58 @@ class FunctionTranslator:
         return "__sampler_for_%s" % image_code
 
     def _visit_attribute(self, node:ast.Attribute)->Tuple[str, Any]:
-        # self.xxx -> extra parameter _self_xxx
+        # self.xxx -> the receiver struct's member, or an extra parameter _self_xxx for an
+        # ndarray attribute (the read/write analysis and the shape plumbing need it apart).
         if (self.self_param and isinstance(node.value, ast.Name) and node.value.id == self.self_param):
+            if node.attr not in self.self_struct_members and node.attr not in \
+                    self.self_attr_types:
+                # The receiver may be a structure pointer instead of a field set
+                # (`def hit(self, ...)` called with a Scene): its scalar members are
+                # fields of that pointer.
+                from . import structs as _structs_module  # noqa: PLC0415
+
+                pointer_t:Any = self._lookup(self.self_param)
+                if isinstance(pointer_t, tuple) and is_ptr(pointer_t):
+                    pointer_dtype:Optional[np.dtype] = _structs_module.dtype_for(
+                        pointer_t[1])
+                    if pointer_dtype is not None:
+                        pointer_members:Dict[str, Any] = _structs_module.member_types(
+                            pointer_dtype, self.backend)
+                        if node.attr in pointer_members:
+                            return (f"({self.self_param})->{node.attr}",
+                                    pointer_members[node.attr])
+            if node.attr in self.self_struct_members:
+                from . import structs as _structs_module  # noqa: PLC0415
+
+                member:str = self.self_struct_members[node.attr]
+                struct_dtype:Optional[np.dtype] = _structs_module.dtype_for(
+                    self.self_struct_type[1])
+                members:Dict[str, Any] = _structs_module.member_types(
+                    struct_dtype, self.backend)
+                if node.attr not in members:
+                    self._error(
+                        f"structure {self.self_struct_type[1]} has no member '.{node.attr}' "
+                        f"(available: {', '.join(members)})", node)
+                # The receiver struct travels as a pointer, so the member read goes
+                # through '->'.
+                return (f"({self.self_param})->{member}", members[member])
             if node.attr not in self.self_attr_types:
+                # A receiver that arrived as this function's own first argument
+                # (`def at(self, t)` called as `ray.at(t)`) or as one structure pointer
+                # (`def hit(self, ...)` called with a Scene) is a structure pointer with no
+                # field set: read its members through the pointer, like any other
+                # structure parameter.
+                receiver_t:Any = self._lookup(self.self_param)
+                if isinstance(receiver_t, tuple) and is_ptr(receiver_t):
+                    from . import structs as _structs_module  # noqa: PLC0415
+
+                    dtype:Optional[np.dtype] = _structs_module.dtype_for(receiver_t[1])
+                    if dtype is not None:
+                        members:Dict[str, Any] = _structs_module.member_types(
+                            dtype, self.backend)
+                        if node.attr in members:
+                            return (f"({self.self_param})->{node.attr}" ,
+                                    members[node.attr])
                 kind:str
                 _target:Any
                 kind, _target = _self_member_call_kind(self.self_owner, node.attr)
@@ -4878,9 +5151,10 @@ class FunctionTranslator:
         from . import structs
 
         if isinstance(base_t, tuple) and is_ptr(base_t):
-            # `p.x` on a written object argument: it travels as a one-element record array,
-            # so the member read goes through the element (`p[0].x`). A method's receiver is
-            # a plain pointer instead (`&record`), addressed as `(&record)->x`.
+            # `p.x` on a structure pointer: a structure argument always travels as one, so
+            # the member read goes through '->'. A record array (a written object argument)
+            # reads its element first, and a receiver passed by address (`&record`) is
+            # addressed as `(&record)->x`.
             dtype:Optional[np.dtype] = structs.dtype_for(base_t[1])
             if dtype is not None:
                 members:Dict[str, Any] = structs.member_types(dtype, self.backend)
@@ -4890,6 +5164,10 @@ class FunctionTranslator:
                         f"(available: {', '.join(members)})", node)
                 if base_code.startswith("&"):
                     # A receiver passed by address: no record array around it.
+                    return f"({base_code})->{node.attr}", members[node.attr]
+                if structs.is_declared_structure(np.dtype(dtype)) and \
+                        not base_code.endswith(']'):
+                    # A structure pointer parameter: addressed directly.
                     return f"({base_code})->{node.attr}", members[node.attr]
                 return f"({base_code}[0]).{node.attr}", members[node.attr]
 
@@ -4950,13 +5228,18 @@ class FunctionTranslator:
         if callee is not pygf_funcs.conjugate:
             return None
         argument:Tuple[str, Any] = self._visit_expression(node.args[0])
-        dtype:Optional[np.dtype] = quaternion.is_quaternion(argument[1])
+        # The argument may travel as a pointer: unwrap the type, dereference the value.
+        arg_code:str = argument[0]
+        arg_type:Any = argument[1]
+        if isinstance(arg_type, tuple) and is_ptr(arg_type):
+            arg_type, arg_code = arg_type[1], f"(*{arg_code})"
+        dtype:Optional[np.dtype] = quaternion.is_quaternion(arg_type)
         if dtype is None:
             self._error(
-                f"conjugate() needs a quaternion, got {argument[1]}", node)
+                f"conjugate() needs a quaternion, got {arg_type}", node)
         type_name:str = structs_name(dtype)
         self._require_quaternion_header(dtype)
-        return f"{type_name}_conjugate({argument[0]})", type_name
+        return f"{type_name}_conjugate({arg_code})", type_name
 
     def _visit_call(self, node:ast.Call)->Tuple[str, Any]:
         func:ast.expr = node.func
@@ -5071,11 +5354,34 @@ class FunctionTranslator:
                                            if isinstance(func.value, ast.Name) else None)
             if (receiver_name is not None and self.self_param
                     and receiver_name == self.self_param):
+                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                # The method belongs to the class the *receiver* is, not necessarily to the
+                # kernel's own class: inside `Camera.render`, `scene.ray_color(...)` reaches
+                # a Scene method, and a helper bound to a Scene receiver calls Scene's own
+                # methods through `self.`. The receiver's dtype names that class.
+                from . import structs as _structs_module  # noqa: PLC0415
+
+                receiver_t:Any = self._lookup(self.self_param)
+                receiver_owner:Optional[type] = None
+                if isinstance(receiver_t, tuple) and is_ptr(receiver_t):
+                    dtype:Optional[np.dtype] = _structs_module.dtype_for(receiver_t[1])
+                    if dtype is not None:
+                        receiver_owner = _structs_module.declared_class(dtype)
+                call_owner:Optional[type] = receiver_owner or self.self_owner
                 kind:str
                 target:Any
-                kind, target = _self_member_call_kind(self.self_owner, func.attr)
+                kind, target = _self_member_call_kind(call_owner, func.attr)
+                if kind in ("method", "staticmethod") and receiver_owner is not None \
+                        and call_owner is not self.self_owner:
+                    # A method of the receiver's class: the receiver is this call's first
+                    # argument, so it binds positionally, exactly as `ray.at(t)` does.
+                    return self._emit_device_call(
+                        func.attr, target,
+                        [(self.self_param, receiver_t)] + args, node,
+                        self_param=(target.__code__.co_varnames[0]
+                                    if getattr(target, "__code__", None) else "self"),
+                        receiver_as_argument=True)
                 if kind in ("method", "staticmethod"):
-                    args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
                     return self._emit_self_method_call(kind, target, func.attr, args, node)
                 self._error(
                     f"calling self.{func.attr}() from device code is not supported: "
@@ -5240,13 +5546,18 @@ class FunctionTranslator:
         from . import structs
 
         base_code, base_t = self._visit_expression(func.value)
+        receiver_is_pointer:bool = (isinstance(base_t, tuple) and is_ptr(base_t))
+        base_struct:str = base_t[1] if receiver_is_pointer else base_t
         owner:Optional[type] = None
-        if isinstance(base_t, str):
-            dtype:Optional[np.dtype] = structs.dtype_for(base_t)
+        if isinstance(base_struct, str):
+            dtype:Optional[np.dtype] = structs.dtype_for(base_struct)
             if dtype is not None:
-                owner = structs.declared_class(dtype)
-            elif base_t in _vec_registry():
-                owner = _vec_registry()[base_t]
+                # The class that actually defines the method: two callers can declare
+                # classes with one layout, and only one of them carries this attribute.
+                owner = (structs.declared_class_carrying(dtype, func.attr)
+                         or structs.declared_class(dtype))
+            elif base_struct in _vec_registry():
+                owner = _vec_registry()[base_struct]
         if owner is None:
             self._error(
                 f"cannot call '.{func.attr}()' on a value of type {base_t}: methods are "
@@ -5265,16 +5576,23 @@ class FunctionTranslator:
             # grey ball while the interpreter, which runs the method unchanged, was right.
             receiver_param:str = (target.__code__.co_varnames[0]
                                   if getattr(target, "__code__", None) else "self")
-            if writes_receiver(target, receiver_param):
-                if isinstance(base_t, tuple) and is_ptr(base_t):
-                    # Already a pointer (an object argument travelling as a record array):
-                    # it can be handed over as it is.
-                    receiver:(str, Any) = (base_code, base_t)
-                else:
-                    receiver = (f"&({base_code})", (PTR, base_t))
-                return self._emit_device_call(func.attr, target, [receiver] + args, node)
-            return self._emit_device_call(func.attr, target,
-                                          [(base_code, base_t)] + args, node)
+            if receiver_is_pointer:
+                # A structure argument already travels as a pointer: hand it over as it is,
+                # whether the callee writes its members or only reads them. The receiver's
+                # parameter name is named so the callee binds it as the structure it is --
+                # without it, `self.origin` inside the method would read the value form.
+                return self._emit_device_call(
+                    func.attr, target, [(base_code, base_t)] + args, node,
+                    self_param=receiver_param, receiver_as_argument=True)
+            # A value receiver is handed over by address: every structure parameter is a
+            # pointer (so `self.<member>` reads the one form), and a local value's address
+            # is available at the call site. The copy python makes for a by-value call is
+            # the one thing that cannot be kept, and a method that assigns to its receiver
+            # needs the address for the write to reach the caller.
+            return self._emit_device_call(
+                func.attr, target,
+                [(f"&({base_code})", (PTR, base_struct))] + args, node,
+                self_param=receiver_param, receiver_as_argument=True)
         if kind == "staticmethod":
             args = [self._visit_expression(a) for a in node.args]
             return self._emit_device_call(func.attr, target, args, node)
@@ -6412,7 +6730,8 @@ class FunctionTranslator:
         return f"{maker}({inner})"
 
     def _emit_device_call(self, name:str, target:Any, args:List[Tuple[str, Any]], node:ast.Call,
-                          self_param:str="")->Tuple[str, Any]:
+                          self_param:str="",
+                          receiver_as_argument:bool=False)->Tuple[str, Any]:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
         if is_kernel_ref:
@@ -6433,11 +6752,34 @@ class FunctionTranslator:
         # A helper that is a method of the kernel's own class keeps the same receiver:
         # its self.xxx references become extra _self_xxx parameters appended after the
         # caller's, and the call site passes them through in that order.
-        self_types:Dict[str, Any] = (self.self_attr_types if self_param else {})
+        #
+        # A *value* method (`ray.at(t)`) is different: the receiver is already the call's
+        # first argument, so it binds as the callee's own first positional parameter
+        # (`def at(self, t)` is `(Ray* self, float t)`) and declares no `_self_` slot.
+        self_types:Dict[str, Any] = ({} if receiver_as_argument
+                                     else self.self_attr_types if self_param else {})
+        # A structure argument always travels as a pointer, so a local value is passed by
+        # its address: the callee reads the members through `->` and a store lands in the
+        # caller's own value, which is what a method's receiver needs.
+        for index, (code, value_t) in enumerate(args):
+            if (isinstance(value_t, str) and structs_dtype_for(value_t) is not None
+                    and not is_vec(value_t)):
+                args[index] = (f"&({code})", (PTR, value_t))
         call_codes:List[str] = [c for c, _ in args]
         if self_param:
+            # The receiver is one structure pointer: forward it (and the array attributes,
+            # which stay separate parameters), exactly as the caller's own signature does.
+            if self.self_struct_members and not receiver_as_argument:
+                call_codes.append(self.self_param)
             call_codes.extend(f"_self_{attr}" for attr in self_types)
-        param_types:List[Any] = ([t for _, t in args] + list(self_types.values()))
+        # The caller's own arguments come first, then the receiver struct, then the array
+        # attributes -- the same order the callee binds them in, and the same order the
+        # call codes below follow.
+        param_types:List[Any] = ([t for _, t in args]
+                                 + ([self.self_struct_type]
+                                    if self_param and self.self_struct_members
+                                    and not receiver_as_argument else [])
+                                 + list(self_types.values()))
 
         sig_key:Tuple[Callable, Tuple[Any, ...]] = (raw_func, tuple(param_types))
         entry:Optional[Dict[str, Any]] = self.device_cache.get(sig_key)
@@ -6455,7 +6797,13 @@ class FunctionTranslator:
                 raw_func, param_types, self.backend, _helper_globals(raw_func, self.resolve_global),
                 self.device_cache,
                 is_kernel=False, self_param=self_param, self_attr_types=self_types,
-                self_owner=self.self_owner, launch_backend=self.launch_backend)
+                self_owner=self.self_owner, launch_backend=self.launch_backend,
+                self_struct_members=(self.self_struct_members
+                                     if self_param and not receiver_as_argument
+                                     else None),
+                self_struct_type=(self.self_struct_type
+                                  if self_param and not receiver_as_argument else None),
+                receiver_as_argument=receiver_as_argument)
             callee.translate()
             c_name:str = self._device_func_name(raw_func, param_types)
             # A helper that indexes a multi-dimensional array needs that array's extents, and
@@ -6549,13 +6897,33 @@ class FunctionTranslator:
                 "functions, can be called from device code")
 
     def _device_func_name(self, func:Callable, types:List[Any])->str:
-        # The plain function name, with the module folded into the hash rather than the
-        # name: two modules can define the same helper, and the C name must not collide,
-        # but spelling the module in the name reads as noise. The hash covers both the
-        # monomorphized types and the module the helper lives in.
+        # A method of a class reads `Class_method`; a plain function keeps its own name.
+        # The hash stays in the name because a helper monomorphizes per argument type
+        # (`blend` over float and over float3 are two device functions), and two modules
+        # can define the same helper name -- the hash covers both. A generated name that
+        # another layout already took gains an `_alterN` suffix, which keeps the family
+        # readable the way the structure names do.
+        base:str = func.__name__
+        # A method is named after the class it is *defined on*, which `__qualname__` records:
+        # `Ray.at` is `Ray_at`, never the receiving kernel's own class. A plain function has
+        # no dot in its qualname, and a nested definition (`<locals>` in it) has no class.
+        qualname:str = getattr(func, "__qualname__", "")
+        if "." in qualname:
+            owner_name:str = qualname.rsplit(".", 1)[0]
+            if "<" not in owner_name:
+                base = f"{owner_name}_{func.__name__}"
         module_file:str = getattr(getattr(func, "__code__", None), "co_filename", "")
         module_mark:str = os.path.basename(module_file) if module_file else ""
-        return f"{func.__name__}_{short_hash(module_mark + '|' + type_sig(types))}"
+        name:str = f"{base}_{short_hash(module_mark + '|' + type_sig(types))}"
+        # A name another helper already generated is taken: add the numbered suffix.
+        taken:Set[str] = {entry["c_name"] for entry in self.device_cache.values()
+                          if entry.get("c_name")}
+        if name in taken:
+            index:int = 1
+            while f"{base}_{index}" in taken or f"{name}_{index}" in taken:
+                index += 1
+            name = f"{name}_{index}"
+        return name
 
     def _device_qualifier(self)->str:
         """The storage qualifier a device function needs on this backend."""
@@ -6575,7 +6943,21 @@ class FunctionTranslator:
             if name in outer_names:
                 continue
             if is_ptr(t):
-                params.append(f"{self._device_type(t[1])}* {name}")
+                # Every structure parameter is a pointer, and one whose members the body
+                # never writes is `const` -- the same rule the kernel signature follows.
+                from . import structs as _structs_module  # noqa: PLC0415
+
+                is_struct:bool = (_structs_module.dtype_for(t[1]) is not None
+                                  if isinstance(t[1], str) else False)
+                const:str = ("const " if is_struct and name not in self.member_writes
+                             else "")
+                params.append(f"{const}{self._device_type(t[1])}* {name}")
+            elif isinstance(t, str) and structs_dtype_for(t) is not None:
+                # A structure value that reached a device parameter by value (a helper's
+                # receiver before the pointer rule, or a caller's own spelling) travels as
+                # a pointer too: one spelling for every structure.
+                const = ("const " if name not in self.member_writes else "")
+                params.append(f"{const}{self._device_type(t)}* {name}")
             else:
                 params.append(f"{self._device_type(t)} {name}")
         # A structure in the signature needs its typedef emitted too, and this helper's own
@@ -6669,8 +7051,18 @@ class FunctionTranslator:
             if name in outer_names:
                 continue
             if is_ptr(t):
+                # A structure parameter is a pointer, and one the body never writes is
+                # `const`: it says the member reads are all the callee does, which is the
+                # information a reader of the generated source needs.
+                from . import structs as _structs_module  # noqa: PLC0415
+
+                is_struct:bool = (_structs_module.dtype_for(t[1]) is not None
+                                  if isinstance(t[1], str) else False)
+                const:str = ("const " if is_struct and name not in self.member_writes
+                             else "")
                 qualifier:str = ("__global " if self.backend == "opencl" else "")
-                params.append(f"{qualifier}{self._kernel_scalar_type(t[1])}* {name}")
+                params.append(
+                    f"{qualifier}{const}{self._kernel_scalar_type(t[1])}* {name}")
             elif is_image(t):
                 params.append(f"{self._image_param_type(name, t)} {name}")
             else:
