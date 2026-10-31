@@ -2593,6 +2593,7 @@ class FunctionTranslator:
             slice_code, slice_t = self._visit_expression(target.value)
             if isinstance(slice_t, tuple) and slice_t and slice_t[0] == SHARED_SLICE:
                 store_code, store_t = self._visit_shared_index(slice_code, slice_t, target)
+                store_code, _ = self._scalar_position(store_code, store_t, target)
                 self._emit(f"{store_code} = {code};")
                 return
             base_code, base_t = self._visit_array_target(target.value)
@@ -3374,7 +3375,8 @@ class FunctionTranslator:
             # A store into a zeros_per_group() slice: the same flattening as the read side.
             slice_code, slice_t = self._visit_expression(target.value)
             if isinstance(slice_t, tuple) and slice_t and slice_t[0] == SHARED_SLICE:
-                return self._visit_shared_index(slice_code, slice_t, target)
+                element_code, element_t = self._visit_shared_index(slice_code, slice_t, target)
+                return self._scalar_position(element_code, element_t, target)
             base_code, base_t = self._visit_array_target(target.value)
             index_code, _ = self._visit_subscript_index(target)
             return f"{base_code}[{index_code}]", base_t
@@ -3467,9 +3469,57 @@ class FunctionTranslator:
 
     def _visit_subscript_index(self, node:ast.Subscript)->Tuple[str, Any]:
         self._record_subscript_indices(node)
-        index:ast.expr = node.slice
+        return self._flatten_index(node.slice, node.value, node)
+
+    def _shared_slice_shape(self, node:ast.expr)->Optional[Tuple[int, ...]]:
+        """The shape a `zeros_per_group` slice was declared with, or None if it is not one."""
+        if not isinstance(node, ast.Subscript) or not isinstance(node.value, ast.Name):
+            return None
+        t:Any = self._lookup(node.value.id)
+        if not (isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"):
+            return None
+        if not self._is_block_id_expression(node.slice):
+            return None
+        shape:Tuple[int, ...] = tuple(t[4])
+        return shape
+
+    def _flatten_index(self, index:ast.expr, target:ast.expr,
+                       node:ast.AST)->Tuple[str, Any]:
+        """One flat offset for an index that may name several axes.
+
+        A tuple index (`a[i, j]`) is row-major flattening over the *declared* shape, which is
+        why it needs the array's name; a scalar index is already a flat offset and is left
+        alone, so the 1-D spelling keeps working on a multidimensional array.
+
+        An atomic call passes the whole array as the target, so an atomic on a shared buffer
+        must name the group's slice (`buf[blockIdx]`) rather than the buffer.
+        """
         if isinstance(index, ast.Tuple):
-            array_name:str = self._array_name(node.value)
+            slice_shape:Optional[Tuple[int, ...]] = self._shared_slice_shape(target)
+            if slice_shape is not None:
+                # An atomic on a shared buffer names the group's slice as its array, and the
+                # slice carries its own shape, so the flattening needs no `_shape_var`.
+                dims:List[Tuple[str, Any]] = [self._visit_expression(e) for e in index.elts]
+                terms:List[str] = []
+                for d, (code, t) in enumerate(dims):
+                    if not is_int(t):
+                        self._error("array indices must be integers", node)
+                    term:str = code
+                    for inner in range(d + 1, len(dims)):
+                        if inner >= len(slice_shape):
+                            self._error(
+                                f"this shared buffer has {len(slice_shape)} dimension(s), so "
+                                f"it cannot be indexed with {len(dims)}", node)
+                        term = f"{term} * {slice_shape[inner]}"
+                    terms.append(term)
+                return " + ".join(terms), "int"
+            if self._lookup(self._array_name(target)) is not None \
+                    and isinstance(self._lookup(self._array_name(target)), tuple) \
+                    and self._lookup(self._array_name(target))[0] == "shared":
+                self._error(
+                    "a shared buffer is indexed by its group first, so pass the tuple after "
+                    "the group: `buf[blockIdx][i, j]`", node)
+            array_name:str = self._array_name(target)
             dims:List[Tuple[str, Any]] = [self._visit_expression(e) for e in index.elts]
             terms:List[str] = []
             for d, (code, t) in enumerate(dims):
@@ -3888,7 +3938,8 @@ class FunctionTranslator:
         # multidimensional subscript can be flattened exactly like an array parameter's.
         readonly_code, readonly_t = self._visit_expression(value)
         if isinstance(readonly_t, tuple) and readonly_t and readonly_t[0] == SHARED_SLICE:
-            return self._visit_shared_index(readonly_code, readonly_t, node)
+            element_code, element_t = self._visit_shared_index(readonly_code, readonly_t, node)
+            return self._scalar_position(element_code, element_t, node)
 
         base_code, base_t = self._visit_array_target(value)
         if is_image(base_t):
@@ -3932,9 +3983,25 @@ class FunctionTranslator:
             if offset_base:
                 return f"{code}[({offset_base}) + ({flat})]", ctype
             return f"{code}[{flat}]", ctype
-        # Partly indexed: the caller's code keeps the running offset and the axes left.
+        # Partly indexed: the caller's code keeps the running offset and the axes left. Such a
+        # value is a *slice*, not an element, so it can only be indexed further -- writing to
+        # it would target the whole buffer. `_scalar_position` refuses that where a scalar is
+        # required.
         combined:str = f"({offset_base}) + ({flat})" if offset_base else flat
         return f"{code}", (SHARED_SLICE, ctype, remaining, combined)
+
+    def _scalar_position(self, code:str, t:Any, node:ast.AST)->Tuple[str, Any]:
+        """A shared slice's element, refusing a partly indexed one.
+
+        `buf[blockIdx]` with `(2, 2)` axes and one index is a slice of a row; it has no
+        device value of its own, so using it where a scalar is needed is an error rather than
+        a buffer with no subscript.
+        """
+        if isinstance(t, tuple) and t and t[0] == SHARED_SLICE:
+            self._error(
+                f"this shared buffer has {len(t[2])} dimension(s) left, so it is a slice rather "
+                f"than an element: index every axis, as `buf[blockIdx][i, j]`", node)
+        return code, t
 
     def _visit_shared_slice(self, node:ast.Subscript)->Optional[Tuple[str, Any]]:
         """`buf[blockIdx]` on a shared buffer: **this** group's storage, and nothing more.
@@ -4372,7 +4439,19 @@ class FunctionTranslator:
                 self._error(
                     f"{builtin}() is a statement, not a value: use it on its own, as "
                     f"`name = {builtin}(...)`", node)
-            args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+            # An atomic's index may name several axes (`atomic_add(a, (i, j), v)`), which is
+            # the same row-major flattening a subscript uses, so it is flattened **instead of**
+            # being visited as an expression: a bare tuple has no device value of its own. A
+            # scalar index stays a flat offset, so the 1-D spelling keeps working on a
+            # multidimensional array. The array is the first argument, which is where the
+            # declared shape comes from.
+            args:List[Tuple[str, Any]] = []
+            for position, argument in enumerate(node.args):
+                if (builtin in ATOMIC_BUILTINS and position == 1
+                        and isinstance(argument, ast.Tuple)):
+                    args.append(self._flatten_index(argument, node.args[0], node))
+                else:
+                    args.append(self._visit_expression(argument))
             return self._emit_gpu_builtin(builtin, args, node)
 
         if isinstance(func, ast.Name):

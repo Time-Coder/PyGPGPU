@@ -85,6 +85,25 @@ def work_size_extent(dim: Any, what: str) -> Any:
             frame.local_size[axis] if axis < len(frame.local_size) else 1)
 
 
+def _flat_position(array: Any, index: Any) -> int:
+    """The flat offset an atomic's index names.
+
+    A tuple (`atomic_add(a, (i, j), v)`) is row-major flattening over the array's real
+    shape, matching what the translator emits for the same call; a scalar is already flat.
+    """
+    if isinstance(index, tuple):
+        shape: Any = getattr(array, "shape", ())
+        if len(index) > len(shape):
+            raise SyntaxError(
+                f"this array has {len(shape)} dimension(s), so it cannot be indexed with "
+                f"{len(index)}") from None
+        offset: int = 0
+        for axis, position in enumerate(index):
+            offset = offset * int(shape[axis]) + int(position)
+        return offset
+    return int(index)
+
+
 def atomic_in_place(array: Any, index: Any, apply: Any) -> Any:
     """Read-modify-write one element of ``array`` and return the previous value.
 
@@ -97,7 +116,7 @@ def atomic_in_place(array: Any, index: Any, apply: Any) -> Any:
     store: Any = array
     if getattr(array, "ndim", 1) > 1:
         store = array.reshape(-1)
-    position: int = int(index)
+    position: int = _flat_position(array, index)
     previous: Any = store[position]
     store[position] = apply(previous)
     return previous

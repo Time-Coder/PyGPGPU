@@ -256,6 +256,55 @@ def test_a_magic_loop_body_is_not_split_by_the_bracket():
     np.testing.assert_array_equal(out, values * 2)
 
 
+def test_an_atomic_takes_a_flat_index_or_a_tuple(gpu_backend):
+    """`atomic_add(a, i, v)` is row-major; a tuple names the axes and flattens the same way.
+
+    A scalar index is already a flat offset, so `atomic_add(a, 5, 1)` on a `(2, 3)` array
+    writes the second row's third element. A tuple says the axes instead and must land in the
+    same place -- which is what makes `atomic_add(a, (i, j), v)` the readable spelling.
+    """
+
+    @kernel
+    def by_tuple(array: np.ndarray, tag: np.ndarray, row: int, column: int, value: int):
+        work_size(tag)
+        atomic_add(array, (row, column), value)
+
+    @kernel
+    def by_flat(array: np.ndarray, tag: np.ndarray, position: int, value: int):
+        work_size(tag)
+        atomic_add(array, position, value)
+
+    # `tag` is the iteration domain, so it is one work item and the atomic runs once.
+    tag = np.zeros(1, dtype=np.int32)
+    for backend in ("python", gpu_backend):
+        tuple_result = np.zeros((2, 3), dtype=np.int32)
+        by_tuple[backend](tuple_result, tag, np.int32(1), np.int32(2), np.int32(5))
+        flat_result = np.zeros((2, 3), dtype=np.int32)
+        by_flat[backend](flat_result, tag, np.int32(5), np.int32(5))
+        np.testing.assert_array_equal(tuple_result, flat_result)
+        assert int(tuple_result.sum()) == 5
+        assert tuple_result[1, 2] == 5
+
+    # A 1-D atomic still means what it always did.
+    flat = np.zeros(4, dtype=np.int32)
+    by_flat[gpu_backend](flat, tag, np.int32(3), np.int32(5))
+    assert flat.tolist() == [0, 0, 0, 5]
+
+
+def test_an_atomic_tuple_index_works_on_three_axes(gpu_backend):
+    """Row-major flattening over the declared rank, not just two axes."""
+
+    @kernel
+    def one_cell(array: np.ndarray, tag: np.ndarray):
+        work_size(tag)
+        atomic_add(array, (0, 1, 1), 12)
+
+    array = np.zeros((2, 2, 3), dtype=np.int32)
+    one_cell[gpu_backend](array, np.zeros(1, dtype=np.int32))
+    assert int(array.sum()) == 12
+    np.testing.assert_array_equal(np.argwhere(array != 0).tolist(), [[0, 1, 1]])
+
+
 def test_a_local_size_reports_the_group_width(gpu_backend):
     """`get_local_size(0)` is blockDim.x, available for indexing a local buffer."""
 
