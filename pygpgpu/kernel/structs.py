@@ -50,10 +50,14 @@ def struct_name(dtype:np.dtype)->str:
     """
     from .quaternion import quat_type_name  # noqa: PLC0415 (import cycle)
 
-    fixed:Optional[str] = quat_type_name(np.dtype(dtype))
+    dtype:np.dtype = np.dtype(dtype)
+    fixed:Optional[str] = quat_type_name(dtype)
     if fixed is not None:
         return fixed
-    digest:str = hashlib.md5(repr(np.dtype(dtype)).encode("utf-8")).hexdigest()[:10]
+    hint:Optional[str] = _NAME_HINTS.get(dtype)
+    if hint is not None:
+        return hint
+    digest:str = hashlib.md5(repr(dtype).encode("utf-8")).hexdigest()[:10]
     return f"_st_{digest}"
 
 
@@ -146,22 +150,66 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
         # always includes; emitting it here too would define the type twice, which C++ rejects.
         if quat_type_name(dtype) is not None:
             continue
-        members:str = " ".join(f"{member};" for member in structure_fields(dtype, backend))
+        if lines:
+            # One blank line between structure definitions.
+            lines.append("")
+        members:List[str] = structure_fields(dtype, backend)
         if backend == "opencl":
-            lines.append(f"typedef struct {{ {members} }} {name};")
+            lines.append("typedef struct")
+            lines.append("{")
+            body:str = "\n".join(f"    {member};" for member in members)
+            lines.append(body)
+            lines.append(f"}} {name};")
         else:
-            lines.append(f"struct {name} {{ {members} }};")
+            lines.append(f"struct {name}")
+            lines.append("{")
+            lines.append("\n".join(f"    {member};" for member in members))
+            lines.append("};")
             lines.append(f"typedef struct {name} {name};")
     return "\n".join(lines)
 
 
 _REGISTRY: Dict[str, np.dtype] = {}
+_NAME_HINTS: Dict[np.dtype, str] = {}
+
+
+def register_name_hint(dtype:Any, cls:type) -> None:
+    """Prefer the python class's name when spelling this dtype's C structure.
+
+    A structure synthesized from a python object (`Ray`, `HitRecord`) describes a layout a
+    hash can name, but the hash says nothing a reader recognizes -- the class the value came
+    from does. The hint is advisory, and it is refused when it would collide: the C name is
+    the key every member lookup resolves through, so two different layouts may not share
+    one name. A structure with no hint keeps its hashed name.
+    """
+    name:str = getattr(cls, "__name__", "")
+    if not name:
+        return
+    name = _safe_identifier(name)
+    dtype:np.dtype = np.dtype(dtype)
+    existing:Optional[np.dtype] = _REGISTRY.get(name)
+    if existing is not None and existing != dtype:
+        return                     # the name is taken by a different layout
+    _NAME_HINTS.setdefault(dtype, name)
+
+
+def _safe_identifier(name:str) -> str:
+    """A C identifier from a python class name, with leading digits prefixed."""
+    cleaned:str = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in name)
+    return f"_{cleaned}" if cleaned and cleaned[0].isdigit() else (cleaned or "_anon")
 
 
 def register(dtype:Any) -> str:
     """Record a structure dtype and return its C type name."""
-    name:str = struct_name(np.dtype(dtype))
-    _REGISTRY[name] = np.dtype(dtype)
+    dtype:np.dtype = np.dtype(dtype)
+    name:str = struct_name(dtype)
+    existing:Optional[np.dtype] = _REGISTRY.get(name)
+    if existing is not None and existing != dtype:
+        # A hint gave this name to another layout: fall back to the hashed name so the
+        # member lookups of both stay correct.
+        digest:str = hashlib.md5(repr(dtype).encode("utf-8")).hexdigest()[:10]
+        name = f"_st_{digest}"
+    _REGISTRY[name] = dtype
     return name
 
 

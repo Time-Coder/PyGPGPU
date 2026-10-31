@@ -1289,6 +1289,28 @@ class FunctionTranslator:
     def _emit(self, line:str)->None:
         self.lines.append("    " * self._indent + line)
 
+    def _render_body(self, lines:Optional[List[str]]=None)->str:
+        """The emitted lines with blank separators collapsed and the edges trimmed.
+
+        The walkers record a blank line after every closed block and between statement runs;
+        two blanks in a row read as one, and none may lead the body or survive at its end.
+        """
+        rendered:List[str] = []
+        for line in (self.lines if lines is None else lines):
+            if line == "" and (not rendered or rendered[-1] == ""):
+                continue
+            rendered.append(line)
+        while rendered and rendered[0] == "":
+            rendered.pop(0)
+        while rendered and rendered[-1] == "":
+            rendered.pop()
+        return "\n".join(rendered)
+
+    def _emit_blank(self)->None:
+        """A separator line, recorded so the renderer can collapse or trim it."""
+        if self.lines and self.lines[-1] != "":
+            self.lines.append("")
+
     def _lookup(self, name:str)->Any:
         for scope in reversed(self.scopes):
             if name in scope:
@@ -2303,17 +2325,23 @@ class FunctionTranslator:
             self._visit_augassign(node)
         elif isinstance(node, ast.If):
             cond, _ = self._visit_expression(node.test)
-            self._emit(f"if ({cond}) {{")
+            self._emit(f"if ({cond})")
+            self._emit("{")
             self._push_scope_block(node.body)
             if node.orelse:
-                self._emit("} else {")
+                self._emit("}")
+                self._emit("else")
+                self._emit("{")
                 self._push_scope_block(node.orelse)
             self._emit("}")
+            self._emit_blank()
         elif isinstance(node, ast.While):
             cond, _ = self._visit_expression(node.test)
-            self._emit(f"while ({cond}) {{")
+            self._emit(f"while ({cond})")
+            self._emit("{")
             self._push_scope_block(node.body)
             self._emit("}")
+            self._emit_blank()
         elif isinstance(node, ast.For):
             # A second *top-level* magic loop would silently become an ordinary serial loop
             # inside every work item -- each item running the whole phase, all of them racing
@@ -2421,14 +2449,17 @@ class FunctionTranslator:
             start, stop, step = values[0][0], values[1][0], values[2][0]
 
         if step is None:
-            self._emit(f"for (int {target} = {start}; {target} < {stop}; {target}++) {{")
+            self._emit(f"for (int {target} = {start}; {target} < {stop}; {target}++)")
+            self._emit("{")
         elif re.fullmatch(r"-?\d+", step):
             cond_op:str = (">" if step.startswith("-") else "<")
-            self._emit(f"for (int {target} = {start}; {target} {cond_op} {stop}; {target} += {step}) {{")
+            self._emit(f"for (int {target} = {start}; {target} {cond_op} {stop}; {target} += {step})")
+            self._emit("{")
         else:
             self._error("range() step must be a constant integer", node.iter.args[-1])
         self._push_scope_block(node.body)
         self._emit("}")
+        self._emit_blank()
 
     def _emit_element_loop(self, node:ast.For)->None:
         """`for x in arr:` as an indexed loop with `x` a copy of the current element.
@@ -2471,7 +2502,8 @@ class FunctionTranslator:
 
         name:str = node.target.id
         index:str = f"_{name}_idx"
-        self._emit(f"for (int {index} = 0; {index} < {stop}; {index}++) {{")
+        self._emit(f"for (int {index} = 0; {index} < {stop}; {index}++)")
+        self._emit("{")
         self._emit(f"{self._device_type(element_t)} {name} = {code}[{index}];")
         self._define(name, element_t, node.target)
         self._indent += 1
@@ -2674,7 +2706,8 @@ class FunctionTranslator:
         guard:str = (f"atomic_cmpxchg((volatile __global int*)(&{claim}), 0, 1) == 0"
                      if self.backend == "opencl"
                      else f"atomicCAS(&{claim}, 0, 1) == 0")
-        self._emit(f"if ({guard}) {{")
+        self._emit(f"if ({guard})")
+        self._emit("{")
         # The winning site records what it returned, so the host rebuilds that site's
         # shape rather than a shape inferred from every site at once.
         self._emit(f"    {self.RETURN_SITE}[0] = {site + 1};")
@@ -3586,7 +3619,8 @@ class FunctionTranslator:
         self._emit(f"else if (_pa{n} == 0.0) _pd{n} = signbit(_pv{n}) ? 4 : 3;")
         self._emit(f"else if (_pa{n} == floor(_pa{n}) && _pa{n} < {plain_max})"
                    f" _pd{n} = {whole_leaf};")
-        self._emit("else {")
+        self._emit("else")
+        self._emit("{")
         self._indent += 1
         self._emit(f"double _pgap{n} = {gap % n};")
         # A power of two has only half that gap below it.
@@ -3595,14 +3629,20 @@ class FunctionTranslator:
         self._emit(f"if (_pa{n} < {smallest_normal}) _pgap{n} = {smallest_step};")
         self._emit(f"int _pe{n} = (int)floor(log10(_pa{n}));")
         self._emit(f"double _ps{n} = pow(10.0, (double)_pe{n});")
-        self._emit(f"if (_ps{n} > _pa{n}) {{ _pe{n} -= 1; _ps{n} = pow(10.0, (double)_pe{n}); }}")
-        self._emit(f"else if (_ps{n} * 10.0 <= _pa{n})"
-                   f" {{ _pe{n} += 1; _ps{n} = pow(10.0, (double)_pe{n}); }}")
+        self._emit(f"if (_ps{n} > _pa{n})")
+        self._emit("{")
+        self._emit(f"    _pe{n} -= 1; _ps{n} = pow(10.0, (double)_pe{n});")
+        self._emit("}")
+        self._emit(f"else if (_ps{n} * 10.0 <= _pa{n})")
+        self._emit("{")
+        self._emit(f"    _pe{n} += 1; _ps{n} = pow(10.0, (double)_pe{n});")
+        self._emit("}")
         # Half the gap either side, then the shortest budget whose rounding fits inside it.
         self._emit(f"double _plo{n} = _pa{n} - 0.5 * _pgap{n};")
         self._emit(f"double _phi{n} = _pa{n} + 0.5 * _pgap{n};")
         self._emit(f"int _pbest{n} = {max_digits};")
-        self._emit(f"for (int _pk{n} = 0; _pk{n} < {max_digits}; _pk{n}++) {{")
+        self._emit(f"for (int _pk{n} = 0; _pk{n} < {max_digits}; _pk{n}++)")
+        self._emit("{")
         self._indent += 1
         # Round to _pk+1 significant digits: divide by 10^(e-_pk), round, multiply back.
         # The exponent is split in two so no factor leaves the double range.
@@ -3611,9 +3651,13 @@ class FunctionTranslator:
         self._emit(f"double _pdown{n} = pow(10.0, (double)_phalf{n})"
                    f" * pow(10.0, (double)(_pstep{n} - _phalf{n}));")
         self._emit(f"double _pq{n} = round(_pa{n} / _pdown{n}) * _pdown{n};")
-        self._emit(f"if (_pq{n} >= _plo{n} && _pq{n} <= _phi{n}) {{ _pbest{n} = _pk{n} + 1; break; }}")
+        self._emit(f"if (_pq{n} >= _plo{n} && _pq{n} <= _phi{n})")
+        self._emit("{")
+        self._emit(f"    _pbest{n} = _pk{n} + 1; break;")
+        self._emit("}")
         self._indent -= 1
         self._emit("}")
+        self._emit_blank()
         # Python's notation bands: outside them the text is in the exponent form, inside
         # them "%g" keeps the fixed notation python uses. The exponent leaf with budget p
         # prints exactly the digits of "%.pg", so the same budget selects both.
@@ -3652,7 +3696,10 @@ class FunctionTranslator:
             cases.append('case %d: printf("%s%s"%s); break;'
                          % (position, format_text, tail, arguments))
         cases.append("default: break;")
-        self._emit(f"switch ((int){index}) {{ {' '.join(cases)} }}")
+        self._emit(f"switch ((int){index})")
+        self._emit("{")
+        self._emit("\n".join(f"    {case}" for case in cases))
+        self._emit("}")
 
     def _int_format(self, t:str)->str:
         """The printf conversion for an integer type on this backend."""
@@ -5156,7 +5203,7 @@ class FunctionTranslator:
                 f"{len(param_types)}", node)
         digest:str = hashlib.md5(
             (raw_func.__name__ + repr(param_types)).encode("utf-8")).hexdigest()[:8]
-        c_name:str = f"pyk_nested{len(self.nested_kernels)}_{digest}"
+        c_name:str = f"nested{len(self.nested_kernels)}_{digest}"
         # Registered before translating, so a kernel that launches itself is refused rather
         # than recursed into.
         self.nested_seen[raw_func] = c_name
@@ -6502,9 +6549,13 @@ class FunctionTranslator:
                 "functions, can be called from device code")
 
     def _device_func_name(self, func:Callable, types:List[Any])->str:
+        # The plain function name, with the module folded into the hash rather than the
+        # name: two modules can define the same helper, and the C name must not collide,
+        # but spelling the module in the name reads as noise. The hash covers both the
+        # monomorphized types and the module the helper lives in.
         module_file:str = getattr(getattr(func, "__code__", None), "co_filename", "")
-        base:str = (os.path.basename(module_file).replace(".", "_") + "_" + func.__name__) if module_file else func.__name__
-        return f"pydev_{base}_{short_hash(type_sig(types))}"
+        module_mark:str = os.path.basename(module_file) if module_file else ""
+        return f"{func.__name__}_{short_hash(module_mark + '|' + type_sig(types))}"
 
     def _device_qualifier(self)->str:
         """The storage qualifier a device function needs on this backend."""
@@ -6546,11 +6597,11 @@ class FunctionTranslator:
         params.extend(self._outer_param_declarations(device=True))
         ret:str = (self.return_type or "void")
         header:str = f"{self._device_qualifier()}{self._device_type(ret)} {c_name}({', '.join(params)})"
-        body:str = "\n".join(self.lines)
+        body:str = self._render_body()
         # No typedef block here: the caller emits every structure type once, ahead of all
         # the device functions (see PyKernel._compile). Repeating it per helper would define
         # the same struct twice, which C++ rejects.
-        return f"{header} {{\n{body}\n}}"
+        return f"{header}\n{{\n{body}\n}}"
 
     def _outer_param_declarations(self, device:bool=False)->List[str]:
         """C declarations for the parameters the host fills in at launch time.
@@ -6654,11 +6705,14 @@ class FunctionTranslator:
                 body_lines.append(
                     f"__shared__ {self._device_type(lc_type)} {lc_name}[{lc_count}];")
         body_lines.extend(self.lines)
-        body:str = "\n".join(body_lines)
+        # A blank line between the shared-memory declarations and the body reads as a
+        # separate preamble; the renderer collapses and trims whatever follows.
+        body_lines.append("")
+        body:str = self._render_body(body_lines)
         # The structure types are emitted once by the caller, ahead of the whole source (see
         # PyKernel._compile): a helper may need them too, and two copies of the same struct
         # is an error in C++.
-        return f"{header} {{\n{body}\n}}"
+        return f"{header}\n{{\n{body}\n}}"
 
     def render_kernels(self, c_name:str)->List[Tuple[str, str]]:
         """Every kernel this translation produces, as (name, rendered source).

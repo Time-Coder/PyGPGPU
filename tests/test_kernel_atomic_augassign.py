@@ -114,7 +114,7 @@ def _generated_source(kernel_object, backend: str) -> str:
     folders = {"opencl": ("__clcache__", ".cl"), "cuda": ("__cucache__", ".cu")}
     folder, suffix = folders[backend]
     cache = pathlib.Path(__file__).parent / folder / "pykernels"
-    pattern = f"pyk_{kernel_object.__name__}_*{suffix}"
+    pattern = f"{kernel_object.__name__}_*{suffix}"
     for path in sorted(cache.glob(pattern)):
         if "_clean" in path.name:
             continue

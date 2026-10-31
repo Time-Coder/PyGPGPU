@@ -168,7 +168,7 @@ def _generated_source(backend: str) -> str:
                "hip": ("__hipcache__", ".hip")}
     folder, suffix = folders[backend]
     cache = pathlib.Path(__file__).parent / folder / "pykernels"
-    for path in sorted(cache.glob(f"pyk_clip_for_codegen_*{suffix}")):
+    for path in sorted(cache.glob(f"clip_for_codegen_*{suffix}")):
         if "_clean" in path.name:
             continue
         return path.read_text(encoding="utf-8")

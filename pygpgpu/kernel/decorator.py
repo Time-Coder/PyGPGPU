@@ -1613,7 +1613,7 @@ class PyKernel:
         return self.raw_func.__globals__.get(name)
 
     def _c_kernel_name(self, sig:str, backend:str)->str:
-        return f"pyk_{self.__name__}_{short_hash(sig + '_' + backend)}"
+        return f"{self.__name__}_{short_hash(sig + '_' + backend)}"
 
     def _bind_images(self, full_values:Any, backend:str)->None:
         """Create the device objects for every Image argument, before compilation.
@@ -1703,13 +1703,21 @@ class PyKernel:
         # the launch statement names a device function, and C requires it before its caller.
         device_prefix:List[str] = list(translator.nested_helpers) + list(translator.nested_kernels)
         device_prefix.extend(dependency_codes)
-        source:str = ("\n".join(device_prefix) + "\n\n" + kernel_code) if device_prefix else kernel_code
+        # Every top-level definition is separated by one blank line: helper from helper,
+        # helper from kernel. A trailing blank on each piece makes the join produce exactly
+        # one, and the final trim drops the one after the last definition.
+        pieces:List[str] = [piece.rstrip("\n") for piece in device_prefix]
+        pieces.append(kernel_code.rstrip("\n"))
+        source:str = "\n\n".join(piece for piece in pieces if piece)
         if include_lines:
             # The header declares the types, so it goes after the ordinary typedef block and
-            # ahead of every function that names a quaternion.
-            source = include_lines + "\n" + source
+            # ahead of every function that names a quaternion. A blank line separates the
+            # include block from the first definition.
+            source = include_lines + "\n\n" + source
         if typedefs:
-            source = typedefs + "\n" + source
+            # The typedef block ends in the declarations, and one blank line separates it
+            # from the first definition that follows.
+            source = typedefs + "\n\n" + source
 
         source_path:str = self._write_source(sig, source, backend)
         linked:bool = translator.nests_a_launch
@@ -1854,7 +1862,7 @@ class PyKernel:
         cache_dir:str = self._cache_dir(backend)
         os.makedirs(cache_dir, exist_ok=True)
         extension:str = {"opencl": "cl", "cuda": "cu", "hip": "hip"}[backend]
-        path:str = os.path.join(cache_dir, f"pyk_{self.__name__}_{sig}_{self._source_sig}.{extension}")
+        path:str = os.path.join(cache_dir, f"{self.__name__}_{sig}_{self._source_sig}.{extension}")
 
         existing:Optional[str] = None
         if os.path.isfile(path):

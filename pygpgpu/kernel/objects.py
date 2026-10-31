@@ -879,6 +879,21 @@ def member_type(value:Any, attr:str)->type:
 _STRUCT_CACHE:Dict[Tuple[Any, ...], type] = {}
 
 
+def _prefer_class_name(structure:type, cls:Optional[type]) -> None:
+    """Let the C structure this dtype describes be named after the python class.
+
+    The device type is generated from the dtype, and its C name comes from
+    `structs.struct_name`; a hash says nothing a reader recognizes, while the class the
+    value came from does. The hint is advisory and first-seen wins, because two classes
+    with one layout share a dtype.
+    """
+    if cls is None or getattr(cls, "__module__", "") == "builtins":
+        return
+    from .structs import register_name_hint  # noqa: PLC0415 (import cycle)
+
+    register_name_hint(np.dtype(structure), cls)
+
+
 def _structure_for(fields:Sequence[Tuple[str, type]],
                    methods:Sequence[Tuple[str, Any]])->type:
     # Keyed by the member *set* alone -- not their order, and not the method list. The walk
@@ -1119,6 +1134,7 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
             else:
                 fields.append((member, member_type(value, member)))
         structure_of[element_path] = _structure_for(fields, scan.methods[element_path])
+        _prefer_class_name(structure_of[element_path], scan.classes.get(element_path))
 
     # Second pass for the list members: their element structures exist now, so the parent's
     # field can be a fixed-length array of them.
@@ -1156,6 +1172,7 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
             else:
                 fields.append((member, member_type(value, member)))
         structure_of[path] = _structure_for(fields, scan.methods[path])
+        _prefer_class_name(structure_of[path], scan.classes.get(path))
         if "." in path:
             parent, member = path.rsplit(".", 1)
             parent = _list_root(parent)
@@ -1191,6 +1208,7 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
         for name, fields in zip(names, specs):
             chosen:List[Tuple[str, type]] = merged if merged is not None else fields
             structure:type = _structure_for(chosen, scan.methods[name])
+            _prefer_class_name(structure, type(holders[name]))
             if name in scan.constructed:
                 # A value the body built has no argument to replace: the structure is all it
                 # needs, and the translator looks it up at the constructor call. The class is
