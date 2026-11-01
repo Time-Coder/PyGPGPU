@@ -1716,7 +1716,16 @@ class PyKernel:
         source_file:str = getattr(getattr(self.raw_func, "__code__", None),
                                   "co_filename", "") or ""
         module_mark:str = os.path.basename(source_file)
-        return f"{self.__name__}_{short_hash(module_mark + '|' + sig + '_' + backend)}"
+        # A method reads `Class_method`, exactly as a device helper does: the receiver is
+        # the first parameter, so the class is part of what the kernel is. A plain function
+        # keeps its own name.
+        base:str = self.__name__
+        qualname:str = getattr(self.raw_func, "__qualname__", "")
+        if "." in qualname:
+            owner_name:str = qualname.rsplit(".", 1)[0]
+            if "<" not in owner_name:
+                base = f"{owner_name}_{self.__name__}"
+        return f"{base}_{short_hash(module_mark + '|' + sig + '_' + backend)}"
 
     def _bind_images(self, full_values:Any, backend:str)->None:
         """Create the device objects for every Image argument, before compilation.

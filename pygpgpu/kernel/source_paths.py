@@ -305,7 +305,16 @@ def assemble_source(header: List[str], definitions: List[str],
     # includes past the declarations and break exactly that.
     parts: List[str] = [piece.strip("\n") for piece in header if piece.strip()]
     parts.extend(piece.strip("\n") for piece in definitions if piece.strip())
-    body: str = "\n\n".join(parts) + "\n"
+    # A run of `#include` lines reads as one list, so the lines are packed together and one
+    # blank line follows the last of them. Every other pair of pieces keeps its separator:
+    # a structure declaration, a device function and the kernel each stand on their own.
+    joined: List[str] = []
+    for piece in parts:
+        if joined and _is_include_only(joined[-1]) and _is_include_only(piece):
+            joined[-1] = joined[-1] + "\n" + piece
+            continue
+        joined.append(piece)
+    body: str = "\n\n".join(joined) + "\n"
     if not path:
         return body
     macro: str = guard_macro(path)
@@ -351,6 +360,12 @@ def _is_file_guard_line(line: str) -> bool:
     stripped: str = line.strip()
     return (stripped.startswith("#ifndef __PYGPGPU_SOURCE_")
             or stripped.startswith("#define __PYGPGPU_SOURCE_"))
+
+
+def _is_include_only(piece: str) -> bool:
+    """Whether a piece is nothing but `#include` lines."""
+    lines: List[str] = [line for line in piece.splitlines() if line.strip()]
+    return bool(lines) and all(line.lstrip().startswith("#include") for line in lines)
 
 
 def _strip_file_guard(source: str, path: str) -> str:

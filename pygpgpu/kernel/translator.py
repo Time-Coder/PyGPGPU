@@ -1430,15 +1430,22 @@ class FunctionTranslator:
             if line == "" and (not rendered or rendered[-1] == ""):
                 continue
             rendered.append(line)
+        # A block that ends just before the brace closing its parent (`while { ... }` as
+        # the last statement of a kernel) leaves two closing braces on consecutive lines.
+        # The inner one still ends a block, so the separator every closing brace gets is
+        # inserted between them.
+        # The trailing blank the caller may have appended is trimmed first: the last real
+        # line is what decides whether a separator is needed before it.
+        trimmed:List[str] = list(rendered)
+        while trimmed and trimmed[-1] == "":
+            trimmed.pop()
         kept:List[str] = []
-        for index, line in enumerate(rendered):
-            if line == "" and index + 1 < len(rendered):
-                previous_indent:str = rendered[index - 1][:len(rendered[index - 1])
-                                                          - len(rendered[index - 1].lstrip())]
-                next_indent:str = rendered[index + 1][:len(rendered[index + 1])
-                                                      - len(rendered[index + 1].lstrip())]
-                if len(next_indent) <= len(previous_indent):
-                    continue          # the scope ends here; no separator is needed
+        for line in trimmed:
+            # Two closing braces on consecutive lines: the inner one ends a block whose
+            # parent ends on the very next line (`while { ... }` as a kernel's last
+            # statement). The inner brace still gets the separator every closed block gets.
+            if kept and line.strip() == "}" and kept[-1].strip() == "}":
+                kept.append("")
             kept.append(line)
         while kept and kept[0] == "":
             kept.pop(0)
@@ -7330,7 +7337,11 @@ class FunctionTranslator:
         # The structure types are emitted once by the caller, ahead of the whole source (see
         # PyKernel._compile): a helper may need them too, and two copies of the same struct
         # is an error in C++.
-        return f"{header}\n{{\n{body}\n}}"
+        # A body whose last line closes a block (`while { ... }` as the kernel's last
+        # statement) is followed by the function's own brace: the inner block still ends
+        # there, so the separator every closed block gets goes between the two braces.
+        separator:str = "\n" if body.rstrip().endswith("}") else ""
+        return f"{header}\n{{\n{body}{separator}\n}}"
 
     def render_kernels(self, c_name:str)->List[Tuple[str, str]]:
         """Every kernel this translation produces, as (name, rendered source).
