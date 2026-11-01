@@ -27,6 +27,14 @@ def np_alignment(dtype:Any) -> int:
     from ...vec_types.layout import _vector_dtype_name
 
     field:np.dtype = np.dtype(dtype)
+    if field.subdtype is not None:
+        # An array member reaches here as a sub-array dtype (`dtype((base, (n,))))`, whose
+        # itemsize is the whole array. C aligns an array exactly like its element, so asking
+        # for the sub-array's own size answered 32 for `float3 vs[2]` and made a structure
+        # holding it align to 32 instead of 16 -- which rounded the parent up a whole 16
+        # bytes and the driver rejected the short buffer.
+        base, _shape = field.subdtype
+        return np_alignment(np.dtype(base))
     if field.fields is not None:
         vector:Optional[str] = _vector_dtype_name(field)
         if vector is not None:

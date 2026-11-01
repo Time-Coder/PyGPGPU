@@ -121,6 +121,57 @@ _NEEDS_REBUILD = [
 ]
 
 
+class _ArrayLeaf(ctypes.Structure):
+    """A structure carrying an array of padded vectors."""
+
+    _fields_ = [("k", ctypes.c_int), ("vs", float3 * 2)]
+
+
+class _ArrayOfStructures(ctypes.Structure):
+    """A structure whose member is an ARRAY of the one above."""
+
+    _fields_ = [("items", _ArrayLeaf * 2), ("n", ctypes.c_int)]
+
+
+def test_an_array_member_aligns_like_its_element():
+    """An array member aligns to its element, not to the whole array.
+
+    `float3 vs[2]` reaches the parser as a sub-array dtype whose itemsize is 32 (both
+    elements), and taking that as the member's alignment made a structure holding it align to
+    32 instead of 16: the parent then rounded up a whole extra 16 bytes, so the buffer the
+    host packed was too short for what the driver expected -- "Buffer size too small (112
+    instead of at least 128 bytes)" for a structure holding an array of structures.
+    """
+    from pygpgpu.opencl.oop.struct_layout import np_alignment
+
+    class_array: np.dtype = np.dtype(_ArrayLeaf)
+    vector: np.dtype = np.dtype(float3)
+    # The array is two 16-byte vectors, but C aligns an array like one element.
+    assert np_alignment(class_array) == np_alignment(vector) == 16
+    assert np_alignment(np.dtype((vector, (2,)))) == 16
+
+    # The sizes that follow from that: 4 + 12 pad + 32 = 48, then 48 * 2 + 4 -> 112.
+    packed, _write_back = pack(_ArrayLeaf(), "opencl")
+    assert ctypes.sizeof(packed) == 48
+    packed, _write_back = pack(_ArrayOfStructures(), "opencl")
+    assert ctypes.sizeof(packed) == 112
+
+
+def test_a_structure_inside_a_structure_array_is_readable(runner):
+    """The values survive the layout: structure -> array of structures -> array of vectors."""
+    value = _ArrayOfStructures()
+    value.items[1].vs[0].x = 8.0
+    out = np.zeros(1, dtype=np.float32)
+    runner(reads_through_structure_array, value, out)
+    assert float(out[0]) == pytest.approx(8.0)
+
+
+@kernel
+def reads_through_structure_array(p, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = p.items[1].vs[0].x
+
+
 @pytest.mark.parametrize("value,rebuild", _NEEDS_REBUILD)
 def test_what_counts_as_containing_a_padded_vector(value, rebuild):
     """A structure is rebuilt for the device exactly when a padded vector is inside it.
