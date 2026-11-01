@@ -134,6 +134,21 @@ def nested_dtypes(dtype:np.dtype)->List[np.dtype]:
     return found
 
 
+def declared_file(dtype:Any) -> str:
+    """The python file the class behind this structure was declared in, or "".
+
+    A structure belongs where its python class lives: that module's generated file holds
+    the declaration, and every other file that names the type includes it.
+    """
+    import sys
+
+    cls:Optional[type] = declared_class(dtype)
+    if cls is None:
+        return ""
+    module:Any = sys.modules.get(getattr(cls, "__module__", ""))
+    return getattr(module, "__file__", "") or ""
+
+
 def render_structures(dtypes:List[np.dtype], backend:str)->str:
     """The typedef block for every structure the kernel uses, members before containers."""
     from .quaternion import quat_type_name  # noqa: PLC0415 (import cycle)

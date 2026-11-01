@@ -1816,8 +1816,35 @@ class PyKernel:
             for dtype in entry.get("structs", ()):
                 if dtype not in structure_dtypes:
                     structure_dtypes.append(dtype)
-        typedefs:str = (structs.render_structures(structure_dtypes, translator.backend)
-                        if structure_dtypes else "")
+        # A structure declaration belongs to the module its python class is defined in: that
+        # file holds the `struct`, and every file naming the type includes it. One with no
+        # python class behind it (a hand-written record dtype, or one synthesised from an
+        # object argument) has no home to go to, so the file that uses it declares it.
+        from . import quaternion as quaternion_types  # noqa: PLC0415
+
+        struct_home:Dict[Any, str] = {}
+        for dtype in structure_dtypes:
+            # A quaternion's declaration comes from the fixed header the source already
+            # includes (see quaternion.include_line), so it has no module of its own: its
+            # python class lives in the pygf package, which is not part of this project.
+            if quaternion_types.quat_type_name(dtype) is not None:
+                continue
+            owner_file:str = structs.declared_file(dtype)
+            if owner_file:
+                struct_home[dtype] = source_paths.source_path(
+                    kernel_source_file, owner_file, backend)
+        typedefs:str = (structs.render_structures(
+            [dtype for dtype in structure_dtypes
+             if dtype not in struct_home
+             or struct_home[dtype] == module_of({"source_file": kernel_source_file})],
+            translator.backend) if structure_dtypes else "")
+        # The declarations that live in another module: those files hold them, this one
+        # includes them.
+        home_declarations:Dict[str, List[Any]] = {}
+        for dtype, home in struct_home.items():
+            if home == module_of({"source_file": kernel_source_file}):
+                continue
+            home_declarations.setdefault(home, []).append(dtype)
 
         # Quaternion structures and their arithmetic both come from a fixed header, copied
         # into the cache's include folder beside the generated source. The source needs only
@@ -1843,8 +1870,21 @@ class PyKernel:
         # The includes come first: a callee from another module is a declaration this file
         # needs before anything that calls it. The order is the order the callees were
         # emitted, so a foreign helper that itself includes another is already covered.
+        # A structure declared by another module: that module's file holds the `struct`,
+        # and this file includes it rather than repeating the declaration. A structure with
+        # no python class behind it stays with the file that uses it.
+        struct_includes:List[str] = [
+            source_paths.include_line(own_path, home) for home in home_declarations]
         foreign_includes:List[str] = [
             source_paths.include_line(own_path, path) for path in foreign_entries]
+        for home, dtypes in home_declarations.items():
+            # Write the declaring module's file: it may hold nothing but these structures,
+            # and the modules that use them reach it through the include above.
+            declared:str = structs.render_structures(dtypes, translator.backend)
+            if declared:
+                source_paths.append_source(
+                    home, [declared], [],
+                    structs.declared_file(dtypes[0]) or kernel_source_file)
         # A generated file is a *header* plus a list of definitions. The header names every
         # structure the file's own code uses and includes every other module it reaches;
         # the definitions are appended one at a time, so a module with several kernels keeps
@@ -1855,6 +1895,8 @@ class PyKernel:
             own_header.append(typedefs)
         if include_lines:
             own_header.append(include_lines)
+        if struct_includes:
+            own_header.append("\n".join(struct_includes))
         if foreign_includes:
             own_header.append("\n".join(foreign_includes))
 
