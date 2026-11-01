@@ -222,6 +222,23 @@ def self_attr_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
     return "data", (None if raw is _MISSING else raw)
 
 
+def _property_of(cls:type, name:str)->Optional[Any]:
+    """The `property` descriptor a class defines for `name`, or None.
+
+    A property is a member the class computes: `box.doubled` is a call to its getter, not a
+    field read. Only a descriptor written in the class body counts, for the same reason a
+    magic method is read from `__dict__` -- an inherited one belongs to another class.
+    """
+    own:Any = getattr(cls, "__dict__", {}).get(name)
+    return own if isinstance(own, property) else None
+
+
+def _property_accessor(descriptor:property, writer:bool)->Optional[Callable]:
+    """The getter (or setter) of a property, or None when it defines no such half."""
+    accessor:Any = descriptor.fset if writer else descriptor.fget
+    return accessor if callable(accessor) else None
+
+
 def _receiver_param_of(method:Any)->str:
     """The parameter name a method binds its receiver to."""
     return (method.__code__.co_varnames[0]
@@ -3253,6 +3270,20 @@ class FunctionTranslator:
             self._error("chained assignment is not supported", node)
         target:ast.expr = node.targets[0]
 
+        # `box.total = v` is a call to the property's setter. It is handled here rather
+        # than in _visit_target because a setter takes the value, which only the
+        # assignment knows -- and because the result is a statement, not an expression.
+        if isinstance(target, ast.Attribute):
+            base_code, base_t = self._visit_expression(target.value)
+            if isinstance(base_t, tuple) and is_ptr(base_t):
+                from . import structs as _structs_module  # noqa: PLC0415
+
+                dtype:Optional[np.dtype] = _structs_module.dtype_for(base_t[1])
+                if dtype is not None and self._emit_property_write(
+                        _structs_module.declared_class(dtype), target.attr,
+                        (base_code, base_t), node.value, node):
+                    return
+
         # A creation below the magic loop runs once per work item, so its object cannot be a
         # host parameter. When the shape is a compile-time constant it is exactly a C local
         # array -- private storage per work item, which is what python's fresh array means --
@@ -4276,6 +4307,8 @@ class FunctionTranslator:
                     self._error(
                         f"cannot assign to '{ast.unparse(target)}': {t[1]} is not a "
                         f"structure the translator knows", target)
+                # `box.total = v` is a call to the property's setter, next to the getter
+                # the read side already answers.
                 member_types:Dict[str, Any] = structs_member_types(dtype, self.backend)
                 if target.attr not in member_types:
                     self._error(
@@ -4647,6 +4680,60 @@ class FunctionTranslator:
         keep their value type.
         """
         return t
+
+    def _emit_property_write(self, cls:Optional[type], name:str, base:Tuple[str, Any],
+                             value:ast.expr, node:ast.AST)->bool:
+        """`box.total = v` as a device call to the property's setter, or False.
+
+        A setter is an ordinary method taking the new value, so the assignment becomes a
+        call statement of its own. False when the class defines no such property, which
+        leaves the field store to answer.
+        """
+        if cls is None:
+            return False
+        descriptor:Optional[Any] = _property_of(cls, name)
+        if descriptor is None:
+            return False
+        setter:Optional[Callable] = _property_accessor(descriptor, writer=True)
+        if setter is None:
+            self._error(
+                f"property '{name}' has no setter: give the class a '@{name}.setter'",
+                node)
+        value_code, value_t = self._visit_expression(value)
+        call:Tuple[str, Any] = self._emit_device_call(
+            name, setter, [base, (value_code, value_t)], node,
+            self_param=_receiver_param_of(setter), receiver_as_argument=True)
+        self._emit(f"{call[0]};")
+        # The store happens inside the setter, which the static analysis cannot see: it
+        # reads `h.doubled = v` but the generated statement is a call, so the parameter
+        # would stay read-only and the host would drop the write. `atomic_targets` is the
+        # force-writable channel a member store already uses.
+        if isinstance(value, ast.expr) and isinstance(base[0], str):
+            written_name:str = base[0].replace("&", "").replace("(", "").replace(")", "")
+            if written_name.isidentifier():
+                self.atomic_targets.add(written_name)
+                self.member_writes.add(written_name)
+        return True
+
+    def _emit_property_read(self, cls:Optional[type], name:str, base:Tuple[str, Any],
+                            node:ast.AST)->Optional[Tuple[str, Any]]:
+        """`box.total` as a device call to the property's getter, or None.
+
+        A property is a member the class computes, so the read is a method call with the
+        receiver as its argument -- the same shape a plain method call takes. None when the
+        class defines no such property, which leaves the field lookup to answer.
+        """
+        if cls is None:
+            return None
+        descriptor:Optional[Any] = _property_of(cls, name)
+        if descriptor is None:
+            return None
+        getter:Optional[Callable] = _property_accessor(descriptor, writer=False)
+        if getter is None:
+            self._error(f"property '{name}' has no getter", node)
+        return self._emit_device_call(
+            name, getter, [base], node,
+            self_param=_receiver_param_of(getter), receiver_as_argument=True)
 
     def _emit_magic_conversion(self, magic:str, code:str, t:Any,
                                node:ast.AST)->Optional[Tuple[str, Any]]:
@@ -5464,6 +5551,15 @@ class FunctionTranslator:
             # addressed as `(&record)->x`.
             dtype:Optional[np.dtype] = structs.dtype_for(base_t[1])
             if dtype is not None:
+                # A `@property` is a member the class computes: `box.total` is a call to
+                # its getter, not a field read. It is tried before the field lookup, and
+                # only for a name that is not a real member -- a property name that
+                # shadows a field would be a field read in python too, because the class
+                # body's descriptor replaces the field of the same name.
+                property_read:Optional[Tuple[str, Any]] = self._emit_property_read(
+                    structs.declared_class(dtype), node.attr, (base_code, base_t), node)
+                if property_read is not None:
+                    return property_read
                 members:Dict[str, Any] = structs.member_types(dtype, self.backend)
                 if node.attr not in members:
                     self._error(

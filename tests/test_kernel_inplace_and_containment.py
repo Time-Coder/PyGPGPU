@@ -178,3 +178,51 @@ def test_calling_a_value_asks_the_class(runner):
     out = np.zeros(1, dtype=np.float32)
     runner(calls_the_value, Converter(2.0, 0), out)
     assert float(out[0]) == pytest.approx(6.0)
+
+
+class Measured(ctypes.Structure):
+    """A class whose computed member is a `@property` with a setter.
+
+    A distinct layout, like every class here: one layout is one dtype, hence one C type.
+    """
+
+    _fields_ = [("raw", ctypes.c_float), ("scale", ctypes.c_float), ("tag", ctypes.c_int)]
+
+    @property
+    def doubled(self):
+        return self.raw * self.scale
+
+    @doubled.setter
+    def doubled(self, value):
+        self.raw = value / self.scale
+
+
+@kernel
+def reads_a_property(measured, answer: np.ndarray):
+    for i in range(answer.shape[0]):
+        answer[i] = measured.doubled
+
+
+@kernel
+def writes_a_property(measured, answer: np.ndarray):
+    for i in range(answer.shape[0]):
+        measured.doubled = 8.0
+        answer[i] = measured.raw
+
+
+def test_a_property_read_calls_its_getter(runner):
+    """`box.total` is a call to the property's getter, not a field read.
+
+    Without the dispatch the translator looked for a member of that name and refused with
+    "structure ... has no member '.total'".
+    """
+    out = np.zeros(1, dtype=np.float32)
+    runner(reads_a_property, Measured(3.0, 2.0, 0), out)
+    assert float(out[0]) == pytest.approx(6.0)
+
+
+def test_a_property_write_calls_its_setter(runner):
+    """`box.total = v` calls the setter with `v`, and the store it makes reaches the host."""
+    out = np.zeros(1, dtype=np.float32)
+    runner(writes_a_property, Measured(0.0, 2.0, 0), out)
+    assert float(out[0]) == pytest.approx(4.0)
