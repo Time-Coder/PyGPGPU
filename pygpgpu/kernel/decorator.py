@@ -18,6 +18,8 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    TypeVar,
+    overload,
 )
 
 import numpy as np
@@ -58,11 +60,14 @@ from . import source_paths
 # only for the type checkers; at runtime it is a plain class whose ``__class_getitem__``
 # returns itself. Subscripting ``PyKernel[P]`` therefore never fails at import.
 _P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 if TYPE_CHECKING:
-    _KernelBase = Generic[_P]
+    class _KernelBase(Generic[_P]):
+        """``Generic`` over the decorated function's parameters, for the type checkers."""
 else:
     class _KernelBase:
+        """Runtime stand-in: subscripting returns this class, so ``PyKernel[_P]`` imports."""
         def __class_getitem__(cls, item:Any)->type:
             return cls
 
@@ -436,7 +441,7 @@ def _bound_arguments_for_call(func:Callable, args:Tuple[Any, ...],
     return _bind_arguments(func, args, kwargs, skip_first)
 
 
-def _native_argument_errors(entry:Callable[..., Any])->Callable[..., Any]:
+def _native_argument_errors(entry:Callable[_P, _R])->Callable[_P, _R]:
     """Give an entry point native-python's single-frame traceback for a bad call.
 
     Native python blames the call site and nothing else; a decorated call would otherwise
@@ -444,9 +449,14 @@ def _native_argument_errors(entry:Callable[..., Any])->Callable[..., Any]:
     different once a function was decorated. The trimming happens here, at the entry point,
     because clearing the traceback deeper inside and re-raising lets every frame the
     exception travels through push itself back on again.
+
+    The parameters are forwarded unchanged (``_P``/``_R``), so wrapping an entry point does
+    not hide its signature from a type checker: ``functools.wraps`` alone conservatively
+    reports ``(*args, **kwargs)``, which would undo the parameter hints the caller's own
+    ``def`` gave the kernel.
     """
     @functools.wraps(entry)
-    def wrapper(*args:Any, **kwargs:Any)->Any:
+    def wrapper(*args:_P.args, **kwargs:_P.kwargs)->_R:
         try:
             return entry(*args, **kwargs)
         except (ArgumentTypeError, TypeError) as error:
@@ -652,20 +662,25 @@ def _user_frame_syntax_error(error:SyntaxError)->SyntaxError:
     return error
 
 
-class _KernelCall:
-    """Bracket-configuration form: k["cuda"][(64, 8)](args) / k[(64, 8)]["cuda"](args), any order."""
+class _KernelCall(_KernelBase[_P]):
+    """Bracket-configuration form: k["cuda"][(64, 8)](args) / k[(64, 8)]["cuda"](args), any order.
 
-    def __init__(self, kernel:"PyKernel", instance:Any,
+    Generic over the decorated function's parameters: a bracket only chooses a backend, a
+    device or a work size, so the call it finally makes has the kernel's own signature --
+    which is what lets ``k["cuda"](a, out)`` suggest ``a``/``out`` just as ``k(a, out)`` does.
+    """
+
+    def __init__(self, kernel:"PyKernel[_P]", instance:Any,
                  backend:Optional[str]=None, device:Optional[str]=None,
                  global_size:Optional[Tuple[int, ...]]=None, local_size:Optional[Tuple[int, ...]]=None):
-        self._kernel:"PyKernel" = kernel
+        self._kernel:"PyKernel[_P]" = kernel
         self._instance:Any = instance
         self._backend:Optional[str] = backend
         self._device:Optional[str] = device
         self._global_size:Optional[Tuple[int, ...]] = global_size
         self._local_size:Optional[Tuple[int, ...]] = local_size
 
-    def __getitem__(self, item:Any)->"_KernelCall":
+    def __getitem__(self, item:Any)->"_KernelCall[_P]":
         if isinstance(item, str):
             backend, device = _parse_selector(item)
             return _KernelCall(
@@ -680,7 +695,7 @@ class _KernelCall:
             (local_size if local_size is not None else self._local_size))
 
     @_native_argument_errors
-    def __call__(self, *args:Any, **kwargs:Any)->Any:
+    def __call__(self, *args:_P.args, **kwargs:_P.kwargs)->Any:
         instance:Any = self._instance
         instance_arg:Optional[Any] = None
         if self._kernel._is_method and instance is None:
@@ -726,14 +741,23 @@ class _KernelCall:
         return self._launch("async", args, kwargs)
 
 
-class _BoundKernelMethod:
-    """Bound instance-method form: instance.kernel_method(...)"""
+class _BoundKernelMethod(_KernelBase[_P]):
+    """Bound instance-method form: instance.kernel_method(...)
 
-    def __init__(self, kernel:"PyKernel", instance:Any):
-        self._kernel:"PyKernel" = kernel
+    Reached through ``PyKernel.__get__``. Its parameters are deliberately loose: the
+    decorated method's ``P`` still carries the receiver, which a type checker has no way to
+    drop from a descriptor's return type, so spelling ``P`` here would make every correct
+    ``obj.method(x, y)`` look like ``method(self=x, x=y)`` and report a missing argument.
+    The receiver is also the one thing a caller never passes explicitly -- the class form
+    ``Klass.method(obj, x, y)`` keeps its full signature, because that access goes through
+    ``PyKernel`` itself.
+    """
+
+    def __init__(self, kernel:"PyKernel[_P]", instance:Any):
+        self._kernel:"PyKernel[_P]" = kernel
         self._instance:Any = instance
 
-    def __getitem__(self, item:Any)->_KernelCall:
+    def __getitem__(self, item:Any)->Any:
         return _KernelCall(self._kernel, self._instance)[item]
 
     @_native_argument_errors
@@ -759,7 +783,7 @@ class _BoundKernelMethod:
                                     launch="async")
 
 
-class PyKernel:
+class PyKernel(_KernelBase[_P]):
     """Implementation of the `@kernel` decorator: translates the python function into backend source at call time, then compiles and runs it.
 
     Decorating class methods is supported: self is dropped during translation, self.xxx attribute
@@ -776,9 +800,12 @@ class PyKernel:
         k["opencl:gfx1036"](a, out)     # backend + device (index or name substring, "name:ordinal" disambiguates)
         k[(64, 8)](a, out)              # global/local (None means automatic)
         k["cuda"][(64, 8)](a, out)      # combined, any order
+
+    The class is generic over the decorated function's own parameters (PEP 612), which is what
+    gives an editor the caller's parameter names on a published kernel -- see _KernelBase above.
     """
 
-    def __init__(self, func:Callable, backend:str, explicit_backend:bool=False):
+    def __init__(self, func:Callable[..., Any], backend:str, explicit_backend:bool=False):
         if isinstance(func, classmethod):
             raise SyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)") from None
         if isinstance(func, staticmethod):
@@ -807,13 +834,17 @@ class PyKernel:
         self._python_runner:Any = None
         self._source_sig:str = self._source_signature()
 
+    @overload
+    def __get__(self, obj:None, objtype:Optional[type]=None)->"PyKernel[_P]": ...
+    @overload
+    def __get__(self, obj:object, objtype:Optional[type]=None)->_BoundKernelMethod[_P]: ...
     def __get__(self, obj:Any, objtype:Optional[type]=None)->Any:
         # descriptor protocol: instance access returns the bound form, class access/static methods return self
         if obj is None or not self._is_method:
             return self
         return _BoundKernelMethod(self, obj)
 
-    def __getitem__(self, item:Any)->_KernelCall:
+    def __getitem__(self, item:Any)->_KernelCall[_P]:
         return _KernelCall(self, None)[item]
 
     @_native_argument_errors
@@ -2742,7 +2773,11 @@ def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:
     return ordered
 
 
-def kernel(func:Optional[Callable]=None, *, backend:Optional[str]=None):
+@overload
+def kernel(func:Callable[_P, Any], *, backend:Optional[str]=None)->PyKernel[_P]: ...
+@overload
+def kernel(func:None=None, *, backend:Optional[str]=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
+def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None):
     """The `@kernel` decorator.
 
     When backend is not specified, probe in DEFAULT_BACKEND_ORDER (cuda -> hip -> opencl)
@@ -2767,8 +2802,13 @@ def kernel(func:Optional[Callable]=None, *, backend:Optional[str]=None):
       `self.static_method(...)`, or `self.other_method(...)` for another method of the same class;
     - math.* and abs/min/max/round map to device builtins;
     - unsupported syntax raises SyntaxError.
+
+    Both spellings are declared as overloads so the decorated name keeps the function's own
+    parameters: ``@kernel`` and ``@kernel(backend=...)`` return one and the same
+    ``PyKernel[...]``, and a checker reports a call's missing or extra argument against the
+    author's ``def`` rather than against a ``*args``-only decorator.
     """
-    def decorator(f:Callable)->PyKernel:
+    def decorator(f:Callable[..., Any])->PyKernel[Any]:
         if backend is not None:
             return PyKernel(f, backend, explicit_backend=True)
         # No backend named: the call-time default decides, so this snapshot is only used
