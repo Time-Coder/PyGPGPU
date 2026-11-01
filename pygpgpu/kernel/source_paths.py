@@ -208,8 +208,12 @@ def guard_macro(path: str) -> str:
     is skipped whole, and its declarations come from the first.
     """
     digest: str = hashlib.md5(
-        os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()
-    return f"__PYGPGPU_SOURCE_{digest}"
+        os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()[:12]
+    # `__<file>_<hash>__`: the file's own name is the readable half, the hash keeps two
+    # same-named modules (both `scene.cu`, say) apart, and the trailing underscores mark
+    # the end the way a leading pair marks the start.
+    stem: str = os.path.splitext(os.path.basename(path))[0] or "source"
+    return f"__{_sanitize(stem)}_{digest}__"
 
 
 def guard_source(path: str, source: str) -> str:
@@ -330,6 +334,7 @@ def _split_source(source: str, path: str = "") -> Tuple[List[str], List[str]]:
     function definition.
     """
     source = _strip_file_guard(source, path)
+    file_macro: str = guard_macro(path) if path else ""
     pieces: List[str] = [piece for piece in source.split("\n\n") if piece.strip()]
     header: List[str] = []
     definitions: List[str] = []
@@ -345,7 +350,7 @@ def _split_source(source: str, path: str = "") -> Tuple[List[str], List[str]]:
         # The file's own guard frames the whole file: it is not a declaration to carry
         # into the header of the next write.
         remainder: List[str] = [line for line in lines
-                                if not _is_file_guard_line(line)]
+                                if not _is_file_guard_line(line, file_macro)]
         block: str = "\n".join(remainder).strip("\n")
         if block:
             header.append(block)
@@ -355,11 +360,18 @@ def _split_source(source: str, path: str = "") -> Tuple[List[str], List[str]]:
 QUAT_DEFINE_PREFIX: str = "#define QUAT_"
 
 
-def _is_file_guard_line(line: str) -> bool:
-    """Whether a line belongs to a generated file's own include guard."""
+def _is_file_guard_line(line: str, macro: str = "") -> bool:
+    """Whether a line belongs to a generated file's own include guard.
+
+    The guard names the file (`__scene_<hash>__`), so it is matched by that macro when the
+    caller knows it; the pattern covers the reading path, which strips a file's guard without
+    knowing which file it came from.
+    """
     stripped: str = line.strip()
-    return (stripped.startswith("#ifndef __PYGPGPU_SOURCE_")
-            or stripped.startswith("#define __PYGPGPU_SOURCE_"))
+    if macro:
+        return stripped in (f"#ifndef {macro}", f"#define {macro}")
+    return (stripped.startswith("#ifndef __") and stripped.endswith("__")
+            and "_source_" not in stripped)
 
 
 def _is_include_only(piece: str) -> bool:

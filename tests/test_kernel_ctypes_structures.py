@@ -134,7 +134,7 @@ def test_a_declared_class_contributes_every_member(gpu_backend):
     # OpenCL spells it 	ypedef struct { ... } Name; and CUDA/HIP struct Name { ... };.
     # The declaration is the run of member lines, so the body is taken from the guard's
     # #ifndef to its #endif.
-    marker = "__PYGPGPU_STRUCT_DeclaredFour_"
+    marker = "__DeclaredFour_"
     start = source.find(marker)
     assert start >= 0, source
     block = source[start:source.find("#endif", start)]

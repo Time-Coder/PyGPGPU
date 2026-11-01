@@ -204,7 +204,7 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
         # several others (`#include`), and two modules can declare one layout -- therefore
         # one C type -- so the guard is what makes that declaration appear once however
         # many files reach it.
-        guard:str = f"__PYGPGPU_STRUCT_{name}"
+        guard:str = f"__{name}__"
         lines.append(f"#ifndef {guard}")
         lines.append(f"#define {guard}")
         if backend == "opencl":
