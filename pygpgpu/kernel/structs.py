@@ -57,10 +57,12 @@ def struct_name(dtype:np.dtype)->str:
     fixed:Optional[str] = quat_type_name(dtype)
     if fixed is not None:
         return fixed
-    hint:Optional[str] = _NAME_HINTS.get(dtype)
-    if hint is not None:
-        return hint
     digest:str = hashlib.md5(repr(dtype).encode("utf-8")).hexdigest()[:10]
+    base:Optional[str] = _NAME_BASES.get(dtype)
+    if base is not None:
+        # A readable name still needs the hash: two modules can declare a class of the same
+        # name (`Ray` in two test modules), and one C type cannot answer for both.
+        return f"{base}_{digest}"
     return f"_st_{digest}"
 
 
@@ -196,43 +198,25 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
 
 
 _REGISTRY: Dict[str, np.dtype] = {}
-_NAME_HINTS: Dict[np.dtype, str] = {}
+# dtype -> the python class name its structure is spelled after. The C name is
+# `<base>_<hash>`: readable, and still distinct when two modules declare one class name.
+_NAME_BASES: Dict[np.dtype, str] = {}
 
 
 def register_name_hint(dtype:Any, cls:type) -> None:
-    """Prefer the python class's name when spelling this dtype's C structure.
+    """Spell this dtype's C structure after the python class the value came from.
 
-    A structure synthesized from a python object (`Ray`, `HitRecord`) describes a layout a
-    hash can name, but the hash says nothing a reader recognizes -- the class the value came
-    from does. The hint is advisory, and it is refused when it would collide: the C name is
-    the key every member lookup resolves through, so two different layouts may not share
-    one name. A structure with no hint keeps its hashed name.
+    A structure describes a layout a hash can name, but the hash says nothing a reader
+    recognizes -- the class the value came from does. The C name is `<class>_<hash>`: the
+    readable half is the class, and the hash keeps two classes of one name apart (two
+    modules can both declare `Ray`), which a bare class name cannot. A structure with no
+    class behind it keeps the opaque `_st_<hash>`.
     """
     name:str = getattr(cls, "__name__", "")
     if not name:
         return
     dtype:np.dtype = np.dtype(dtype)
-    _NAME_HINTS[dtype] = _free_name(_safe_identifier(name), dtype)
-
-
-def _free_name(base:str, dtype:np.dtype) -> str:
-    """The first name in ``base``, ``base_alter1``, ... that no other layout holds.
-
-    Two classes can carry one python name with different members (two modules both
-    defining `Point`, once imported), and every layout needs a name of its own: the C name
-    is the key member lookups resolve through. The numbered spelling keeps the family
-    visible -- `Point` and `Point_alter1` read as related, which a hash never does.
-    """
-    candidate:str = base
-    index:int = 0
-    while True:
-        holder:Optional[np.dtype] = _REGISTRY.get(candidate)
-        if holder is None or holder == dtype:
-            hinted:Optional[np.dtype] = _NAME_HINTS.get(candidate)
-            if hinted is None or hinted == dtype:
-                return candidate
-        index += 1
-        candidate = f"{base}_alter{index}"
+    _NAME_BASES.setdefault(dtype, _safe_identifier(name))
 
 
 def _safe_identifier(name:str) -> str:
@@ -245,11 +229,6 @@ def register(dtype:Any) -> str:
     """Record a structure dtype and return its C type name."""
     dtype:np.dtype = np.dtype(dtype)
     name:str = struct_name(dtype)
-    existing:Optional[np.dtype] = _REGISTRY.get(name)
-    if existing is not None and existing != dtype:
-        # The name is taken by another layout (a hashed dtype a hint later renamed): pick
-        # the next free numbered spelling of this dtype's own hint base.
-        name = _free_name(_NAME_HINTS.get(dtype) or name, dtype)
     _REGISTRY[name] = dtype
     return name
 
@@ -286,6 +265,11 @@ def register_class(cls:Any) -> Optional[np.dtype]:
     _DECLARED_ALL.setdefault(dtype, [])
     if cls not in _DECLARED_ALL[dtype]:
         _DECLARED_ALL[dtype].append(cls)
+    # The class the caller wrote is the readable half of the structure's C name: the
+    # declaration it generates reads `struct Ray_<hash>`, not an opaque `_st_<hash>`.
+    class_name:str = getattr(cls, "__name__", "")
+    if class_name:
+        _NAME_BASES.setdefault(dtype, _safe_identifier(class_name))
     register(dtype)
     _add_subscript_access(cls)
     return dtype
