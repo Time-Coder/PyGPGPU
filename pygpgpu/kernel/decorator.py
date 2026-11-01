@@ -1816,52 +1816,13 @@ class PyKernel:
             for dtype in entry.get("structs", ()):
                 if dtype not in structure_dtypes:
                     structure_dtypes.append(dtype)
-        # A structure declaration belongs to the module its python class is defined in: that
-        # file holds the `struct`, and every file naming the type includes it. A structure
-        # synthesized from a plain python object is no exception -- the class the caller
-        # wrote says where its members came from, so it is declared there too. Only a
-        # hand-written record dtype, with no class behind it, stays with the file that uses
-        # it.
-        from . import quaternion as quaternion_types  # noqa: PLC0415
-
-        package_files:set = set(source_paths.package_source_files())
-        struct_home:Dict[Any, str] = {}
-        for dtype in structure_dtypes:
-            # A quaternion's declaration comes from the fixed header the source already
-            # includes (see quaternion.include_line), so it has no module of its own: its
-            # python class lives in the pygf package, which is not part of this project.
-            if quaternion_types.quat_type_name(dtype) is not None:
-                continue
-            owner_file:str = structs.declared_file(dtype)
-            if not owner_file:
-                # No class behind this layout (a hand-written record dtype), or one this
-                # process never saw registered: nothing says where it belongs, so it is
-                # declared by the file that uses it rather than dropped.
-                continue
-            # A structure synthesized from a plain python object has a *generated* class,
-            # and two classes can share one layout (so one dtype, one C type): the class
-            # registered first decides the name, and its file can be this package's own when
-            # the object was made elsewhere. Nothing reliable says then where the
-            # declaration belongs, so it stays with the file that uses it rather than being
-            # written into a path inside this package.
-            if os.path.normcase(os.path.abspath(owner_file)) in package_files:
-                continue
-            home:str = source_paths.source_path(kernel_source_file, owner_file, backend)
-            if home == module_of({"source_file": kernel_source_file}):
-                continue        # the kernel's own file declares it; nothing to route
-            struct_home[dtype] = home
-        typedefs:str = (structs.render_structures(
-            [dtype for dtype in structure_dtypes
-             if dtype not in struct_home
-             or struct_home[dtype] == module_of({"source_file": kernel_source_file})],
-            translator.backend) if structure_dtypes else "")
-        # The declarations that live in another module: those files hold them, this one
-        # includes them.
-        home_declarations:Dict[str, List[Any]] = {}
-        for dtype, home in struct_home.items():
-            if home == module_of({"source_file": kernel_source_file}):
-                continue
-            home_declarations.setdefault(home, []).append(dtype)
+        # Every structure this compilation reaches is declared by the kernel's own file. A
+        # helper in another module names its types too, and that module's file is reached
+        # from here, so the declaration has to be in scope before the include is read --
+        # putting it in the helper's own file instead made a cycle of includes and, when two
+        # modules shared one structure, the same declaration twice in one file.
+        typedefs:str = (structs.render_structures(structure_dtypes, translator.backend)
+                        if structure_dtypes else "")
 
         # Quaternion structures and their arithmetic both come from a fixed header, copied
         # into the cache's include folder beside the generated source. The source needs only
@@ -1890,18 +1851,17 @@ class PyKernel:
         # A structure declared by another module: that module's file holds the `struct`,
         # and this file includes it rather than repeating the declaration. A structure with
         # no python class behind it stays with the file that uses it.
-        struct_includes:List[str] = [
-            source_paths.include_line(own_path, home) for home in home_declarations]
+        # The includes are ordered the same way the definitions are: a module whose code
+        # calls another module's function has to be reached after that callee, because C
+        # requires a function before its caller. The definitions are already in dependency
+        # order, so the modules are taken in the order their first definition appears.
+        ordered_foreign:List[str] = []
+        for entry in ordered_entries:
+            path:str = module_of(entry)
+            if path in foreign_entries and path not in ordered_foreign:
+                ordered_foreign.append(path)
         foreign_includes:List[str] = [
-            source_paths.include_line(own_path, path) for path in foreign_entries]
-        for home, dtypes in home_declarations.items():
-            # Write the declaring module's file: it may hold nothing but these structures,
-            # and the modules that use them reach it through the include above.
-            declared:str = structs.render_structures(dtypes, translator.backend)
-            if declared:
-                source_paths.append_source(
-                    home, [declared], [],
-                    structs.declared_file(dtypes[0]) or kernel_source_file)
+            source_paths.include_line(own_path, path) for path in ordered_foreign]
         # A generated file is a *header* plus a list of definitions. The header names every
         # structure the file's own code uses and includes every other module it reaches;
         # the definitions are appended one at a time, so a module with several kernels keeps
@@ -1912,21 +1872,28 @@ class PyKernel:
             own_header.append(typedefs)
         if include_lines:
             own_header.append(include_lines)
-        if struct_includes:
-            own_header.append("\n".join(struct_includes))
         if foreign_includes:
             own_header.append("\n".join(foreign_includes))
 
         written:Dict[str, str] = {}
         for path, entries in foreign_entries.items():
-            # A foreign module's file carries its own typedef block as well: the
-            # declarations are guarded by structure name, so whichever file is reached
-            # first declares the type and every later inclusion skips it.
+            # A foreign module's file declares no structures of its own. The kernel's file
+            # carries the whole typedef block ahead of the includes that reach these files,
+            # and each declaration is guarded by its structure name, so the type is declared
+            # once no matter how many files are compiled from it. Repeating the block here
+            # would put every declaration in every file, which is a cycle of includes and a
+            # duplicate definition in the one file two modules share.
             foreign_header:List[str] = []
-            if typedefs:
-                foreign_header.append(typedefs)
             if include_lines:
                 foreign_header.append(include_lines)
+            # A foreign module may itself call into a third module: every structure is
+            # declared by the top-level file, but a *function* it calls has to be reached
+            # from its own file, and only by the files that call it.
+            callee_includes:List[str] = [
+                source_paths.include_line(path, other) for other in ordered_foreign
+                if other != path and other in _called_modules(path, foreign_entries)]
+            if callee_includes:
+                foreign_header.append("\n".join(callee_includes))
             written[path] = source_paths.append_source(
                 path, foreign_header,
                 [entry["code"] for entry in entries if entry["code"]],
@@ -2646,6 +2613,28 @@ def _return_value(raw:Any, dtype:Any, kind:str)->Any:
 
 
 _VEC_RETURN_TYPES:Dict[str, Any] = {}
+
+
+def _called_modules(path:str, foreign_entries:Dict[str, List[Dict[str, Any]]]) -> set:
+    """The other generated files one module's definitions call functions from.
+
+    A module's own file holds its definitions; a definition that names another module's
+    device function needs that file, and C requires the callee before its caller. The
+    reference is matched textually against the callee's generated name, the way
+    `_dependency_order` orders the definitions themselves.
+    """
+    own_code:str = "\n\n".join(entry["code"] for entry in foreign_entries.get(path, ())
+                               if entry["code"])
+    called:set = set()
+    for other, entries in foreign_entries.items():
+        if other == path:
+            continue
+        for entry in entries:
+            name:str = entry.get("c_name") or ""
+            if name and name in own_code:
+                called.add(other)
+                break
+    return called
 
 
 def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:

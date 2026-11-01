@@ -298,21 +298,12 @@ def assemble_source(header: List[str], definitions: List[str],
     read once. Each structure carries a guard of its own as well (see
     `structs.render_structures`), because two modules can name one layout -- one C type.
     """
-    blocks: List[str] = [piece.strip("\n") for piece in header if piece.strip()]
-    leading: List[str] = []
-    rest: List[str] = []
-    for piece in blocks:
-        lines: List[str] = piece.splitlines()
-        directives: List[str] = [line for line in lines if line.lstrip().startswith("#")]
-        remainder: List[str] = [line for line in lines if line not in directives]
-        if directives and not remainder:
-            # A pure directive block (`#define` runs, `#include` lines): it leads.
-            leading.append(piece)
-        else:
-            # A block that mixes a directive with declarations (a guarded structure) stays
-            # whole: its guard has to wrap its own declaration, not sit beside it.
-            rest.append(piece)
-    parts: List[str] = leading + rest
+    # The order the caller built is kept, not re-derived here: `_canonical_header` already
+    # puts the `#define`/`#include` block where it belongs, and a structure declaration has
+    # to come *before* an include whose file names it (a helper in another module takes a
+    # `Ray` by pointer). Re-sorting by "a line starting with # leads" would move the
+    # includes past the declarations and break exactly that.
+    parts: List[str] = [piece.strip("\n") for piece in header if piece.strip()]
     parts.extend(piece.strip("\n") for piece in definitions if piece.strip())
     body: str = "\n\n".join(parts) + "\n"
     if not path:
@@ -432,8 +423,11 @@ def _canonical_header(header: List[str]) -> List[str]:
         widths: List[str] = [line for line in defines
                              if line.startswith(QUAT_DEFINE_PREFIX)]
         canonical.append("\n".join(qualifier + widths))
-    canonical.extend(includes)
+    # The declarations come before the includes: a file this source includes can name a
+    # structure declared here (a helper in another module takes a `Ray` by pointer), and
+    # the compiler reads the included text after these lines.
     canonical.extend(declarations)
+    canonical.extend(includes)
     return canonical
 
 
