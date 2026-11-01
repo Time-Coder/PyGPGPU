@@ -153,6 +153,8 @@ def _parse(func:Any)->Optional[ast.Module]:
 
 _LIFTED_TREES:Dict[str, ast.Module] = {}
 _LIFTED_VALUES:Dict[str, Dict[str, Any]] = {}
+# class -> the members a lifted construction supplied, in the constructor order.
+_LIFTED_MEMBERS:Dict[type, List[Tuple[str, type]]] = {}
 
 
 def _tree_key(func:Any)->str:
@@ -569,23 +571,89 @@ def _writes_to(tree:ast.Module, tracked:Dict[str, str])->List[str]:
     return written
 
 
-def _constructs_a_class(func:Any, resolve:Callable[[str], Any])->bool:
-    """Whether the body builds a value from a class it defines elsewhere.
+def _constructs_a_class(func:Any, resolve:Callable[[str], Any],
+                         _seen:Optional[set] = None)->bool:
+    """Whether the body -- or a helper it calls -- builds a value from a class it defines.
 
     Both spellings count: `ray = Ray(...)` assigns it to a name, and `hit(ray, Interval(...))`
-    builds it straight into a call -- which is the one the lift has to handle, so it is the
-    reason this scan is worth running at all.
+    builds it straight into a call, which is the one the lift has to handle.
+
+    The helper case is what makes this scan worth running for a kernel body that builds
+    nothing itself: `Camera.render` hands its work to `scene.ray_color`, and *that* is where
+    `Interval(0, math.inf)` is written. Without following the call, the gate said "nothing is
+    built" and the whole scan was skipped, so the construction was never lifted.
+
+    A body already lifted answers from the recorded values: its tree holds the name the lift
+    gave it, not the construction, so reading that tree would say "no class is built" and
+    skip the very scan that produced the names.
     """
+    if _LIFTED_VALUES.get(_tree_key(func)):
+        return True
+    seen:set = set() if _seen is None else _seen
+    if _tree_key(func) in seen:
+        return False
+    seen.add(_tree_key(func))
     tree:Optional[ast.Module] = _parse(func)
     if tree is None:
         return False
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            # `scene.ray_color(ray)`: the receiver is an argument, so the method is the
+            # only thing that can be followed -- and it is where the construction is.
+            receiver:Any = node.func.value
+            if not isinstance(receiver, ast.Name):
+                continue
+            owner:Any = resolve(receiver.id)
+            if owner is None:
+                # The receiver is a parameter, so the annotation is the only record of its
+                # class: `_argument_holder` answers the class itself, not an instance.
+                owner = _argument_holder(func, receiver.id)
+            if not isinstance(owner, type):
+                continue
+            method:Any = getattr(owner, node.func.attr, None)
+            # Only a function has globals to resolve its own names against; an
+            # attribute that is a class (`v.float3(...)`) is not a body to walk.
+            method_globals:Optional[Dict[str, Any]] = getattr(method, "__globals__", None)
+            if method_globals is not None and _constructs_a_class(
+                    method, method_globals.get, seen):
+                return True
+            continue
+        if not isinstance(node.func, ast.Name):
             continue
         cls:Any = resolve(node.func.id)
-        if isinstance(cls, type) and not issubclass(cls, (ctypes.Structure, list, tuple)):
+        if isinstance(cls, type):
+            if not issubclass(cls, (ctypes.Structure, list, tuple)):
+                return True
+            continue
+        # A helper is an ordinary function: its own body may be the one that constructs.
+        if callable(cls) and _constructs_a_class(cls, resolve, seen):
             return True
     return False
+
+
+def _argument_holder(func:Any, name:str)->Any:
+    """A placeholder value for a parameter, when its class can be read from the annotation.
+
+    A method call on an argument (`scene.ray_color(...)`) needs the receiver's class to find
+    the method, and the annotation is the only record of it before a launch supplies the real
+    object. The annotation is evaluated best-effort: an unresolvable name answers None.
+    """
+    try:
+        import inspect as _inspect  # noqa: PLC0415
+
+        parameters:Any = _inspect.signature(func).parameters
+        annotation:Any = parameters[name].annotation if name in parameters else None
+        if isinstance(annotation, type):
+            return annotation
+        if isinstance(annotation, str):
+            resolved:Any = func.__globals__.get(annotation)
+            if isinstance(resolved, type):
+                return resolved
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return None
 
 
 # The prefix an inline construction is lifted to. It never reaches the generated source --
@@ -618,7 +686,10 @@ def _inline_constructions(tree:ast.Module, find_class:Callable[[str], Any],
                 node.args = [lift(child) for child in node.args]
                 kinds:Optional[List[Any]] = []
                 for argument in node.args:
-                    kind:Optional[Any] = _argument_kind(argument, objects, resolve, tree)
+                    # `find_class` resolves the *body's own* names first: `math.inf` is a
+                    # module the body's module imported, which the kernel's resolver need
+                    # not see.
+                    kind:Optional[Any] = _argument_kind(argument, objects, find_class, tree)
                     if kind is None:
                         kinds = None
                         break
@@ -628,6 +699,18 @@ def _inline_constructions(tree:ast.Module, find_class:Callable[[str], Any],
                     name:str = f"{INLINE_PREFIX}{counter[0]}"
                     counter[0] += 1
                     lifted[name] = template
+                    # The members this construction supplies, in the constructor's own
+                    # argument order: `__init__`'s defaults may name a member nothing can
+                    # put on a device (a string no body class ever reads), so only an
+                    # argument the call passed is a candidate. The order is kept because the
+                    # synthesized structure sorts its fields by name, and an aggregate
+                    # literal filled in field order would swap the values.
+                    supplied:List[Tuple[str, type]] = []
+                    parameter_names:List[str] = _init_parameters(cls)
+                    for position, kind in enumerate(kinds or ()):
+                        if position < len(parameter_names):
+                            supplied.append((parameter_names[position], kind))
+                    _LIFTED_MEMBERS.setdefault(cls, list(supplied))
                     return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
             # A construction that already has a name is handled by the loop in
@@ -762,6 +845,12 @@ def _argument_kind(argument:ast.expr, objects:Dict[str, Any],
         holder:Any = objects.get(argument.value.id)
         if holder is not None and hasattr(holder, argument.attr):
             return member_type(getattr(holder, argument.attr), argument.attr)
+        # A module attribute (math.inf): the value lives in the globals, and its type is
+        # known even though no object argument carries it.
+        module:Any = resolve(argument.value.id)
+        module_value:Any = getattr(module, argument.attr, None)
+        if isinstance(module_value, (bool, int, float)):
+            return member_type(module_value, argument.attr)
         return None
     if isinstance(argument, ast.Constant) and isinstance(argument.value, (int, float)):
         # An int literal is an int member: the width has to follow the value, or
@@ -899,6 +988,7 @@ def forget_constructed()->None:
     _CONSTRUCTED.clear()
     _LIFTED_TREES.clear()
     _LIFTED_VALUES.clear()
+    _LIFTED_MEMBERS.clear()
 
 
 def scan_object(func:Any, objects:Dict[str, Any],
@@ -1449,6 +1539,35 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
         path:str = name
         if path in structure_of:
             _CONSTRUCTED[cls] = np.dtype(structure_of[path])
+    # A construction lifted inside a *helper* was scanned by the helper's own walk, so its
+    # name never reached this scan's `constructed` map -- and the translator still meets the
+    # constructor call when it translates that helper. The lift recorded the class with the
+    # tree, so the structure it needs can be built here from the same members.
+    # A construction lifted inside a *helper* was scanned by the helper's own walk, so its
+    # name never reached this scan's `constructed` map -- and the translator still meets the
+    # constructor call when it translates that helper. The lift recorded the class with the
+    # tree, and the members it may carry are the ones the body fills: only an argument the
+    # construction actually supplied is a candidate, because `__init__`'s own defaults can
+    # be types a device has no room for (a string that nothing ever reads).
+    for source_function, lifted in _LIFTED_VALUES.items():
+        for name, value in lifted.items():
+            cls = type(value)
+            if cls in _CONSTRUCTED:
+                continue
+            fields = list(_LIFTED_MEMBERS.get(cls) or ())
+            if not fields:
+                continue
+            structure = _structure_for(fields, [])
+            _prefer_class_name(structure, cls)
+            from .structs import register_declared_class  # noqa: PLC0415
+
+            dtype = np.dtype(structure)
+            register_declared_class(dtype, cls)
+            _CONSTRUCTED[cls] = dtype
+            # The constructor's argument order, which the aggregate literal follows: the
+            # synthesized structure sorts its fields by name, so filling it in field order
+            # would put the second argument in the first member.
+            _CONSTRUCTED_PARAMETERS[cls] = _init_parameters(cls)
     return tuple(out)
 
 
