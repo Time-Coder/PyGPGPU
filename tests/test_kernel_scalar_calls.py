@@ -206,3 +206,55 @@ def test_math_trunc_cannot_run_on_the_interpreter():
     device backends are fine, and `np.trunc(x[i])` or pygf's `trunc` work everywhere."""
     with pytest.raises(TypeError):
         math.trunc(np.float32(2.7))
+
+
+def mix32(tid, seed, mask):
+    """The shift-and-multiply mix a random number generator uses.
+
+    It only means what it is supposed to under **unsigned** arithmetic: a signed 32-bit
+    multiply overflows and `x >> 16` fills with ones, and the result comes back negative.
+    """
+    x = tid & mask
+    x ^= (x >> 16)
+    x = (x * 0x9E3779B9) & mask
+    return x / 4294967295.0
+
+
+@kernel
+def unsigned_mix(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = mix32(np.uint32(i + 1), np.uint32(12345), np.uint32(0xFFFFFFFF))
+
+
+@kernel
+def signed_mix(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = mix32(i + 1, 12345, 0xFFFFFFFF)
+
+
+def test_a_numpy_scalar_keeps_its_width_and_signedness(runner, gpu_backend):
+    """`np.uint32(x)` reaches the device as `unsigned`, so the mix stays unsigned.
+
+    A python `int` has no width of its own, and collapsing every integer to `int` made the
+    unsigned mix signed: `x * 0x9E3779B9` overflowed and `x >> 16` filled with ones, so the
+    generator answered a negative number where python answers 0.618.
+    """
+    from pygpgpu.kernel.translator import DTYPE_MAP, infer_ctype
+
+    assert infer_ctype(np.uint32(5)) == DTYPE_MAP["uint32"]
+    assert infer_ctype(np.uint64(5)) == DTYPE_MAP["uint64"]
+    assert infer_ctype(np.int64(5)) == DTYPE_MAP["int64"]
+    # The narrow widths keep the answer they always had (see
+    # tests/test_kernel_narrow_arguments.py): an 8-bit value is an int, a float64 a float.
+    assert infer_ctype(np.uint8(5)) == "int"
+    assert infer_ctype(np.float64(5.0)) == "float"
+
+    out = np.zeros(1, dtype=np.float32)
+    runner(unsigned_mix, out)
+    assert float(out[0]) == pytest.approx(0.618034, abs=1e-5)
+    # The signed spelling gives a different (wrong) answer, which is what the width fixes.
+    # The interpreter backend runs the body unchanged and keeps python's own answer, so
+    # the comparison only holds where the code is actually translated.
+    if gpu_backend is not None:
+        runner(signed_mix, out)
+        assert float(out[0]) < 0.0

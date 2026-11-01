@@ -494,6 +494,14 @@ DTYPE_MAP:Dict[str, str] = {
     "float16": "half", "float32": "float", "float64": "double",
 }
 
+# The numpy scalars whose device type is the *narrow* one, as it always was: an 8- or
+# 16-bit value is an `int` on the device, and a float64 is a `float`. A caller who wants
+# a width of its own says so (`np.uint32`, `np.int64`), and that width is kept.
+NARROWED_SCALARS:Dict[str, str] = {
+    "int8": "int", "int16": "int", "uint8": "int", "uint16": "int",
+    "float16": "float", "float64": "float",
+}
+
 PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string means a scalar
 
 # A zeros_per_group() slice: that group's storage, plus the shape it was declared with.
@@ -877,9 +885,34 @@ def infer_ctype(value:Any)->Any:
         return (PTR, DTYPE_MAP[value.dtype.name])
     if isinstance(value, (bool, np.bool_)):
         return "bool"
-    if isinstance(value, (int, np.integer)):
+    # A numpy scalar carries its own width and signedness, and `np.uint32(x)` is how a
+    # caller says "unsigned 32-bit" without an annotation the translator would ignore.
+    # Collapsing every integer to `int` made an unsigned mix (`x * 0x9E3779B9`, `x >> 16`)
+    # signed, so the multiply overflowed and the shift filled with ones.
+    #
+    # The narrow widths keep their old answer: an 8- or 16-bit numpy scalar is `int` on the
+    # device, as it always was (see tests/test_kernel_narrow_arguments.py), and a float64
+    # is `float`. The widths a caller reaches for *deliberately* -- `np.uint32` for an
+    # unsigned mix, `np.int64`/`np.uint64` for a wide counter -- are kept as they are,
+    # because there would be no reason to spell them otherwise. A python `int` has no
+    # width of its own and stays `int`.
+    if isinstance(value, np.integer):
+        dtype_name:str = np.dtype(type(value)).name
+        if dtype_name in NARROWED_SCALARS:
+            return NARROWED_SCALARS[dtype_name]
+        if dtype_name in DTYPE_MAP:
+            return DTYPE_MAP[dtype_name]
         return "int"
-    if isinstance(value, (float, np.floating)):
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, np.floating):
+        dtype_name = np.dtype(type(value)).name
+        if dtype_name in NARROWED_SCALARS:
+            return NARROWED_SCALARS[dtype_name]
+        if dtype_name in DTYPE_MAP:
+            return DTYPE_MAP[dtype_name]
+        return "float"
+    if isinstance(value, float):
         return "float"
     if _is_device_handle(value):
         # A texture or surface reaches the device as an opaque 64-bit handle, which
