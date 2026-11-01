@@ -95,6 +95,53 @@ def test_the_alignment_flag_is_what_separates_them():
     assert not structs.is_declared_structure(vector)
 
 
+class DeclaredFour(ctypes.Structure):
+    """Four members, two of which a test kernel never reads."""
+
+    _fields_ = [("a", ctypes.c_float), ("b", ctypes.c_float),
+                ("c", ctypes.c_float), ("unused", ctypes.c_float)]
+
+
+@kernel
+def reads_two_of_the_declared(p, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = p.a + p.b
+
+
+def test_a_declared_class_contributes_every_member(gpu_backend):
+    """A `ctypes.Structure` states its layout, so the members are not inferred from use.
+
+    A plain python object is the opposite: its structure is synthesized from what the body
+    reads (see test_kernel_object_arguments). Here all four members must appear, including
+    the two `reads_two_of_the_declared` never touches.
+    """
+    import glob
+    import pathlib
+
+    cache_dir = reads_two_of_the_declared._cache_dir(gpu_backend)
+    import shutil
+
+    shutil.rmtree(cache_dir, ignore_errors=True)
+    reads_two_of_the_declared[gpu_backend](DeclaredFour(1.0, 2.0, 3.0, 4.0),
+                                           np.zeros(1, dtype=np.float32))
+    extension = {"opencl": "cl", "cuda": "cu", "hip": "hip"}[gpu_backend]
+    files = sorted(glob.glob(f"{cache_dir}/*.{extension}"))
+    assert files, f"no generated source under {cache_dir}"
+    source = "\n".join(pathlib.Path(path).read_text(encoding="utf-8")
+                       for path in files)
+    # OpenCL spells it 	ypedef struct { ... } Name; and CUDA/HIP struct Name { ... };, so
+    # the body is located by the member list rather than by one spelling.
+    # OpenCL spells it 	ypedef struct { ... } Name; and CUDA/HIP struct Name { ... };.
+    # The declaration is the run of member lines, so the body is taken from the guard's
+    # #ifndef to its #endif.
+    marker = "__PYGPGPU_STRUCT_DeclaredFour_"
+    start = source.find(marker)
+    assert start >= 0, source
+    block = source[start:source.find("#endif", start)]
+    members = {line.strip() for line in block.splitlines()}
+    assert {"float a;", "float b;", "float c;", "float unused;"} <= members, members
+
+
 def test_a_plain_record_dtype_is_a_structure():
     dtype = np.dtype([("i", "<i4"), ("f", "<f4")])
     assert structs.is_record(dtype)

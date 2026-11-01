@@ -1823,6 +1823,7 @@ class PyKernel:
         from . import quaternion as quaternion_types  # noqa: PLC0415
 
         struct_home:Dict[Any, str] = {}
+        library_files:set = set(source_paths.library_source_files())
         for dtype in structure_dtypes:
             # A quaternion's declaration comes from the fixed header the source already
             # includes (see quaternion.include_line), so it has no module of its own: its
@@ -1830,9 +1831,16 @@ class PyKernel:
             if quaternion_types.quat_type_name(dtype) is not None:
                 continue
             owner_file:str = structs.declared_file(dtype)
-            if owner_file:
-                struct_home[dtype] = source_paths.source_path(
-                    kernel_source_file, owner_file, backend)
+            if not owner_file:
+                continue
+            # A structure synthesized from a plain python object is *made* by this package
+            # (objects.py builds the class), so its class names a library file rather than
+            # the caller's module. It belongs where it is used, so it is declared by the
+            # kernel's own file.
+            if os.path.normcase(os.path.abspath(owner_file)) in library_files:
+                continue
+            struct_home[dtype] = source_paths.source_path(
+                kernel_source_file, owner_file, backend)
         typedefs:str = (structs.render_structures(
             [dtype for dtype in structure_dtypes
              if dtype not in struct_home

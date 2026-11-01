@@ -133,6 +133,25 @@ def _relative_segments(path: str) -> List[str]:
     return segments
 
 
+def library_source_files() -> List[str]:
+    """Every python file of this package, as normalized absolute paths.
+
+    A structure synthesized from a plain python object is *built* by this package
+    (`objects.py` defines the ctypes class), so the class it records names a library file
+    rather than the caller's module. Such a structure belongs where it is used, and this
+    list is what tells a caller's own module apart from a file of this package.
+    """
+    package_root: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    files: List[str] = []
+    for directory, _subdirectories, names in os.walk(package_root):
+        for name in names:
+            if not name.endswith(".py"):
+                continue
+            files.append(os.path.normcase(
+                os.path.abspath(os.path.join(directory, name))))
+    return files
+
+
 def source_directory_of(kernel_file: str) -> str:
     """The directory of the python file a kernel is defined in."""
     return os.path.dirname(os.path.abspath(kernel_file)) if kernel_file else os.getcwd()
