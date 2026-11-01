@@ -2,9 +2,11 @@ from hittable import Hittable, HitRecord
 from ray import Ray
 from pygf import color3f, normalize, mix
 import math
+from typing import override
+from interval import Interval
 
 
-class Scene:
+class Scene(Hittable):
 
     def __init__(self):
         self.hittables: list[Hittable] = []
@@ -15,20 +17,21 @@ class Scene:
     def add(self, object: Hittable):
         self.hittables.append(object)
 
-    def hit(self, ray: Ray, ray_tmin: float, ray_tmax: float)->HitRecord:
+    @override
+    def hit(self, ray: Ray, ray_range: Interval) -> HitRecord:
         record = HitRecord(is_hitted=False)
-        closest_t: float = ray_tmax
+        closest_so_far: float = ray_range.max_value
 
         for hitable in self.hittables:
-            temp_record = hitable.hit(ray, ray_tmin, closest_t) 
+            temp_record = hitable.hit(ray, Interval(ray_range.min_value, closest_so_far)) 
             if temp_record.is_hitted:
-                closest_t = temp_record.t
+                closest_so_far = temp_record.t
                 record = temp_record
 
         return record
 
     def ray_color(self, ray: Ray)->color3f:
-        record = self.hit(ray, 0, math.inf)
+        record = self.hit(ray, Interval(0, math.inf))
         if record.is_hitted:
             return 0.5 * (record.normal + color3f(1))
 

@@ -3,12 +3,14 @@ from pygf import (
     quatf,
     vector3f,
     color3f,
-    conjugate
+    conjugate,
+    clamp
 )
 import numpy as np
 from ray import Ray
 from scene import Scene
 from pygpgpu import kernel
+from utils import rand
 
 
 class Camera:
@@ -20,6 +22,7 @@ class Camera:
         self.aspect_ratio: float = 16/9
         self.image_width: int = 400
         self.viewport_width: float = 0.4
+        self.samples_per_pixel: int = 10
         self.update_params()
 
     def update_params(self):
@@ -52,22 +55,35 @@ class Camera:
     def view_dir_to_world(self, dir: vector3f) -> vector3f:
         return self.orientation * dir
 
+    def get_ray(self, i: int, j: int, sample: int)->Ray:
+        offset: vector3f = self.sample_square(i, j, sample)
+        pixel_sample = (
+              self.left_top_pixel_pos_in_world
+            + ((j + offset.x) * self.du_in_world)
+            + ((i + offset.y) * self.dv_in_world)
+        )
+        ray_origin = self.position
+        ray_direction = pixel_sample - ray_origin
+
+        return Ray(ray_origin, ray_direction)
+
+    def sample_square(self, i, j, seed):
+        return vector3f(rand(i*self.image_width+j, seed)-0.5, rand(i*self.image_width+j, seed+1)-0.5, 0)
+
     @kernel
     def render(self, scene: Scene)->np.ndarray:
         for i, j in np.ndindex(self.image_height, self.image_width):
-            hit_pixel_pos_in_world = (
-                self.left_top_pixel_pos_in_world +
-                (i * self.dv_in_world) +
-                (j * self.du_in_world)
-            )
-            ray_dir_in_world = hit_pixel_pos_in_world - self.position
-            ray = Ray(self.position, ray_dir_in_world)
-            pixel_color: color3f = scene.ray_color(ray)
-            self.write_color(i, j, pixel_color)
+            pixel_color = color3f(0, 0, 0)
+            for sample in range(0, self.samples_per_pixel):
+                ray: Ray = self.get_ray(i, j, sample)
+                pixel_color += scene.ray_color(ray)
+
+            self.write_color(i, j, pixel_color/self.samples_per_pixel)
 
         return self.image
 
     def write_color(self, i:int, j:int, color:color3f):
-        self.image[i, j, 0] = 255 * color.r
-        self.image[i, j, 1] = 255 * color.g
-        self.image[i, j, 2] = 255 * color.b
+        clamp_color = clamp(color, color3f(0), color3f(1))
+        self.image[i, j, 0] = 255 * clamp_color.r
+        self.image[i, j, 1] = 255 * clamp_color.g
+        self.image[i, j, 2] = 255 * clamp_color.b

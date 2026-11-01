@@ -2,6 +2,8 @@ from hittable import Hittable, HitRecord
 from pygf import point3f, vector3f, dot
 from ray import Ray
 import math
+from interval import Interval
+from typing import override
 
 
 class Sphere(Hittable):
@@ -10,7 +12,8 @@ class Sphere(Hittable):
         self.center = center
         self.radius = radius
 
-    def hit(self, ray: Ray, ray_tmin: float, ray_tmax: float)->HitRecord:
+    @override
+    def hit(self, ray: Ray, ray_range: Interval)->HitRecord:
         oc: vector3f = self.center - ray.origin
         a: float = dot(ray.direction, ray.direction)
         h: float = dot(ray.direction, oc)
@@ -23,9 +26,9 @@ class Sphere(Hittable):
         sqrtd: float = math.sqrt(discriminant)
 
         root: float = (h - sqrtd)/a
-        if root <= ray_tmin or ray_tmax <= root:
+        if not ray_range.surrounds(root):
             root = (h + sqrtd) / a
-            if root <= ray_tmin or ray_tmax <= root:
+            if not ray_range.surrounds(root):
                 return HitRecord(is_hitted=False)
 
         t = root
