@@ -4277,6 +4277,21 @@ class FunctionTranslator:
                 return
             self._error(self._structure_operator_message(op_name, target_t, value_t, node), node)
 
+        # A vector has no C in-place operator either (CUDA rejects `v += w`), so the store
+        # is written out as the plain vector operation it means. The right operand goes into
+        # a temporary first: the per-component form names it once per component, and a call
+        # with side effects (`pixel_color += scene.ray_color(...)`) must be evaluated once.
+        vector_store:Optional[str] = self._emit_vector_inplace(
+            target_code, op_name, target_code, target_t, value_code, value_t)
+        if vector_store is not None:
+            if value_code.strip().endswith(")") and "(" in value_code:
+                temporary:str = f"_inplace{self._next_temp()}"
+                self._emit(f"{value_t} {temporary} = {value_code};")
+                vector_store = self._emit_vector_inplace(
+                    target_code, op_name, target_code, target_t, temporary, value_t)
+            self._emit(vector_store)
+            return
+
         name:str = op_name
         if name == "Div":
             if is_int(target_t) and is_int(value_t):
@@ -4632,6 +4647,37 @@ class FunctionTranslator:
         if isinstance(value, (int, float)) and not isinstance(value, np.ndarray):
             return self._visit_constant(ast.Constant(value=value))
         self._error(f"unknown name '{node.id}' (only parameters, local variables and int/float/bool global constants are supported)", node)
+
+    def _emit_vector_inplace(self, target_code:str, op_name:str,
+                             left:str, lt:Any, right:str, rt:Any)->Optional[str]:
+        """`v += w` on a vector as `v = v + w`, or None when that form does not apply.
+
+        A vector has no C in-place operator: CUDA rejects `v += w` outright. The ordinary
+        `+` over vectors already produces the per-component form the vector dispatch knows
+        (see `_visit_binop`), so the store is written out instead.
+        """
+        symbol:str = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/"}.get(op_name, "")
+        if not symbol or not (is_vec(lt) or is_vec(rt)):
+            return None
+        if is_vec(lt) and is_vec(rt):
+            if lt != rt:
+                return None      # the caller reports the mismatched types
+            if self.backend == "opencl":
+                return f"{target_code} = ({left} {symbol} {right});"
+            # The right operand can be a call with side effects (`pixel_color +=
+            # scene.ray_color(...)`), and the per-component form names it once per
+            # component: evaluating it three times would be wrong and wasteful, so it goes
+            # into a temporary first, which the caller emits to get a name back.
+            return f"{target_code} = {self._vec_componentwise(symbol, left, lt, right=right)};"
+        # A vector with a scalar broadcast: the vector side decides which is which.
+        vector_type:Any = lt if is_vec(lt) else rt
+        vector_operand:str = left if is_vec(lt) else right
+        scalar_operand:str = right if is_vec(lt) else left
+        if self.backend == "opencl":
+            return f"{target_code} = ({left} {symbol} {right});"
+        expanded:str = self._vec_componentwise(symbol, vector_operand, vector_type,
+                                               scalar=scalar_operand)
+        return f"{target_code} = {expanded};"
 
     def _vec_componentwise(self, op:str, left:str, vec:str, right:str="", scalar:str="")->str:
         """CUDA has no vector arithmetic/math overloads; expand into per-component form.

@@ -226,3 +226,39 @@ def test_a_property_write_calls_its_setter(runner):
     out = np.zeros(1, dtype=np.float32)
     runner(writes_a_property, Measured(0.0, 2.0, 0), out)
     assert float(out[0]) == pytest.approx(4.0)
+
+
+@kernel
+def accumulates_a_vector(value, answer: np.ndarray):
+    """`pixel += color`: C has no `+=` for a vector type."""
+    for i in range(answer.shape[0]):
+        total = value * 0.0
+        total += value
+        total += value
+        answer[i] = total.x
+
+
+@kernel
+def accumulates_a_call(color, answer: np.ndarray):
+    """The operand is a call, which must be evaluated once, not once per component."""
+    for i in range(answer.shape[0]):
+        total = color * 0.0
+        total += color * 2.0
+        answer[i] = total.y
+
+
+def test_a_vector_in_place_operator_is_written_out(runner):
+    """`v += w` on a vector becomes `v = v + w`, because the vector has no `+=`.
+
+    CUDA rejects `v += w` for a vector type outright ("no operator \"+=\" matches these
+    operands"), and the per-component `+` the vector dispatch produces is the form the
+    store needs. An operand that is a call is evaluated into a temporary first: the
+    component-wise spelling names it once per component.
+    """
+    from pygf import float3
+
+    out = np.zeros(1, dtype=np.float32)
+    runner(accumulates_a_vector, float3(1.0, 2.0, 3.0), out)
+    assert float(out[0]) == pytest.approx(2.0)   # 1.0 accumulated twice
+    runner(accumulates_a_call, float3(1.0, 2.0, 3.0), out)
+    assert float(out[0]) == pytest.approx(4.0)   # 2.0 doubled
