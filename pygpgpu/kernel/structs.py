@@ -142,19 +142,39 @@ def nested_dtypes(dtype:np.dtype)->List[np.dtype]:
     return found
 
 
+def _class_source_file(cls:type) -> str:
+    """The file a class was written in, from any function it defines."""
+    import sys
+
+    module:Any = sys.modules.get(getattr(cls, "__module__", ""))
+    module_file:str = getattr(module, "__file__", "") or ""
+    if module_file:
+        return module_file
+    # A class a test module created on the fly can name a module without a file; its own
+    # method still carries the source location.
+    for value in getattr(cls, "__dict__", {}).values():
+        code:Any = getattr(getattr(value, "__func__", value), "__code__", None)
+        if code is not None:
+            return getattr(code, "co_filename", "") or ""
+    return ""
+
+
 def declared_file(dtype:Any) -> str:
     """The python file the class behind this structure was declared in, or "".
 
     A structure belongs where its python class lives: that module's generated file holds
-    the declaration, and every other file that names the type includes it.
+    the declaration, and every other file that names the type includes it. A structure
+    synthesized from a plain python object takes the file of the class the caller wrote --
+    the object's own class -- because the generated class behind the layout lives in this
+    package and would send the declaration here instead of to the caller.
     """
-    import sys
-
+    recorded:Optional[str] = _DECLARED_FILES.get(np.dtype(dtype))
+    if recorded:
+        return recorded
     cls:Optional[type] = declared_class(dtype)
     if cls is None:
         return ""
-    module:Any = sys.modules.get(getattr(cls, "__module__", ""))
-    return getattr(module, "__file__", "") or ""
+    return _class_source_file(cls)
 
 
 def render_structures(dtypes:List[np.dtype], backend:str)->str:
@@ -210,6 +230,11 @@ _NAME_BASES: Dict[np.dtype, str] = {}
 # dtype -> the C name it was first given. Pinned, because a later class registration must
 # not rename a layout an existing signature already spells.
 _SETTLED_NAMES: Dict[np.dtype, str] = {}
+# dtype -> the python file the class behind it was written in. Kept separately from
+# `_DECLARED`, because a structure synthesized from a plain object has a *generated* class
+# (built by this package) while its members were inferred from the caller's source: the
+# declaration belongs to that caller's module, not to the file that built the class.
+_DECLARED_FILES: Dict[np.dtype, str] = {}
 
 
 def register_name_hint(dtype:Any, cls:type) -> None:
@@ -226,6 +251,12 @@ def register_name_hint(dtype:Any, cls:type) -> None:
         return
     dtype:np.dtype = np.dtype(dtype)
     _NAME_BASES.setdefault(dtype, _safe_identifier(name))
+    # The class the value came from is the one that says where the declaration belongs, and
+    # for a plain python object it is the only such evidence: the structure itself is built
+    # here, so its own class names this package's file.
+    source_file:str = _class_source_file(cls)
+    if source_file:
+        _DECLARED_FILES.setdefault(dtype, source_file)
 
 
 def _safe_identifier(name:str) -> str:

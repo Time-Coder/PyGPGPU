@@ -133,22 +133,23 @@ def _relative_segments(path: str) -> List[str]:
     return segments
 
 
-def library_source_files() -> List[str]:
+def package_source_files() -> List[str]:
     """Every python file of this package, as normalized absolute paths.
 
-    A structure synthesized from a plain python object is *built* by this package
-    (`objects.py` defines the ctypes class), so the class it records names a library file
-    rather than the caller's module. Such a structure belongs where it is used, and this
-    list is what tells a caller's own module apart from a file of this package.
+    A structure declaration is routed to the module that defines its class, but a class can
+    live here instead of in the caller's project: a structure synthesized from a plain
+    python object is built by this package, and two classes can share one layout, so the
+    class registered first may be one of ours. Writing a caller's declaration into a path
+    inside this package is never right, so this list is what a caller's own module is
+    checked against.
     """
     package_root: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     files: List[str] = []
     for directory, _subdirectories, names in os.walk(package_root):
         for name in names:
-            if not name.endswith(".py"):
-                continue
-            files.append(os.path.normcase(
-                os.path.abspath(os.path.join(directory, name))))
+            if name.endswith(".py"):
+                files.append(os.path.normcase(
+                    os.path.abspath(os.path.join(directory, name))))
     return files
 
 

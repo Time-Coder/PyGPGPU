@@ -1817,13 +1817,15 @@ class PyKernel:
                 if dtype not in structure_dtypes:
                     structure_dtypes.append(dtype)
         # A structure declaration belongs to the module its python class is defined in: that
-        # file holds the `struct`, and every file naming the type includes it. One with no
-        # python class behind it (a hand-written record dtype, or one synthesised from an
-        # object argument) has no home to go to, so the file that uses it declares it.
+        # file holds the `struct`, and every file naming the type includes it. A structure
+        # synthesized from a plain python object is no exception -- the class the caller
+        # wrote says where its members came from, so it is declared there too. Only a
+        # hand-written record dtype, with no class behind it, stays with the file that uses
+        # it.
         from . import quaternion as quaternion_types  # noqa: PLC0415
 
+        package_files:set = set(source_paths.package_source_files())
         struct_home:Dict[Any, str] = {}
-        library_files:set = set(source_paths.library_source_files())
         for dtype in structure_dtypes:
             # A quaternion's declaration comes from the fixed header the source already
             # includes (see quaternion.include_line), so it has no module of its own: its
@@ -1832,15 +1834,22 @@ class PyKernel:
                 continue
             owner_file:str = structs.declared_file(dtype)
             if not owner_file:
+                # No class behind this layout (a hand-written record dtype), or one this
+                # process never saw registered: nothing says where it belongs, so it is
+                # declared by the file that uses it rather than dropped.
                 continue
-            # A structure synthesized from a plain python object is *made* by this package
-            # (objects.py builds the class), so its class names a library file rather than
-            # the caller's module. It belongs where it is used, so it is declared by the
-            # kernel's own file.
-            if os.path.normcase(os.path.abspath(owner_file)) in library_files:
+            # A structure synthesized from a plain python object has a *generated* class,
+            # and two classes can share one layout (so one dtype, one C type): the class
+            # registered first decides the name, and its file can be this package's own when
+            # the object was made elsewhere. Nothing reliable says then where the
+            # declaration belongs, so it stays with the file that uses it rather than being
+            # written into a path inside this package.
+            if os.path.normcase(os.path.abspath(owner_file)) in package_files:
                 continue
-            struct_home[dtype] = source_paths.source_path(
-                kernel_source_file, owner_file, backend)
+            home:str = source_paths.source_path(kernel_source_file, owner_file, backend)
+            if home == module_of({"source_file": kernel_source_file}):
+                continue        # the kernel's own file declares it; nothing to route
+            struct_home[dtype] = home
         typedefs:str = (structs.render_structures(
             [dtype for dtype in structure_dtypes
              if dtype not in struct_home
