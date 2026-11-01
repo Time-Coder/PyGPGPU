@@ -2740,6 +2740,7 @@ class FunctionTranslator:
             self._visit_statement(statement)
         self._indent -= 1
         self._emit("}")
+        self._emit_blank()
 
     # ---------- kernel return values ----------
     #
