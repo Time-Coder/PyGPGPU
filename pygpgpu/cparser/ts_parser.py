@@ -99,7 +99,7 @@ class TSParserMixin:
                 specifier, alias = child.named_children[0], (self._node_text(child.named_children[1]) if len(child.named_children) > 1 else "")
                 if specifier.type in ("struct_specifier", "union_specifier"):
                     self._parse_struct(specifier, alias)
-            elif child.type == "struct_specifier":
+            elif child.type in ("struct_specifier", "union_specifier"):
                 self._parse_struct(child)
             elif child.type == "function_definition":
                 self._parse_function(child)
@@ -125,11 +125,21 @@ class TSParserMixin:
             return
 
         used_name:str = (alias_name if alias_name else struct_name)
-        struct_info:Any = self._new_struct_info(used_name)
+        # A union and a structure parse identically -- the members are the same list
+        # -- but they lay out differently: a union gives every member the same address.
+        # The node that named this declaration is the only record of which one it is.
+        is_union:bool = node.type == "union_specifier"
+        struct_info:Any = self._new_struct_info(used_name, is_union)
         keys:Set[str] = {used_name}
         if struct_name:
             keys.add(struct_name)
             keys.add("struct " + struct_name)
+            # A union's name is spelled with its own keyword, exactly as a structure's is:
+            # a declaration written `union Tag { ... };` names its type `union Tag`, and a
+            # member declared that way reaches the parser's type text with the keyword in
+            # it. Registering only `struct Tag` left a generated `union U_<hash>` unreachable
+            # by the member declarations that name it.
+            keys.add("union " + struct_name)
         for key in keys:
             self._struct_infos[key] = struct_info
 

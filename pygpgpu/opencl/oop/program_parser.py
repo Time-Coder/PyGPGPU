@@ -5,6 +5,7 @@ import sys
 import copy
 import json
 from ctypes import c_char_p, c_uint64, Structure
+from ctypes import Union as ctypes_union
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Union
 
 from ...cparser import CPreprocessor
@@ -311,6 +312,22 @@ class Kernel_{kernel_name}(KernelWrapper):
         return setter
     
     @staticmethod
+    def _structure_bytes(value)->bytes:
+        """The raw bytes of one record value, from any of the shapes a caller passes.
+
+        A `ctypes` instance converts through `bytes()`, which is what backs it. A numpy
+        record does not: `bytes(record)` goes through the buffer protocol, and a dtype whose
+        members overlap (a union layout) or whose offsets do not ascend is refused there with
+        "dtypes with overlapping or out-of-order fields are not representable as buffers".
+        `tobytes()` copies the element's raw memory instead, so it answers for every layout.
+        """
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        if isinstance(value, np.void):
+            return value.tobytes()
+        return bytes(value)
+
+    @staticmethod
     def _apply_structure_pointers(value, cmd_queue:CommandQueue):
         if isinstance(value, Structure) and hasattr(value, "apply_pointers"):
             value.apply_pointers(cmd_queue)
@@ -352,7 +369,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                 dtype.append((member.name, getattr(base_type, "dtype", base_type),
                               member.array_shape))
 
-        _fields_, dtype = align_struct(_fields_, dtype)
+        _fields_, dtype = align_struct(_fields_, dtype, is_union=struct_info.is_union)
         ptr_field_prefix:str = f"_{struct_info.name}_ptr_"
 
         def __init__(self, *args, **kwargs):
@@ -373,7 +390,15 @@ class Kernel_{kernel_name}(KernelWrapper):
                     setattr(self, f"_{self.__class__.__name__}_data_{key}", used_kwargs[key])
                     del used_kwargs[key]
 
-            Structure.__init__(self, **used_kwargs)
+            # `ctypes.Structure.__init__` only accepts a Structure instance, so a class
+            # built on the Union base has to store the members through attribute sets --
+            # one member per keyword, which is exactly what the structure branch does
+            # through its constructor.
+            if issubclass(type(self), Structure):
+                Structure.__init__(self, **used_kwargs)
+            else:
+                for key, item in used_kwargs.items():
+                    setattr(self, key, item)
 
         def apply_pointers(self, cmd_queue:CommandQueue, member_infos:Optional[Dict[str, Any]]=None)->List[Dict[str, Any]]:
             result = []
@@ -445,7 +470,14 @@ class Kernel_{kernel_name}(KernelWrapper):
                 ori_name:str = field[0].replace(ptr_field_prefix, "")
                 type_body[ori_name] = property(self._make_getter(ori_name), self._make_setter(ori_name))
 
-        struct_type = type(struct_name, (Structure,), type_body)
+        # A union gives every member offset zero, and a type() over a Structure base
+        # would lay them out one after another -- the device type would then be twice
+        # as wide as the value the caller hands over. The dtype already says which it
+        # is (see structs.is_union_dtype), so the base follows it.
+        from ...kernel.structs import is_union_dtype  # noqa: PLC0415 (import cycle)
+
+        base_type = ctypes_union if is_union_dtype(dtype) else Structure
+        struct_type = type(struct_name, (base_type,), type_body)
         self._struct_types[struct_name] = struct_type
 
         return struct_type
@@ -456,8 +488,8 @@ class Kernel_{kernel_name}(KernelWrapper):
             self._create_struct_type(struct_info)
         self._analyze_kernels()
 
-    def _new_struct_info(self, name:str)->StructInfo:
-        return StructInfo(name=name)
+    def _new_struct_info(self, name:str, is_union:bool=False)->StructInfo:
+        return StructInfo(name=name, is_union=is_union)
 
     def _new_kernel_info(self, name:str)->KernelInfo:
         return KernelInfo(name=name)

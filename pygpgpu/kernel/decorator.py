@@ -8,9 +8,21 @@ import inspect
 import os
 import pathlib
 import threading
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 import numpy as np
+
+from typing_extensions import ParamSpec
 
 from ..vec_types.layout import pack
 from ..utils import local_size_for_global, detect_work_size, device_limits
@@ -29,6 +41,30 @@ from .translator import (
 )
 from .objects import ObjectBinding, convert_object_arguments
 from . import source_paths
+
+
+# ---------- typing hooks ----------
+
+# A kernel is a callable object, so the IDE's parameter hints come from its type, not from
+# the ``__call__`` of the class it happens to be. ``PyKernel`` is generic over the decorated
+# function's own parameters (PEP 612), which is what lets a type checker see
+# ``add(a, b, out)``'s signature on ``add`` itself. Before this, ``@kernel`` published
+# ``PyKernel`` as its return type and the decorated name was read as the *decorator*
+# (``(f) -> PyKernel``), so every call showed ``__call__(*args, **kwargs)`` and lost its
+# parameter list.
+#
+# The generic base is the one construct that differs by interpreter: a user-defined generic
+# over a ParamSpec needs Python 3.10+, and this package supports 3.7+, so the base exists
+# only for the type checkers; at runtime it is a plain class whose ``__class_getitem__``
+# returns itself. Subscripting ``PyKernel[P]`` therefore never fails at import.
+_P = ParamSpec("_P")
+
+if TYPE_CHECKING:
+    _KernelBase = Generic[_P]
+else:
+    class _KernelBase:
+        def __class_getitem__(cls, item:Any)->type:
+            return cls
 
 
 # ---------- bracket selector parsing ----------
@@ -1782,6 +1818,22 @@ class PyKernel:
         # object is what the kernel receives as a parameter (see
         # FunctionTranslator._host_created_assignment).
         creation_values, _ = _host_created_values(self.raw_func, args, instance)
+        # The class each STRUCTURE argument was actually built from. One dtype can stand
+        # for several classes, so the dtype alone cannot say whose method `p.total` is --
+        # but the launch has the instance the caller handed over, and its type is the
+        # answer. Keyed by parameter name, which is what the translator's expressions carry.
+        # `structure_dtype_of` excludes the vector types, which are ctypes classes too.
+        struct_arg_classes:Dict[str, type] = {}
+        parameter_names:List[str] = _positional_argument_names(self.raw_func)
+        for parameter_name, value in zip(parameter_names, args):
+            # A union is a `ctypes` record as well but not a `Structure` subclass, so the
+            # class is recognized through the shared predicate rather than `ctypes.Structure`.
+            if not structs.is_ctypes_record(value):
+                continue
+            # structure_dtype_of excludes the vector types, which are ctypes classes too.
+            if structs.structure_dtype_of(value) is None:
+                continue
+            struct_arg_classes[parameter_name] = type(value)
         translator:FunctionTranslator = FunctionTranslator(
             self.raw_func, list(arg_types) + list(self_types), codegen_backend,
             self._resolve_global, device_cache, is_kernel=True,
@@ -1789,6 +1841,7 @@ class PyKernel:
             self_owner=owner, launch_backend=backend,
             self_struct_members=self_struct_members,
             self_struct_type=self_struct_type,
+            struct_arg_classes=struct_arg_classes,
             host_creation_values=creation_values)
         translator.translate()
         # One kernel per magic loop: a body with several renders several, launched in order

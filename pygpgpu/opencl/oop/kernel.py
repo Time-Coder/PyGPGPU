@@ -1,5 +1,6 @@
 from __future__ import annotations
 from ctypes import c_size_t, pointer, sizeof, Structure, byref, memmove, c_void_p
+from ctypes import Union as ctypes_union
 from functools import partial
 import concurrent.futures
 import asyncio
@@ -126,6 +127,21 @@ def _bridge(completion:Any, future:Any, on_done:Any)->None:
 
     completion.add_done_callback(relay)
 
+
+def _structure_bytes(value)->bytes:
+    """The raw bytes of one record value, from any of the shapes a caller passes.
+
+    A `ctypes` instance converts through `bytes()`, which is what backs it. A numpy record
+    does not: `bytes(record)` goes through the buffer protocol, and a dtype whose members
+    overlap (a union layout) or whose offsets do not ascend is refused there with "dtypes
+    with overlapping or out-of-order fields are not representable as buffers". `tobytes()`
+    copies the element's raw memory instead, so it answers for every layout.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, np.void):
+        return value.tobytes()
+    return bytes(value)
 
 class Kernel(CLObject):
 
@@ -330,7 +346,10 @@ class Kernel(CLObject):
                 host_data[:] = buffer.data.tolist()
             elif isinstance(host_data, np.ndarray):
                 host_data[:] = buffer.data
-            elif isinstance(host_data, Structure):
+            elif isinstance(host_data, (Structure, ctypes_union)):
+                # A union instance is a `ctypes` record too: its bytes are the copy target,
+                # the same way a structure's are. Testing for `Structure` alone skipped the
+                # write-back, so a kernel that wrote `p.i` left the caller's union unchanged.
                 memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
     def __after_call(self, cmd_queue:CommandQueue, launch_event:Event, bound:Dict[str, Any])->List[Event]:
@@ -560,13 +579,15 @@ class Kernel(CLObject):
                 is_struct = True
 
             if not arg_info.is_ptr:
-                if is_struct and isinstance(value, (np.void, bytes, bytearray, Structure)):
+                if is_struct and isinstance(value, (np.void, bytes, bytearray, Structure, ctypes_union)):
                     # A numpy record holds exactly the bytes the dtype described, which is the
                     # layout the parsed structure has, so it can back the ctypes value directly.
-                    # A ctypes.Structure instance is the caller's own class, which is a
+                    # A ctypes instance is the caller's own class, which is a
                     # different type from the one the parser generated for the same layout,
-                    # so it goes through its bytes as well.
-                    value = content_type.from_buffer_copy(bytes(value))
+                    # so it goes through its bytes as well -- through `_structure_bytes`,
+                    # because `bytes(record)` is refused for an overlapping (union) dtype.
+                    value = content_type.from_buffer_copy(
+                        ProgramParser._structure_bytes(value))
                 if isinstance(value, content_type):
                     used_value = value
                 else:
@@ -600,15 +621,17 @@ class Kernel(CLObject):
                     CL.clSetKernelArg(self.id, index, bytes_per_group, None)
                     bound[arg_info.name] = (None, value, None)
                 else:
-                    if is_struct and isinstance(value, (Structure, np.void)):
+                    if is_struct and isinstance(value, (Structure, ctypes_union, np.void)):
                         # A pointer-to-structure parameter: the caller hands over the
                         # structure value itself, and the launch needs a device address.
                         # Allocate a buffer, upload the bytes, and pass that pointer; a
                         # body that writes the members reads the buffer back like any
                         # written array.
                         packed:Any = (value if isinstance(value, np.void)
-                                      else content_type.from_buffer_copy(bytes(value)))
-                        data:np.ndarray = np.frombuffer(bytes(packed), dtype=np.uint8)
+                                      else content_type.from_buffer_copy(
+                                          ProgramParser._structure_bytes(value)))
+                        data:np.ndarray = np.frombuffer(
+                            ProgramParser._structure_bytes(packed), dtype=np.uint8)
                         buffer, event = arg_info.use_buffer(cmd_queue, data)
                         CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
                         bound[arg_info.name] = (buffer, value, packed)

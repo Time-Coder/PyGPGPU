@@ -5,6 +5,12 @@ needs: `np.dtype([("i", "<i4"), ("f", "<f4")])` is `struct { int i; float f; };`
 the host has to be a `ctypes` class, and an array of that dtype is simply an array of the
 structure.
 
+A dtype whose fields all sit at offset zero is a **union**: two members share the storage, and
+no C `struct` can describe that -- emitting one would place the second member after the first
+and make the type twice as wide. Such a dtype is therefore declared as `union { ... }` on the
+device, whichever way the host built it: `ctypes.Union` (and `ctypes.LittleEndianUnion`) yields
+exactly that record shape, and so does a `np.dtype` written by hand with explicit offsets.
+
 The generated names are derived from the dtype text, so the same dtype always yields the same
 C type name -- the kernel cache is keyed by the generated source, and a name that changed
 between runs would defeat it.
@@ -27,7 +33,7 @@ _DECLARED_ALL: Dict[np.dtype, List[type]] = {}
 
 
 def is_record(dtype:Any)->bool:
-    """True for a structured dtype that is a *structure*, not a vector.
+    """True for a structured dtype that is a *structure* or a *union*, not a vector.
 
     A dtype whose layout coincides with a vector type is a structure when a
     `ctypes.Structure` class declared it -- the layout alone cannot tell the two apart.
@@ -41,6 +47,23 @@ def is_record(dtype:Any)->bool:
     if _vector_dtype_name(dtype) is not None:
         return False
     return True
+
+
+def is_union_dtype(dtype:Any)->bool:
+    """True when a record dtype describes a **union** rather than a structure.
+
+    A C union gives every member the same address, and numpy records exactly that as a list
+    of offsets that are all zero. Nothing else produces that shape -- a C structure's members
+    follow one another, and a packed record's offsets still ascend -- so the offsets are the
+    whole answer, and it is the flat one: the layout comes from the bytes, not from the way
+    a caller happened to build the dtype. Two dtypes with one offset list therefore agree on
+    this, which is what lets a `ctypes.Union` and a hand-written `np.dtype` with zero offsets
+    share one device type.
+    """
+    if not isinstance(dtype, np.dtype) or dtype.fields is None:
+        return False
+    offsets:List[int] = [int(dtype.fields[name][1]) for name in dtype.names or ()]
+    return bool(offsets) and all(offset == 0 for offset in offsets)
 
 
 def struct_name(dtype:np.dtype)->str:
@@ -200,6 +223,10 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
             # One blank line between structure definitions.
             lines.append("")
         members:List[str] = structure_fields(dtype, backend)
+        # A layout whose members all share one address is a union, and the declaration has to
+        # say so: `struct` would put the second member after the first and hand the kernel a
+        # value of the wrong width, so the rank a member sits at is part of the declaration.
+        kind:str = "union" if is_union_dtype(dtype) else "struct"
         # Every structure is guarded by its own name. A generated file can be reached from
         # several others (`#include`), and two modules can declare one layout -- therefore
         # one C type -- so the guard is what makes that declaration appear once however
@@ -208,17 +235,17 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
         lines.append(f"#ifndef {guard}")
         lines.append(f"#define {guard}")
         if backend == "opencl":
-            lines.append("typedef struct")
+            lines.append(f"typedef {kind}")
             lines.append("{")
             body:str = "\n".join(f"    {member};" for member in members)
             lines.append(body)
             lines.append(f"}} {name};")
         else:
-            lines.append(f"struct {name}")
+            lines.append(f"{kind} {name}")
             lines.append("{")
             lines.append("\n".join(f"    {member};" for member in members))
             lines.append("};")
-            lines.append(f"typedef struct {name} {name};")
+            lines.append(f"typedef {kind} {name} {name};")
         lines.append("#endif")
     return "\n".join(lines)
 
@@ -273,23 +300,47 @@ def register(dtype:Any) -> str:
     return name
 
 
+def is_ctypes_record(value:Any)->bool:
+    """True when a value is a `ctypes` structure **or union** subclass/instance.
+
+    A caller can declare a layout in four spellings: `ctypes.Structure`,
+    `ctypes.LittleEndianStructure`, `ctypes.Union` and `ctypes.LittleEndianUnion`. The
+    little-endian pair are subclasses of the native pair, so `ctypes.Structure` covers them;
+    a union is a *sibling* type in `ctypes`, not a subclass, and testing only for
+    `ctypes.Structure` made every union fall through to the plain-object path, where the
+    members are guessed from what the body reads and a `p["i"]` spelling has nothing to
+    answer it.
+
+    A class and an instance are both accepted: `infer_ctype` sees whichever the caller
+    passed, and both are `isinstance` of the abstract base of their own kind.
+    """
+    import ctypes
+
+    kind:Any = value if isinstance(value, type) else type(value)
+    return isinstance(kind, type) and issubclass(kind, (ctypes.Structure, ctypes.Union))
+
+
 def register_class(cls:Any) -> Optional[np.dtype]:
-    """Record the dtype a `ctypes.Structure` class declares, and return it.
+    """Record the dtype a `ctypes` structure or union class declares, and return it.
 
     The class is kept as evidence: a dtype whose layout matches a vector type is still a
     structure when the caller wrote a class for it, and member access then has to be the
     structure's string subscript rather than a vector's component name.
 
+    A union is registered through this same door -- `np.dtype(ctypes_union)` yields the
+    record whose member offsets are all zero, which is exactly what `is_union_dtype`
+    recognizes, so no separate registry is needed.
+
     The class also gains numpy's member spelling (`instance["i"]`) if it does not already
     accept one. A kernel body writes `p["i"]` -- the spelling that works on every backend --
     so the interpreter backend, which runs the body unchanged, must see the same thing: a
-    `ctypes.Structure` instance answers `["i"]` exactly as a record element does.
+    `ctypes` record instance answers `["i"]` exactly as a record element does.
     """
     import ctypes
 
     from .translator import _vec_registry
 
-    if not (isinstance(cls, type) and issubclass(cls, ctypes.Structure)):
+    if not (isinstance(cls, type) and issubclass(cls, (ctypes.Structure, ctypes.Union))):
         return None
     # A vector type is a `ctypes.Structure` too, and it already answers a positional
     # subscript (`v[0]`); installing a member-name subscript on it would replace that.
@@ -398,7 +449,7 @@ def _add_subscript_access(cls:Any) -> None:
 
 
 def is_declared_structure(dtype:Any) -> bool:
-    """True when a `ctypes.Structure` class declared this dtype's layout.
+    """True when a `ctypes` structure or union class produced this dtype's layout.
 
     Alignment is the evidence, not just the registry: `np.dtype(cls)` over a
     `ctypes.Structure` always produces an *aligned* record (C layout), while the vector
@@ -406,13 +457,19 @@ def is_declared_structure(dtype:Any) -> bool:
     record whose layout coincides with a vector -- `{float x; float y;}` against `float2` --
     is a structure when it is aligned, and a vector when it is not.
 
+    A `ctypes.Union` is the one exception to the alignment rule: numpy cannot mark a record
+    whose members all share an address as aligned (alignment describes the stride of a
+    *sequence* of them), so `np.dtype(ctypes_union)` comes back with ``isalignedstruct``
+    False. Its offsets are the evidence instead, and they are all zero -- see
+    `is_union_dtype`, which is the same test a hand-written dtype of that shape passes.
+
     Note the argument has to be the dtype *object*, not a value compared against one: an
     aligned record and the vector's plain record compare equal and hash equal, so only the
     ``isalignedstruct`` flag on the dtype you were handed tells them apart.
     """
     if not isinstance(dtype, np.dtype) or dtype.fields is None:
         return False
-    return bool(dtype.isalignedstruct)
+    return bool(dtype.isalignedstruct) or is_union_dtype(dtype)
 
 
 def structure_dtype_of(value:Any) -> Optional[np.dtype]:
@@ -425,17 +482,15 @@ def structure_dtype_of(value:Any) -> Optional[np.dtype]:
     An ndarray keeps the dtype object it was created with, so an aligned record array stays
     distinguishable from a vector array whose layout happens to match.
     """
-    import ctypes
-
     from .translator import _vec_registry
 
     if isinstance(value, np.ndarray):
         dtype:np.dtype = value.dtype
         return dtype if is_declared_structure(dtype) else None
 
-    cls:Any = type(value) if isinstance(value, ctypes.Structure) else value
-    if not (isinstance(cls, type) and issubclass(cls, ctypes.Structure)):
+    if not is_ctypes_record(value):
         return None
+    cls:Any = type(value) if not isinstance(value, type) else value
     if cls in _vec_registry().values() or _is_vector_alias(cls):
         return None
     return register_class(cls)

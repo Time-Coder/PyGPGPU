@@ -46,12 +46,43 @@ def np_alignment(dtype:Any) -> int:
     return int(field.itemsize) or 1
 
 
-def align_struct(fields:List[Any], spec:List[Any]) -> tuple:
-    """The aligned ctypes fields and numpy dtype for one parsed structure.
+def align_struct(fields:List[Any], spec:List[Any], is_union:bool=False) -> tuple:
+    """The aligned ctypes fields and numpy dtype for one parsed structure or union.
 
     ``fields`` are the ``(name, ctype)`` members and ``spec`` the matching
     ``(name, numpy_dtype[, shape])`` entries, in declaration order.
+
+    A **union** gives every member offset zero and takes the size of its widest member,
+    rounded up to the strictest alignment -- not the sum of the members, which is what the
+    structure layout below computes. That is the whole difference, and without it the
+    parsed type for `union { int; float; }` came out 8 bytes where the caller's own 4-byte
+    value was uploaded, so the driver rejected the buffer as too small.
     """
+    if is_union:
+        widest:int = 0
+        strictest:int = 1
+        members:List[Any] = []
+        names:List[str] = []
+        formats:List[Any] = []
+        for (member_name, ctype), entry in zip(fields, spec):
+            base:np.dtype = np.dtype(entry[1]) if len(entry) > 1 else np.dtype("u1")
+            shape:Any = entry[2] if len(entry) > 2 else ()
+            count:int = 1
+            for extent in shape or ():
+                count *= int(extent)
+            strictest = max(strictest, np_alignment(base))
+            widest = max(widest, int(base.itemsize) * count)
+            members.append((entry[0], ctype))
+            names.append(entry[0])
+            formats.append((base, shape) if shape else base)
+        itemsize:int = -(-widest // strictest) * strictest
+        if itemsize > widest:
+            # The padding member keeps the ctypes class and the record the same width.
+            members.append(("_pad_tail", c_char * (itemsize - widest)))
+        dtype:np.dtype = np.dtype({"names": names, "formats": formats,
+                                   "offsets": [0] * len(names), "itemsize": itemsize})
+        return members, dtype
+
     layout:List[tuple] = []
     cursor:int = 0
     alignment:int = 1

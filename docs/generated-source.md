@@ -70,6 +70,23 @@ example compiled its own kernel and then failed on the helper, which is how that
 Each declaration is wrapped in its own guard (`#ifndef __<C name>__`), because two modules can name
 one layout -- therefore one C type -- and whichever file is reached first declares it.
 
+## A union is declared `union`, not `struct`
+
+The dtype decides which keyword the block uses: `structs.is_union_dtype` reads the field **offsets**,
+and a layout whose members all sit at offset zero is a union. Writing it as a `struct` would place
+the second member after the first, so the device type would be as wide as the sum of the members
+instead of the widest one -- and the host, which uploads the caller's own (narrower) value, would be
+rejected with "Buffer size too small". Both ctypes dialects reach this: `ctypes.Union` and
+`ctypes.LittleEndianUnion` (siblings of `ctypes.Structure`, not subclasses), and a hand-written
+`np.dtype` with explicit zero offsets, which is the same layout described the same way.
+
+    typedef union { int i; float f; } U_<hash>;      opencl
+    union U_<hash> { int i; float f; };              cuda / hip
+    typedef union U_<hash> U_<hash>;
+
+The parsed type on the host side follows the same keyword, so the launch copies both directions
+through a value of the right width.
+
 ## Names
 
 | What | Shape | Where the class comes from |

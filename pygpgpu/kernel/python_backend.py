@@ -245,26 +245,29 @@ def as_host_array(value: Any) -> Any:
 
 
 def prepare_structure_classes(func: Any) -> None:
-    """Give every `ctypes.Structure` class this function names a member subscript.
+    """Give every `ctypes` structure or union class this function names a member subscript.
 
     The interpreter runs the body unchanged, so `ray["origin"]` needs to work on the
     instance the body constructed -- but nothing on this path inspects argument types, which
     is where a class would otherwise be registered. The body's own names are the reliable
     source: `Ray` is a global of the function, and its own module is what a body usually
     refers to.
+
+    A union is a sibling of `ctypes.Structure`, not a subclass, so it is asked for through
+    `is_ctypes_record` -- otherwise a union body that spells `p["i"]` had no subscript to
+    reach and the interpreter backend alone failed on a kernel every device backend ran.
     """
-    import ctypes
     import sys
 
     from . import structs
 
     namespace: dict = getattr(func, "__globals__", {}) or {}
     for value in list(namespace.values()):
-        if isinstance(value, type) and issubclass(value, ctypes.Structure):
+        if isinstance(value, type) and structs.is_ctypes_record(value):
             structs.register_class(value)
     for value in list(vars(sys.modules["builtins"]).values()):
         # `ctypes.Structure` itself, which a body may name -- harmless, already a class.
-        if isinstance(value, type) and issubclass(value, ctypes.Structure):
+        if isinstance(value, type) and structs.is_ctypes_record(value):
             structs.register_class(value)
 
 

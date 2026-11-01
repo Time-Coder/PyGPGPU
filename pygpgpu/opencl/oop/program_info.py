@@ -157,8 +157,12 @@ class ArgInfo(VarInfo):
 
 class StructInfo:
 
-    def __init__(self, name:str):
+    def __init__(self, name:str, is_union:bool=False):
         self.name: str = name
+        # A C union gives every member the same address; the ctypes class built for it has
+        # to be a Union, or the members are laid out one after another and the device
+        # type is as wide as their sum instead of their maximum.
+        self.is_union: bool = is_union
         self.members: Dict[str, VarInfo] = {}
 
     def declare(self)->str:

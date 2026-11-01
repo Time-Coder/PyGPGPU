@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import enum
 import hashlib
 import inspect
 import math
@@ -233,6 +234,21 @@ def _property_of(cls:type, name:str)->Optional[Any]:
     return own if isinstance(own, property) else None
 
 
+def _property_carrier(classes:Any, name:str)->Optional[Any]:
+    """The descriptor for `name` from the first of `classes` that defines one.
+
+    One dtype can stand for several classes -- two classes with one layout share it -- so
+    the property has to be looked for in every class the layout carries, not just the one
+    registered first. Without this, the second class's `box.total` compiled the first
+    class's getter and answered its value.
+    """
+    for cls in classes or ():
+        descriptor:Optional[Any] = _property_of(cls, name)
+        if descriptor is not None:
+            return descriptor
+    return None
+
+
 def _property_accessor(descriptor:property, writer:bool)->Optional[Callable]:
     """The getter (or setter) of a property, or None when it defines no such half."""
     accessor:Any = descriptor.fset if writer else descriptor.fget
@@ -243,6 +259,31 @@ def _receiver_param_of(method:Any)->str:
     """The parameter name a method binds its receiver to."""
     return (method.__code__.co_varnames[0]
             if getattr(method, "__code__", None) else "self")
+
+
+def _enum_member_value(value:Any)->Optional[Tuple[Any, Any]]:
+    """The constant an `enum.Enum`/`enum.IntEnum` member stands for, or None.
+
+    An enum is a *named constant* in python, not a type a device can hold: `Kind.B` in a
+    kernel body means the number `B` was given, and every use of it (a comparison, an
+    arithmetic expression, an argument to `np.full`) wants that number. So the member is
+    replaced by its value at translation time rather than carried as a parameter.
+
+    Returns (value, member) so a caller can name the member in an error, or None when the
+    value is not an enum member. `enum.IntEnum` is a plain `int` subclass, which is why this
+    is asked *before* the ordinary int/float constant branch -- otherwise an `IntEnum`
+    member silently became the integer, which is the answer for an `IntEnum` but not for an
+    `Enum`, whose value may be any type.
+    """
+    if not isinstance(value, enum.Enum):
+        return None
+    member:Any = value
+    payload:Any = member.value
+    if isinstance(payload, enum.Enum):
+        # An alias chain (`A = B` in the class body) resolves to the member that holds the
+        # actual value; python's own `_.value` stops at the first level.
+        payload = payload.value
+    return payload, member
 
 
 def _operator_name(magic:str)->str:
@@ -1213,6 +1254,7 @@ class FunctionTranslator:
                  host_creation_values:Optional[Dict[str, Any]]=None,
                  self_struct_members:Optional[Dict[str, str]]=None,
                  self_struct_type:Any=None,
+                 struct_arg_classes:Optional[Dict[str, type]]=None,
                  receiver_as_argument:bool=False):
         self.func:Callable = func
         self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
@@ -1264,6 +1306,11 @@ class FunctionTranslator:
         # is a data attribute, an instance method, or a staticmethod. None for the
         # decoration-time body scan, where the class does not exist yet.
         self.self_owner:Optional[type] = self_owner
+        # The class each STRUCTURE argument was actually built from. One dtype can stand
+        # for several classes -- two classes with one layout share it -- so the dtype alone
+        # cannot say whose method `p.total` is. The launch knows: the caller handed over an
+        # instance, and its type is recorded here under the parameter's name.
+        self.struct_arg_classes:Dict[str, type] = dict(struct_arg_classes or {})
         # The receiver travels as one structure: member name -> the attribute it holds.
         # A member read of `self.<attr>` becomes a field read of the struct parameter, and
         # an ndarray attribute stays a separate `_self_<attr>` argument (the read/write
@@ -3280,7 +3327,7 @@ class FunctionTranslator:
 
                 dtype:Optional[np.dtype] = _structs_module.dtype_for(base_t[1])
                 if dtype is not None and self._emit_property_write(
-                        _structs_module.declared_class(dtype), target.attr,
+                        _structs_module.declared_classes(dtype), target.attr,
                         (base_code, base_t), node.value, node):
                     return
 
@@ -4494,6 +4541,32 @@ class FunctionTranslator:
             return self._visit_attribute(node)
         self._error(f"unsupported expression: {node.__class__.__name__}", node)
 
+    def _visit_enum_constant(self, entry:Tuple[Any, Any], node:ast.AST)->Tuple[str, Any]:
+        """Emit an enum member as the constant it stands for.
+
+        An `IntEnum` member's value is an int and an `Enum`'s may be anything; only the
+        numeric ones have a device meaning, so a member whose value is not a number is
+        refused with the value's type named -- there is nothing to emit for it.
+        """
+        payload:Any = entry[0]
+        member:Any = entry[1]
+        name:str = f"{type(member).__name__}.{getattr(member, 'name', '?')}"
+        if isinstance(payload, enum.Enum):
+            payload = payload.value
+        if isinstance(payload, bool):
+            return ("true" if payload else "false"), "bool"
+        if isinstance(payload, int):
+            if payload == 0:
+                return "0", "int"
+            # An enumerator is spelled in the C source, so a negative one keeps its sign.
+            return str(payload), "int"
+        if isinstance(payload, float):
+            return self._visit_constant(ast.Constant(value=payload))
+        self._error(
+            f"{name} is an enum member whose value is a {type(payload).__name__}, which has "
+            f"no device equivalent: give the member a numeric value (an int or a float), or "
+            f"read the value on the host and pass it as a scalar argument", node)
+
     def _visit_constant(self, node:ast.Constant)->Tuple[str, Any]:
         value:Any = node.value
         if isinstance(value, bool):
@@ -4548,6 +4621,12 @@ class FunctionTranslator:
             vector_type, code = table[node.id]
             return code, vector_type
         value:Any = self.resolve_global(node.id)
+        enum_value:Optional[Tuple[Any, Any]] = _enum_member_value(value)
+        if enum_value is not None:
+            # An enum member is a named constant, so the device reads its value. Python has
+            # no device enum type to name here -- the number is what every operator and
+            # every function that accepts it already wants.
+            return self._visit_enum_constant(enum_value, node)
         if isinstance(value, bool):
             return self._visit_constant(ast.Constant(value=value))
         if isinstance(value, (int, float)) and not isinstance(value, np.ndarray):
@@ -4681,6 +4760,22 @@ class FunctionTranslator:
         """
         return t
 
+    def _property_descriptor(self, classes:Any, name:str,
+                             code:str)->Optional[Any]:
+        """The property descriptor for `name`, from the class that actually owns it.
+
+        The launch knows the exact class of a structure argument (see `_class_of`), and
+        that answer wins: two classes with one layout share a dtype, so asking the dtype
+        answered with the class that registered it first -- and `b.total` then compiled
+        `a`'s getter and returned its value.
+        """
+        exact:Optional[type] = self._class_of(code, None)
+        if exact is not None:
+            descriptor:Optional[Any] = _property_of(exact, name)
+            if descriptor is not None:
+                return descriptor
+        return _property_carrier(classes, name)
+
     def _emit_property_write(self, cls:Optional[type], name:str, base:Tuple[str, Any],
                              value:ast.expr, node:ast.AST)->bool:
         """`box.total = v` as a device call to the property's setter, or False.
@@ -4689,9 +4784,7 @@ class FunctionTranslator:
         call statement of its own. False when the class defines no such property, which
         leaves the field store to answer.
         """
-        if cls is None:
-            return False
-        descriptor:Optional[Any] = _property_of(cls, name)
+        descriptor:Optional[Any] = self._property_descriptor(cls, name, base[0])
         if descriptor is None:
             return False
         setter:Optional[Callable] = _property_accessor(descriptor, writer=True)
@@ -4723,9 +4816,7 @@ class FunctionTranslator:
         receiver as its argument -- the same shape a plain method call takes. None when the
         class defines no such property, which leaves the field lookup to answer.
         """
-        if cls is None:
-            return None
-        descriptor:Optional[Any] = _property_of(cls, name)
+        descriptor:Optional[Any] = self._property_descriptor(cls, name, base[0])
         if descriptor is None:
             return None
         getter:Optional[Callable] = _property_accessor(descriptor, writer=False)
@@ -4815,7 +4906,21 @@ class FunctionTranslator:
                     self_param=_receiver_param_of(method), receiver_as_argument=True)
         return None
 
-    def _magic_owner(self, t:Any, magic:str)->Optional[Tuple[type, Any]]:
+    def _class_of(self, code:str, t:Any)->Optional[type]:
+        """The class a value was built from, when this launch knows it exactly.
+
+        One dtype can stand for several classes -- two classes with one layout share it --
+        so a dtype alone cannot say whose method `p.total` is. The call does know: the
+        caller handed over an instance, and its type travels in `struct_arg_classes` under
+        the parameter's name. That answer wins over the dtype, which only has the class
+        that registered the layout first.
+        """
+        name:str = code.strip().lstrip("&").strip("()").strip()
+        exact:Optional[type] = self.struct_arg_classes.get(name)
+        return exact
+
+    def _magic_owner(self, t:Any, magic:str,
+                     code:str = "")->Optional[Tuple[type, Any]]:
         """The class whose magic method an operand's operator should call, and that method.
 
         A python class that defines `__add__` gives `a + b` a meaning of its own, and a
@@ -4832,13 +4937,21 @@ class FunctionTranslator:
         dtype:Any = _structs_module.dtype_for(base)
         if dtype is None:
             return None
-        cls:Optional[type] = _structs_module.declared_class(dtype)
-        if cls is None:
-            return None
-        method:Any = _magic_method_of(cls, magic)
-        if method is None:
-            return None
-        return cls, method
+        # The launch may know the exact class of this value (see `_class_of`); that answer
+        # is the one that counts, because two classes sharing a layout would otherwise be
+        # answered by whichever registered first.
+        exact:Optional[type] = self._class_of(code, t) if code else None
+        if exact is not None:
+            method:Any = _magic_method_of(exact, magic)
+            if method is not None:
+                return exact, method
+        # Otherwise ask every class the layout carries -- a shared layout means the first
+        # registered one is not necessarily the class whose method this is.
+        for cls in _structs_module.declared_classes(dtype):
+            method:Any = _magic_method_of(cls, magic)
+            if method is not None:
+                return cls, method
+        return None
 
     def _is_structure_operand(self, t:Any)->bool:
         """Whether a translated type is a structure value (a quaternion is one too).
@@ -5516,6 +5629,21 @@ class FunctionTranslator:
 
         if isinstance(node.value, ast.Name):
             module:Any = self.resolve_global(node.value.id)
+            # `Kind.B`: reading a member off an enum *class* is that member's value, exactly
+            # as reading the bare name `B` would be. The class itself has no device
+            # representation, so this has to be answered before it reaches the generic
+            # attribute path.
+            #
+            # The base has to be a real enum *class* before the attribute is read: `blockIdx`
+            # is an `_IndexVector` whose attributes compute the launch's numbers, so an
+            # unconditional `getattr` here asked for a work item that does not exist yet and
+            # made every `blockIdx.x` fail with "get_group_id() is only available inside a
+            # @kernel function body".
+            if isinstance(module, enum.EnumMeta):
+                enum_member:Optional[Tuple[Any, Any]] = _enum_member_value(
+                    getattr(module, node.attr, None))
+                if enum_member is not None:
+                    return self._visit_enum_constant(enum_member, node)
             if module is math or module is np:
                 if node.attr in _MATH_CONSTS:
                     return _MATH_CONSTS[node.attr], "float"
@@ -5557,7 +5685,7 @@ class FunctionTranslator:
                 # shadows a field would be a field read in python too, because the class
                 # body's descriptor replaces the field of the same name.
                 property_read:Optional[Tuple[str, Any]] = self._emit_property_read(
-                    structs.declared_class(dtype), node.attr, (base_code, base_t), node)
+                    structs.declared_classes(dtype), node.attr, (base_code, base_t), node)
                 if property_read is not None:
                     return property_read
                 members:Dict[str, Any] = structs.member_types(dtype, self.backend)

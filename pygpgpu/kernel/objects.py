@@ -48,12 +48,17 @@ def looks_like_object(value:Any)->bool:
     """Whether an argument is an arbitrary python object rather than a value we already know.
 
     Everything the translator already handles is excluded: arrays, numpy scalars, plain
-    numbers, strings, device handles, and anything that is a `ctypes.Structure` -- a caller's
-    declared structure and a vector type included, both of which already have a device type.
+    numbers, strings, device handles, and anything that is a `ctypes` structure *or union* --
+    a caller's declared layout and a vector type included, all of which already have a device
+    type. A union is not a `ctypes.Structure` subclass, so testing for that alone sent every
+    union down this path, where the members are guessed from what the body reads and a
+    `p["i"]` spelling has no layout behind it to answer it.
     """
+    from .structs import is_ctypes_record  # noqa: PLC0415 (import cycle)
+
     if value is None:
         return False
-    if isinstance(value, (np.ndarray, np.generic, ctypes.Structure)):
+    if isinstance(value, (np.ndarray, np.generic)) or is_ctypes_record(value):
         return False
     if isinstance(value, (bool, int, float, complex, str, bytes)):
         return False
