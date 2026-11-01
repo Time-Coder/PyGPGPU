@@ -434,6 +434,15 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
             for index in range(host_field_type._length_):
                 element_packed, _ = _pack_structure(host_array[index], backend)
                 target[index] = element_packed
+        elif issubclass(host_field_type, ctypes.Structure):
+            # One nested structure. Its device class may differ from the host's, in which
+            # case the field above was declared with that class -- so the host instance
+            # cannot be assigned to it and has to be packed first, the way an element of an
+            # array of structures is. A nested structure that needed no change comes back as
+            # itself either way.
+            nested_packed, _nested_write_back = _pack_structure(
+                getattr(value, field_name), backend)
+            setattr(packed, field_name, nested_packed)
         else:
             setattr(packed, field_name, getattr(value, field_name))
 

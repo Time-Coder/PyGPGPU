@@ -108,6 +108,70 @@ def reads_two_of_the_declared(p, out: np.ndarray):
         out[i] = p.a + p.b
 
 
+class Vec3Member(ctypes.Structure):
+    """A three-component vector member: only OpenCL re-lays this out."""
+
+    _fields_ = [("v", float3), ("n", ctypes.c_int)]
+
+
+class _InnerVec3(ctypes.Structure):
+    _fields_ = [("v", float3)]
+
+
+class NestedVec3Member(ctypes.Structure):
+    """The vector sits one level down, which is the shape that used to crash."""
+
+    _fields_ = [("inner", _InnerVec3), ("k", ctypes.c_float)]
+
+
+@kernel
+def reads_a_vec3_member(p, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = p.v.x + p.v.y + p.v.z + p.n
+
+
+@kernel
+def reads_a_nested_vec3_member(p, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = p.inner.v.x + p.k
+
+
+def test_a_structure_argument_is_passed_as_itself(gpu_backend):
+    """Only a 3-component vector under OpenCL needs a rebuilt `struct` behind the caller's.
+
+    A structure with no such member -- on any backend -- and every structure on CUDA/HIP
+    travels as the object the caller handed over: `pack` answers it unchanged, so nothing is
+    copied and no write-back is installed. Under OpenCL a structure that contains a padded
+    vector (directly or through a nested one) is rebuilt in the device layout, because the
+    driver's ABI is 16 bytes per 3-component vector and ctypes lays one out at 12.
+    """
+    from pygpgpu.vec_types.layout import pack
+
+    plain = Pair(1, 2.0)
+    vec = Vec3Member(float3(1.0, 2.0, 3.0), 4)
+    nested = NestedVec3Member(_InnerVec3(float3(5.0, 0.0, 0.0)), 1.0)
+    padded = {"opencl"}
+    needs_rebuild = gpu_backend in padded
+    for value in (plain, vec, nested):
+        packed, write_back = pack(value, gpu_backend)
+        if needs_rebuild and type(value) in (Vec3Member, NestedVec3Member):
+            assert packed is not value, type(value).__name__
+            assert write_back is not None, type(value).__name__
+        else:
+            assert packed is value, type(value).__name__
+            assert write_back is None, type(value).__name__
+
+
+def test_a_padded_structure_argument_still_reads_its_members(runner):
+    """The rebuilt structure carries the same values, nested one included."""
+    out = np.zeros(1, dtype=np.float32)
+    runner(reads_a_vec3_member, Vec3Member(float3(1.0, 2.0, 3.0), 4), out)
+    assert float(out[0]) == pytest.approx(10.0)
+    runner(reads_a_nested_vec3_member, NestedVec3Member(_InnerVec3(float3(5.0, 0.0, 0.0)), 1.0),
+           out)
+    assert float(out[0]) == pytest.approx(6.0)
+
+
 def test_a_declared_class_contributes_every_member(gpu_backend):
     """A `ctypes.Structure` states its layout, so the members are not inferred from use.
 
