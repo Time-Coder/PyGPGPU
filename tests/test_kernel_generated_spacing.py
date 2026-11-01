@@ -125,7 +125,12 @@ def blocks(a: np.ndarray, out: np.ndarray):
 
 
 def test_every_closed_block_is_followed_by_a_blank_line(gpu_backend):
-    """A blank line after each `}` -- except the one whose next line is `else`."""
+    """A blank line after each `}` -- unless the very next line closes its parent.
+
+    Two cases have no separator: `if`/`else`, whose two halves are one statement, and a
+    block that is the last thing in its parent (`for { if { ... } }`), where the two closing
+    braces would otherwise be separated by a blank line that separates nothing.
+    """
     source = _source(blocks, __file__, np.arange(4, dtype=np.float32),
                      np.zeros(4, dtype=np.float32), backend=gpu_backend)
     lines = source.splitlines()
@@ -136,6 +141,9 @@ def test_every_closed_block_is_followed_by_a_blank_line(gpu_backend):
         if following.startswith("else"):
             # `if`/`else` are one statement: no separator between the halves.
             assert following == "else", source
+            continue
+        if following == "}":
+            # The next line closes the parent, so nothing sits between the two braces.
             continue
         if following.startswith("#endif"):
             # The file's own end needs no separator, and the `#endif` that closes a

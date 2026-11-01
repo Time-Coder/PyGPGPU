@@ -1439,14 +1439,17 @@ class FunctionTranslator:
         trimmed:List[str] = list(rendered)
         while trimmed and trimmed[-1] == "":
             trimmed.pop()
-        kept:List[str] = []
-        for line in trimmed:
-            # Two closing braces on consecutive lines: the inner one ends a block whose
-            # parent ends on the very next line (`while { ... }` as a kernel's last
-            # statement). The inner brace still gets the separator every closed block gets.
-            if kept and line.strip() == "}" and kept[-1].strip() == "}":
-                kept.append("")
-            kept.append(line)
+        kept:List[str] = list(trimmed)
+        # A blank line directly before a closing brace separated a block that ends there.
+        # When the very next line closes the *parent*, that separator would sit between two
+        # braces instead of between two statements, so it is dropped. Every other closing
+        # brace keeps its own separator (`if`/`else` already has none by construction).
+        spaced:List[str] = []
+        for index, line in enumerate(kept):
+            if line == "" and index + 1 < len(kept) and kept[index + 1].strip() == "}":
+                continue
+            spaced.append(line)
+        kept = spaced
         while kept and kept[0] == "":
             kept.pop(0)
         while kept and kept[-1] == "":
@@ -7337,11 +7340,9 @@ class FunctionTranslator:
         # The structure types are emitted once by the caller, ahead of the whole source (see
         # PyKernel._compile): a helper may need them too, and two copies of the same struct
         # is an error in C++.
-        # A body whose last line closes a block (`while { ... }` as the kernel's last
-        # statement) is followed by the function's own brace: the inner block still ends
-        # there, so the separator every closed block gets goes between the two braces.
-        separator:str = "\n" if body.rstrip().endswith("}") else ""
-        return f"{header}\n{{\n{body}{separator}\n}}"
+        # The body already ends with the separator rule applied: two braces that close a
+        # block and its parent sit together, with no blank line between them.
+        return f"{header}\n{{\n{body}\n}}"
 
     def render_kernels(self, c_name:str)->List[Tuple[str, str]]:
         """Every kernel this translation produces, as (name, rendered source).
