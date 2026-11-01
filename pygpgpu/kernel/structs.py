@@ -57,13 +57,19 @@ def struct_name(dtype:np.dtype)->str:
     fixed:Optional[str] = quat_type_name(dtype)
     if fixed is not None:
         return fixed
+    # The name is fixed the first time it is asked for. A class can register after the
+    # dtype has already been named (a value is converted before the kernel that uses it is
+    # translated, and another module may register its own class later), and a name that
+    # changes afterwards would change the type signature of every kernel already compiled
+    # against the old spelling -- the same function then appears twice in one generated file.
+    settled:Optional[str] = _SETTLED_NAMES.get(dtype)
+    if settled is not None:
+        return settled
     digest:str = hashlib.md5(repr(dtype).encode("utf-8")).hexdigest()[:10]
     base:Optional[str] = _NAME_BASES.get(dtype)
-    if base is not None:
-        # A readable name still needs the hash: two modules can declare a class of the same
-        # name (`Ray` in two test modules), and one C type cannot answer for both.
-        return f"{base}_{digest}"
-    return f"_st_{digest}"
+    name:str = f"{base}_{digest}" if base is not None else f"_st_{digest}"
+    _SETTLED_NAMES[dtype] = name
+    return name
 
 
 def _scalar_type(dtype:np.dtype)->Optional[str]:
@@ -201,6 +207,9 @@ _REGISTRY: Dict[str, np.dtype] = {}
 # dtype -> the python class name its structure is spelled after. The C name is
 # `<base>_<hash>`: readable, and still distinct when two modules declare one class name.
 _NAME_BASES: Dict[np.dtype, str] = {}
+# dtype -> the C name it was first given. Pinned, because a later class registration must
+# not rename a layout an existing signature already spells.
+_SETTLED_NAMES: Dict[np.dtype, str] = {}
 
 
 def register_name_hint(dtype:Any, cls:type) -> None:
@@ -350,6 +359,10 @@ def _add_subscript_access(cls:Any) -> None:
             f"{type(self).__name__} is indexed by member name, not by position: "
             f"use s['{list(np.dtype(cls).names or ())[0]}']")
 
+    # Marked, because this subscript is the translation's own member spelling (`s["i"]`),
+    # not a method the caller wrote: a device translation must not turn `s[i]` into a call
+    # to it the way a caller's own `__getitem__` becomes one.
+    __getitem__.__pygpgpu_member_subscript__ = True
     cls.__getitem__ = __getitem__
 
 

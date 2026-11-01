@@ -222,6 +222,41 @@ def self_attr_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
     return "data", (None if raw is _MISSING else raw)
 
 
+def _receiver_param_of(method:Any)->str:
+    """The parameter name a method binds its receiver to."""
+    return (method.__code__.co_varnames[0]
+            if getattr(method, "__code__", None) else "self")
+
+
+def _operator_name(magic:str)->str:
+    """The `ast` operator name a magic method belongs to."""
+    for name, candidate in MAGIC_METHODS.items():
+        if candidate == magic:
+            return name
+    return ""
+
+
+def _magic_method_of(cls:type, name:str)->Optional[Callable]:
+    """The device method a class defines for `name`, or None.
+
+    Only a method written out in the class body qualifies. `__eq__` exists on `object`
+    (and on `ctypes.Structure`) as a synthesised identity comparison, which has no device
+    meaning and would silently turn `a == b` into a pointer compare, so the lookup walks the
+    class's own `__dict__` rather than its `__mro__`.
+    """
+    own:Any = getattr(cls, "__dict__", {}).get(name)
+    if own is None:
+        return None
+    if isinstance(own, (staticmethod, classmethod)):
+        return None
+    function:Any = getattr(own, "__func__", own)
+    # The member-name subscript a structure gets (`s["i"]`) is the translation's own
+    # spelling, not a method the caller wrote: `s[i]` must stay an array index.
+    if getattr(function, "__pygpgpu_member_subscript__", False):
+        return None
+    return function if callable(function) else None
+
+
 def _self_member_call_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
     """Classify ``self.name(...)``: what the attribute read yields, then called.
 
@@ -424,6 +459,34 @@ _CUDA_TYPE_NAMES:Dict[str, str] = {
 # An image parameter is ("image", channels, scalar type): its storage is opaque to
 # the kernel, which only ever samples or stores through it.
 IMAGE = "image"
+
+# A python class can give an operator a meaning of its own, and device code has to keep
+# it: `a + b` on a class that defines `__add__` is that method, exactly as `ray.at(t)` is
+# `Ray_at`. The keys are the `ast` operator class names the dispatchers already use, so one
+# table serves the binary, unary and comparison paths.
+MAGIC_METHODS:Dict[str, str] = {
+    "Add": "__add__", "Sub": "__sub__", "Mult": "__mul__", "Div": "__truediv__",
+    "FloorDiv": "__floordiv__", "Mod": "__mod__", "Pow": "__pow__",
+    "LShift": "__lshift__", "RShift": "__rshift__",
+    "BitOr": "__or__", "BitXor": "__xor__", "BitAnd": "__and__",
+    "MatMult": "__matmul__",
+    "Lt": "__lt__", "LtE": "__le__", "Gt": "__gt__", "GtE": "__ge__",
+    "Eq": "__eq__", "NotEq": "__ne__",
+    "USub": "__neg__", "UAdd": "__pos__", "Invert": "__invert__",
+}
+# The reflected spelling is tried on the right operand when the left one has no method.
+MAGIC_REFLECTED:Dict[str, str] = {
+    "Add": "__radd__", "Sub": "__rsub__", "Mult": "__rmul__", "Div": "__rtruediv__",
+    "FloorDiv": "__rfloordiv__", "Mod": "__rmod__", "Pow": "__rpow__",
+    "LShift": "__rlshift__", "RShift": "__rrshift__",
+    "BitOr": "__ror__", "BitXor": "__rxor__", "BitAnd": "__rand__",
+    "MatMult": "__rmatmul__",
+}
+# A comparison has its own reflected form, and python reads `a < b` as `a.__lt__` first.
+MAGIC_COMPARE_REFLECTED:Dict[str, str] = {
+    "Lt": "__gt__", "LtE": "__ge__", "Gt": "__lt__", "GtE": "__le__",
+    "Eq": "__eq__", "NotEq": "__ne__",
+}
 
 _C_FIELD_TYPES:Dict[Any, str] = {}
 
@@ -4515,6 +4578,89 @@ class FunctionTranslator:
 
         return None
 
+    def _magic_receiver_type(self, t:Any)->Any:
+        """The type a magic method's receiver parameter takes.
+
+        A structure argument travels as a pointer, so a class method's receiver is a
+        pointer too; a vector (the package's own types define no magic method) and a scalar
+        keep their value type.
+        """
+        return t
+
+    def _emit_magic_binop(self, magic:str, left:str, lt:Any, right:str, rt:Any,
+                          node:ast.BinOp)->Optional[Tuple[str, Any]]:
+        """`a op b` as a device call to the class's magic method, or None.
+
+        Python resolves `a + b` as `a.__add__(b)`, and then -- if the left class does not
+        define it -- as `b.__radd__(a)`. Both spellings are kept: the reflected form is how a
+        scalar on the left reaches a class that only knows how to multiply itself by one
+        (`2.0 * v` calls `v.__rmul__(2.0)`), which is a shape a kernel body does write.
+        """
+        owner:Optional[Tuple[type, Any]] = self._magic_owner(lt, magic)
+        if owner is not None:
+            _cls, method = owner
+            return self._emit_device_call(
+                magic, method, [(left, lt), (right, rt)], node,
+                self_param=_receiver_param_of(method), receiver_as_argument=True)
+
+        reflected:Optional[str] = MAGIC_REFLECTED.get(_operator_name(magic))
+        if reflected is not None:
+            owner = self._magic_owner(rt, reflected)
+            if owner is not None:
+                _cls, method = owner
+                # The reflected method takes the right operand's receiver first, so the
+                # operands are handed over in the order the call has them.
+                return self._emit_device_call(
+                    reflected, method, [(right, rt), (left, lt)], node,
+                    self_param=_receiver_param_of(method), receiver_as_argument=True)
+        return None
+
+    def _emit_magic_compare(self, magic:str, left:str, lt:Any, right:str, rt:Any,
+                            op:ast.cmpop)->Optional[Tuple[str, Any]]:
+        """`a == b` as a device call to the class's comparison, or None."""
+        owner:Optional[Tuple[type, Any]] = self._magic_owner(lt, magic)
+        if owner is not None:
+            _cls, method = owner
+            return self._emit_device_call(
+                magic, method, [(left, lt), (right, rt)], op,
+                self_param=_receiver_param_of(method), receiver_as_argument=True)
+
+        # Python reads `a < b` as `b.__gt__(a)` when the left class has no `__lt__`.
+        reflected:Optional[str] = MAGIC_COMPARE_REFLECTED.get(_operator_name(magic))
+        if reflected is not None:
+            owner = self._magic_owner(rt, reflected)
+            if owner is not None:
+                _cls, method = owner
+                return self._emit_device_call(
+                    reflected, method, [(right, rt), (left, lt)], op,
+                    self_param=_receiver_param_of(method), receiver_as_argument=True)
+        return None
+
+    def _magic_owner(self, t:Any, magic:str)->Optional[Tuple[type, Any]]:
+        """The class whose magic method an operand's operator should call, and that method.
+
+        A python class that defines `__add__` gives `a + b` a meaning of its own, and a
+        device translation has to keep it: the operator becomes a device call to that
+        method, with the operands as its arguments, exactly as `ray.at(t)` becomes a call to
+        `Ray_at`. Returns None when the operand carries no such method, which leaves the
+        ordinary operator path (a scalar or a vector operation) to answer.
+        """
+        from . import structs as _structs_module  # noqa: PLC0415
+
+        base:str = t[1] if isinstance(t, tuple) and is_ptr(t) else t
+        if not isinstance(base, str):
+            return None
+        dtype:Any = _structs_module.dtype_for(base)
+        if dtype is None:
+            return None
+        cls:Optional[type] = _structs_module.declared_class(dtype)
+        if cls is None:
+            return None
+        method:Any = _magic_method_of(cls, magic)
+        if method is None:
+            return None
+        return cls, method
+
     def _is_structure_operand(self, t:Any)->bool:
         """Whether a translated type is a structure value (a quaternion is one too).
 
@@ -4556,6 +4702,17 @@ class FunctionTranslator:
             name, left, lt, right, rt, node)
         if quat_result is not None:
             return quat_result
+
+        # A class that defines the operator's magic method gives it a meaning, and the
+        # translation keeps that meaning: `a + b` becomes `Class___add__(&a, &b)`, the same
+        # shape `ray.at(t)` takes. Only a method written in the class body counts, so an
+        # inherited identity comparison cannot silently answer for a structure.
+        magic:Optional[str] = MAGIC_METHODS.get(name)
+        if magic is not None:
+            call:Optional[Tuple[str, Any]] = self._emit_magic_binop(
+                magic, left, lt, right, rt, node)
+            if call is not None:
+                return call
 
         # A structure value has no arithmetic: none of `+ - * / % ** < <= > >= == !=` has a
         # device meaning for an aggregate, and emitting one produced either a C++ operator
@@ -4631,6 +4788,19 @@ class FunctionTranslator:
     def _visit_unaryop(self, node:ast.UnaryOp)->Tuple[str, Any]:
         code, t = self._visit_expression(node.operand)
         name:str = node.op.__class__.__name__
+        # A class that defines `__neg__` / `__pos__` / `__invert__` gives the unary operator
+        # a meaning; without this, `-a` on a structure emitted `(-a)` and the compiler
+        # rejected it as arithmetic on an aggregate.
+        magic:Optional[str] = MAGIC_METHODS.get(name)
+        if magic is not None:
+            owner:Optional[Tuple[type, Any]] = self._magic_owner(t, magic)
+            if owner is not None:
+                cls, method = owner
+                return self._emit_device_call(
+                    magic, method, [(code, t)], node,
+                    self_param=(method.__code__.co_varnames[0]
+                                if getattr(method, "__code__", None) else "self"),
+                    receiver_as_argument=True)
         if name == "USub":
             if is_vec(t) and self.backend == "cuda":
                 # CUDA has no unary minus on a vector type: the negation is per component.
@@ -4670,6 +4840,20 @@ class FunctionTranslator:
             if name not in symbols:
                 self._error(f"unsupported comparison: {name}", op)
             right, rt = self._visit_expression(comparator)
+            # A class that defines `__eq__` / `__lt__` and its siblings gives the comparison
+            # a meaning, and the translation keeps it as a device call.
+            magic:Optional[str] = MAGIC_METHODS.get(name)
+            if magic is not None:
+                call:Optional[Tuple[str, Any]] = self._emit_magic_compare(
+                    magic, left, lt, right, rt, op)
+                if call is not None:
+                    # A chained comparison cannot be a single call: `a < b < c` means
+                    # `a < b and b < c`, which the loop already joins with `&&`.
+                    if len(node.ops) != 1:
+                        self._error(
+                            "chained comparison is not supported on a class that defines "
+                            "its own comparison; write the two comparisons separately", op)
+                    return call
             # A structure value has no comparison either: C rejects `s == s` outright, so it
             # is refused here with the same explanation the arithmetic gets.
             if self._is_structure_operand(lt) or self._is_structure_operand(rt):
@@ -4700,6 +4884,36 @@ class FunctionTranslator:
         member:Optional[Tuple[str, Any]] = self._struct_member_access(node)
         if member is not None:
             return member
+
+        # `box[i]` on a class that defines `__getitem__` is that method, exactly as
+        # `box.attr` is `box.__getattribute__`. The member read above already covered the
+        # string spelling (`s["field"]`), so only a computed index reaches here.
+        if (not (isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str))
+                and isinstance(node.value, ast.Name)):
+            # Only a plain name is a class instance this class's `__getitem__` can answer
+            # for. A shared buffer (`bins[blockIdx]`) and an array are indexed by the paths
+            # below, and visiting their base here would raise the shared-buffer refusal
+            # before that path could handle the outer subscript.
+            binding:Any = self._lookup(node.value.id)
+            # A structure travels as a pointer too, so `is_ptr` alone would call it an
+            # array and skip the `__getitem__` its class may define.
+            is_struct_ptr:bool = (isinstance(binding, tuple) and is_ptr(binding)
+                                  and structs_dtype_for(binding[1]) is not None)
+            is_array:bool = (is_ptr(binding) and not is_struct_ptr) or (
+                isinstance(binding, tuple) and len(binding) == 4 and binding[0] == "bodyarr")
+            is_shared:bool = (isinstance(binding, tuple) and len(binding) == 5
+                              and binding[0] == "shared")
+            if not is_array and not is_shared:
+                base_code, base_t = self._visit_expression(node.value)
+                owner:Optional[Tuple[type, Any]] = self._magic_owner(base_t, "__getitem__")
+                if owner is not None:
+                    _cls, method = owner
+                    index_code, index_t = self._visit_expression(node.slice)
+                    return self._emit_device_call(
+                        "__getitem__", method,
+                        [(base_code, base_t), (index_code, index_t)],
+                        node, self_param=_receiver_param_of(method),
+                        receiver_as_argument=True)
 
         # `buf[k]` on a `zeros_per_group(...)` value: the index selects a work group, and only
         # caller's own group is reachable from inside a work item, so `k` must be the block
@@ -5663,6 +5877,14 @@ class FunctionTranslator:
         if len(args) != 1:
             self._error("len() takes exactly 1 argument", node)
         code, t = args[0]
+        # A class that defines `__len__` states its own length, which the array rule below
+        # knows nothing about.
+        owner:Optional[Tuple[type, Any]] = self._magic_owner(t, "__len__")
+        if owner is not None:
+            _cls, method = owner
+            return self._emit_device_call(
+                "__len__", method, [(code, t)], node,
+                self_param=_receiver_param_of(method), receiver_as_argument=True)
         if not is_ptr(t):
             self._error("len() takes an array argument", node)
         holder = node.args[0]
