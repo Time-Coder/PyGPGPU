@@ -7139,9 +7139,9 @@ class FunctionTranslator:
         # A method of a class reads `Class_method`; a plain function keeps its own name.
         # The hash stays in the name because a helper monomorphizes per argument type
         # (`blend` over float and over float3 are two device functions), and two modules
-        # can define the same helper name -- the hash covers both. A generated name that
-        # another layout already took gains an `_alterN` suffix, which keeps the family
-        # readable the way the structure names do.
+        # can define the same helper name -- the hash covers both. Nothing is appended to
+        # settle a collision: the hash is what keeps two helpers apart, so a numbered
+        # suffix would only appear if the hash itself collided.
         base:str = func.__name__
         # A method is named after the class it is *defined on*, which `__qualname__` records:
         # `Ray.at` is `Ray_at`, never the receiving kernel's own class. A plain function has
@@ -7153,16 +7153,7 @@ class FunctionTranslator:
                 base = f"{owner_name}_{func.__name__}"
         module_file:str = getattr(getattr(func, "__code__", None), "co_filename", "")
         module_mark:str = os.path.basename(module_file) if module_file else ""
-        name:str = f"{base}_{short_hash(module_mark + '|' + type_sig(types))}"
-        # A name another helper already generated is taken: add the numbered suffix.
-        taken:Set[str] = {entry["c_name"] for entry in self.device_cache.values()
-                          if entry.get("c_name")}
-        if name in taken:
-            index:int = 1
-            while f"{base}_{index}" in taken or f"{name}_{index}" in taken:
-                index += 1
-            name = f"{name}_{index}"
-        return name
+        return f"{base}_{short_hash(module_mark + '|' + type_sig(types))}"
 
     def _device_qualifier(self)->str:
         """The storage qualifier a device function needs on this backend."""
