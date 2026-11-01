@@ -1119,11 +1119,19 @@ class PyKernel:
         receiver_name:List[str] = ([self._self_param]
                                    if self_struct_members else [])
         self_attr_names:List[str] = [f"_self_{name}" for name in self_attrs]
-        prefix_names:List[str] = (list(_positional_argument_names(self.raw_func))[:len(args)]
-                                  + receiver_name + self_attr_names
+        # The launch is packed in the order the device signature declares: the receiver
+        # first (it is a method's first parameter), then the caller's arguments, then the
+        # ndarray attributes. `arg_types` and `self_types` already lead with the receiver
+        # type, so the values have to lead with the receiver too.
+        receiver_values:List[Any] = (list(self_values[:1]) if self_struct_members else [])
+        argument_values:List[Any] = (list(self_values[1:]) if self_struct_members
+                                     else list(self_values))
+        prefix_names:List[str] = (receiver_name
+                                  + list(_positional_argument_names(self.raw_func))[:len(args)]
+                                  + self_attr_names
                                   + list(launch_meta.get("carried") or []))
         full:List[Any] = [_kernel_scalar_argument(value, t)
-                          for value, t in zip(list(args) + list(self_values),
+                          for value, t in zip(receiver_values + list(args) + argument_values,
                                               arg_types + self_types)]
         # A carried scalar is one of the kernel's own parameters (declared before the shape
         # extents), so its slot joins full here rather than the trailing created values.

@@ -1364,7 +1364,19 @@ class FunctionTranslator:
         if expected != len(param_types):
             raise SyntaxError(f"{func.__name__}() takes {expected} device arguments but {len(param_types)} types were given") from None
 
+        # The receiver is a method's first parameter, the way python spells one: `self` is
+        # the receiver, so the device signature reads `Class* self,` before the caller's
+        # own arguments. `self.params` *is* the signature order, so the receiver is
+        # appended before the arguments rather than after them. The slot it occupies in
+        # `param_types` stays where the host packs it (after the positional arguments), so
+        # the type is taken from there and the two lists keep their own orders.
         scope:Dict[str, Any] = {}
+        if self.self_struct_members:
+            struct_type:Any = (param_types[len(args)] if len(param_types) > len(args)
+                               else self.self_struct_type)
+            if self.self_struct_type is None:
+                self.self_struct_type = struct_type
+            self.params.append((self.self_param, struct_type))
         if receiver_type is not None:
             # The receiver is not a `_self_` field set: it is one structure pointer,
             # spelled by the function's own first parameter name.
@@ -1377,17 +1389,6 @@ class FunctionTranslator:
             # function be read by editors and type checkers.
             scope[arg.arg] = t
             self.params.append((arg.arg, t))
-        # self.xxx attributes -> the receiver struct (scalar members) plus one parameter
-        # per ndarray member, filled from the instance at call time. The struct comes first
-        # among them, because that is the order the host packs `self_values` in
-        # (see PyKernel._invoke_inner); the parameter indices the launch derives from this
-        # list have to agree with that order.
-        if self.self_struct_members:
-            struct_type:Any = (param_types[len(args)] if len(param_types) > len(args)
-                               else self.self_struct_type)
-            if self.self_struct_type is None:
-                self.self_struct_type = struct_type
-            self.params.append((self.self_param, struct_type))
         for attr, t in self.self_attr_types.items():
             if attr in self.self_struct_members:
                 continue                  # carried inside the receiver struct
@@ -7000,10 +7001,11 @@ class FunctionTranslator:
                 args[index] = (f"&({code})", (PTR, value_t))
         call_codes:List[str] = [c for c, _ in args]
         if self_param:
-            # The receiver is one structure pointer: forward it (and the array attributes,
-            # which stay separate parameters), exactly as the caller's own signature does.
+            # The receiver is a method's first parameter, exactly as in the signature the
+            # callee builds (see FunctionTranslator.__init__), so it is passed first. The
+            # array attributes come after the caller's arguments, as their own parameters.
             if self.self_struct_members and not receiver_as_argument:
-                call_codes.append(self.self_param)
+                call_codes.insert(0, self.self_param)
             call_codes.extend(f"_self_{attr}" for attr in self_types)
         # The caller's own arguments come first, then the receiver struct, then the array
         # attributes -- the same order the callee binds them in, and the same order the
