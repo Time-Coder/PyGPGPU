@@ -478,6 +478,17 @@ MAGIC_METHODS:Dict[str, str] = {
     "USub": "__neg__", "UAdd": "__pos__", "Invert": "__invert__",
 }
 # The reflected spelling is tried on the right operand when the left one has no method.
+# A conversion the class defines: `int(box)` is `box.__int__()`. `bool` is here too, but a
+# class that defines no `__bool__` still answers through the ordinary truth test, so it is
+# tried first rather than instead.
+CONVERSION_METHODS:Dict[str, str] = {
+    "int": "__int__", "float": "__float__", "bool": "__bool__",
+}
+# A single-argument builtin whose device meaning is the class's own method.
+BUILTIN_METHODS:Dict[str, str] = {"abs": "__abs__", "round": "__round__"}
+# `box(args)` is `box.__call__(args)`.
+CALL_METHOD:str = "__call__"
+
 # `v += w` asks `v.__iadd__(w)` first, and falls back to `v.__add__(w)` when the class
 # defines no in-place form -- python's own rule, and the reason a class that only knows
 # `__add__` still supports `+=`.
@@ -4637,6 +4648,22 @@ class FunctionTranslator:
         """
         return t
 
+    def _emit_magic_conversion(self, magic:str, code:str, t:Any,
+                               node:ast.AST)->Optional[Tuple[str, Any]]:
+        """`int(box)` / `abs(box)` and friends as a device call to the class's method.
+
+        A class that defines the conversion gives the builtin a meaning the device keeps:
+        casting an aggregate is not what the caller wrote. None when the operand carries
+        no such method, which leaves the ordinary scalar path to answer.
+        """
+        owner:Optional[Tuple[type, Any]] = self._magic_owner(t, magic)
+        if owner is None:
+            return None
+        _cls, method = owner
+        return self._emit_device_call(
+            magic, method, [(code, t)], node,
+            self_param=_receiver_param_of(method), receiver_as_argument=True)
+
     def _emit_magic_binop(self, magic:str, left:str, lt:Any, right:str, rt:Any,
                           node:ast.BinOp)->Optional[Tuple[str, Any]]:
         """`a op b` as a device call to the class's magic method, or None.
@@ -5579,14 +5606,38 @@ class FunctionTranslator:
             name:str = func.id
             args = [self._visit_expression(a) for a in node.args]
             arg_codes:List[str] = [c for c, _ in args]
+            # `v(args)` on a structure value is `v.__call__(args)`: the callee is a value,
+            # not a function, and a class that defines `__call__` gives it a meaning.
+            holder:Any = self._lookup(name)
+            if holder is not None and self._is_structure_operand(holder):
+                owner:Optional[Tuple[type, Any]] = self._magic_owner(holder, CALL_METHOD)
+                if owner is not None:
+                    _cls, method = owner
+                    return self._emit_device_call(
+                        CALL_METHOD, method, [(name, holder)] + list(args), node,
+                        self_param=_receiver_param_of(method), receiver_as_argument=True)
 
             if name in ("int", "float", "bool"):
                 if len(args) != 1:
                     self._error(f"{name}() takes exactly 1 argument", node)
+                # `int(box)` is `box.__int__()`, the way `abs(box)` is `box.__abs__()`:
+                # a class that defines the conversion gives it a meaning, and a device
+                # keeps it rather than casting the aggregate.
+                converted:Optional[Tuple[str, Any]] = self._emit_magic_conversion(
+                    CONVERSION_METHODS[name], arg_codes[0], args[0][1], node)
+                if converted is not None:
+                    return converted
                 t:Any = {"int": "int", "float": "float", "bool": "bool"}[name]
                 return f"(({t})({arg_codes[0]}))", t
 
             if name in ("abs", "min", "max", "round", "pow"):
+                # `abs(box)` and `round(box)` are single-argument calls on the class;
+                # `min`/`max`/`pow` take two and are not method-shaped.
+                if name in ("abs", "round") and len(args) == 1:
+                    converted = self._emit_magic_conversion(
+                        BUILTIN_METHODS[name], arg_codes[0], args[0][1], node)
+                    if converted is not None:
+                        return converted
                 return self._emit_builtin(name, args, node)
 
             if name == "len":

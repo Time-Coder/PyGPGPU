@@ -95,3 +95,86 @@ def test_not_containment_negates_the_same_call(runner):
     assert float(out[0]) == pytest.approx(1.0)
     runner(not_contained, Acc(5.0, 0.0), out)
     assert float(out[0]) == pytest.approx(0.0)
+
+
+class Converter(ctypes.Structure):
+    """A class that defines every conversion the translator supports.
+
+    A distinct layout again: one layout per class, or they share a dtype and a C type.
+    """
+
+    _fields_ = [("value", ctypes.c_float), ("spare", ctypes.c_int)]
+
+    def __int__(self):
+        return int(self.value)
+
+    def __float__(self):
+        return self.value
+
+    def __abs__(self):
+        return Converter(abs(self.value), 0)
+
+    def __round__(self):
+        return round(self.value)
+
+    def __call__(self, factor):
+        return Converter(self.value * factor, 0)
+
+
+@kernel
+def converts_to_int(boxed, answer: np.ndarray):
+    for i in range(answer.shape[0]):
+        answer[i] = float(int(boxed))
+
+
+@kernel
+def converts_to_float(boxed, answer: np.ndarray):
+    for i in range(answer.shape[0]):
+        answer[i] = float(boxed)
+
+
+@kernel
+def converts_with_abs(boxed, answer: np.ndarray):
+    for i in range(answer.shape[0]):
+        answer[i] = abs(boxed).value
+
+
+@kernel
+def converts_with_round(boxed, answer: np.ndarray):
+    for i in range(answer.shape[0]):
+        answer[i] = float(round(boxed))
+
+
+@kernel
+def calls_the_value(boxed, answer: np.ndarray):
+    for i in range(answer.shape[0]):
+        answer[i] = boxed(3.0).value
+
+
+def test_a_conversion_asks_the_class(runner):
+    """`int(box)` is `box.__int__()` and `float(box)` is `box.__float__()`.
+
+    Without the dispatch the translator cast the aggregate itself, which the compiler
+    rejected ("invalid type conversion").
+    """
+    out = np.zeros(1, dtype=np.float32)
+    runner(converts_to_int, Converter(-2.7, 0), out)
+    assert float(out[0]) == pytest.approx(-2.0)
+    runner(converts_to_float, Converter(2.5, 0), out)
+    assert float(out[0]) == pytest.approx(2.5)
+
+
+def test_a_single_argument_builtin_asks_the_class(runner):
+    """`abs(box)` is `box.__abs__()` and `round(box)` is `box.__round__()`."""
+    out = np.zeros(1, dtype=np.float32)
+    runner(converts_with_abs, Converter(-2.5, 0), out)
+    assert float(out[0]) == pytest.approx(2.5)
+    runner(converts_with_round, Converter(2.4, 0), out)
+    assert float(out[0]) == pytest.approx(2.0)
+
+
+def test_calling_a_value_asks_the_class(runner):
+    """`box(args)` is `box.__call__(args)` -- the callee is a value, not a function."""
+    out = np.zeros(1, dtype=np.float32)
+    runner(calls_the_value, Converter(2.0, 0), out)
+    assert float(out[0]) == pytest.approx(6.0)
