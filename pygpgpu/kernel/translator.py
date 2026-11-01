@@ -472,9 +472,23 @@ MAGIC_METHODS:Dict[str, str] = {
     "MatMult": "__matmul__",
     "Lt": "__lt__", "LtE": "__le__", "Gt": "__gt__", "GtE": "__ge__",
     "Eq": "__eq__", "NotEq": "__ne__",
+    # `x in box` asks box.__contains__(x): the receiver is the RIGHT operand, which is why
+    # the dispatch for these two reverses the pair.
+    "In": "__contains__", "NotIn": "__contains__",
     "USub": "__neg__", "UAdd": "__pos__", "Invert": "__invert__",
 }
 # The reflected spelling is tried on the right operand when the left one has no method.
+# `v += w` asks `v.__iadd__(w)` first, and falls back to `v.__add__(w)` when the class
+# defines no in-place form -- python's own rule, and the reason a class that only knows
+# `__add__` still supports `+=`.
+MAGIC_INPLACE:Dict[str, str] = {
+    "Add": "__iadd__", "Sub": "__isub__", "Mult": "__imul__", "Div": "__itruediv__",
+    "FloorDiv": "__ifloordiv__", "Mod": "__imod__", "Pow": "__ipow__",
+    "LShift": "__ilshift__", "RShift": "__irshift__",
+    "BitOr": "__ior__", "BitXor": "__ixor__", "BitAnd": "__iand__",
+    "MatMult": "__imatmul__",
+}
+
 MAGIC_REFLECTED:Dict[str, str] = {
     "Add": "__radd__", "Sub": "__rsub__", "Mult": "__rmul__", "Div": "__rtruediv__",
     "FloorDiv": "__rfloordiv__", "Mod": "__rmod__", "Pow": "__rpow__",
@@ -4150,6 +4164,30 @@ class FunctionTranslator:
         target_code, target_t = self._visit_target(node.target)
         value_code, value_t = self._visit_expression(node.value)
 
+        # A structure target has no C in-place operator: `v += w` on a class is that
+        # class's `__iadd__`, or its `__add__` when it defines no in-place form. The call
+        # returns a new value, which is stored back -- exactly what python does.
+        if self._is_structure_operand(target_t):
+            inplace:Optional[str] = MAGIC_INPLACE.get(op_name)
+            owner:Optional[Tuple[type, Any]] = (
+                self._magic_owner(target_t, inplace) if inplace is not None else None)
+            called:str = inplace or ""
+            if owner is None:
+                # No in-place method: python answers `v = v + w`, so the plain operator's
+                # method (or the refusal that explains there is none) decides.
+                magic:Optional[str] = MAGIC_METHODS.get(op_name)
+                owner = (self._magic_owner(target_t, magic)
+                         if magic is not None else None)
+                called = magic or ""
+            if owner is not None:
+                _cls, method = owner
+                call:Tuple[str, Any] = self._emit_device_call(
+                    called, method, [(target_code, target_t), (value_code, value_t)],
+                    node, self_param=_receiver_param_of(method), receiver_as_argument=True)
+                self._emit(f"{target_code} = {call[0]};")
+                return
+            self._error(self._structure_operator_message(op_name, target_t, value_t, node), node)
+
         name:str = op_name
         if name == "Div":
             if is_int(target_t) and is_int(value_t):
@@ -4630,6 +4668,21 @@ class FunctionTranslator:
     def _emit_magic_compare(self, magic:str, left:str, lt:Any, right:str, rt:Any,
                             op:ast.cmpop)->Optional[Tuple[str, Any]]:
         """`a == b` as a device call to the class's comparison, or None."""
+        # A containment test asks the RIGHT operand: `x in box` is `box.__contains__(x)`.
+        # Its result is a truth value, so `not in` negates the same call. A chained form
+        # (`x in a in b`) is refused above, where the operator is read.
+        if magic == "__contains__":
+            owner:Optional[Tuple[type, Any]] = self._magic_owner(rt, magic)
+            if owner is not None:
+                _cls, method = owner
+                call:Tuple[str, Any] = self._emit_device_call(
+                    magic, method, [(right, rt), (left, lt)], op,
+                    self_param=_receiver_param_of(method), receiver_as_argument=True)
+                if op.__class__.__name__ == "NotIn":
+                    return f"(!{call[0]})", "bool"
+                return call
+            return None
+
         owner:Optional[Tuple[type, Any]] = self._magic_owner(lt, magic)
         if owner is not None:
             _cls, method = owner
@@ -4829,7 +4882,8 @@ class FunctionTranslator:
         self._error(f"unsupported unary operator: {name}", node)
 
     def _visit_compare(self, node:ast.Compare)->Tuple[str, Any]:
-        symbols:Dict[str, str] = {"Lt": "<", "LtE": "<=", "Gt": ">", "GtE": ">=", "Eq": "==", "NotEq": "!="}
+        symbols:Dict[str, str] = {"Lt": "<", "LtE": "<=", "Gt": ">", "GtE": ">=",
+                                  "Eq": "==", "NotEq": "!=", "In": "in", "NotIn": "not in"}
 
         left, lt = self._visit_expression(node.left)
         if is_vec(lt):
