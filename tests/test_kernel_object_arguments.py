@@ -156,6 +156,55 @@ def test_a_plain_objects_structure_lives_with_its_class(gpu_backend):
     assert "float a;" not in own or declaring == [f"{pathlib.Path(__file__).stem}.{extension}"], own
 
 
+class Range:
+    """A plain class whose value a body hands straight to a helper."""
+
+    def __init__(self, low, high):
+        self.low = low
+        self.high = high
+
+    def size(self):
+        return self.high - self.low
+
+    def contains(self, value):
+        return self.low <= value
+
+
+def sum_of(pair):
+    """The helper the constructed value is handed to, like the example's `self.hit`."""
+    return pair.a + pair.b
+
+
+@kernel
+def constructs_inline(out: np.ndarray):
+    """`sum_of(Pair(1.0, 2.0))`: the value has no name of its own."""
+    for i in range(out.shape[0]):
+        out[i] = sum_of(Pair(1.0, 2.0))
+
+
+@kernel
+def constructs_named(out: np.ndarray):
+    """The same value bound first, which already worked."""
+    for i in range(out.shape[0]):
+        pair = Pair(1.0, 2.0)
+        out[i] = sum_of(pair)
+
+
+def test_a_construction_written_into_a_call(runner):
+    """`sum_of(Pair(1.0, 2.0))` builds the value inline, and the scan has to see it.
+
+    An unnamed temporary has no path for the scan to bind, so the value was refused with
+    "device code has no objects"; the tree is now read as though the body had written the
+    name itself. The value also travels by address, and a compound literal has no address,
+    so a temporary local is emitted for the argument.
+    """
+    out = np.zeros(1, dtype=np.float32)
+    runner(constructs_inline, out)
+    assert float(out[0]) == pytest.approx(3.0)
+    runner(constructs_named, out)
+    assert float(out[0]) == pytest.approx(3.0)
+
+
 def test_a_helper_receiving_the_object(runner):
     out = np.zeros(1, dtype=np.float32)
     runner(through_a_helper, Greeter(2.5), out)

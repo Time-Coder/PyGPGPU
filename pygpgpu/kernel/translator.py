@@ -7327,6 +7327,14 @@ class FunctionTranslator:
         for index, (code, value_t) in enumerate(args):
             if (isinstance(value_t, str) and structs_dtype_for(value_t) is not None
                     and not is_vec(value_t)):
+                # A compound literal has no address: `&((T{...}))` is not valid C, so a
+                # value built straight into the call (`self.hit(ray, Interval(0, inf))`)
+                # is stored in a local first. The temporary is emitted before this
+                # statement, which is the same shape a named construction already takes.
+                if code.startswith(f"({value_t}{{"):
+                    temporary:str = f"_arg{self._next_temp()}"
+                    self._emit(f"{value_t} {temporary} = {code};")
+                    code = temporary
                 args[index] = (f"&({code})", (PTR, value_t))
         call_codes:List[str] = [c for c, _ in args]
         if self_param:

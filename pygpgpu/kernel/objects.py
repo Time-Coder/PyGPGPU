@@ -137,10 +137,27 @@ class Scan:
 def _parse(func:Any)->Optional[ast.Module]:
     from .translator import _parse_kernel_source, get_dedented_source  # noqa: PLC0415
 
+    cached:Optional[ast.Module] = _LIFTED_TREES.get(_tree_key(func))
+    if cached is not None:
+        # The scan lifts an inline construction into a local (see _inline_constructions),
+        # and every later step has to read that same tree: a fresh parse would give back
+        # the original `self.hit(ray, Interval(...))`, with the lifted name nowhere in it.
+        import copy as _copy  # noqa: PLC0415
+
+        return _copy.deepcopy(cached)
     try:
         return _parse_kernel_source(get_dedented_source(func))
     except Exception:
         return None
+
+
+_LIFTED_TREES:Dict[str, ast.Module] = {}
+_LIFTED_VALUES:Dict[str, Dict[str, Any]] = {}
+
+
+def _tree_key(func:Any)->str:
+    """A key naming one function's source, so a lifted tree can be found again."""
+    return f"{getattr(func, '__module__', '')}:{getattr(func, '__qualname__', '')}"
 
 
 def _follow_aliases(tree:ast.Module, tracked:Dict[str, str])->None:
@@ -513,6 +530,17 @@ def _scan_function(func:Any, tracked:Dict[str, str], scan:Scan)->None:
                 forwarded[keyword.arg] = tracked[keyword.value.id]
         if forwarded:
             _scan_function(target, forwarded, scan)
+        # The helper's own body can build a value inline too (`sum_of(Pair(1, 2))`), and
+        # that tree is lifted on its own: the walk above only follows names, so the helper
+        # is scanned for its own constructions here.
+        helper_constructions:Dict[str, Any] = constructed_locals(
+            target, scan.values, scan.resolve)
+        for name, value in helper_constructions.items():
+            if name not in scan.members:
+                scan.add_path(name, value)
+        if helper_constructions:
+            _scan_function(target, {**forwarded, **{n: n
+                                                    for n in helper_constructions}}, scan)
 
 
 def _writes_to(tree:ast.Module, tracked:Dict[str, str])->List[str]:
@@ -542,20 +570,92 @@ def _writes_to(tree:ast.Module, tracked:Dict[str, str])->List[str]:
 
 
 def _constructs_a_class(func:Any, resolve:Callable[[str], Any])->bool:
-    """Whether the body assigns a value from a class it defines elsewhere."""
+    """Whether the body builds a value from a class it defines elsewhere.
+
+    Both spellings count: `ray = Ray(...)` assigns it to a name, and `hit(ray, Interval(...))`
+    builds it straight into a call -- which is the one the lift has to handle, so it is the
+    reason this scan is worth running at all.
+    """
     tree:Optional[ast.Module] = _parse(func)
     if tree is None:
         return False
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
-        value:ast.expr = node.value
-        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
-            continue
-        cls:Any = resolve(value.func.id)
+        cls:Any = resolve(node.func.id)
         if isinstance(cls, type) and not issubclass(cls, (ctypes.Structure, list, tuple)):
             return True
     return False
+
+
+# The prefix an inline construction is lifted to. It never reaches the generated source --
+# only the scan's copy of the tree -- so it only has to be a name the body cannot spell.
+INLINE_PREFIX:str = "_inline_"
+
+
+def _inline_constructions(tree:ast.Module, find_class:Callable[[str], Any],
+                          objects:Dict[str, Any],
+                          resolve:Callable[[str], Any])->Dict[str, Any]:
+    """Lift every unnamed construction into a local, and answer the templates it built.
+
+    `self.hit(ray, Interval(0, math.inf))` builds a value straight into a call, so the scan
+    has no *name* to bind it to, and a plain class was refused with "device code has no
+    objects". The value means the same as `bounds = Interval(0, math.inf)`, so the tree is
+    rewritten to that shape in place: every step after this one -- the member collection, the
+    method walk, the translator -- then sees a construction it already handles.
+
+    Rewriting is safe because the lifted name is never emitted: the translator translates
+    the *body*, where the constructor call is, so only the scan's view carries the name.
+    """
+    lifted:Dict[str, Any] = {}
+    counter:List[int] = [0]
+
+    def lift(node:ast.AST)->ast.AST:
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and not getattr(node, "_named_construction", False)):
+            cls:Any = find_class(node.func.id)
+            if isinstance(cls, type) and not issubclass(cls, (ctypes.Structure, list, tuple)):
+                node.args = [lift(child) for child in node.args]
+                kinds:Optional[List[Any]] = []
+                for argument in node.args:
+                    kind:Optional[Any] = _argument_kind(argument, objects, resolve, tree)
+                    if kind is None:
+                        kinds = None
+                        break
+                    kinds.append(kind)
+                template:Any = _template_from(kinds, cls)
+                if template is not None:
+                    name:str = f"{INLINE_PREFIX}{counter[0]}"
+                    counter[0] += 1
+                    lifted[name] = template
+                    return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            # A construction that already has a name is handled by the loop in
+            # `constructed_locals`; lifting it again would give the same value a second,
+            # unnamed path, which the scan then resolves against an empty template.
+            lift_arguments(node.value)
+            return node
+        for field, value in ast.iter_fields(node):
+            if isinstance(value, list):
+                if value and isinstance(value[0], ast.stmt):
+                    for item in value:
+                        lift(item)
+                    continue
+                setattr(node, field, [lift(item) if isinstance(item, ast.expr) else item
+                                      for item in value])
+            elif isinstance(value, ast.expr):
+                setattr(node, field, lift(value))
+            elif isinstance(value, ast.AST):
+                lift(value)
+        return node
+
+    def lift_arguments(call:ast.Call)->None:
+        """Lift the constructions nested inside a named one's own arguments."""
+        call.args = [lift(child) for child in call.args]
+
+    for statement in tree.body:
+        lift(statement)
+    return lifted
 
 
 def constructed_locals(func:Any, objects:Dict[str, Any],
@@ -581,6 +681,12 @@ def constructed_locals(func:Any, objects:Dict[str, Any],
     caller-visible spellings working.
     """
     found:Dict[str, Any] = {}
+    cached:Optional[Dict[str, Any]] = _LIFTED_VALUES.get(_tree_key(func))
+    if cached is not None:
+        # This function was already read once, and the tree kept is the *lifted* one: it
+        # holds no construction any more, so scanning it again would answer nothing. The
+        # values the first pass produced are the answer.
+        return dict(cached)
     tree:Optional[ast.Module] = _parse(func)
     if tree is None:
         return found
@@ -619,6 +725,21 @@ def constructed_locals(func:Any, objects:Dict[str, Any],
         template:Any = _template_from(kinds, cls)
         if template is not None:
             found[target.id] = template
+    # A construction written straight into a call -- `self.hit(ray, Interval(0, math.inf))`
+    # -- has no name for the scan to bind, so the value it builds was refused as "device
+    # code has no objects". The tree is rewritten as though the body had written
+    # `bounds = Interval(...)` and passed `bounds`, which is the shape every later step
+    # already handles; the lifted names answer from `found` and never reach the generated
+    # source, because the translator reaches the constructor in the body itself.
+    lifted:Dict[str, Any] = _inline_constructions(tree, find_class, objects, resolve)
+    if lifted:
+        # Every later step reads the same tree (see _parse), or the lifted name would be
+        # nowhere in the body the scan walks next. The values are cached with it: a second
+        # call to this function would read the *lifted* tree, which no longer holds a
+        # construction to lift, and would answer with nothing.
+        _LIFTED_TREES[_tree_key(func)] = tree
+        _LIFTED_VALUES[_tree_key(func)] = dict(lifted)
+    found.update(lifted)
     return found
 
 
@@ -634,17 +755,21 @@ def _argument_kind(argument:ast.expr, objects:Dict[str, Any],
     if isinstance(argument, ast.Name):
         value:Any = objects.get(argument.id)
         if value is not None:
-            return type(value) if not isinstance(value, (int, float, bool)) else ctypes.c_float
+            return member_type(value, argument.id)
         # A local the body assigned carries whatever its right-hand side did.
         return _assigned_kind(argument.id, objects, resolve, tree)
     if isinstance(argument, ast.Attribute) and isinstance(argument.value, ast.Name):
         holder:Any = objects.get(argument.value.id)
         if holder is not None and hasattr(holder, argument.attr):
-            member:Any = getattr(holder, argument.attr)
-            return type(member) if not isinstance(member, (int, float, bool)) else ctypes.c_float
+            return member_type(getattr(holder, argument.attr), argument.attr)
         return None
     if isinstance(argument, ast.Constant) and isinstance(argument.value, (int, float)):
-        return ctypes.c_float
+        # An int literal is an int member: the width has to follow the value, or
+        # `Interval(0, 3)` gives both members the float width and the device type no
+        # longer matches what `__init__` assigned. `bool` has its own width too.
+        if isinstance(argument.value, bool):
+            return ctypes.c_bool
+        return ctypes.c_int32 if isinstance(argument.value, int) else ctypes.c_float
     # Anything else -- an inline construction, an arithmetic expression over known operands --
     # is answered by the same walk `_expression_kind` does for an assigned local.
     return _expression_kind(argument, objects, resolve, tree)
@@ -772,6 +897,8 @@ def constructed_structure(cls:type)->Optional[Any]:
 def forget_constructed()->None:
     """Drop the recorded constructions, so a new scan cannot see a previous one."""
     _CONSTRUCTED.clear()
+    _LIFTED_TREES.clear()
+    _LIFTED_VALUES.clear()
 
 
 def scan_object(func:Any, objects:Dict[str, Any],
@@ -867,6 +994,11 @@ def member_type(value:Any, attr:str)->type:
             f"elements are instances of one class")
     if isinstance(value, ctypes.Structure):
         # A declared structure or a vector type already has a device type: use it as it is.
+        return type(value)
+    # The scan's template is an instance built from placeholder types (`c_int32()`), so a
+    # member can arrive as a ctypes scalar rather than a python number. Its own class is
+    # the width the constructor stored, which is exactly what the member has to be.
+    if isinstance(value, ctypes._SimpleCData):  # noqa: SLF001 (the documented base)
         return type(value)
     if isinstance(value, (type, Callable)):
         raise SyntaxError(
