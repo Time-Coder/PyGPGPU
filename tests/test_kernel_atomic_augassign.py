@@ -114,12 +114,37 @@ def _generated_source(kernel_object, backend: str) -> str:
     folders = {"opencl": ("__clcache__", ".cl"), "cuda": ("__cucache__", ".cu")}
     folder, suffix = folders[backend]
     cache = pathlib.Path(__file__).parent / folder / "pykernels"
-    pattern = f"{kernel_object.__name__}_*{suffix}"
-    for path in sorted(cache.glob(pattern)):
-        if "_clean" in path.name:
-            continue
-        return path.read_text(encoding="utf-8")
-    return ""
+    # One generated file per python module, named after it (see kernel.source_paths).
+    path = cache / f"{pathlib.Path(__file__).stem}{suffix}"
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _kernel_body(source: str, kernel_name: str) -> str:
+    """The generated function a kernel's own name starts, from its header to its last brace.
+
+    A module's generated file holds every kernel the module defines, so a test that asks
+    what *this* kernel emitted has to isolate its function.
+    """
+    import re
+
+    # __global__ void name_hash(...) on CUDA/HIP, __kernel void name_hash(...) on OpenCL:
+    # the storage qualifier is followed by a return type before the name.
+    # __global__ void name_hash(...) on CUDA/HIP, __kernel void name_hash(...) on
+    # OpenCL: the storage qualifier is followed by a return type before the name.
+    match = re.search(rf"__[^\n]*?void[^\n]*?(?<!\w){kernel_name}_\w+\(", source)
+    if not match:
+        return ""
+    start: int = source.rfind("\n", 0, match.start()) + 1
+    depth: int = 0
+    for index in range(match.start(), len(source)):
+        character: str = source[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    return source[start:]
 
 
 @pytest.mark.parametrize("backend", ["opencl", "cuda"])
@@ -131,7 +156,11 @@ def test_the_safe_case_emits_no_atomic(gpu_backend, runner, backend):
     runner(accumulate_own_element, x, out)
     source: str = _generated_source(accumulate_own_element, backend)
     assert source, f"no generated source found for {backend}"
-    assert "atomic" not in source.lower()
+    # One generated file holds every kernel of this module, so only this kernel's own
+    # function body may be inspected: the sibling kernel is the one that emits an atomic.
+    body: str = _kernel_body(source, "accumulate_own_element")
+    assert body, source
+    assert "atomic" not in body.lower()
 
 
 @pytest.mark.parametrize("backend", ["opencl", "cuda"])
@@ -142,7 +171,9 @@ def test_the_racy_case_does_emit_an_atomic(gpu_backend, runner, backend):
     runner(hist_with_plus_equals, image)
     source: str = _generated_source(hist_with_plus_equals, backend)
     assert source, f"no generated source found for {backend}"
-    assert "atomic" in source.lower()
+    body: str = _kernel_body(source, "hist_with_plus_equals")
+    assert body, source
+    assert "atomic" in body.lower()
 
 
 # ---------------------------------------------------------------------------

@@ -455,7 +455,10 @@ class Kernel_{kernel_name}(Kernel):
     
     @property
     def md5(self)->str:
-        return ProgramParser.md5_of(self._includes, self._defines, self._options)
+        # The file itself belongs to the key: several kernels share one generated
+        # file (every kernel a module defines), and each is compiled on its own call.
+        return ProgramParser.md5_of(self._includes, self._defines, self._options,
+                                    file_name=self._file_name)
     
     @property
     def cache_folder(self)->str:
@@ -485,5 +488,14 @@ class Kernel_{kernel_name}(Kernel):
         }
         if file_name:
             content["file_name"] = os.path.abspath(file_name).replace("\\", "/")
+            # The source's *content* belongs to the key: several kernels can share one
+            # generated file (every kernel a python module defines), and each is compiled
+            # on its own call, so a key that named only the path would let the first
+            # kernel's binary answer for the rest -- the module then lacks their symbols.
+            try:
+                with open(file_name, "r", encoding="utf-8") as file:
+                    content["source"] = md5sums(file.read())
+            except OSError:
+                pass
 
         return md5sums(json.dumps(content, separators=(',', ':'), indent=None))

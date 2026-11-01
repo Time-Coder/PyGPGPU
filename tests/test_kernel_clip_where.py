@@ -168,11 +168,9 @@ def _generated_source(backend: str) -> str:
                "hip": ("__hipcache__", ".hip")}
     folder, suffix = folders[backend]
     cache = pathlib.Path(__file__).parent / folder / "pykernels"
-    for path in sorted(cache.glob(f"clip_for_codegen_*{suffix}")):
-        if "_clean" in path.name:
-            continue
-        return path.read_text(encoding="utf-8")
-    return ""
+    # One generated file per python module, named after it (see kernel.source_paths).
+    path = cache / f"{pathlib.Path(__file__).stem}{suffix}"
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
 @pytest.mark.parametrize("backend", ["opencl", "cuda"])

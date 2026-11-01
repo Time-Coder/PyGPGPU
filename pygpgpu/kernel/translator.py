@@ -6832,6 +6832,10 @@ class FunctionTranslator:
                 # Structure types this helper's signature or body mentions: the caller emits
                 # their typedefs once, ahead of every device function.
                 "structs": list(callee.private_structs),
+                # The python file this function was written in: its device code goes to
+                # that module's own source file (see pygpgpu.kernel.source_paths).
+                "source_file": getattr(getattr(raw_func, "__code__", None),
+                                        "co_filename", "") or "",
                 # A helper's body may use quaternion arithmetic too; its generated functions
                 # travel with the entry so the compile step can emit them once.
                 "quaternion_helpers": dict(callee.quaternion_helpers),

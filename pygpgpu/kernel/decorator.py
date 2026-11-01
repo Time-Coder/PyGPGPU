@@ -28,6 +28,7 @@ from .translator import (
     type_sig,
 )
 from .objects import ObjectBinding, convert_object_arguments
+from . import source_paths
 
 
 # ---------- bracket selector parsing ----------
@@ -1705,7 +1706,17 @@ class PyKernel:
         return self.raw_func.__globals__.get(name)
 
     def _c_kernel_name(self, sig:str, backend:str)->str:
-        return f"{self.__name__}_{short_hash(sig + '_' + backend)}"
+        """The kernel's C name, unique per module as well as per signature.
+
+        Two modules can define a kernel with the same name and the same argument types --
+        two test modules both declaring calls_a_method, say -- and one generated file
+        #includes the other. Without the module in the hash the two kernels share one C
+        name, and the source defines it twice.
+        """
+        source_file:str = getattr(getattr(self.raw_func, "__code__", None),
+                                  "co_filename", "") or ""
+        module_mark:str = os.path.basename(source_file)
+        return f"{self.__name__}_{short_hash(module_mark + '|' + sig + '_' + backend)}"
 
     def _bind_images(self, full_values:Any, backend:str)->None:
         """Create the device objects for every Image argument, before compilation.
@@ -1768,14 +1779,38 @@ class PyKernel:
         rendered:List[Tuple[str, str]] = translator.render_kernels(c_name)
         kernel_code:str = "\n\n".join(source for _, source in rendered)
 
-        # Device helper functions must be emitted in dependency order: C requires a callee to
-        # be declared before its caller, and the cache is filled depth-first (a nested helper
-        # is finished *after* the helper that calls it). Emit leaves first.
-        dependency_codes:List[str] = [entry["code"] for entry in _dependency_order(device_cache)]
+        # The generated device code is split the way the python code is (see source_paths):
+        # a kernel and every helper written in its own module go to that module's source
+        # file, and a helper from another module goes to that module's file and is reached
+        # with one `#include`. One file per python module means one compilation unit per
+        # module, so a callee from another module still has to be reachable -- which is what
+        # the include does (the preprocessor expands it before the compiler runs).
+        kernel_source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
 
-        # Structure types come first, once, before every device function and the kernel: a
-        # helper's signature may name one as well, and C++ rejects the same struct defined
-        # twice. Collect them from the kernel and from each helper.
+        def module_of(entry:Dict[str, Any])->str:
+            """The python file a device function came from, spelled as a cache path."""
+            return source_paths.source_path(kernel_source_file, entry.get("source_file", ""),
+                                            backend)
+
+        # Device helper functions are emitted in dependency order: C requires a callee to be
+        # declared before its caller, and the cache is filled depth-first (a nested helper
+        # is finished *after* the helper that calls it). Emit leaves first.
+        ordered_entries:List[Dict[str, Any]] = _dependency_order(device_cache)
+        own_entries:List[Dict[str, Any]] = [
+            entry for entry in ordered_entries
+            if module_of(entry) == module_of({"source_file": kernel_source_file})]
+        foreign_entries:Dict[str, List[Dict[str, Any]]] = {}
+        for entry in ordered_entries:
+            path:str = module_of(entry)
+            if path == module_of({"source_file": kernel_source_file}):
+                continue
+            foreign_entries.setdefault(path, []).append(entry)
+
+        # A nested launch needs the callee's own `__global__` function in this same source:
+        # the launch statement names a device function, and C requires it before its caller.
+        device_prefix:List[str] = list(translator.nested_helpers) + list(translator.nested_kernels)
+        device_prefix.extend(entry["code"] for entry in own_entries)
+
         structure_dtypes:List[Any] = list(translator.structure_dtypes())
         for entry in device_cache.values():
             for dtype in entry.get("structs", ()):
@@ -1798,28 +1833,61 @@ class PyKernel:
             include_lines = quaternion_header.include_line(
                 tuple(sorted(quaternion_needs)), backend, self._cache_dir(backend))
 
-        # A nested launch needs the callee's own `__global__` function in this same source:
-        # the launch statement names a device function, and C requires it before its caller.
-        device_prefix:List[str] = list(translator.nested_helpers) + list(translator.nested_kernels)
-        device_prefix.extend(dependency_codes)
         # Every top-level definition is separated by one blank line: helper from helper,
         # helper from kernel. A trailing blank on each piece makes the join produce exactly
         # one, and the final trim drops the one after the last definition.
         pieces:List[str] = [piece.rstrip("\n") for piece in device_prefix]
         pieces.append(kernel_code.rstrip("\n"))
-        source:str = "\n\n".join(piece for piece in pieces if piece)
-        if include_lines:
-            # The header declares the types, so it goes after the ordinary typedef block and
-            # ahead of every function that names a quaternion. A blank line separates the
-            # include block from the first definition.
-            source = include_lines + "\n\n" + source
-        if typedefs:
-            # The typedef block ends in the declarations, and one blank line separates it
-            # from the first definition that follows.
-            source = typedefs + "\n\n" + source
 
-        source_path:str = self._write_source(sig, source, backend)
+        own_path:str = module_of({"source_file": kernel_source_file})
+        # The includes come first: a callee from another module is a declaration this file
+        # needs before anything that calls it. The order is the order the callees were
+        # emitted, so a foreign helper that itself includes another is already covered.
+        foreign_includes:List[str] = [
+            source_paths.include_line(own_path, path) for path in foreign_entries]
+        # A generated file is a *header* plus a list of definitions. The header names every
+        # structure the file's own code uses and includes every other module it reaches;
+        # the definitions are appended one at a time, so a module with several kernels keeps
+        # all of them in one file. The header comes first because C needs a type before the
+        # function that names it, and a callee before its caller.
+        own_header:List[str] = []
+        if typedefs:
+            own_header.append(typedefs)
+        if include_lines:
+            own_header.append(include_lines)
+        if foreign_includes:
+            own_header.append("\n".join(foreign_includes))
+
+        written:Dict[str, str] = {}
+        for path, entries in foreign_entries.items():
+            # A foreign module's file carries its own typedef block as well: the
+            # declarations are guarded by structure name, so whichever file is reached
+            # first declares the type and every later inclusion skips it.
+            foreign_header:List[str] = []
+            if typedefs:
+                foreign_header.append(typedefs)
+            if include_lines:
+                foreign_header.append(include_lines)
+            written[path] = source_paths.append_source(
+                path, foreign_header,
+                [entry["code"] for entry in entries if entry["code"]],
+                entries[0].get("source_file", "") or "")
+
+        source_path:str = source_paths.append_source(
+            own_path, own_header, [piece for piece in pieces if piece],
+            kernel_source_file)
+        # The whole file is one translation unit: a nested launch anywhere in it makes NVRTC
+        # reject the source, so the *file* decides the build path, not the kernel being
+        # compiled. A module with one nesting kernel and one ordinary kernel must be built
+        # by nvcc even when the ordinary kernel is launched first, so the decision reads the
+        # file that was actually written (it accumulates every kernel of the module).
         linked:bool = translator.nests_a_launch
+        if not linked:
+            try:
+                with open(source_path, "r", encoding="utf-8") as file:
+                    linked = "<<<" in file.read()
+            except OSError:
+                linked = False
         kernels:List[Any] = [
             self._backend_compile(source_path, name, backend, device_obj, linked=linked)
             for name, _ in rendered]
@@ -1957,25 +2025,13 @@ class PyKernel:
                  "whole_shape_index": param_index.get(translator.nd_whole_shape_param, -1)})
 
     def _cache_dir(self, backend:str)->str:
+        """The pykernels folder this kernel's generated sources live in.
+
+        It is the shared root the per-module files sit under, so the quaternion header can
+        be placed there once and every module's source reach it.
+        """
         source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
-        base_dir:str = (os.path.dirname(os.path.abspath(source_file)) if source_file else os.getcwd())
-        folder:str = {"opencl": "__clcache__", "cuda": "__cucache__", "hip": "__hipcache__"}[backend]
-        return os.path.join(base_dir, folder, "pykernels")
-
-    def _write_source(self, sig:str, source:str, backend:str)->str:
-        cache_dir:str = self._cache_dir(backend)
-        os.makedirs(cache_dir, exist_ok=True)
-        extension:str = {"opencl": "cl", "cuda": "cu", "hip": "hip"}[backend]
-        path:str = os.path.join(cache_dir, f"{self.__name__}_{sig}_{self._source_sig}.{extension}")
-
-        existing:Optional[str] = None
-        if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as file:
-                existing = file.read()
-        if existing != source:
-            with open(path, "w", encoding="utf-8", newline="\n") as file:
-                file.write(source)
-        return path
+        return source_paths.cache_root(source_file, backend)
 
     def _backend_compile(self, source_path:str, c_name:str, backend:str, device_obj:Any,
                          linked:bool=False):

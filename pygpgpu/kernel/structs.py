@@ -157,6 +157,13 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
             # One blank line between structure definitions.
             lines.append("")
         members:List[str] = structure_fields(dtype, backend)
+        # Every structure is guarded by its own name. A generated file can be reached from
+        # several others (`#include`), and two modules can declare one layout -- therefore
+        # one C type -- so the guard is what makes that declaration appear once however
+        # many files reach it.
+        guard:str = f"__PYGPGPU_STRUCT_{name}"
+        lines.append(f"#ifndef {guard}")
+        lines.append(f"#define {guard}")
         if backend == "opencl":
             lines.append("typedef struct")
             lines.append("{")
@@ -169,6 +176,7 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
             lines.append("\n".join(f"    {member};" for member in members))
             lines.append("};")
             lines.append(f"typedef struct {name} {name};")
+        lines.append("#endif")
     return "\n".join(lines)
 
 
