@@ -383,17 +383,26 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
         device_type:Any = field_type
         name:Optional[str] = _is_vector_class(field_type)
         if name is not None:
-            device_type = _device_class(name, backend)
-            changed = True
+            # Only a vector the device stores in more slots than the host does changes the
+            # layout: a 2-component vector is 8 bytes on both sides and a 4-component one is
+            # already four slots, so rebuilding a structure that holds either of them would
+            # copy bytes to produce an identical layout.
+            if _needs_padding(name, backend):
+                device_type = _device_class(name, backend)
+                changed = True
         elif issubclass(field_type, ctypes.Array):
             name = _is_vector_class(field_type._type_)
             if name is not None:
-                device_type = _device_class(name, backend) * field_type._length_
-                changed = True
+                if _needs_padding(name, backend):
+                    device_type = _device_class(name, backend) * field_type._length_
+                    changed = True
             elif issubclass(field_type._type_, ctypes.Structure):
+                # An array of structures: the element's own class says whether its layout
+                # differs, and a nested array is asked the same question recursively.
                 packed_element:Any = _pack_structure(field_type._type_(), backend)[0]
-                device_type = type(packed_element) * field_type._length_
-                changed = True
+                if type(packed_element) is not field_type._type_:
+                    device_type = type(packed_element) * field_type._length_
+                    changed = True
         elif issubclass(field_type, ctypes.Structure):
             packed, packed_write_back = _pack_structure(field_type(), backend)
             if packed_write_back is not None:

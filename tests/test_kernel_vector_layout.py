@@ -15,7 +15,7 @@ import ctypes
 
 import numpy as np
 import pytest
-from pygf import float3, float4, int3
+from pygf import float2, float3, float4, int3
 
 from pygpgpu import kernel
 from pygpgpu.vec_types.layout import _host_classes, _vector_dtype_name, pack
@@ -70,6 +70,76 @@ def test_an_array_of_three_component_vectors_is_repacked_and_restored():
     unpack(packed)
     assert host["x"].tolist() == [7.0, 8.0]
     assert host["y"].tolist() == [2.0, 2.0]
+
+
+class _InnerVec3(ctypes.Structure):
+    _fields_ = [("v", float3)]
+
+
+class _MidVec3(ctypes.Structure):
+    _fields_ = [("inner", _InnerVec3)]
+
+
+class _Vec3Array(ctypes.Structure):
+    _fields_ = [("v", float3 * 3)]
+
+
+class _Vec3ArrayHolder(ctypes.Structure):
+    _fields_ = [("rows", _Vec3Array)]
+
+
+class _StructVec3Array(ctypes.Structure):
+    _fields_ = [("rows", _InnerVec3 * 2)]
+
+
+class _StructVec3ArrayHolder(ctypes.Structure):
+    _fields_ = [("rows", _StructVec3Array)]
+
+
+class _Vec2Member(ctypes.Structure):
+    _fields_ = [("v", float2), ("k", ctypes.c_int)]
+
+
+class _Vec4Member(ctypes.Structure):
+    _fields_ = [("v", float4)]
+
+
+_NEEDS_REBUILD = [
+    # 1. a member that is a 3-component vector
+    pytest.param(_InnerVec3(), True, id="direct-vector"),
+    # a 2- or 4-component one is not padded, so it must not force a rebuild
+    pytest.param(_Vec2Member(), False, id="direct-vector2"),
+    pytest.param(_Vec4Member(), False, id="direct-vector4"),
+    # 2. a member that is a structure which contains one, at any depth
+    pytest.param(_MidVec3(), True, id="nested-structure"),
+    # 3. an array whose elements are 3-component vectors, or structures that contain one
+    pytest.param(_Vec3Array(), True, id="array-of-vector"),
+    pytest.param(_StructVec3Array(), True, id="array-of-structure"),
+    # ... and the same shapes reached through a structure member
+    pytest.param(_Vec3ArrayHolder(), True, id="structure-array-of-vector"),
+    pytest.param(_StructVec3ArrayHolder(), True, id="structure-array-of-structure"),
+]
+
+
+@pytest.mark.parametrize("value,rebuild", _NEEDS_REBUILD)
+def test_what_counts_as_containing_a_padded_vector(value, rebuild):
+    """A structure is rebuilt for the device exactly when a padded vector is inside it.
+
+    Only a 3-component vector changes layout under OpenCL, and it counts wherever it
+    appears: as a member, inside a nested structure, as an array's element, or inside a
+    structure held by an array. Rebuilding a structure without one would copy bytes into an
+    identical layout, so the test also pins the shapes that must be left alone.
+    """
+    packed, write_back = pack(value, "opencl")
+    if rebuild:
+        assert packed is not value, type(value).__name__
+        assert write_back is not None, type(value).__name__
+    else:
+        assert packed is value, type(value).__name__
+        assert write_back is None, type(value).__name__
+    # CUDA and HIP store the host layout itself, so nothing is ever rebuilt there.
+    packed, write_back = pack(value, "cuda")
+    assert packed is value and write_back is None
 
 
 class _WithVector(ctypes.Structure):
