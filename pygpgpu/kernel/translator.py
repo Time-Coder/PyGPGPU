@@ -7739,7 +7739,16 @@ class FunctionTranslator:
             return self._device_type("uchar")
         return self._device_type(t)
 
-    def render_kernel(self, c_name:str)->str:
+    def parameter_declarations(self)->List[str]:
+        """The kernel's parameter list, exactly as the generated signature spells it.
+
+        Split out of `render_kernel` because the kernel's C name has to cover it: the name's
+        hash is built from the *argument types* the caller passed, which do not include the
+        extent parameters the translator derives, nor the outer-scope values, nor the shared
+        buffers. A body whose derived signature changed therefore kept its old name, and the
+        file then held two declarations of that name -- "more than one instance of overloaded
+        function". Hashing the rendered list makes a changed signature a changed name.
+        """
         # Outer-scope parameters are held in self.params so the host can index launch
         # arguments by name, but they are *declared* last: the host appends them after the
         # work-size/sampler/local-size arguments it derives (see PyKernel._invoke_inner).
@@ -7784,6 +7793,19 @@ class FunctionTranslator:
         # Return slots come last, after every parameter the work size and samplers derive
         # from, so appending them at launch time cannot disturb those positions.
         params.extend(self.render_return_params())
+        return params
+
+    def signature_digest(self)->str:
+        """A digest of what this kernel's device signature declares.
+
+        The C name appends it, so a body whose derived parameters changed is a different
+        name -- and the generated file then holds one declaration instead of two that
+        collide.
+        """
+        return hashlib.md5(";".join(self.parameter_declarations()).encode("utf-8")).hexdigest()[:8]
+
+    def render_kernel(self, c_name:str)->str:
+        params:List[str] = self.parameter_declarations()
 
         prefix:str = ("__kernel " if self.backend == "opencl" else "__global__ ")
         header:str = f"{prefix}void {c_name}({', '.join(params)})"

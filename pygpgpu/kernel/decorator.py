@@ -1836,13 +1836,21 @@ class PyKernel(_KernelBase[_P]):
                     return None
         return self.raw_func.__globals__.get(name)
 
-    def _c_kernel_name(self, sig:str, backend:str)->str:
-        """The kernel's C name, unique per module as well as per signature.
+    def _c_kernel_name(self, sig:str, backend:str, declaration:str="")->str:
+        """The kernel's C name, unique per module and per what it declares.
 
         Two modules can define a kernel with the same name and the same argument types --
         two test modules both declaring calls_a_method, say -- and one generated file
         #includes the other. Without the module in the hash the two kernels share one C
         name, and the source defines it twice.
+
+        `declaration` is the rendered parameter list, when the caller already has one. The
+        name has to cover it as well as `sig`: `sig` is built from the *argument types* the
+        caller passed, while the generated signature also carries the extents derived from
+        the body, the outer-scope values and the shared buffers. Without them in the hash a
+        body whose derived signature changed kept its old name, and the file then held two
+        declarations of that name. It is folded into the *same* hash rather than appended
+        as a second one, so a kernel name stays `name_<hash>` (see docs/generated-source.md).
         """
         source_file:str = getattr(getattr(self.raw_func, "__code__", None),
                                   "co_filename", "") or ""
@@ -1856,7 +1864,10 @@ class PyKernel(_KernelBase[_P]):
             owner_name:str = qualname.rsplit(".", 1)[0]
             if "<" not in owner_name:
                 base = f"{owner_name}_{self.__name__}"
-        return f"{base}_{short_hash(module_mark + '|' + sig + '_' + backend)}"
+        payload:str = module_mark + "|" + sig + "_" + backend
+        if declaration:
+            payload += "|" + declaration
+        return f"{base}_{short_hash(payload)}"
 
     def _bind_images(self, full_values:Any, backend:str)->None:
         """Create the device objects for every Image argument, before compilation.
@@ -1973,6 +1984,14 @@ class PyKernel(_KernelBase[_P]):
         if self._domain:
             self._apply_declared_domain(translator)
         translator.translate()
+        # The name has to cover what the translator actually declares. `sig` is built from
+        # the *argument types* the caller passed, which do not include the extent parameters
+        # derived from the body, the outer-scope values or the shared buffers -- so a body
+        # whose derived signature changed kept its old name, and the generated file ended up
+        # holding two declarations of it ("more than one instance of overloaded function").
+        # Re-deriving the name with the rendered declaration folds that into the same hash.
+        c_name = self._c_kernel_name(sig, backend,
+                                     declaration=";".join(translator.parameter_declarations()))
         # One kernel per magic loop: a body with several renders several, launched in order
         # so the arrays stay on the device between them.
         rendered:List[Tuple[str, str]] = translator.render_kernels(c_name)
@@ -1985,6 +2004,10 @@ class PyKernel(_KernelBase[_P]):
         # module, so a callee from another module still has to be reachable -- which is what
         # the include does (the preprocessor expands it before the compiler runs).
         kernel_source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
+        # What the generated file records so a later call can tell whether it still
+        # describes this module's text. mtime alone is not reliable (`git checkout` restores
+        # the old stamp), so the digest is what actually decides.
+        source_digest:str = source_paths.python_source_digest(kernel_source_file)
 
         def module_of(entry:Dict[str, Any])->str:
             """The python file a device function came from, spelled as a cache path."""
@@ -2096,11 +2119,12 @@ class PyKernel(_KernelBase[_P]):
             written[path] = source_paths.append_source(
                 path, foreign_header,
                 [entry["code"] for entry in entries if entry["code"]],
-                entries[0].get("source_file", "") or "")
+                entries[0].get("source_file", "") or "",
+                source_digest=source_digest)
 
         source_path:str = source_paths.append_source(
             own_path, own_header, [piece for piece in pieces if piece],
-            kernel_source_file)
+            kernel_source_file, source_digest=source_digest)
         # The whole file is one translation unit: a nested launch anywhere in it makes NVRTC
         # reject the source, so the *file* decides the build path, not the kernel being
         # compiled. A module with one nesting kernel and one ordinary kernel must be built

@@ -458,8 +458,26 @@ def _canonical_header(header: List[str]) -> List[str]:
     return canonical
 
 
+def python_source_digest(source_python:str)->str:
+    """A digest of the python text that produced a generated file.
+
+    The freshness test used to be mtime alone, which assumes a file's timestamp moves
+    forward when its text changes. Git breaks that assumption: `git checkout` and
+    `git stash pop` restore a file *and* set its mtime back, so a generated file written
+    from newer text kept looking "newer than the source" and was reused -- leaving the old
+    declaration of a kernel beside the new one, and the compiler reported "more than one
+    instance of overloaded function". Reading the text is what makes the test about
+    content rather than about a clock.
+    """
+    try:
+        with open(source_python, "r", encoding="utf-8") as file:
+            return hashlib.md5(file.read().encode("utf-8")).hexdigest()
+    except OSError:
+        return ""
+
+
 def append_source(path: str, header: List[str], definitions: List[str],
-                  source_python: str) -> str:
+                  source_python: str, source_digest: str = "") -> str:
     """Write definitions into a generated file, keeping what the file already holds.
 
     One python module owns one generated file, and it is compiled once per kernel, so each
@@ -483,6 +501,12 @@ def append_source(path: str, header: List[str], definitions: List[str],
                 and os.path.getmtime(path) > os.path.getmtime(source_python))
         except OSError:
             target_is_newer = False
+        # The clock is not the whole answer: `git checkout` and `git stash pop` restore a
+        # file *and* set its mtime back, so a file written from newer text kept looking
+        # fresh. The digest recorded beside it is what actually decides, and a mismatch
+        # invalidates whichever way the timestamps point.
+        if target_is_newer and source_digest:
+            target_is_newer = _stored_digest(path) == source_digest
         if not target_is_newer:
             # The file describes python text that has since changed: start it over.
             existing = None
@@ -518,7 +542,42 @@ def append_source(path: str, header: List[str], definitions: List[str],
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as file:
         file.write(source)
+    _write_digest(path, source_digest)
     return path
+
+
+DIGEST_SUFFIX: str = ".source-digest"
+
+
+def digest_sidecar(path:str)->str:
+    """Where a generated file's source digest is kept.
+
+    A sidecar rather than a comment inside the source: the generated text is a
+    carefully-assembled translation unit whose blank lines are significant (`_split_source`
+    splits it on a blank line), so threading one more line through it risked changing how a
+    later write re-reads the file. A `.source-digest` file next to the source cannot affect
+    what the compiler sees.
+    """
+    return path + DIGEST_SUFFIX
+
+
+def _write_digest(path:str, digest:str)->None:
+    if not digest:
+        return
+    try:
+        with open(digest_sidecar(path), "w", encoding="utf-8", newline="\n") as file:
+            file.write(digest + "\n")
+    except OSError:
+        pass
+
+
+def _stored_digest(path:str, source:str="")->str:
+    """The digest recorded beside a generated file, or "" when there is none."""
+    try:
+        with open(digest_sidecar(path), "r", encoding="utf-8") as file:
+            return file.read().strip()
+    except OSError:
+        return ""
 
 
 def write_source(path: str, source: str, source_python: str,

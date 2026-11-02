@@ -98,10 +98,28 @@ through a value of the right width.
 | file guard | `__<file>_<hash>__` | the file's own path |
 | structure guard | `__<C name>__` | the C type name |
 
-The hash covers the module plus the argument-type signature, which is what keeps two helpers of
-one name apart: a helper monomorphizes per call type (`blend` over `float` and over `float3` are two
-device functions), and two modules can define the same name. **Nothing appends a number to settle a
-collision** -- the hash is what does that, so a name never reads `blend_ab12_1`.
+The hash covers the module plus the argument-type signature **and the rendered parameter list**,
+which is what keeps two helpers of one name apart: a helper monomorphizes per call type (`blend`
+over `float` and over `float3` are two device functions), and two modules can define the same
+name. The rendered list matters because the generated signature carries more than the caller's
+argument types -- the extents derived from the body, the outer-scope values, the shared buffers
+-- so hashing the types alone left a body whose derived signature had changed under its old
+name, and the file then held two declarations of it. **Nothing appends a number to settle a
+collision** -- the hash is what does that, so a name never reads `blend_ab12_1`, and a kernel
+name keeps its single `name_<hash>` shape.
+
+## A generated file is invalidated by its source's digest, not only by its timestamp
+
+`append_source` keeps a file whose contents describe the current python text and starts it over
+otherwise. The first test was the mtime, which assumes a file's stamp moves forward when its text
+changes; `git checkout` and `git stash pop` restore a file **and** set its mtime back, so a file
+written from newer text kept looking fresh and its stale declaration survived beside the new
+one. The digest of the python text a file came from is now recorded **beside** it, in
+`<source>.source-digest`, and a mismatch invalidates it whichever way the timestamps point. A
+sidecar rather than a comment inside the generated text: that text is a translation unit whose
+blank lines `_split_source` splits on, so threading one more line through it would change how a
+later write re-reads the file. An unchanged source keeps the file, so the append rule still
+holds: a module's other kernels stay in place.
 
 A method is named after the class it is *defined on*, never the class of the kernel that calls it:
 `Ray.at` is `Ray_at`. A structure's C name is **pinned the first time it is asked for**
