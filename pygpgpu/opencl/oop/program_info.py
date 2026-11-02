@@ -82,13 +82,39 @@ class VarInfo:
 
         return bool(self.kernel_flags & KernelFlags.Writed)
 
+    @property
+    def need_upload(self)->bool:
+        """Whether this argument's host data has to travel to the device at all.
+
+        A pointer the kernel neither reads nor writes contributes nothing and receives
+        nothing, so both copies are pointless -- `KernelFlags(0)` says exactly that and this
+        is where it takes effect. Every other argument is uploaded, including a written one:
+        the read-back is whole-buffer, so a buffer that was never uploaded would come back
+        with zeros in every element the kernel left alone.
+        """
+        if not (self.is_ptr or self.type_str in CLInfo.image_types):
+            return True
+        # Either direction implies the contents matter: a read needs the real values, and a
+        # read-back needs them too, because it copies the whole buffer home. Only an
+        # argument with NEITHER flag can skip the copy.
+        return bool(self.kernel_flags & (KernelFlags.Readed | KernelFlags.Writed))
+
     def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
         if isinstance(data, gnp.ndarray):
             used_buffer, event = data._to_device(cmd_queue, self.name, kernel_flags=self.kernel_flags)
         else:
             used_buffer = cmd_queue.context.get_buffer(data.nbytes)
             used_buffer.kernel_flags = self.kernel_flags
-            event = used_buffer.set_data(cmd_queue, data)
+            # An argument the kernel never touches skips the copy entirely: the buffer has
+            # to exist for the launch, but its contents are never read, so filling it is
+            # work for no result (see need_upload).
+            if self.need_upload:
+                event = used_buffer.set_data(cmd_queue, data)
+            else:
+                # Nothing reads this argument, so the data stays on the host -- but the
+                # read-back still needs its pointer, which set_data is what records.
+                used_buffer.bind_data(data)
+                event = None
 
         if event is not None and CL.print_info:
             print(f"copy data to device for argument '{self.name}'")

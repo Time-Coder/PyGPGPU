@@ -381,6 +381,27 @@ class TSParserMixin:
         return flags
 
     def _param_flags(self, info:Any, reads:Set[str], writes:Set[str], escapes:Set[str])->Dict[str, KernelFlags]:
+        """The copy policy of every pointer argument: what is uploaded, what is read back.
+
+        A pointer the body never touches is copied **neither way**. The analysis knows the
+        body, so a buffer that appears nowhere in it cannot contribute or receive anything,
+        and moving it costs a copy for no result -- which is what a kernel that reserves an
+        argument for a code path it does not take would otherwise pay on every launch. That
+        is why the "no flags" case is left empty rather than widened to both.
+
+        A buffer the body **writes** is uploaded as well, because the read-back copies the
+        *whole* buffer into the caller's array: a buffer that was never uploaded would
+        replace every element the kernel did not write with the contents of a fresh device
+        buffer (zeros). Python keeps those elements, so `out[i, j, 0] = ...` on a 3-channel
+        image must leave channels 1 and 2 as the caller had them.
+
+        An explicit `write_only` qualifier no longer changes the copy policy. It described
+        what the *shader* may assume, and this host cannot honour the saving it implied for
+        the same reason as above: the read-back is whole-buffer, so an upload that was
+        skipped would come back as zeros in every element the kernel left alone. The
+        qualifier is therefore a statement about the body's uses, already captured by the
+        analysis, not an instruction to stop copying.
+        """
         result:Dict[str, KernelFlags] = {}
         for name, arg in info.args.items():
             if not self._is_mem_arg(arg):
@@ -388,24 +409,19 @@ class TSParserMixin:
                 continue
 
             if name in escapes:
+                # The pointer escaped (handed to a helper or stored): its uses are unknown,
+                # so it keeps both directions.
                 flags:KernelFlags = (KernelFlags.Readed | KernelFlags.Writed)
             else:
-                flags = ((KernelFlags.Readed if name in reads else KernelFlags(0)) | (KernelFlags.Writed if name in writes else KernelFlags(0)))
+                flags = ((KernelFlags.Readed if name in reads else KernelFlags(0)) |
+                         (KernelFlags.Writed if name in writes else KernelFlags(0)))
 
-            if not flags:
-                flags = (KernelFlags.Readed | KernelFlags.Writed)
-
+            # A `const`/read-only qualifier is authoritative: the body cannot write through
+            # it, so there is nothing to read back. A `write_only` one is not consulted --
+            # see the docstring.
             if arg.readonly:
                 flags = KernelFlags.Readed
-            elif arg.writeonly:
-                flags = KernelFlags.Writed
             elif flags & KernelFlags.Writed:
-                # Reading a buffer the kernel writes is implied by writing it: the download
-                # after a launch copies the *whole* buffer back into the caller's array, so
-                # a buffer that was never uploaded would replace every element the kernel
-                # did not write with the contents of a fresh device buffer (zeros). Python
-                # keeps those elements, so the upload has to happen -- `out[i, j, 0] = ...`
-                # on a 3-channel image must leave channels 1 and 2 as the caller had them.
                 flags = flags | KernelFlags.Readed
 
             result[name] = flags
@@ -562,6 +578,18 @@ class TSParserMixin:
                 (ctx["writes"] if is_write else ctx["reads"]).add(root)
             return
 
+        if node_type == "type_descriptor":
+            # A cast's type sits here, and a cast is how C spells some *parenthesised
+            # arithmetic*: `(w1 * ((float)(a[0]))) + (w2 * ...)` is parsed as a cast whose
+            # type is `w1 * ((float)(a[0]))`, because `( expr ) + expr` and `( type ) expr`
+            # are the same shape. The grammar therefore labels the operands
+            # `type_identifier` / `abstract_*_declarator` even though they name variables.
+            # Each of them is resolved as a plain name here: a real type name never resolves
+            # to an argument, so a genuine cast contributes nothing while the ambiguous one
+            # recovers exactly the reads and writes a reader would find.
+            self._visit_type_descriptor(node, scopes, ctx)
+            return
+
         if node_type == "subscript_expression":
             children:List[Node] = node.named_children
             base:Node = children[0]
@@ -659,11 +687,36 @@ class TSParserMixin:
         for child in node.named_children:
             self._visit_expression(child, scopes, ctx, False)
 
+    def _visit_type_descriptor(self, node:Node, scopes, ctx)->None:
+        """Count the names inside a cast's type as reads.
+
+        The grammar spells both `(float)(a[0])` and the ambiguous `(w1 * (a[0])) + ...` as a
+        `cast_expression` whose `type_descriptor` holds the left operand. A real type
+        contributes only keywords (`primitive_type`, `type_identifier` naming a struct), and
+        none of those resolves to a kernel argument, so resolving each name here costs one
+        dictionary lookup when the cast is genuine -- and it is what keeps `w1` and `a[0]`
+        alive when the cast is not.
+        """
+        if node.type in ("identifier", "field_identifier", "type_identifier"):
+            root, _ = self._resolve(self._node_text(node), scopes)
+            if root is not None:
+                ctx["reads"].add(root)
+            return
+        for child in node.named_children:
+            self._visit_type_descriptor(child, scopes, ctx)
+
     def _visit_call(self, node:Node, scopes, ctx)->None:
         children:List[Node] = node.named_children
         func:Node = children[0]
         func_name:str = (self._node_text(func) if func.type == "identifier" else "")
-        arg_list:Node = (children[1] if len(children) > 1 and children[1].type == "argument_list" else None)
+        # The argument list is found **by type**, not by position: a nested launch spells
+        # `child<<<grid, block>>>(args)`, whose children are the callee, a
+        # `kernel_call_syntax` node and then the argument list. Taking `children[1]` read
+        # the launch geometry as the arguments, so the list was empty and every pointer
+        # handed to the child looked untouched -- its flags came out as neither read nor
+        # written, and skipping both copies broke the nested launch.
+        arg_list:Node = next((child for child in children[1:]
+                              if child.type == "argument_list"), None)
         actuals:List[Node] = (list(arg_list.named_children) if arg_list is not None else [])
 
         helper_flags:Optional[Dict[str, KernelFlags]] = None

@@ -7,6 +7,7 @@ import functools
 import inspect
 import os
 import pathlib
+import sys
 import threading
 from typing import (
     TYPE_CHECKING,
@@ -35,6 +36,7 @@ from .translator import (
     PTR,
     FunctionTranslator,
     _assigned_name_of,
+    _unpack_count_message,
     infer_ctype,
     is_ptr,
     scan_self_attrs,
@@ -486,6 +488,12 @@ def _native_argument_errors(entry:Callable[_P, _R])->Callable[_P, _R]:
     not hide its signature from a type checker: ``functools.wraps`` alone conservatively
     reports ``(*args, **kwargs)``, which would undo the parameter hints the caller's own
     ``def`` gave the kernel.
+
+    A failure of the *body* travels through here too, and arrives already carrying a
+    stand-in for the body's own line (see ``PyKernel._invoke``). The wrapper is the last
+    place its own frame can be dropped, because a bare ``raise`` here would push it back on:
+    only the stand-in is kept, so the reader sees the caller's line and the body's line and
+    nothing of this library.
     """
     @functools.wraps(entry)
     def wrapper(*args:_P.args, **kwargs:_P.kwargs)->_R:
@@ -494,8 +502,33 @@ def _native_argument_errors(entry:Callable[_P, _R])->Callable[_P, _R]:
         except (ArgumentTypeError, TypeError) as error:
             error.__traceback__ = None
             raise
+        except Exception as error:
+            body:Optional[Any] = _body_only(error)
+            if body is None:
+                raise
+            error.__traceback__ = body
+            raise
 
     return wrapper
+
+
+def _body_only(error:BaseException)->Optional[Any]:
+    """The exceptions raised by a kernel body, without this library's frames.
+
+    ``PyKernel._invoke`` puts a stand-in for the body's own line at the end of the chain;
+    everything ahead of it belongs to the launch machinery. Nothing is returned for an
+    error that carries no such stand-in -- a failure raised before the body ran -- so that
+    one keeps its own diagnostic.
+    """
+    traceback:Any = error.__traceback__
+    keep:Any = None
+    cursor:Any = traceback
+    while cursor is not None:
+        if _is_body_stand_in(cursor.tb_frame.f_code):
+            keep = cursor
+            break
+        cursor = cursor.tb_next
+    return keep
 
 
 def _callable_signature(func:Callable, skip_first:bool)->Optional[inspect.Signature]:
@@ -692,6 +725,117 @@ def _user_frame_syntax_error(error:SyntaxError)->SyntaxError:
         return error
     error.__traceback__ = keep
     return error
+
+
+# A comment constant that marks the frame stand-in built by _body_frame, so the entry
+# wrapper can recognize a body failure among the errors it forwards.
+_FRAME_MARKER = "__pygpgpu_body_frame__"
+
+
+def _is_body_stand_in(code:Any)->bool:
+    """True for the code object :func:`_body_frame` compiles.
+
+    The stand-in is the only function this library creates inside the user's own file, so
+    its presence in a traceback identifies a body failure -- and it is the frame the
+    caller's own python would have shown. The marker is a constant in the compiled body,
+    which no ordinary function carries.
+    """
+    for constant in getattr(code, "co_consts", ()) or ():
+        if isinstance(constant, str) and constant == _FRAME_MARKER:
+            return True
+    return False
+
+
+def _body_frame(func:Callable, error:BaseException)->Optional[Any]:
+    """A frame standing in for ``func``'s own body at the line that failed.
+
+    Native python would show exactly two: the caller's line and the failing line inside the
+    function. The body's real frame cannot simply be kept, because it is a frame of the
+    interpreter backend's machinery rather than of the user's code -- and the device
+    backends never execute the body at all.
+
+    A traceback frame's ``co_filename``/``tb_lineno`` are read-only, so the stand-in is a
+    function compiled from source carrying the user's filename and enough blank lines to
+    place its ``raise`` on the failing line. Its code positions then supply the same caret
+    CPython would draw. Only the mapping matters: the file, line and column are what a
+    reader sees.
+    """
+    filename:str = getattr(getattr(func, "__code__", None), "co_filename", "") or ""
+    if not filename or filename.startswith("<"):
+        return None
+    # The line the error points at, in the user's file. For an unpacking failure that is the
+    # `for` statement itself, which is exactly what python blames. A *device* backend refuses
+    # that shape before the body ever runs, so there is no frame to read it from -- the
+    # translator records the position on the exception instead (see _unpacking_error).
+    lineno:int = int(getattr(error, "lineno", 0) or 0)
+    if not lineno:
+        cursor:Any = error.__traceback__
+        while cursor is not None:
+            if os.path.abspath(cursor.tb_frame.f_code.co_filename) == os.path.abspath(filename):
+                lineno = cursor.tb_lineno
+                break
+            cursor = cursor.tb_next
+    if not lineno:
+        return None
+
+    qualname:str = getattr(func, "__qualname__", None) or getattr(func, "__name__", "kernel")
+    # A nested function's qualname carries its outer names; the frame shows the last one.
+    func_name:str = qualname.rsplit(".", 1)[-1]
+    # `def <name>():` has to sit far enough above the failing line that the `raise` lands on
+    # it. The stand-in is three lines (def, marker, raise), so its `def` starts at
+    # `lineno - 3`. The marker string is what identifies this stand-in later (see
+    # _is_body_stand_in); it is dead code, because the `raise` below it always happens.
+    source:str = ("\n" * max(lineno - 3, 0)
+                  + f"def {func_name}():\n"
+                  + f"    '{_FRAME_MARKER}'\n"
+                  + "    raise _PYGPGPU_FRAME_EXCEPTION\n")
+    namespace:Dict[str, Any] = {"_PYGPGPU_FRAME_EXCEPTION": error}
+    try:
+        exec(compile(source, filename, "exec"), namespace)  # noqa: S102 - a frame stand-in
+        frame_func:Any = namespace[func_name]
+    except (SyntaxError, ValueError):
+        return None
+    try:
+        frame_func()
+    except BaseException:  # noqa: BLE001 - the carrier raises; the real error travels along
+        # Only the frame for the user's file is wanted: the caller's frame comes from
+        # `_caller_traceback` and everything else in this chain is this module's own.
+        cursor = sys.exc_info()[2]
+        while cursor is not None:
+            if os.path.abspath(cursor.tb_frame.f_code.co_filename) == os.path.abspath(filename):
+                # The captured chain continues into this function and its caller, which are
+                # library frames -- the stand-in is a whole traceback, not just its head.
+                cursor.tb_next = None
+                return cursor
+            cursor = cursor.tb_next
+    return None
+
+
+def _user_traceback(error:BaseException, func:Callable)->Any:
+    """The traceback native python would have produced: the caller, then the failing line.
+
+    Everything between the two belongs to this library, so it is spliced out. The head is
+    the caller's own frame -- the line that asked the kernel to run -- and its successor is
+    the stand-in built by :func:`_body_frame`, which carries the body's file, line and
+    function name.
+
+    CPython prepends the frame that *executes* the ``raise``, so the chain cannot be
+    assembled by assigning ``tb_next``: the caller node is already part of the live chain,
+    and pointing it at the stand-in is rejected as a loop. It is assembled the way the
+    interpreter assembles one -- raise once from the stand-in, then drop that one frame --
+    which leaves exactly the frames of a native failure.
+    """
+    body:Any = _body_frame(func, error)
+    if body is None:
+        return _caller_traceback(error.__traceback__)
+    body.tb_next = None
+    try:
+        # Never returns: the stand-in raises the caller's own exception object.
+        raise error.with_traceback(body)
+    except BaseException as raised:
+        # `raised.__traceback__` is this function's own frame followed by the stand-in.
+        head:Any = raised.__traceback__
+        return head.tb_next if head is not None and head.tb_next is not None else body
 
 
 class _KernelCall(_KernelBase[_P]):
@@ -950,6 +1094,15 @@ class PyKernel(_KernelBase[_P]):
             # exception, not the chain.
             caller = _caller_traceback(caught.__traceback__)
             raise caught.with_traceback(caller) from None
+        except Exception as caught:
+            # A failure of the *body* -- a wrong unpack, an out-of-range index -- has to read
+            # exactly as it does without the decorator: the caller's line, then the line in
+            # the function that failed. The body's own frame belongs to the execution
+            # machinery, and the device backends never run the body at all, so it is
+            # replaced by a stand-in carrying the same file, line and function name; the
+            # library frames between the two are spliced out here.
+            caught.__traceback__ = _user_traceback(caught, self.raw_func)
+            raise caught from None
 
     def _sync_device(self, backend:str, device_obj:Any)->None:
         """Wait until every launch this backend has queued has finished, callbacks included.
@@ -1408,6 +1561,14 @@ class PyKernel(_KernelBase[_P]):
                     continue
                 shape:Tuple[int, ...] = tuple(int(s) for s in full[pi].shape)
                 if dim >= 0:
+                    if dim >= len(shape):
+                        # The loop asks for an axis the array does not have. numpy raises
+                        # this as an unpacking error from the `for` itself, so the launch
+                        # says it in the same words instead of letting an index slip out.
+                        raise ValueError(
+                            f"{_unpack_count_message(dim + 1, len(shape))}: "
+                            f"'{launch_meta['param_names'].get(pi, 'the array')}' has shape "
+                            f"{shape}")
                     loop_extents.append(shape[dim])
                 else:
                     loop_extents.extend(shape)
@@ -1439,14 +1600,15 @@ class PyKernel(_KernelBase[_P]):
             if whole >= 0 and loop_names:
                 rank:int = len(tuple(int(s) for s in full[whole].shape))
                 if rank != loop_names:
+                    # numpy raises the unpacking error itself for this shape, so the device
+                    # reports it in the same words: a body should not have to learn a second
+                    # vocabulary for the same mistake. The array and its shape follow, since
+                    # only the launch knows either.
                     raise ValueError(
-                        f"{self.__name__}(): the magic loop unpacks {loop_names} index "
-                        f"name{'s' if loop_names != 1 else ''} but np.ndindex(...) iterates "
-                        f"the whole shape of '{launch_meta['param_names'].get(whole, 'the array')}'"
-                        f", which has {rank} dimension{'s' if rank != 1 else ''} "
-                        f"{tuple(int(s) for s in full[whole].shape)}. Give one name per "
-                        f"dimension, or iterate an explicit subset, e.g. "
-                        f"np.ndindex(image.shape[0], image.shape[1])")
+                        f"{_unpack_count_message(loop_names, rank)}: "
+                        f"'{launch_meta['param_names'].get(whole, 'the array')}' has shape "
+                        f"{tuple(int(s) for s in full[whole].shape)}, and "
+                        f"np.ndindex(....shape) iterates every dimension of it")
             # The loop has to name one index per dimension of its domain: `for j, i in
             # np.ndindex(image.shape)` over an RGB image would silently iterate only two of
             # the three dimensions, so the third axis never varies. Say so instead.
@@ -1456,8 +1618,8 @@ class PyKernel(_KernelBase[_P]):
                     source = (f" (the array has shape "
                               f"{tuple(int(s) for s in full[work_size_dims[0][0]].shape)})")
                 raise ValueError(
-                    f"{self.__name__}(): the magic loop unpacks {loop_names} index "
-                    f"name{'s' if loop_names != 1 else ''} but its iteration domain has "
+                    f"{_unpack_count_message(loop_names, len(extents_list))}: "
+                    f"the loop's iteration domain has "
                     f"{len(extents_list)} dimension{'s' if len(extents_list) != 1 else ''}"
                     f"{source}. Give one name per dimension, or iterate an explicit subset, "
                     f"e.g. np.ndindex(image.shape[0], image.shape[1])")
@@ -2223,6 +2385,18 @@ class PyKernel(_KernelBase[_P]):
         for target_name in translator.atomic_targets:
             if target_name in kernel._args:
                 kernel._args[target_name].kernel_flags = (kernel._args[target_name].kernel_flags | KernelFlags.Writed)
+
+        # The return slots are written by the device and read back on the host, so they stay
+        # fully bidirectional. `atomicCAS(&_ret_claim[0], 0, 1)` *reads* the claim word to
+        # compare it against zero, and a slot that was never uploaded would compare against
+        # whatever the device buffer happened to hold -- the claim would fire at random or
+        # never, and a launch would return the wrong site's value. That is the same reason a
+        # write-only argument is still uploaded, applied to a slot the library owns rather
+        # than to the caller's data.
+        for slot_name in (translator.RETURN_CLAIM, translator.RETURN_SITE):
+            slot_info:Any = kernel._args.get(slot_name)
+            if slot_info is not None:
+                slot_info.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed)
 
         param_index:Dict[str, int] = {name: i for i, (name, _) in enumerate(translator.params)}
         # A multi-phase body is translated per phase, so the main translator indexes nothing;

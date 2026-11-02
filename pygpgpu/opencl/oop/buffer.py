@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ctypes import c_void_p, pointer
 import ctypes
-from typing import List, Optional, TYPE_CHECKING, Tuple, Union
+from typing import Any, List, Optional, TYPE_CHECKING, Tuple, Union
 from typing_extensions import override
 
 import numpy as np
@@ -14,7 +14,6 @@ from ..driver import (
     cl_int,
     cl_event
 )
-from ...constants import KernelFlags
 from .command_queue import CommandQueue
 from .event import Event
 
@@ -96,32 +95,49 @@ class Buffer(MemObject):
         CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, origin, region, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueReadBuffer)
 
-    @override
-    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:Optional[List[Event]]=None)->Event:
-        if cmd_queue.context != self.context:
-            raise ValueError("cmd_queue should be in the same context as buffer")
-        
+    def _host_pointer_of(self, data:Union[bytes, bytearray, np.ndarray])->Tuple[ctypes.c_void_p, Any]:
+        """The host pointer and the (contiguous) data a copy would read from."""
         if isinstance(data, bytes):
-            size = len(data)
+            size: int = len(data)
             host_ptr = (ctypes.c_ubyte * size).from_buffer_copy(data)
         elif isinstance(data, bytearray):
             size = len(data)
             host_ptr = (ctypes.c_ubyte * size).from_buffer(data)
-        elif isinstance(data, np.ndarray):
+        else:
             if not data.flags['C_CONTIGUOUS']:
                 data = np.ascontiguousarray(data)
-
             host_ptr = data.ctypes.data_as(c_void_p)
             size = data.nbytes
-
         if size != self._size:
             raise ValueError("data size is not equal to buffer size")
+        return host_ptr, data
 
+    def bind_data(self, data:Union[bytes, bytearray, np.ndarray])->None:
+        """Remember the caller's data **without** copying it to the device.
+
+        Some arguments are never read by the kernel, so their initial contents do not have
+        to travel -- but the read-back still needs a host destination, and `read` takes it
+        from `_host_ptr`, which only the copy path used to set. Binding the pointer while
+        skipping the transfer is what keeps a skipped upload from turning into a bad
+        device-to-host copy at read-back time.
+        """
+        self._host_ptr, self._data = self._host_pointer_of(data)
+
+    @override
+    def set_data(self, cmd_queue:CommandQueue, data:Union[bytes, bytearray, np.ndarray], after_events:Optional[List[Event]]=None)->Event:
+        if cmd_queue.context != self.context:
+            raise ValueError("cmd_queue should be in the same context as buffer")
+
+        host_ptr, data = self._host_pointer_of(data)
         self._host_ptr = host_ptr
         self._data = data
 
         event = None
-        if not (self.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) and (self.kernel_flags & KernelFlags.Readed):
-            event = self.write(cmd_queue, 0, size, host_ptr, after_events)
+        # Either direction needs the real contents (a read uses them; a read-back copies the
+        # whole buffer home, so an upload that was skipped would come back as zeros in every
+        # element the kernel left alone). Only an argument with neither flag skips the copy,
+        # and that decision is made before this method is called (see need_upload).
+        if not (self.flags & cl_mem_flags.CL_MEM_WRITE_ONLY) and self.kernel_flags:
+            event = self.write(cmd_queue, 0, self._size, host_ptr, after_events)
         
         return event
