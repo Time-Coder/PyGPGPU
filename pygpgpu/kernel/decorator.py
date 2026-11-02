@@ -27,7 +27,7 @@ import numpy as np
 from typing_extensions import ParamSpec
 
 from ..vec_types.layout import pack
-from ..utils import local_size_for_global, detect_work_size, device_limits
+from ..utils import local_size_for_global, detect_work_size, device_limits, blocks_to_global
 from .python_backend import PythonKernel, analyse
 from . import structs
 from ..numpy import ndarray as gnp
@@ -246,7 +246,26 @@ def _parse_selector(sel:str)->Tuple[Optional[str], Optional[str]]:
 
 
 def _parse_work_item(item:Any)->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[int, ...]]]:
-    """Parse a work-size bracket: int / (global,) / (global, local); None means automatic."""
+    """Parse a work-size bracket, in CUDA's own terms: ``(blocks, threads)``.
+
+    The bracket states a launch the way a CUDA or HIP programmer states one -- how many
+    blocks per grid and how many threads per block -- because that is the spelling those
+    readers already use, and OpenCL users who want a work group write ``local=`` in their
+    own API rather than a bracket. So ``k[(4, 256)]`` is 4 blocks of 256 threads: 1024 work
+    items. ``k[(n,)]`` / ``k[n]`` is a plain item count with an automatic group size.
+
+    What travels onwards is the *total work-item* form every backend already speaks
+    (``global`` items split by a ``local`` group size), computed here as
+    ``blocks * threads``. Doing the conversion at this one entry point keeps every
+    downstream rule unchanged: the geometry a CUDA/HIP launch derives stays
+    ``global // local``, which is now ``blocks`` by construction, and the OpenCL launch
+    keeps receiving the total size its API wants. It also removes a check that only the
+    old spelling needed: a total size could fail to divide by the group size, while a block
+    count multiplied by a thread count always divides (the quotient *is* the block count).
+
+    ``None`` still means "automatic". A one-element bracket is a bare item count, so it is
+    the same number under either spelling and needs no conversion.
+    """
     def norm(v:Any)->Optional[Tuple[int, ...]]:
         if v is None:
             return None
@@ -259,14 +278,27 @@ def _parse_work_item(item:Any)->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[
             return t
         raise TypeError(f"work size entry must be int or tuple of ints, got {type(v).__name__}")
 
+    def blocks_and_threads(blocks:Optional[Tuple[int, ...]],
+                           threads:Optional[Tuple[int, ...]]
+                           )->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[int, ...]]]:
+        """``(blocks, threads)`` -> the ``(global, local)`` form the backends speak."""
+        if blocks is None or threads is None:
+            # One half alone: `threads` alone has no meaning (a group size with no grid),
+            # and `blocks` alone keeps the old "count with an automatic group" reading,
+            # which is the same number either way.
+            return blocks, threads
+        return blocks_to_global(blocks, threads)
+
     if isinstance(item, int):
         return norm(item), None
     if isinstance(item, tuple):
         if len(item) == 1:
             return norm(item[0]), None
         if len(item) == 2:
-            return norm(item[0]), norm(item[1])
-    raise TypeError("work size bracket must be n, (global,), or (global, local); use None for auto")
+            return blocks_and_threads(norm(item[0]), norm(item[1]))
+    raise TypeError(
+        "work size bracket must be n, (blocks,), or (blocks, threads) -- a CUDA-style "
+        "launch; use None for an automatic size")
 
 
 # Vendor spellings people reach for, mapped to a substring of the vendor string the
@@ -1480,23 +1512,29 @@ class PyKernel(_KernelBase[_P]):
                         f"covers {needed} work items (the loop decomposes a flat work-item "
                         f"position, so even {needed} alone works); a larger grid is fine, and "
                         f"omitting the bracket lets the loop derive the size itself")
-            # Uniform total-work-item semantics (OpenCL/SYCL): global = total number of work items, must be divisible by local;
-            # cuda's gridDim is a block count, derived from total/local, transparent to the user
+            # The bracket arrived as `(blocks, threads)` and was turned into the total
+            # work-item form here (see _parse_work_item), so the two axes agree in rank and
+            # the total always divides by the group: the quotient *is* the block count. A
+            # caller's own `local=` still has to be a size that splits the total, which is
+            # the one divisibility question that remains -- and it is answered for that
+            # argument, not for the bracket.
             if local_size is None:
                 local_size = local_size_for_global(
                     global_size, max_work_group_size=device_max_group,
                     max_work_item_sizes=device_max_items)
             if len(local_size) != len(global_size):
                 raise ValueError(
-                    f"global {global_size} and local {local_size} work sizes must have the same dimension")
-            for g, l in zip(global_size, local_size):
-                if g % l != 0:
-                    raise ValueError(
-                        f"global work size {global_size} must be divisible by local {local_size}; "
-                        f"use None for an automatically derived local size")
-            geometry = (tuple(g // l for g, l in zip(global_size, local_size))
-                        if backend in ("cuda", "hip") else global_size)
-            phase_geometry = (geometry, local_size)
+                    f"the block size {local_size} names {len(local_size)} "
+                    f"dimension(s) but the launch has {len(global_size)}; both have to name "
+                    f"the same number of axes")
+            # Every backend's `Kernel.__getitem__` takes the same bracket the caller wrote
+            # (`blocks, threads`), so what travels here is the block count and the group
+            # width -- never the total. Handing a backend the total would make it multiply it
+            # by the group width again: `(1, 256)` became 65536 work items that way. CUDA and
+            # HIP take `(grid_dims, block_dims)` directly; OpenCL converts the pair to the
+            # `(global_work_size, local_work_size)` its API wants (see utils.blocks_to_global).
+            blocks = tuple(g // l for g, l in zip(global_size, local_size))
+            phase_geometry = (blocks, local_size)
         else:
             phase_geometry = None
         # Every phase of the body gets the same geometry: they are passes over one domain.

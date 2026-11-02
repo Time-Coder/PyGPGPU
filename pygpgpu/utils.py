@@ -363,6 +363,36 @@ def local_size_for_global(global_size: Tuple[int, ...], total_local_size: int = 
     return _pick_local_size(extents, budget, max_work_item_sizes)
 
 
+def blocks_to_global(blocks: Tuple[int, ...], threads: Tuple[int, ...]
+                     ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    """``(blocks_per_grid, threads_per_block)`` -> ``(global_work_size, local_work_size)``.
+
+    Every bracket in this package states a launch the way a CUDA or HIP programmer states
+    one, on **every** backend: a grid of so many blocks, each holding so many threads.
+    OpenCL's own API speaks a different pair -- the total number of work items and the size
+    of one work group -- so the translation happens once, here, and nothing downstream has
+    to know which spelling the caller used.
+
+    ``global = blocks * threads`` and ``local = threads``. Two consequences follow and both
+    are wanted. First, the total always divides by the group size -- the quotient *is* the
+    block count -- so a divisibility check has nothing left to reject. Second, a CUDA or HIP
+    launch derives ``grid_dims = global // local``, which is ``blocks`` by construction, so
+    the three backends agree on the same launch from the same bracket.
+
+    The ranks have to match: two axes cannot say how many threads a three-axis grid holds.
+    """
+    block_extents:Tuple[int, ...] = tuple(int(b) for b in blocks)
+    thread_extents:Tuple[int, ...] = tuple(int(t) for t in threads)
+    if len(block_extents) != len(thread_extents):
+        raise ValueError(
+            f"the work size bracket {(block_extents, thread_extents)} mixes a "
+            f"{len(block_extents)}-dimensional block count with a "
+            f"{len(thread_extents)}-dimensional thread count; both have to name the same "
+            f"number of axes")
+    global_size:Tuple[int, ...] = tuple(b * t for b, t in zip(block_extents, thread_extents))
+    return global_size, thread_extents
+
+
 # ---------- progress-logging switch ----------
 
 # Modules that own a ``print_info`` flag. Kept here, below every backend, so the

@@ -2,7 +2,7 @@
 
 Using the object-oriented OpenCL wrapper directly:
     Platforms -> Platform -> Device / default_context -> Context.compile -> Program.
-    Program.kernel("name") / program.name -> Kernel; Kernel[(global, local)] sets the work size.
+    Program.kernel("name") / program.name -> Kernel; Kernel[(blocks, threads)] sets the work size.
     Pass numpy arrays (or Buffer / structs) as arguments; the kernel handles the
     upload/download copies automatically.
 
@@ -37,7 +37,7 @@ def main():
     kernel = program.add_offset       # program["add_offset"] also works
     print("kernel arguments:", kernel.args.keys())
 
-    # 3) Allocate and run (work size automatic; kernel[(N, 256)] also works).
+    # 3) Allocate and run (work size automatic; kernel[(blocks, 256)] also works).
     # `n` is the real element count so the kernel can clamp: the launch size may be
     # rounded up to a multiple of the local size.
     n = 1_000_000
@@ -49,9 +49,9 @@ def main():
     print("add_offset auto work size OK")
 
     out.fill(0.0)
-    kernel[(1_000_192, 256)](a, b, out, np.float32(1.0), np.int32(n))
+    kernel[(3907, 256)](a, b, out, np.float32(1.0), np.int32(n))
     assert np.allclose(out, a + b + 1.0)
-    print("add_offset manual (global, local) OK")
+    print("add_offset manual (blocks, threads) OK")
 
     # 4) Multi-platform walk demo: you can also pick a device explicitly
     #    (it must belong to the context)

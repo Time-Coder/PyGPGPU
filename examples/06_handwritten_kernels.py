@@ -40,9 +40,9 @@ def main():
     # size may be rounded up to a multiple of the local size.
     vecadd.add_offset(a, b, out, np.float32(1.0), np.int32(n))
     assert np.allclose(out, a + b + 1.0)
-    # Manually specified (total work items, per group); global must cover the data.
+    # Manually specified (blocks per grid, threads per block); the launch must cover the data.
     out.fill(0.0)
-    vecadd.add_offset[(1_000_192, 256)](a, b, out, np.float32(1.0), np.int32(n))
+    vecadd.add_offset[(3907, 256)](a, b, out, np.float32(1.0), np.int32(n))
     assert np.allclose(out, a + b + 1.0)
     print("add_offset (auto + manual work size) OK")
 

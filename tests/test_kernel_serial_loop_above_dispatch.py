@@ -50,7 +50,7 @@ def test_a_serial_loop_above_the_dispatch_keeps_the_body_on_the_device(gpu_backe
     """`zeros_per_group` must reach the device, not the host tail."""
     x = np.arange(1, ITEMS + 1, dtype=np.int32)
     out = np.zeros(1, dtype=np.int32)
-    shared_sum_with_serial_loop[gpu_backend][(LANES, LANES)](x, out)
+    shared_sum_with_serial_loop[gpu_backend][(1, LANES)](x, out)
     assert int(out[0]) == int(x.sum()), (int(out[0]), int(x.sum()))
 
 

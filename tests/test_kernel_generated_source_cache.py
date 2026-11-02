@@ -23,7 +23,7 @@ import tempfile
 
 import numpy as np
 
-from pygpgpu import kernel
+from pygpgpu import (barrier, blockIdx, get_global_id, kernel, zeros_per_group)
 from pygpgpu.kernel import source_paths
 
 
@@ -136,6 +136,21 @@ def test_the_kernel_name_keeps_one_hash_suffix(gpu_backend):
         assert re.fullmatch(r"named_by_its_declaration_[0-9a-f]{8}", name), name
 
 
+@kernel(domain="out")
+def declares_shared_memory(out: np.ndarray):
+    """A gid-style body that also declares a fixed-size shared buffer.
+
+    Defined at module scope so one source compiles once: a kernel defined inside a test
+    function is a *new* source on every run, and OpenCL runs out of resources when a suite
+    recompiles it repeatedly.
+    """
+    lane = get_global_id(0)
+    buf = zeros_per_group(64, np.int32)
+    buf[blockIdx][lane] = 7
+    barrier()
+    out[lane] = float(buf[blockIdx][lane])
+
+
 def test_a_derived_signature_change_changes_the_name(gpu_backend):
     """A kernel whose signature carries derived parameters still gets a name of its own.
 
@@ -143,17 +158,7 @@ def test_a_derived_signature_change_changes_the_name(gpu_backend):
     parameters derived from the body (`_out_shape0`). The name covers that declaration, which
     is what keeps a body whose derived signature changed from reusing its old name.
     """
-    from pygpgpu import zeros_per_group, blockIdx, barrier, get_global_id
-
-    @kernel
-    def declares_shared_memory(out: np.ndarray):
-        lane = get_global_id(0)
-        buf = zeros_per_group(64, np.int32)
-        buf[blockIdx][lane] = 7
-        barrier()
-        out[lane] = float(buf[blockIdx][lane])
-
-    declares_shared_memory[gpu_backend][(64, 64)](np.zeros(64, dtype=np.float32))
+    declares_shared_memory[gpu_backend][(1, 64)](np.zeros(64, dtype=np.float32))
     names: list = [n for n in _kernel_names(gpu_backend)
                    if n.startswith("declares_shared_memory")]
     assert names, "no generated kernel found"

@@ -34,7 +34,8 @@ from .image2d import image2d
 from .mem_object import MemObject
 from .pipe import pipe
 from .program_parser import ProgramParser
-from ...utils import detect_work_size, join_with_and, local_size_for_global, device_limits, product
+from ...utils import (detect_work_size, join_with_and, local_size_for_global, device_limits,
+                      product, blocks_to_global)
 from ... import numpy as gnp
 
 if TYPE_CHECKING:
@@ -191,29 +192,40 @@ class Kernel(CLObject):
                 raise ValueError(f"device {device} is not in current context")
             self._call_state.device = device
         elif len(sizes_or_device) == 2:
-            global_sizes = sizes_or_device[0]
-            local_sizes = sizes_or_device[1]
-            if isinstance(global_sizes, str) or isinstance(local_sizes, str):
+            blocks = sizes_or_device[0]
+            threads = sizes_or_device[1]
+            if isinstance(blocks, str) or isinstance(threads, str):
                 raise TypeError(
-                    "the two-element form takes (global_work_size, local_work_size); "
+                    "the two-element form takes (blocks_per_grid, threads_per_block); "
                     "a device name is given as a single-element bracket")
-            global_work_size:Tuple[int, ...] = ((global_sizes,) if isinstance(global_sizes, int)
-                                                else tuple(global_sizes))
-            local_work_size:Optional[Tuple[int, ...]] = (
-                (local_sizes,) if isinstance(local_sizes, int)
-                else (tuple(local_sizes) if local_sizes is not None else None))
+            block_dims:Tuple[int, ...] = ((blocks,) if isinstance(blocks, int)
+                                          else tuple(blocks))
+            thread_dims:Optional[Tuple[int, ...]] = (
+                (threads,) if isinstance(threads, int)
+                else (tuple(threads) if threads is not None else None))
 
-            work_dim = len(global_work_size)
+            work_dim = len(block_dims)
             if work_dim > 3:
                 raise ValueError("dimension over 3 is not supported")
-            
+
             if work_dim <= 0:
                 raise ValueError("dimension should be at least 1")
-            
-            # a None local_work_size means automatic inference (global specified only)
-            if local_work_size is not None and work_dim != len(local_work_size):
-                raise ValueError(f"global_work_size={global_work_size} and local_work_size={local_work_size} do not have same dimension")
-        
+
+            # a None thread count means automatic inference (a block count alone)
+            if thread_dims is None:
+                global_work_size:Tuple[int, ...] = block_dims
+                local_work_size:Optional[Tuple[int, ...]] = None
+            else:
+                if work_dim != len(thread_dims):
+                    raise ValueError(
+                        f"blocks={block_dims} and threads={thread_dims} do not have the "
+                        f"same dimension")
+                # The bracket is CUDA's spelling on every backend (see
+                # utils.blocks_to_global): a grid of `blocks` groups, each `threads` wide.
+                # OpenCL wants the total item count and one group's width, so the two are
+                # computed here and nothing below has to know which spelling arrived.
+                global_work_size, local_work_size = blocks_to_global(block_dims, thread_dims)
+
             self._call_state.global_work_size = global_work_size
             self._call_state.local_work_size = local_work_size
         else:

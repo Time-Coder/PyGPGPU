@@ -40,7 +40,7 @@ saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运�
   k[(1024, 256)](args)             # work size: (总数, 每组), None 为自动
   k["cuda"][(1024, 256)](args)     # 组合
   ```
-- **总数语义**(OpenCL/SYCL 风格): `(global, local)` 中的 global 是**总 work-item 数**, CUDA/HIP 的 grid 块数由 `global / local` 自动换算, 三个后端行为严格一致。
+- **所有后端统一用 CUDA 的中括号**: (blocks_per_grid, threads_per_block), 也就是 CUDA/HIP 用户本来就这么写的形式。k[(4, 256)] 表示 4 个 block、每个 256 个 thread(共 1024 个 work item);k[(n,)] 是只给总个数、block 尺寸自动推导,None 为全自动。同一个中括号在每个后端、@kernel 和低层 oop API 上都成立,block 数不再需要能被什么整除:总量本就是 locks * threads。
 - **静态读写分析**: 解析 kernel 函数体, 推断每个指针参数是只读/只写/读写——只写参数跳过上传, 只读参数跳过回读, 连续调用间数据留在设备上(gnp 数组零中间拷贝)。
 - **向量类型**: 50 个向量类型(float4/int3/...), 支持 `.x/.y/.z/.w` 成员与 swizzle、构造、算术(标量广播)、比较、逐分量 math。
 - **双面函数库** `pygpgpu.funcs`(即 `pygpgpu.vec_types.funcs`): `dot/cross/normalize/clamp/...` 在宿主 Python 直接可运行, 在 `@kernel` 里自动翻译为设备内建。
@@ -110,7 +110,7 @@ def histogram(data: np.ndarray, counts: np.ndarray) -> None:
 
 类型注解是可选项: 本 README 里的代码片段带上注解只为便于阅读, 设备端类型来自调用时的实参, 所以同样的代码不写注解也能跑(`self` 不是 kernel 参数, 给它加注解没有任何影响)。
 
-kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `get_global_id` 的写法里用装饰器指明数组: `@kernel(domain="x")`。迭代域会贡献 `x` 的全部维度, 用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
+kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `get_global_id` 的写法里用装饰器指明数组: `@kernel(domain="x")`。迭代域会贡献 `x` 的全部维度, 用 `k[(blocks, threads)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
 
 ### 数组元素上的 `+=`
 
@@ -233,9 +233,9 @@ saxpy["py"].submit(x, y, out, 2.0)   # 同一次启动, 放到线程池里执行
 
 | kernel 写法 | `k["python"](...)` 的行为 |
 |---|---|
-| 魔法循环(`for i in range(x.shape[0])`、`enumerate(x)`、`np.ndindex`/`np.ndenumerate`) | 函数只调用一次: 循环本身已经覆盖了所有元素。此时 `(total, local)` 中括号不改变任何东西, 因为决定迭代范围的是循环, 不是启动规模 |
+| 魔法循环(`for i in range(x.shape[0])`、`enumerate(x)`、`np.ndindex`/`np.ndenumerate`) | 函数只调用一次: 循环本身已经覆盖了所有元素。此时 `(blocks, threads)` 中括号不改变任何东西, 因为决定迭代范围的是循环, 不是启动规模 |
 | gid 写法(`get_global_id`), 迭代域来自 `@kernel(domain="x")` | 按声明的迭代域(`x` 的完整 shape)每个工作项跑一遍函数体, `get_global_id` 返回当前索引——也就是按 `np.ndindex` 顺序, 每个元素一步 |
-| gid 写法, 迭代域来自 `k[(total, local)]` 中括号 | 同上, 按中括号的每个工作项跑一遍, 因此函数体必须像在 GPU 上一样, 自己针对真实元素个数做越界保护 |
+| gid 写法, 迭代域来自 `k[(blocks, threads)]` 中括号 | 同上, 按中括号的每个工作项跑一遍, 因此函数体必须像在 GPU 上一样, 自己针对真实元素个数做越界保护 |
 
 这类函数体里的内建函数会解析到 host 侧实现: 索引内建、原子操作(退化为普通读-改-写, 串行执行使其结果精确)、`barrier()`(空操作)以及向量数学函数族(直接调用 `pygpgpu.funcs` 的 host 实现)。有两种东西无法模拟, 会直接报错: `local`(组内共享内存需要并行工作项)与魔法循环函数体里的 `get_global_id`(那里没有"当前工作项", 请改用循环变量)。
 

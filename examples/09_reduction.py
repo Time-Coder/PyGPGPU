@@ -38,9 +38,9 @@ from pygpgpu import (kernel, atomic_add, barrier, blockIdx, get_global_id,
                      zeros_per_group)
 
 
-def launch_size(n, local=256):
-    """Round a work-item count up to a multiple of the per-group size."""
-    return ((n + local - 1) // local) * local
+def block_count(n, threads=256):
+    """How many blocks of `threads` cover `n` work items (the last one partly idle)."""
+    return (n + threads - 1) // threads
 
 
 @kernel(domain="x")
@@ -120,9 +120,9 @@ def main():
 
     # 2) Private strided sums, then one atomic per work item.
     # Here the launch size is given explicitly instead, to show both styles; note that
-    # (total, local) is the same (total-work-item) bracketing as 01_basic_kernel.py.
+    # (blocks, threads) is the same bracketing as 01_basic_kernel.py.
     out = np.zeros(1, dtype=np.int32)
-    sum_strided[(launch_size(n), 256)](x, out, np.int32(n))
+    sum_strided[(block_count(n), 256)](x, out, np.int32(n))
     assert int(out[0]) == expected, (int(out[0]), expected)
     print("  sum_strided     OK:", int(out[0]))
 

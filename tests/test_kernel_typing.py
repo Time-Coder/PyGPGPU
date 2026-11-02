@@ -190,7 +190,7 @@ def test_an_axis_is_one_launch_term_not_a_built_vector(gpu_backend)->None:
     check:Any = reads_one_axis
     cache_dir:str = check._cache_dir(gpu_backend)
     shutil.rmtree(cache_dir, ignore_errors=True)
-    check[gpu_backend][(8, 8)](np.zeros(8, dtype=np.float32))
+    check[gpu_backend][(1, 8)](np.zeros(8, dtype=np.float32))
     extension:str = {"cuda": "cu", "opencl": "cl", "hip": "hip"}[gpu_backend]
     files = sorted(glob.glob(f"{cache_dir}/*.{extension}"))
     assert files, f"no generated source under {cache_dir}"

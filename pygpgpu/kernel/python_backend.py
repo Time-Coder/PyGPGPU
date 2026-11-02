@@ -541,12 +541,8 @@ class PythonKernel:
             local = tuple(int(l) for l in local)
             if len(local) != len(domain):
                 raise ValueError(
-                    f"global {domain} and local {local} work sizes must have the same dimension")
-            for g, l in zip(domain, local):
-                if g % l != 0:
-                    raise ValueError(
-                        f"global work size {domain} must be divisible by local {local}; "
-                        f"use None for an automatically derived local size")
+                    f"the block size {local} names {len(local)} dimension(s) but the launch "
+                    f"has {len(domain)}; both have to name the same number of axes")
         frame = PythonFrame(domain, local or local_size_for_global(domain))
         previous: Optional[PythonFrame] = get_host_frame()
         set_host_frame(frame)
@@ -623,12 +619,8 @@ class PythonKernel:
         local: Tuple[int, ...] = tuple(int(l) for l in local_size)
         if len(local) != len(global_size):
             raise ValueError(
-                f"global {global_size} and local {local} work sizes must have the same dimension")
-        for g, l in zip(global_size, local):
-            if g % l != 0:
-                raise ValueError(
-                    f"global work size {global_size} must be divisible by local {local}; "
-                    f"use None for an automatically derived local size")
+                f"the block size {local} names {len(local)} dimension(s) but the launch has "
+                f"{len(global_size)}; both have to name the same number of axes")
         return global_size, local
 
     def __repr__(self) -> str:

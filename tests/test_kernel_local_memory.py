@@ -85,8 +85,8 @@ def shared_sums(x: np.ndarray, hist: np.ndarray):
 
 def _launch_shared(function, backend, pixels, hist):
     """A group of 256 lanes is required: one lane per bin, as in the CUDA version."""
-    total = -(-pixels.size // BINS) * BINS
-    function[backend][(total, BINS)](pixels, hist)
+    blocks = -(-pixels.size // BINS)
+    function[backend][(blocks, BINS)](pixels, hist)
 
 
 def _expected(pixels: np.ndarray) -> np.ndarray:
@@ -137,7 +137,7 @@ def test_the_local_count_must_be_a_literal(gpu_backend):
         out[get_global_id(0)] = slots[blockIdx][get_local_id(0)]
 
     with pytest.raises(SyntaxError) as caught:
-        uses_a_global_count[gpu_backend][(BINS, BINS)](np.zeros(BINS, dtype=np.float32))
+        uses_a_global_count[gpu_backend][(1, BINS)](np.zeros(BINS, dtype=np.float32))
     assert "constant" in str(caught.value)
 
 
@@ -153,7 +153,7 @@ def test_a_shared_buffer_must_be_indexed_by_its_group(gpu_backend):
         out[get_global_id(0)] = slots[lane]
 
     with pytest.raises(SyntaxError) as caught:
-        wrong_index[gpu_backend][(BINS, BINS)](np.zeros(BINS, dtype=np.int32),
+        wrong_index[gpu_backend][(1, BINS)](np.zeros(BINS, dtype=np.int32),
                                                np.zeros(BINS, dtype=np.int32))
     assert "block" in str(caught.value).lower()
 
@@ -167,7 +167,7 @@ def test_a_shared_buffer_cannot_be_used_without_a_group():
         out[get_global_id(0)] = slots
 
     with pytest.raises(SyntaxError) as caught:
-        bare["cuda"][(BINS, BINS)](np.zeros(BINS, dtype=np.int32))
+        bare["cuda"][(1, BINS)](np.zeros(BINS, dtype=np.int32))
     assert "block" in str(caught.value).lower()
 
 
@@ -189,7 +189,7 @@ def test_the_interpreter_backend_keeps_each_groups_slice_apart():
         out[blk * 4 + lid] = buf[blk][lid // 2, lid % 2]
 
     out = np.zeros(8, dtype=np.int32)
-    tag["python"][(8, 4)](out)
+    tag["python"][(2, 4)](out)
     np.testing.assert_array_equal(
         out, np.array([0, 1, 2, 3, 100, 101, 102, 103], dtype=np.int32))
 
@@ -203,7 +203,7 @@ def test_the_cuda_index_vector_is_the_opencl_scalar(gpu_backend):
         out[i] = 1 if blockIdx.x == get_group_id(0) else 0
 
     out = np.zeros(BINS, dtype=np.int32)
-    both[gpu_backend][(BINS, BINS)](out)
+    both[gpu_backend][(1, BINS)](out)
     np.testing.assert_array_equal(out, np.ones(BINS, dtype=np.int32))
 
 
@@ -223,12 +223,12 @@ def test_the_interpreter_reports_real_group_ids():
         out[i] = get_group_id(0) * 100 + get_local_id(0)
 
     out = np.zeros(8, dtype=np.int32)
-    ids["python"][(8, 4)](out)
+    ids["python"][(2, 4)](out)
     np.testing.assert_array_equal(
         out, np.array([0, 1, 2, 3, 100, 101, 102, 103], dtype=np.int32))
 
     out[:] = 0
-    ids["python"][(8, 2)](out)
+    ids["python"][(4, 2)](out)
     np.testing.assert_array_equal(
         out, np.array([0, 1, 100, 101, 200, 201, 300, 301], dtype=np.int32))
 
@@ -243,7 +243,7 @@ def test_a_magic_loop_body_is_not_split_by_the_bracket():
 
     values = np.arange(8, dtype=np.int32)
     out = np.zeros(8, dtype=np.int32)
-    doubled["python"][(16, 4)](values, out)
+    doubled["python"][(4, 4)](values, out)
     np.testing.assert_array_equal(out, values * 2)
 
 
@@ -302,5 +302,5 @@ def test_a_local_size_reports_the_group_width(gpu_backend):
         out[i] = get_local_size(0)
 
     out = np.zeros(BINS, dtype=np.int32)
-    report[gpu_backend][(BINS, BINS)](out)
+    report[gpu_backend][(1, BINS)](out)
     np.testing.assert_array_equal(out, np.full(BINS, BINS, dtype=np.int32))

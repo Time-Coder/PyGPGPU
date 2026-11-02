@@ -37,10 +37,10 @@ No C code to write, no build system to configure; the first call translates, com
   k(args)                          # fully automatic
   k["cuda"](args)                  # backend (opencl/cuda/hip/python, aliases ocl/cu/rocm/amd/py)
   k["opencl:gfx1036"](args)        # backend:device
-  k[(1024, 256)](args)             # work size: (total, per group), None = automatic
-  k["cuda"][(1024, 256)](args)     # combined
+  k[(4, 256)](args)                # work size: (blocks per grid, threads per block)
+  k["cuda"][(4, 256)](args)        # combined
   ```
-- **Total-work semantics** (OpenCL/SYCL style): in `(global, local)`, `global` is the **total number of work items**; CUDA/HIP grid dimensions are derived as `global / local`, so all three backends behave exactly the same.
+- **CUDA work-size brackets on every backend**: (blocks_per_grid, threads_per_block), the spelling a CUDA or HIP reader already writes. k[(4, 256)] launches 4 blocks of 256 threads (1024 work items); k[(n,)] is a bare item count with an automatic block size, and None means automatic. The same bracket works on every backend, in @kernel and in the low-level oop API, and a block count never has to divide anything: the total is locks * threads by construction.
 - **Static read/write analysis**: the kernel body is parsed to infer whether each pointer argument is read-only, write-only or read-write — write-only arguments skip the upload, read-only arguments skip the read-back, and data stays on the device across calls (zero intermediate copies for gnp arrays).
 - **Vector types**: 50 vector types (float4/int3/...) with `.x/.y/.z/.w` members, swizzles, construction, arithmetic (scalar broadcast), comparisons and component-wise math.
 - **Dual-sided function library** `pygpgpu.funcs` (aka `pygpgpu.vec_types.funcs`): `dot/cross/normalize/clamp/...` run as-is in host Python and are translated to device builtins inside `@kernel`.
@@ -161,7 +161,7 @@ All three are exact on every backend — thousands of work items incrementing on
 
 Type annotations are optional: the snippets in this README carry them for readability, but the device types come from the arguments at call time, so the same code works unannotated (`self` is not a kernel argument, so annotating it changes nothing).
 
-A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `get_global_id`, name the array in the decorator: `@kernel(domain="x")`. The domain contributes all of `x`'s dimensions, and a `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
+A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `get_global_id`, name the array in the decorator: `@kernel(domain="x")`. The domain contributes all of `x`'s dimensions, and a `k[(blocks, threads)]` bracket also works. Without any of these the call raises instead of guessing.
 
 ### Printing from a kernel
 
@@ -234,9 +234,9 @@ The two kernel styles keep their meanings, which is where the interpreter differ
 
 | Kernel style | What `k["python"](...)` does |
 |---|---|
-| magic loop (`for i in range(x.shape[0])`, `enumerate(x)`, `np.ndindex`/`np.ndenumerate`) | runs the function once: the loop already covers every element. A `(total, local)` bracket changes nothing here, because the loop, not the launch, decides the extent |
+| magic loop (`for i in range(x.shape[0])`, `enumerate(x)`, `np.ndindex`/`np.ndenumerate`) | runs the function once: the loop already covers every element. A `(blocks, threads)` bracket changes nothing here, because the loop, not the launch, decides the extent |
 | gid-style (`get_global_id`), domain from `@kernel(domain="x")` | runs the body once per work item of the declared domain (`x`'s full shape), with `get_global_id` reporting the current index — one serial step per element, in `np.ndindex` order |
-| gid-style, domain from a `k[(total, local)]` bracket | same, one step per work item of the bracket, so the body must clamp itself against the real element count exactly as it does on a GPU |
+| gid-style, domain from a `k[(blocks, threads)]` bracket | same, one step per work item of the bracket, so the body must clamp itself against the real element count exactly as it does on a GPU |
 
 Inside such a body the same functions resolve to their host implementations: the indexing builtins, the atomics (plain read-modify-writes — serial execution makes them exact), `barrier()` (a no-op) and the vector math family, which uses `pygpgpu.funcs`' host implementation. Two things cannot be emulated and raise instead: `local` (group-local memory is shared by parallel work items) and a `get_global_id` call inside a magic-loop body, where there is no current work item — use the loop variable there.
 
