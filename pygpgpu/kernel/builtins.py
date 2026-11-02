@@ -89,6 +89,8 @@ from .host_runtime import atomic_in_place, local_extent, work_item, work_size_ex
 # Everything a kernel body may call, so `from pygpgpu import *` and an editor completing
 # `pygpgpu.` show exactly the supported set and nothing else.
 __all__ = [
+    # compile-time switch: False in python, True while a kernel is being translated
+    "KERNEL_TRANSLATING",
     # work-item indexing
     "get_global_id", "get_local_id", "get_group_id",
     "get_global_size", "get_local_size", "get_num_groups",
@@ -131,6 +133,28 @@ __all__ = [
     "hypot",
     "cbrt",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Compile-time switch: a body that behaves differently on each side
+# ---------------------------------------------------------------------------
+
+# `typing.TYPE_CHECKING` is `False` at runtime and `True` for a type checker, so the same
+# source can say something only one reader may act on. This is the same trick for the
+# *translator*: it is always `False` in python -- the interpreter backend runs the body as
+# written and takes the python branch -- while the translator resolves it to `True` and
+# keeps only the device branch, dropping the other one as if it were a macro.
+#
+# The point is a body whose two sides genuinely differ, which a kernel cannot otherwise
+# express: a debug print on the host, a lookup table in python, or a check that only the
+# host can run. Writing it any other way (a plain `if` on a value the device cannot see) is
+# refused precisely because the device would have to evaluate the condition too.
+#
+# The comparison has to be spelled so that *python* evaluates the branch python should run:
+# `if not KERNEL_TRANSLATING:` is the host's side and `if KERNEL_TRANSLATING:` is the
+# device's. Both are decided at translation time, so neither reaches the generated source as
+# a runtime test.
+KERNEL_TRANSLATING: bool = False
 
 
 # ---------------------------------------------------------------------------

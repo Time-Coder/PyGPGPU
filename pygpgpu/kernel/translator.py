@@ -659,6 +659,65 @@ def _math_device_name(attr:str, backend:str)->str:
     return attr if attr.endswith("f") else attr + "f"
 
 
+# The name of the compile-time switch (see `builtins.KERNEL_TRANSLATING`), and the value a
+# translation sees. Python resolves the same name to False, which is what lets one body run
+# differently on each side without the translator guessing at it.
+KERNEL_TRANSLATING_NAME:str = "KERNEL_TRANSLATING"
+KERNEL_TRANSLATING_VALUE:bool = True
+
+
+def _translation_branch(node:ast.expr, body:List[ast.stmt],
+                        orelse:List[ast.stmt])->Optional[List[ast.stmt]]:
+    """The branch a translation keeps for an ``if`` about ``KERNEL_TRANSLATING``.
+
+    Returns None when the condition says nothing about translation (an ordinary device
+    ``if``), and otherwise the statements the device side should contain -- an empty list
+    when the condition is false, so the whole ``if`` disappears.
+    """
+    truth:Optional[bool] = _translation_truth(node)
+    if truth is None:
+        return None
+    return list(body) if truth else list(orelse)
+
+
+def _translation_truth(node:ast.expr)->Optional[bool]:
+    """The compile-time truth of a condition about `KERNEL_TRANSLATING`, or None.
+
+    None means the condition says nothing about translation, so it is left to the device.
+
+    **The trigger is the name, not the object it resolves to.** A body that declares its own
+    `KERNEL_TRANSLATING` -- a module global, a local, anything that reads as that name --
+    gets the same conditional translation, because a kernel author writing that name is
+    asking for exactly this and requiring an import would only make the spelling longer. It
+    is also why this works on source text rather than on a resolved value: the translator
+    never has to import anything to decide the branch.
+
+    The constant is False in python and True while translating, so a condition is decidable
+    when it is built from that name with `not`, `and`, `or` and boolean literals --
+    each of which python evaluates with short-circuiting. `if KERNEL_TRANSLATING:` is
+    therefore the device branch and `if not KERNEL_TRANSLATING:` is python's.
+    """
+    if isinstance(node, ast.Name) and node.id == KERNEL_TRANSLATING_NAME:
+        return KERNEL_TRANSLATING_VALUE
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        # A boolean literal says the same thing on both sides, so it is decided here and a
+        # branch around it collapses (KERNEL_TRANSLATING and True is just the constant).
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        inner:Optional[bool] = _translation_truth(node.operand)
+        return None if inner is None else not inner
+    if isinstance(node, ast.BoolOp):
+        values:List[Optional[bool]] = [_translation_truth(value) for value in node.values]
+        if any(value is None for value in values):
+            return None
+        if isinstance(node.op, ast.And):
+            return all(values)
+        if isinstance(node.op, ast.Or):
+            return any(values)
+        return None
+    return None
+
+
 def _vec_component_name(text:str)->str:
     """`rgb` -> `xyz`: the device spelling of a component or swizzle."""
     return "".join(_VEC_COLOR_ALIASES.get(char, char) for char in text)
@@ -2778,6 +2837,17 @@ class FunctionTranslator:
         elif isinstance(node, ast.AugAssign):
             self._visit_augassign(node)
         elif isinstance(node, ast.If):
+            # `if KERNEL_TRANSLATING:` / `if not KERNEL_TRANSLATING:` is a *compile-time*
+            # branch, the translator's counterpart of `typing.TYPE_CHECKING`: the constant is
+            # False in python (so the interpreter backend runs the python branch, which it
+            # does by executing the body as written) and True here, so exactly one branch is
+            # translated and the other is dropped -- a macro, not a runtime test. Any other
+            # condition is an ordinary device `if`.
+            taken:Optional[List[ast.stmt]] = _translation_branch(node.test, node.body,
+                                                                 node.orelse)
+            if taken is not None:
+                self._emit_block(taken)
+                return
             cond, _ = self._visit_expression(node.test)
             self._emit(f"if ({cond})")
             self._emit("{")
@@ -2849,6 +2919,18 @@ class FunctionTranslator:
             pass
         else:
             self._error(f"unsupported statement: {node.__class__.__name__}", node)
+
+    def _emit_block(self, statements:List[ast.stmt])->None:
+        """Translate statements as a plain block, with a scope of their own.
+
+        Used by the compile-time branch (`if KERNEL_TRANSLATING`), which contributes its
+        statements *inline*: it is a macro, so no `if` and no braces survive into the
+        generated source.
+        """
+        self.scopes.append({})
+        for statement in statements:
+            self._visit_statement(statement)
+        self.scopes.pop()
 
     def _push_scope_block(self, statements:List[ast.stmt])->None:
         self.scopes.append({})

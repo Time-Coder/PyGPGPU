@@ -241,6 +241,22 @@ saxpy["py"].submit(x, y, out, 2.0)   # 同一次启动, 放到线程池里执行
 
 向量数组可以照常使用: 读取 `v = points[i]` 得到向量实例, `out[i] = v.xyzy * 2.0` 写回各分量。
 
+### 一份函数体, 两种行为: KERNEL_TRANSLATING
+
+解释器从头到尾照原样执行函数体, 所以当一个 kernel 在两边需要**不同**代码时, 差异无处安放 -- 而对一个设备看不到的值写普通 if, 会被拒绝。KERNEL_TRANSLATING 就是这个出口, 借鉴 	yping.TYPE_CHECKING: 它在 Python 里是 False, 在翻译函数体时是 True, 因此条件在**翻译期**就被定下, 只有一个分支会被生成:
+
+`python
+@kernel(domain="out")
+def measure(data: np.ndarray, out: np.ndarray):
+    i = get_global_id(0)
+    if KERNEL_TRANSLATING:
+        out[i] = data[i] * 2.0          # 设备: 真正的计算
+    else:
+        out[i] = len(str(i))            # Python: 设备无法执行的仅主机表达式
+`
+
+分支会像宏一样被内联 -- 生成的源码里不会留下任何 if -- 而被丢弃的分支根本不会被翻译, 所以仅限 Python 的代码对设备零成本。识别的只是**名字**, 因此 kernel 也可以自己声明一个 KERNEL_TRANSLATING, 不必从这里 import。
+
 ### 手写 kernel 文件
 
 已有 C 风格 kernel? `.cl` / `.cu` / `.hip` 文件(对应后端原生语法)可以像 Python 模块一样直接 import。写一个 `vecadd.cl`:

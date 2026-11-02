@@ -242,6 +242,22 @@ Inside such a body the same functions resolve to their host implementations: the
 
 Vector-typed arrays work unchanged: reading `v = points[i]` yields a vector instance, and `out[i] = v.xyzy * 2.0` writes its components.
 
+### One body, two behaviours: `KERNEL_TRANSLATING`
+
+The interpreter runs the body as written, so a kernel that needs *different* code on each side has nowhere to put the difference — and a plain `if` on a value the device cannot see would be refused. `KERNEL_TRANSLATING` is the escape hatch, borrowed from `typing.TYPE_CHECKING`: it is `False` in Python and `True` while the body is being translated, so the condition is decided at **translation time** and exactly one branch is emitted:
+
+```python
+@kernel(domain="out")
+def measure(data: np.ndarray, out: np.ndarray):
+    i = get_global_id(0)
+    if KERNEL_TRANSLATING:
+        out[i] = data[i] * 2.0          # device: the real computation
+    else:
+        out[i] = len(str(i))            # python: a host-only expression the device could not run
+```
+
+The branch is inlined as a macro — no `if` survives into the generated source — and the dropped branch is never translated, so Python-only work costs the device nothing. Only the name is recognized, so a kernel may declare its own `KERNEL_TRANSLATING` instead of importing it.
+
 ### Handwritten kernel files
 
 Already have C-style kernels? `.cl` / `.cu` / `.hip` files (native syntax of the matching backend) import like Python modules. Write a `vecadd.cl`:
