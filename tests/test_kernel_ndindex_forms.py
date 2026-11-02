@@ -127,7 +127,15 @@ def mismatched_extents(x: np.ndarray, out: np.ndarray):
 
 
 def test_a_domain_that_does_not_match_the_unpacking_is_rejected(gpu_backend, runner):
-    with pytest.raises(SyntaxError) as caught:
+    """The count mismatch reads as python's own unpacking error, on every backend.
+
+    `for i, j, k in np.ndindex(x.shape[0], x.shape[1])` asks for three names from two
+    values, which python reports as a plain ``ValueError`` raised by the ``for``
+    statement. The device refuses it for the same reason and in the same words, so a
+    kernel body does not have to learn a second vocabulary for one mistake.
+    """
+    with pytest.raises(ValueError) as caught:
         runner(mismatched_extents, np.zeros((2, 3), np.float32), np.zeros(2, np.float32))
     message = str(caught.value)
-    assert "3" in message and "2" in message
+    assert "not enough values to unpack" in message
+    assert "expected 3, got 2" in message

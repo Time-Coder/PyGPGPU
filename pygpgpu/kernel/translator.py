@@ -485,6 +485,46 @@ def _syntax_error(message:str, node:Optional[ast.AST]=None,
     return error
 
 
+def _unpack_count_message(names:int, values:int)->str:
+    """What python itself says when a loop's names do not match the number of values.
+
+    `for i, j in np.ndindex(arr.shape[0])` is an ordinary unpacking error in python -- the
+    loop asks for more names than the iterator yields -- and a kernel body should say the
+    same thing, in the same words, so the two spellings of one mistake read alike. CPython
+    has two messages and picks by direction: too few values is "not enough values to
+    unpack", too many is "too many values to unpack", both with "(expected N, got M)".
+    """
+    if values < names:
+        return (f"not enough values to unpack (expected {names}, got {values})")
+    return (f"too many values to unpack (expected {names}, got {values})")
+
+
+def _unpacking_error(message:str, node:Optional[ast.AST], filename:str,
+                     source:Optional[str]=None, first_line:int=1)->ValueError:
+    """An unpacking :class:`ValueError`, positioned at the loop that raises it.
+
+    ``ValueError`` has no ``filename``/``lineno`` of its own, so the position travels in the
+    message exactly as the interpreter's does -- and the traceback is trimmed to the user's
+    frame by the launch (see ``PyKernel._invoke``). The source line and caret come from the
+    same helper a translation error uses, so the two render alike.
+    """
+    error:ValueError = ValueError(message)
+    _position_error(error, node, filename, source, first_line)
+    return error
+
+
+def _position_error(error:BaseException, node:Optional[ast.AST], filename:str,
+                    source:Optional[str]=None, first_line:int=1)->BaseException:
+    """Attach file/line/column to an exception raised *about* a span of the user's source."""
+    if node is None:
+        return error
+    lineno:int = getattr(node, "lineno", 0)
+    file_lineno:Optional[int] = (first_line + lineno - 1) if lineno else None
+    error.filename = filename  # type: ignore[attr-defined]
+    error.lineno = file_lineno  # type: ignore[attr-defined]
+    return error
+
+
 INT_TYPES:Set[str] = {"bool", "char", "uchar", "short", "ushort", "int", "uint", "long", "ulong"}
 FLOAT_TYPES:Set[str] = {"float", "double"}
 SCALAR_TYPES:Set[str] = INT_TYPES | FLOAT_TYPES
@@ -2196,6 +2236,14 @@ class FunctionTranslator:
                 return []
             if isinstance(arg, ast.Tuple):
                 args = list(arg.elts)
+            elif isinstance(arg, ast.Subscript) and self._extent_source(arg) is not None:
+                # A single axis spelled out: `np.ndindex(arr.shape[0])`. numpy reads it as
+                # a one-dimensional domain of that length, exactly like the tuple and
+                # multi-argument forms, so the loop is the work-item dispatch just the same.
+                # This used to fall through to "not a magic loop", which pushed the creation
+                # above the loop into device code and reported it as a *second* magic loop --
+                # a long message about a shape the body never wrote.
+                args = [arg]
             else:
                 return None
 
@@ -2506,32 +2554,39 @@ class FunctionTranslator:
                         f"`for (y, x), v in {module_name}.ndenumerate(array)`", target)
                 names_node = target.elts[0]
                 value_name = target.elts[1].id
-            if not (isinstance(names_node, ast.Tuple) and all(isinstance(e, ast.Name) for e in names_node.elts)):
+            if not (isinstance(names_node, ast.Name)
+                    or (isinstance(names_node, ast.Tuple)
+                        and all(isinstance(e, ast.Name) for e in names_node.elts))):
                 self._error(
                     f"{module_name}.{form} indices must be unpacked into plain names, "
                     f"e.g. `for y, x in {module_name}.ndindex(array.shape)`", target)
-            names:List[str] = [e.id for e in names_node.elts]
+            # One name is the 1-D spelling (`for i in np.ndindex(arr.shape[0])`), which numpy
+            # accepts; a tuple is the multi-dimensional one.
+            names:List[str] = ([names_node.id] if isinstance(names_node, ast.Name)
+                               else [e.id for e in names_node.elts])
             ndim:int = len(names)
-            if ndim == 1:
-                self._error(
-                    f"for 1-D iteration use `range(array.shape[0])` or `enumerate(array)`; "
-                    f"{module_name}.{form} is for 2-D or more", target)
-            # Any rank is accepted. A grid has three axes, so the host flattens a larger
-            # traversal into one launch axis and `_emit_nd_head` decomposes that position
-            # over the loop's domain -- no rank is refused, and none needs to be.
+            # A one-name domain (`for i in np.ndindex(arr.shape[0])`) is legal numpy and is
+            # legal here: the head below handles any rank, and refusing this rank pushed a
+            # plain 1-D body into the "not a magic loop" path, where the array created above
+            # it became device code and the error named the wrong thing entirely.
 
-            # One extent per unpacked name. An explicit np.ndindex(a, b, ...) states them
-            # itself, so a mismatch is a mistake worth naming; the whole-shape spelling
-            # takes its extents from the array, one per name.
+            # One extent per unpacked name. A mismatch between the two is a *count*
+            # mismatch, and python reports it as an unpacking ValueError raised by the
+            # `for` statement itself -- so the device says the same thing, in the same
+            # words, and the check below raises a ValueError rather than a translation
+            # SyntaxError.
+            # The whole-shape spelling takes its extents from the array, one per name; that
+            # rank is known only at launch, because a pointer carries none.
             explicit:Optional[List[Tuple[str, int]]] = self._nd_loop_extents
-            if explicit is not None and len(explicit) != ndim:
-                self._error(
-                    f"this loop unpacks {ndim} name{'s' if ndim != 1 else ''} but "
-                    f"{module_name}.ndindex(...) is given {len(explicit)} "
-                    f"extent{'s' if len(explicit) != 1 else ''}; they must match", target)
             sources:List[Tuple[str, int]] = (explicit
                                              if explicit is not None
                                              else [(param, d) for d in range(ndim)])
+            if explicit is not None and len(explicit) != ndim:
+                # Positioned at the loop, so the message carries the file and line the
+                # interpreter would blame (see _body_frame, which turns them into a frame).
+                raise _unpacking_error(_unpack_count_message(ndim, len(explicit)),
+                                       target, self.filename, self.source_text,
+                                       self.first_line)
             if explicit is None:
                 # `np.ndindex(arr.shape)` asks for the array's whole shape, but a pointer
                 # carries no rank, so "whole" can only be checked at launch. Remember which
