@@ -141,3 +141,29 @@ def test_the_bracket_form_still_runs()->None:
     out = np.zeros(4, dtype=np.float32)
     _plain["python"](a, b, out, 2.0)
     assert np.allclose(out, a * 2.0 + b)
+
+
+def test_an_index_vector_publishes_its_components_to_a_checker()->None:
+    """`threadIdx.x` has to read as an `int`, not as `Any`.
+
+    The components come from `__getattr__` at runtime, because they read the launch frame
+    and cannot be stored; a checker cannot see a name that only exists there, so it
+    reported `Any` -- and every reader had to guess at the type of `threadIdx.x`. The three
+    axes are therefore declared on the class inside `if TYPE_CHECKING`, and the module-level
+    names are annotated with the class instead of with `Any`.
+    """
+    from pygpgpu.kernel import builtins as namespace
+
+    source:str = inspect.getsource(namespace)
+    assert "if TYPE_CHECKING:\n        x:int\n        y:int\n        z:int" in source, \
+        "the index-vector components must be declared for a checker"
+
+    for name in ("blockIdx", "threadIdx", "blockDim", "gridDim"):
+        # `Any` here is what swallowed the type in the editor.
+        assert f"{name}:Any = " not in source, f"{name} is annotated as Any"
+        assert f"{name}:_IndexVector = " in source, f"{name} must carry the class as its type"
+
+    # ... and the runtime still answers the axes, so the annotation changed nothing.
+    for name in ("blockIdx", "threadIdx", "blockDim", "gridDim"):
+        vector:Any = getattr(namespace, name)
+        assert repr(vector).startswith("<index vector: "), repr(vector)

@@ -26,7 +26,7 @@ Usage::
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
 # The vector half of the namespace (dot/length/normalize/clamp/mix/...) is dual-sided
 # already: `pygpgpu.vec_types.funcs` holds one implementation that serves both sides, so
@@ -200,7 +200,17 @@ class _IndexVector:
     side does not see this class at all: the translator recognizes the *name* and emits the
     vector directly (see `INDEX_VECTOR_BUILTINS`), and this only has to be right on the
     interpreter backend, where the body runs unchanged.
+
+    The three components are declared for the editor and the type checker only: at runtime
+    they come from `__getattr__`, because they read the launch frame and cannot be stored.
+    Publishing them here is what makes `threadIdx.x` read as an `int` instead of `Any` -- a
+    name a checker cannot see is a name every reader has to guess at.
     """
+
+    if TYPE_CHECKING:
+        x:int
+        y:int
+        z:int
 
     __slots__ = ("_readers",)
 
@@ -242,14 +252,14 @@ class _IndexVector:
         return id(self)
 
 
-blockIdx:Any = _IndexVector(x=lambda: get_group_id(0), y=lambda: get_group_id(1),
-                            z=lambda: get_group_id(2))
-threadIdx:Any = _IndexVector(x=lambda: get_local_id(0), y=lambda: get_local_id(1),
-                             z=lambda: get_local_id(2))
-blockDim:Any = _IndexVector(x=lambda: get_local_size(0), y=lambda: get_local_size(1),
-                            z=lambda: get_local_size(2))
-gridDim:Any = _IndexVector(x=lambda: get_num_groups(0), y=lambda: get_num_groups(1),
-                           z=lambda: get_num_groups(2))
+blockIdx:_IndexVector = _IndexVector(x=lambda: get_group_id(0), y=lambda: get_group_id(1),
+                                     z=lambda: get_group_id(2))
+threadIdx:_IndexVector = _IndexVector(x=lambda: get_local_id(0), y=lambda: get_local_id(1),
+                                      z=lambda: get_local_id(2))
+blockDim:_IndexVector = _IndexVector(x=lambda: get_local_size(0), y=lambda: get_local_size(1),
+                                     z=lambda: get_local_size(2))
+gridDim:_IndexVector = _IndexVector(x=lambda: get_num_groups(0), y=lambda: get_num_groups(1),
+                                    z=lambda: get_num_groups(2))
 
 
 # ---------------------------------------------------------------------------
