@@ -28,7 +28,7 @@ from typing import Any, Callable
 import numpy as np
 import pytest
 
-from pygpgpu import kernel
+from pygpgpu import kernel, threadIdx
 
 
 def _decorator_module()->Any:
@@ -167,3 +167,38 @@ def test_an_index_vector_publishes_its_components_to_a_checker()->None:
     for name in ("blockIdx", "threadIdx", "blockDim", "gridDim"):
         vector:Any = getattr(namespace, name)
         assert repr(vector).startswith("<index vector: "), repr(vector)
+
+
+def test_an_axis_is_one_launch_term_not_a_built_vector(gpu_backend)->None:
+    """`threadIdx.x` emits the axis, not "build the int3, then take its first component".
+
+    The index vectors are values in the source, so their *name* resolves to a whole
+    `make_int3(...)` (CUDA) or compound literal (OpenCL). Taking a component off that
+    expression rebuilt all three terms and then indexed one, which read as
+    `int i = make_int3((int)threadIdx.x, ...).x` for a single number. The axis is its own
+    launch term, so it is what the component has to emit.
+    """
+    import glob
+    import pathlib
+    import shutil
+
+    @kernel
+    def reads_one_axis(out: np.ndarray):
+        lane = threadIdx.x
+        out[lane] = 1
+
+    check:Any = reads_one_axis
+    cache_dir:str = check._cache_dir(gpu_backend)
+    shutil.rmtree(cache_dir, ignore_errors=True)
+    check[gpu_backend][(8, 8)](np.zeros(8, dtype=np.float32))
+    extension:str = {"cuda": "cu", "opencl": "cl", "hip": "hip"}[gpu_backend]
+    files = sorted(glob.glob(f"{cache_dir}/*.{extension}"))
+    assert files, f"no generated source under {cache_dir}"
+    source:str = pathlib.Path(files[0]).read_text(encoding="utf-8")
+
+    axis_line:str = next(line for line in source.splitlines() if "lane =" in line)
+    assert "make_int3" not in axis_line, axis_line
+    assert "int3)" not in axis_line, axis_line
+    # The axis still names the launch term that means it.
+    expected:str = ("threadIdx.x" if gpu_backend != "opencl" else "get_local_id(0)")
+    assert expected in axis_line, axis_line

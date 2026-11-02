@@ -49,6 +49,24 @@ INDEX_VECTOR_OPENCL:Dict[str, Tuple[str, str]] = {
     "gridDim": ("int3", "(int3)(get_num_groups(0), get_num_groups(1), get_num_groups(2))"),
 }
 
+# The scalars behind each axis, so `threadIdx.x` is one launch term rather than
+# "build the whole int3, then take its first component". Both tables above answer the same
+# three numbers, so this is the same fact spelled once per backend: a reader who wants an
+# axis is asking for a `get_*` call, and that is what this returns.
+INDEX_VECTOR_AXES_CUDA:Dict[str, Tuple[str, str, str]] = {
+    "blockIdx": ("(int)(blockIdx.x)", "(int)(blockIdx.y)", "(int)(blockIdx.z)"),
+    "threadIdx": ("(int)(threadIdx.x)", "(int)(threadIdx.y)", "(int)(threadIdx.z)"),
+    "blockDim": ("(int)(blockDim.x)", "(int)(blockDim.y)", "(int)(blockDim.z)"),
+    "gridDim": ("(int)(gridDim.x)", "(int)(gridDim.y)", "(int)(gridDim.z)"),
+}
+
+INDEX_VECTOR_AXES_OPENCL:Dict[str, Tuple[str, str, str]] = {
+    "blockIdx": ("get_group_id(0)", "get_group_id(1)", "get_group_id(2)"),
+    "threadIdx": ("get_local_id(0)", "get_local_id(1)", "get_local_id(2)"),
+    "blockDim": ("get_local_size(0)", "get_local_size(1)", "get_local_size(2)"),
+    "gridDim": ("get_num_groups(0)", "get_num_groups(1)", "get_num_groups(2)"),
+}
+
 # Atomic ops: (gpu name, opencl name, cuda name); integer element types only.
 # `atomic_cas` is the one with a different arity: (array, index, compare, value).
 ATOMIC_BUILTINS:Dict[str, Tuple[str, str]] = {

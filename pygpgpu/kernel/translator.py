@@ -20,6 +20,8 @@ from .device_builtins import (
     ATOMIC_BUILTINS,
     GENERIC_BUILTINS,
     INDEX_BUILTINS,
+    INDEX_VECTOR_AXES_CUDA,
+    INDEX_VECTOR_AXES_OPENCL,
     INDEX_VECTOR_BUILTINS,
     INDEX_VECTOR_OPENCL,
     MATH_BUILTINS,
@@ -660,6 +662,7 @@ def _math_device_name(attr:str, backend:str)->str:
 def _vec_component_name(text:str)->str:
     """`rgb` -> `xyz`: the device spelling of a component or swizzle."""
     return "".join(_VEC_COLOR_ALIASES.get(char, char) for char in text)
+
 
 _MATH_FUNCS:Dict[str, Optional[str]] = {
     "sqrt": None, "exp": None, "log": None, "log2": None, "log10": None,
@@ -5691,6 +5694,30 @@ class FunctionTranslator:
     def _sampler_name(self, image_code:str)->str:
         return "__sampler_for_%s" % image_code
 
+    def _index_vector_axis(self, node:ast.Attribute, vector_type:str)->Optional[str]:
+        """The scalar expression for `blockIdx.x`-style axis, or None when it is not one.
+
+        The index vectors are *values* in the source (`buf[blockIdx][j]`), so their name
+        resolves to a built vector. Taking a component off that rebuilt all three terms and
+        indexed one: `int i = make_int3((int)threadIdx.x, ...).x`. The axis itself is a single
+        launch term, and this answers it directly -- the same number the `get_*` spelling
+        gives, which is what the axis meant in the first place.
+        """
+        if len(node.attr) != 1:
+            return None
+        base:ast.expr = node.value
+        if not isinstance(base, ast.Name) or base.id not in INDEX_VECTOR_BUILTINS:
+            return None
+        if INDEX_VECTOR_BUILTINS[base.id][0] != vector_type:
+            return None
+        component:str = _vec_component_name(node.attr)
+        axis:int = "xyz".find(component)
+        if axis < 0:
+            return None
+        table:Dict[str, Tuple[str, str, str]] = (
+            INDEX_VECTOR_AXES_OPENCL if self.backend == "opencl" else INDEX_VECTOR_AXES_CUDA)
+        return table[base.id][axis]
+
     def _visit_attribute(self, node:ast.Attribute)->Tuple[str, Any]:
         # self.xxx -> the receiver struct's member, or an extra parameter _self_xxx for an
         # ndarray attribute (the read/write analysis and the shape plumbing need it apart).
@@ -5796,6 +5823,14 @@ class FunctionTranslator:
             if field_key not in _C_FIELD_TYPES:
                 self._error(
                     f"vector type {base_t} has no component '.{node.attr}'", node)
+            # `threadIdx.x` is one launch term, not a component of a built vector: the *name*
+            # resolves to a whole `int3` (`make_int3(...)` on CUDA, a compound literal on
+            # OpenCL), so reading one component off it rebuilt all three and then indexed
+            # them. The scalar spelling is what the axis means, and it is what the OpenCL
+            # path already answers for `get_local_id(0)`.
+            axis:Optional[str] = self._index_vector_axis(node, base_t)
+            if axis is not None:
+                return axis, _C_FIELD_TYPES[field_key]
             return f"({base_code}.{component})", _C_FIELD_TYPES[field_key]
 
         # A structure member, read with python's attribute spelling. It cannot be confused
