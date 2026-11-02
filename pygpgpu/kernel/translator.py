@@ -989,25 +989,43 @@ def _magic_loop_end(statements:List[ast.stmt])->int:
 
 
 def _outside_loops(body:List[ast.stmt])->List[ast.stmt]:
-    """The top-level statements that are not a magic loop.
+    """The top-level statements a body runs on the host, outside its work-item dispatch.
 
     A single-loop body places all of them before the loop, but a body with several loops
     may also place one *between* two of them (`mid = np.zeros(4)` in a two-pass body), and
     the pass that reads such a value needs it bound on the host just the same.
+
+    Only statements whose meaning is *host* work belong here. A serial `for` loop and an
+    `if` block are per-work-item code that the device must run (every work item iterates
+    its own slice, or tests its own lane), so they are left to the translator; returning
+    them to the host would execute device-only builtins there -- `zeros_per_group` used
+    under such a loop reported "only available inside a @kernel function body" for a body
+    that plainly was one.
     """
     loops:List[int] = [
         index for index, stmt in enumerate(body)
         if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt)]
+    # A statement is host work only if the host can *execute* it. The body's serial loops and
+    # its `if` blocks are per-work-item code: every work item iterates its own slice or tests
+    # its own lane, so handing them to the host would run device-only builtins there --
+    # `zeros_per_group` under such a loop reported "only available inside a @kernel function
+    # body" for a body that plainly was one. A bare `for` / `If` is therefore never host code,
+    # with or without a dispatch loop; everything else (a creation, a plain assignment) is,
+    # because its value has to exist before the launch.
+    per_item = (ast.For, ast.Return, ast.If)
     if not loops:
-        return list(body)
+        # A gid-style body: all of it is per-work-item code, except the creations the host
+        # still has to build (see _creation_assignments), which stay in the list.
+        return [stmt for stmt in body if not isinstance(stmt, per_item)]
     # Everything before the first loop, plus the gap between consecutive loops: those are
     # the statements a body places outside its work-item dispatch, and a value bound there
     # (a created array, a scalar) is read by a later pass. Statements *after* the last loop
     # are excluded -- `return out` lives there and must keep its device meaning.
-    outside:List[ast.stmt] = list(body[:loops[0]])
+    outside:List[ast.stmt] = [stmt for stmt in body[:loops[0]]
+                              if not isinstance(stmt, per_item)]
     for start, end in zip(loops, loops[1:]):
         outside.extend(stmt for stmt in body[start + 1:end]
-                       if not isinstance(stmt, (ast.For, ast.Return)))
+                       if not isinstance(stmt, per_item))
     return outside
 
 
@@ -1213,18 +1231,45 @@ def _magic_loop_index(body:List[ast.stmt])->int:
     return len(body)
 
 
+def _is_shape_access(node:ast.expr)->bool:
+    """True for `<X>.shape[0]`, the only bound a work-item dispatch may take.
+
+    This is the same shape `_shape0_range_param` insists on when it decides the loop
+    is the dispatch: a plain count, a start/step, or any other expression describes a
+    *serial* loop the work item runs itself, and is not the iteration domain.
+    """
+    return (isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Attribute) and node.value.attr == "shape"
+            and isinstance(node.slice, ast.Constant) and node.slice.value == 0)
+
+
 def _is_magic_loop_stmt(stmt:ast.stmt)->bool:
-    """True for the outermost loop the translator turns into work-item dispatch."""
+    """True for a loop *shaped* like the work-item dispatch.
+
+    The test has to be as strict as the dispatch itself, because its other callers
+    (`_outside_loops`, `magic_loop_phases`, `_translate_phase_kernels`) use it to decide
+    which statements are host code. `for j in range(lane * 4, lane * 4 + 4)` is an ordinary
+    serial loop over four elements, but it used to count as the dispatch -- which pushed
+    every statement above it into the host region, where a device-only builtin such as
+    `zeros_per_group` cannot run (it reported "only available inside a @kernel function
+    body" for a body that plainly was one). `_is_secondary_magic_loop` already told a
+    literal `range(8)` apart from a real domain; this predicate has to agree with it.
+    """
     if not isinstance(stmt, ast.For):
         return False
     iterator:ast.expr = stmt.iter
-    if isinstance(iterator, ast.Call):
-        func:ast.expr = iterator.func
-        if isinstance(func, ast.Name) and func.id in ("range", "enumerate"):
-            return True
-        if (isinstance(func, ast.Attribute) and func.attr in ("ndindex", "ndenumerate")
-                and isinstance(func.value, ast.Name)):
-            return True
+    if not isinstance(iterator, ast.Call):
+        return False
+    func:ast.expr = iterator.func
+    if isinstance(func, ast.Name) and func.id == "range":
+        # One argument, and it addresses an array's first dimension: the dispatch form.
+        return (len(iterator.args) == 1 and not iterator.keywords
+                and _is_shape_access(iterator.args[0]))
+    if isinstance(func, ast.Name) and func.id == "enumerate":
+        return len(iterator.args) == 1 and not iterator.keywords
+    if (isinstance(func, ast.Attribute) and func.attr in ("ndindex", "ndenumerate")
+            and isinstance(func.value, ast.Name)):
+        return True
     return False
 
 
@@ -2312,9 +2357,13 @@ class FunctionTranslator:
         # The statements after the loop are python: they run once on the host, after the
         # launch, reading whatever the work items wrote (see PyKernel._run_host_region).
         # Recorded here so every dispatch shape treats the tail the same way.
-        self.body_tail = list(body[[n for n, stmt in enumerate(body)
-                                    if isinstance(stmt, ast.For)][-1] + 1:]
-                              if any(isinstance(stmt, ast.For) for stmt in body) else [])
+        #
+        # "After the loop" has to mean after the *dispatch* loop: a serial `for` above it
+        # (`for j in range(lane * 4, lane * 4 + 4)`) is per-work-item code, and taking the
+        # last `ast.For` of any kind as the boundary pushed everything between them -- a
+        # `zeros_per_group` declaration included -- into the host tail, where a device-only
+        # builtin has no work item and fails.
+        self.body_tail = list(body[_magic_loop_end(body):])
         magic_index:Optional[int] = None
         enumerate_form:Optional[Tuple[str, Any]] = None
         nd_form:Optional[Tuple[str, str, str]] = None
