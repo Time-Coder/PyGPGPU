@@ -38,16 +38,14 @@ from pygpgpu import (
     get_local_size,
     kernel,
     zeros_per_group,
-    work_size,
 )
 
 BINS = 256
 
 
-@kernel
+@kernel(domain="pixels")
 def shared_histogram(pixels: np.ndarray, hist: np.ndarray):
     """One work item per pixel; counts accumulate in shared memory, then merge once."""
-    work_size(pixels)              # bounds guard against the real pixel count
     lane = get_local_id(0)         # threadIdx.x
     bins = zeros_per_group(256, np.uint32)   # __shared__ uint bins[256], per group
 
@@ -61,10 +59,9 @@ def shared_histogram(pixels: np.ndarray, hist: np.ndarray):
         atomic_add(hist, lane, bins[blockIdx][lane])   # merge into the global histogram
 
 
-@kernel
+@kernel(domain="pixels")
 def shared_histogram_plus_equals(pixels: np.ndarray, hist: np.ndarray):
     """The same kernel with `+=`, which is atomic on shared memory for the same reason."""
-    work_size(pixels)
     lane = get_local_id(0)
     bins = zeros_per_group(256, np.uint32)
     bins[blockIdx][lane] = 0
@@ -75,10 +72,9 @@ def shared_histogram_plus_equals(pixels: np.ndarray, hist: np.ndarray):
         hist[lane] += bins[blockIdx][lane]
 
 
-@kernel
+@kernel(domain="x")
 def shared_sums(x: np.ndarray, hist: np.ndarray):
     """A shared buffer used as a scratch pad, without atomics: each lane owns one slot."""
-    work_size(x)
     lane = get_local_id(0)
     slots = zeros_per_group(256, np.int32)
     slots[blockIdx][lane] = int(x[get_global_id(0)]) * 2
@@ -133,9 +129,8 @@ def test_a_shared_scratch_buffer_without_atomics(gpu_backend):
 def test_the_local_count_must_be_a_literal(gpu_backend):
     """The size is a compile-time constant, exactly like `__shared__ T name[N]`."""
 
-    @kernel
+    @kernel(domain="out")
     def uses_a_global_count(out: np.ndarray):
-        work_size(out)
         slots = zeros_per_group(BINS, np.float32)  # a module global, not a literal
         slots[blockIdx][get_local_id(0)] = 0.0
         barrier()
@@ -149,9 +144,8 @@ def test_the_local_count_must_be_a_literal(gpu_backend):
 def test_a_shared_buffer_must_be_indexed_by_its_group(gpu_backend):
     """`slots[lane]` names a group the work item cannot reach, so it is refused."""
 
-    @kernel
+    @kernel(domain="out")
     def wrong_index(pixels: np.ndarray, out: np.ndarray):
-        work_size(out)
         lane = get_local_id(0)
         slots = zeros_per_group(256, np.int32)
         slots[lane] = 1                    # a local id is not a group id
@@ -167,9 +161,8 @@ def test_a_shared_buffer_must_be_indexed_by_its_group(gpu_backend):
 def test_a_shared_buffer_cannot_be_used_without_a_group():
     """Naming the buffer itself (`out[i] = slots`) is refused: it is a mapping on the host."""
 
-    @kernel
+    @kernel(domain="out")
     def bare(out: np.ndarray):
-        work_size(out)
         slots = zeros_per_group(256, np.int32)
         out[get_global_id(0)] = slots
 
@@ -204,9 +197,8 @@ def test_the_interpreter_backend_keeps_each_groups_slice_apart():
 def test_the_cuda_index_vector_is_the_opencl_scalar(gpu_backend):
     """`blockIdx.x` and `get_group_id(0)` are the same number, spelled two ways."""
 
-    @kernel
+    @kernel(domain="out")
     def both(out: np.ndarray):
-        work_size(out)
         i = get_global_id(0)
         out[i] = 1 if blockIdx.x == get_group_id(0) else 0
 
@@ -225,9 +217,8 @@ def test_the_interpreter_reports_real_group_ids():
 
     from pygpgpu import get_group_id, get_local_id
 
-    @kernel
+    @kernel(domain="out")
     def ids(out: np.ndarray):
-        work_size(out)
         i = get_global_id(0)
         out[i] = get_group_id(0) * 100 + get_local_id(0)
 
@@ -264,14 +255,12 @@ def test_an_atomic_takes_a_flat_index_or_a_tuple(gpu_backend):
     same place -- which is what makes `atomic_add(a, (i, j), v)` the readable spelling.
     """
 
-    @kernel
+    @kernel(domain="tag")
     def by_tuple(array: np.ndarray, tag: np.ndarray, row: int, column: int, value: int):
-        work_size(tag)
         atomic_add(array, (row, column), value)
 
-    @kernel
+    @kernel(domain="tag")
     def by_flat(array: np.ndarray, tag: np.ndarray, position: int, value: int):
-        work_size(tag)
         atomic_add(array, position, value)
 
     # `tag` is the iteration domain, so it is one work item and the atomic runs once.
@@ -294,9 +283,8 @@ def test_an_atomic_takes_a_flat_index_or_a_tuple(gpu_backend):
 def test_an_atomic_tuple_index_works_on_three_axes(gpu_backend):
     """Row-major flattening over the declared rank, not just two axes."""
 
-    @kernel
+    @kernel(domain="tag")
     def one_cell(array: np.ndarray, tag: np.ndarray):
-        work_size(tag)
         atomic_add(array, (0, 1, 1), 12)
 
     array = np.zeros((2, 2, 3), dtype=np.int32)
@@ -308,9 +296,8 @@ def test_an_atomic_tuple_index_works_on_three_axes(gpu_backend):
 def test_a_local_size_reports_the_group_width(gpu_backend):
     """`get_local_size(0)` is blockDim.x, available for indexing a local buffer."""
 
-    @kernel
+    @kernel(domain="out")
     def report(out: np.ndarray):
-        work_size(out)
         i = get_global_id(0)
         out[i] = get_local_size(0)
 

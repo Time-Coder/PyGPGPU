@@ -29,7 +29,6 @@ from pygpgpu import (
     get_global_id,
     kernel,
     zeros_per_group,
-    work_size,
 )
 from pygpgpu.kernel import builtins as namespace
 from pygpgpu.kernel import device_builtins as builtin_tables
@@ -41,7 +40,7 @@ def _dispatched_names() -> list[str]:
     return sorted(set(builtin_tables.INDEX_BUILTINS)
                   | set(builtin_tables.ATOMIC_BUILTINS)
                   | set(builtin_tables.GENERIC_BUILTINS)
-                  | {"zeros_per_group", "work_size"})
+                  | {"zeros_per_group"})
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +71,8 @@ def test_the_module_and_the_package_expose_the_same_objects():
         assert getattr(pygpgpu, name) is getattr(namespace, name), name
 
 
-# These two take no fixed argument list by design: barrier() has nothing to wait on, and
-# work_size() accepts any number of arrays to declare the domain.
-_VARIADIC_BY_DESIGN: set[str] = {"barrier", "work_size"}
+# barrier() takes no arguments by design: there is nothing to wait on.
+_VARIADIC_BY_DESIGN: set[str] = {"barrier"}
 
 
 @pytest.mark.parametrize("name", _dispatched_names())
@@ -92,7 +90,7 @@ def test_each_builtin_has_a_real_signature(name: str):
 
 
 
-@pytest.mark.parametrize("name", ["get_global_id", "atomic_cas", "normalize", "work_size"])
+@pytest.mark.parametrize("name", ["get_global_id", "atomic_cas", "normalize"])
 def test_parameter_names_are_meaningful(name: str):
     signature = inspect.signature(getattr(pygpgpu, name))
     assert "args" not in signature.parameters
@@ -139,8 +137,7 @@ def test_work_item_builtins_explain_themselves_outside_a_kernel():
     assert "inside a @kernel" in str(caught.value)
 
 
-def test_work_size_and_barrier_are_no_ops_on_the_host():
-    assert work_size(np.zeros(4, dtype=np.float32)) is None
+def test_barrier_is_a_no_op_on_the_host():
     assert barrier() is None
 
 

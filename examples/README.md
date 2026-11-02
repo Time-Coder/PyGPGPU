@@ -48,10 +48,10 @@ one of them:
 
 - a **magic loop**, `for i in range(x.shape[0]): ...` (or `np.ndindex`/`np.ndenumerate` for 2-D/3-D),
   whose loop bound is the domain;
-- for a **gid-style** kernel that dispatches on `get_global_id`, a declaration at the top of the
-  body: `work_size(x)`. That statement is host-side only — the translator erases it and emits no
-  device code — and it contributes all of `x`'s dimensions, matching what `np.ndindex(x.shape)` would
-  give. Without either, the call raises instead of silently guessing.
+- for a **gid-style** kernel that dispatches on `get_global_id`, the decorator names the array:
+  `@kernel(domain="x")`. The domain contributes all of `x`'s dimensions, matching what
+  `np.ndindex(x.shape)` would give, and it emits no device code because it only decides the
+  launch shape. Without either, the call raises instead of silently guessing.
 
 With a domain, `@kernel` derives the local size from those extents and may round the global size up
 to a multiple of it (this keeps work groups efficient for awkward extents, e.g. a prime length,

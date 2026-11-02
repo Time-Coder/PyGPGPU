@@ -23,7 +23,7 @@ import numpy as np
 
 import pygpgpu.numpy as gnp
 from pygpgpu import (kernel, atomic_add, barrier, blockIdx, get_global_id, get_group_id,
-                     get_local_id, zeros_per_group, work_size)
+                     get_local_id, zeros_per_group)
 
 
 @kernel
@@ -38,11 +38,11 @@ def add_inplace(x: np.ndarray, c: float):
         x[i] = x[i] + c
 
 
-@kernel
+@kernel(domain="data")
 def histogram(data: np.ndarray, counts: np.ndarray):
     # A gid-style kernel must declare its iteration domain explicitly (there is no magic
-    # loop to read it from): `data` supplies the launch size, dimension by dimension.
-    work_size(data)
+    # loop to read it from): `domain="data"` says `data` supplies the launch size,
+    # dimension by dimension.
     i = get_global_id(0)
     atomic_add(counts, data[i], 1)
 
@@ -53,7 +53,10 @@ GROUP_ITEMS = 1024  # elements per work group = 4 elements/thread * 256 threads
 @kernel
 def group_reduce(x: np.ndarray, out: np.ndarray):
     """Reduction: each work group first reduces into local memory, then thread
-    0 atomically adds the partial sum into the global out."""
+    0 atomically adds the partial sum into the global out.
+
+    This one is launched with an explicit bracket, so it declares no domain.
+    """
     g = get_group_id(0)
     l = get_local_id(0)
     base = g * GROUP_ITEMS

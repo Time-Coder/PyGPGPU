@@ -17,7 +17,7 @@ import asyncio
 import numpy as np
 import pytest
 
-from pygpgpu import kernel, get_global_id, work_size
+from pygpgpu import kernel, get_global_id
 from pygpgpu.vec_types import float4
 
 
@@ -121,9 +121,8 @@ def scalar_argument_return(x: np.ndarray, factor: float):
             return x[i] * factor
 
 
-@kernel
+@kernel(domain="x")
 def gid_style_return(x: np.ndarray):
-    work_size(x)
     i = get_global_id(0)
     if i == 0:
         return x[i] * 10.0

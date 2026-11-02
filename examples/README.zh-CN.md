@@ -44,7 +44,7 @@
 kernel 有两种方式声明自己的迭代域, 自动 work size 需要其中之一:
 
 - **魔法循环**, 即 `for i in range(x.shape[0]): ...`(二维/三维用 `np.ndindex`/`np.ndenumerate`), 循环边界就是迭代域;
-- 对基于 `get_global_id` 的 **gid 写法** kernel, 在函数体开头声明: `work_size(x)`。这条语句只在 host 侧生效——翻译器会把它擦除, 不生成任何设备代码——并且它会贡献 `x` 的全部维度, 与 `np.ndindex(x.shape)` 的语义一致。两者都没有时, 调用会直接报错, 而不是静默猜测。
+- 对基于 `get_global_id` 的 **gid 写法** kernel, 用装饰器指明: `@kernel(domain="x")`。迭代域会贡献 `x` 的全部维度, 与 `np.ndindex(x.shape)` 的语义一致; 它不生成任何设备代码, 只决定启动形状。两者都没有时, 调用会直接报错, 而不是静默猜测。
 
 有了迭代域后, `@kernel` 依据这些 extent 推导 local size, 并可能把 global size 向上取整到 local 的整数倍(这样在 shape 尴尬时——例如长度为质数——仍能保持高效的工作组划分, 而不是退化成单个 work item)。生成的 kernel 会为每个 work-item 做越界保护, 所以对 `@kernel` 是安全的。
 

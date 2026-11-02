@@ -99,9 +99,8 @@ def matrix_scale(m: np.ndarray, out: np.ndarray, k: float) -> None:
     for y, x in np.ndindex(out.shape):    # 2D NDRange
         out[y, x] = m[y, x] * k
 
-@kernel(backend="cuda")
+@kernel(backend="cuda", domain="data")
 def histogram(data: np.ndarray, counts: np.ndarray) -> None:
-    work_size(data)                   # iteration domain for a gid-style kernel
     i = get_global_id(0)
     atomic_add(counts, data[i], 1)    # atomics, results read back automatically
 ```
@@ -162,7 +161,7 @@ All three are exact on every backend — thousands of work items incrementing on
 
 Type annotations are optional: the snippets in this README carry them for readability, but the device types come from the arguments at call time, so the same code works unannotated (`self` is not a kernel argument, so annotating it changes nothing).
 
-A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `get_global_id`, declare `work_size(x)` — that statement is host-side only, erased by the translator, and contributes all of `x`'s dimensions. A `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
+A kernel needs an iteration domain for its work size to be derived. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain) or, when dispatching on `get_global_id`, name the array in the decorator: `@kernel(domain="x")`. The domain contributes all of `x`'s dimensions, and a `k[(total, local)]` bracket also works. Without any of these the call raises instead of guessing.
 
 ### Printing from a kernel
 
@@ -236,7 +235,7 @@ The two kernel styles keep their meanings, which is where the interpreter differ
 | Kernel style | What `k["python"](...)` does |
 |---|---|
 | magic loop (`for i in range(x.shape[0])`, `enumerate(x)`, `np.ndindex`/`np.ndenumerate`) | runs the function once: the loop already covers every element. A `(total, local)` bracket changes nothing here, because the loop, not the launch, decides the extent |
-| gid-style (`get_global_id`), domain from `work_size(x)` | runs the body once per work item of the declared domain (`x`'s full shape), with `get_global_id` reporting the current index — one serial step per element, in `np.ndindex` order |
+| gid-style (`get_global_id`), domain from `@kernel(domain="x")` | runs the body once per work item of the declared domain (`x`'s full shape), with `get_global_id` reporting the current index — one serial step per element, in `np.ndindex` order |
 | gid-style, domain from a `k[(total, local)]` bracket | same, one step per work item of the bracket, so the body must clamp itself against the real element count exactly as it does on a GPU |
 
 Inside such a body the same functions resolve to their host implementations: the indexing builtins, the atomics (plain read-modify-writes — serial execution makes them exact), `barrier()` (a no-op) and the vector math family, which uses `pygpgpu.funcs`' host implementation. Two things cannot be emulated and raise instead: `local` (group-local memory is shared by parallel work items) and a `get_global_id` call inside a magic-loop body, where there is no current work item — use the loop variable there.
@@ -449,7 +448,7 @@ wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
 | Input data | numpy arrays directly | wrap in `ti.field`, explicit `from_numpy`/`to_numpy` | `cuda.to_device` + `copy_to_host` by hand | wrap in `wp.array` |
 | Helper functions | **plain Python — no decorator, annotations optional** | `@ti.func` + annotated args | `@cuda.jit(device=True)` | `@wp.func` + annotated args |
 | Backends in one process | **all three, mixed freely** | one, fixed by `ti.init(arch=...)` | CUDA only | CUDA only |
-| Launch size | inferred from the loop bound (or `work_size(x)` / a bracket) | inferred from `range` | blocks × threads by hand, plus a guard | pass `dim=` |
+| Launch size | inferred from the loop bound (or `domain="x"` / a bracket) | inferred from `range` | blocks × threads by hand, plus a guard | pass `dim=` |
 | Bounds guard | emitted for you | emitted for you | you write it | you write it |
 | Backends | OpenCL, CUDA, HIP | CPU, CUDA, Vulkan and others | CPU, CUDA | CPU, CUDA |
 | AMD GPU | HIP (native AMD codegen) and OpenCL | via Vulkan | no | no |

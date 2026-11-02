@@ -79,7 +79,7 @@ def work_size_extent(dim: Any, what: str) -> Any:
     if axis >= len(frame.global_size):
         raise ValueError(
             f"{what}({axis}) is out of range: this launch has {len(frame.global_size)} "
-            f"work-size dimension(s); declare the domain with work_size(array) or pass a "
+            f"work-size dimension(s); declare the domain with @kernel(domain=...) or pass a "
             f"(global, local) bracket")
     return (frame.global_size[axis],
             frame.local_size[axis] if axis < len(frame.local_size) else 1)

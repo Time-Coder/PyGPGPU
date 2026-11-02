@@ -1,6 +1,6 @@
 import numpy as np
 from pygpgpu import (atomic_add, barrier, blockIdx, get_global_id, get_local_id, get_local_size,
-                     kernel, zeros_per_group, work_size)
+                     kernel, zeros_per_group)
 
 
 # Intensity histograms: one bin per possible uint8 value, so bin i counts the pixels whose
@@ -93,7 +93,7 @@ def gamma(image:np.ndarray, gamma_value:float):
 
     return dest_image
 
-@kernel
+@kernel(domain="image")
 def hist(image:np.ndarray):
     """Intensity histogram of an RGB image: 256 bins per channel.
 
@@ -113,7 +113,7 @@ def hist(image:np.ndarray):
     unique inside the group (a CUDA block is 1-D there, which is why ``threadIdx.x`` alone
     is enough in the C version).
     """
-    work_size(image)                       # one work item per channel sample
+    # one work item per channel sample: the decorator declares image as the domain
     size0 = get_local_size(0)
     size1 = get_local_size(1)
     lane = get_local_id(0) + size0 * (get_local_id(1) + size1 * get_local_id(2))

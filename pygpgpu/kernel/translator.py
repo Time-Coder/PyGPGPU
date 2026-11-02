@@ -1407,15 +1407,16 @@ class FunctionTranslator:
         # The array whose whole shape a `np.ndindex(arr.shape)` loop iterates, when that is
         # how the domain was spelled: the launch checks its rank against the loop's names.
         self.nd_whole_shape_param:str = ""
-        # Array names declared by an explicit `gpu.work_size(x)` statement; this is the
-        # gid-style equivalent of a magic loop's implied iteration domain. The rank comes
-        # from each array's runtime shape (a pointer type carries no rank).
+        # The array whose shape declares the iteration domain, recorded from
+        # `@kernel(domain=...)`; this is the gid-style counterpart of a magic loop's implied
+        # domain. The rank comes from that array's runtime shape (a pointer type carries no
+        # rank), so PyKernel expands it at call time.
         self.declared_work_arrays:List[str] = []
         # Set when the body calls gpu.get_global_id()/... , i.e. it dispatches on the launch
         # index and therefore needs an iteration domain from somewhere.
         self.uses_global_id:bool = False
-        # Set once a magic loop is detected: it fixes the iteration domain, so an explicit
-        # gpu.work_size(...) declaration would be redundant.
+        # Set once a magic loop is detected: it fixes the iteration domain, so a
+        # `@kernel(domain=...)` declaration would be redundant.
         self.magic_loop_present:bool = False
         # Image parameters that an OpenCL kernel samples. Each one needs a sampler
         # constant emitted next to the kernel, and the host side builds one sampler
@@ -2153,29 +2154,86 @@ class FunctionTranslator:
             return name
         return self._shape_var(name, dim)
 
+    def _launch_id_code(self, axis:int)->str:
+        """The work-item id along one launch axis."""
+        if self.backend == "opencl":
+            return f"get_global_id({axis})"
+        component:str = (".x" if axis == 0 else ".y" if axis == 1 else ".z")
+        return f"(int)(blockIdx{component} * blockDim{component} + threadIdx{component})"
+
     def _emit_nd_head(self, names:List[str], param:str)->None:
-        """Multi-dimensional work-item head: names[0] maps to dimension 0 (slowest)."""
+        """Multi-dimensional work-item head: names[0] maps to dimension 0 (slowest).
+
+        The body compiles once per signature and the generated source is cached by it, so the
+        head cannot depend on how many axes the *launch* happens to have -- a bracket is not
+        part of the signature, and a source compiled for a 1-D launch would be reused by a
+        2-D one. It is therefore always the same statement: fold the launch's ids into one
+        flat work-item position, then decompose that position over the loop's own domain.
+
+        Every axis folds the same way, which is what makes the launch rank irrelevant.
+        Normalising each id by its grid extent (the C remainder semantics, so a one-item axis
+        contributes its only value) and then by the stride to the next axis gives a position
+        where axis 0 is fastest -- and the decomposition, which has the *last* loop name
+        fastest, walks the domain from the last stride back. A launch of exactly the loop's
+        rank and one of a single flat axis are both instances of the same fold, so neither
+        needs a different source.
+        """
         ndim:int = len(names)
         self.work_item_indices = list(names)
         sources:List[Tuple[str, int]] = self._nd_loop_extents or [(param, d) for d in range(ndim)]
         for d, name in enumerate(names):
             self._define(name, "int", None)
             self._nd_bound_code(sources[d])
+        # The launch supplies at most three ids (get_global_id has three dimensions). The
+        # name is addressed by the loop's position, not by its domain: `param` may itself be
+        # an expression (`(self)->image_height`, for a receiver member), which is no C
+        # identifier.
+        gid:str = "_work_position"
+        self._emit(f"const int {gid} = {self._flattened_launch_id(param)};")
         checks:List[str] = []
         for d, name in enumerate(names):
-            component:int = ndim - 1 - d
-            bound:str = self._nd_bound_code(sources[d])
-            if self.backend == "opencl":
-                self._emit(f"const int {name} = get_global_id({component});")
-            else:
-                c:str = (".x" if component == 0 else ".y" if component == 1 else ".z")
-                self._emit(f"const int {name} = (int)(blockIdx{c} * blockDim{c} + threadIdx{c});")
-            checks.append(f"{name} >= {bound}")
+            # The stride to the next-faster loop axis is the size of the axes after this one,
+            # so the slowest axis divides by every later extent and the fastest takes the
+            # remainder of its own. That makes the decomposition the exact inverse of the
+            # row-major flattening `_nd_flat_index` emits for a subscript.
+            divisor:str = gid
+            for inner in range(d + 1, ndim):
+                divisor = f"{divisor} / {self._nd_bound_code(sources[inner])}"
+            if d:
+                divisor = f"{divisor} % {self._nd_bound_code(sources[d])}"
+            self._emit(f"const int {name} = {divisor};")
+            checks.append(f"{name} >= {self._nd_bound_code(sources[d])}")
         self._emit(f"if ({' || '.join(checks)})")
         self._emit("{")
         self._emit("    return;")
         self._emit("}")
         self._emit_blank()
+
+    def _flattened_launch_id(self, param:str)->str:
+        """One flat work-item position, folded from whichever launch axes are present.
+
+        `get_global_id(d)` reports a number in `[0, size(d))`, and a grid axis of one item
+        reports 0, so folding every axis by its own grid extent and the strides of the axes
+        between them yields the same position for a 1-D grid and for an N-D one of the same
+        total. The grid extents are launch-time values the backend already exposes, so the
+        generated source does not have to know the rank.
+
+        Axis 0 is the fastest one, which is the order `_nd_flat_index` flattens the loop's own
+        names in reverse -- so the loop's last name lands on gid 0.
+        """
+        if self.backend == "opencl":
+            sizes:List[str] = [f"get_global_size({d})" for d in range(3)]
+            ids:List[str] = [f"get_global_id({d})" for d in range(3)]
+        else:
+            sizes = ["(int)(gridDim.x * blockDim.x)", "(int)(gridDim.y * blockDim.y)",
+                     "(int)(gridDim.z * blockDim.z)"]
+            ids = [self._launch_id_code(axis) for axis in range(3)]
+        # ((z % nz) * ny + y % ny) * nx + x % nx: one expression, so a rank-1 grid folds to
+        # its own gid. Every group is parenthesised explicitly -- `%` and `*` share a
+        # precedence level in C and associate left, so `a % b * c` is `(a % b) * c`, but
+        # leaving the operands bare would also silently regroup the outer sum.
+        return (f"((({ids[2]} % {sizes[2]}) * {sizes[1]} + ({ids[1]} % {sizes[1]}))"
+                f" * {sizes[0]} + ({ids[0]} % {sizes[0]}))")
 
     def _nd_flat_index(self, names:List[str], param:str)->str:
         """Row-major flat index expression: n0*s1*s2 + n1*s2 + n2."""
@@ -2279,16 +2337,16 @@ class FunctionTranslator:
 
         if magic_index is None:
             # No magic loop: the user indexes via gpu.get_global_id and friends. The iteration
-            # domain then has to come from somewhere: either an explicit gpu.work_size(...)
-            # declaration, or the bracket at call time. Without either, the launch size cannot
-            # be derived (see PyKernel._invoke).
+            # domain then has to come from somewhere: the decorator's `domain=`, or the bracket
+            # at call time. Without either, the launch size cannot be derived (see
+            # PyKernel._invoke).
             for stmt in body:
                 self._visit_statement(stmt)
             return
 
         # Statements before the magic loop are translated as usual (e.g. local variable initialization).
-        # The magic loop already fixes the iteration domain, so a gpu.work_size(...) declaration
-        # among them would be redundant: flag it before visiting so the check sees the conflict.
+        # The magic loop already fixes the iteration domain, so a `domain=` declaration is
+        # redundant: PyKernel rejects a kernel that carries both before it reaches here.
         self.magic_loop_present = True
         for stmt in _outside_loops(body):
             # A creation the device cannot perform is executed by the interpreter instead
@@ -2346,9 +2404,10 @@ class FunctionTranslator:
             if ndim == 1:
                 self._error(
                     f"for 1-D iteration use `range(array.shape[0])` or `enumerate(array)`; "
-                    f"{module_name}.{form} is for 2-D/3-D", target)
-            if ndim > 3:
-                self._error(f"{module_name}.{form} supports at most 3 dimensions, got {ndim}", target)
+                    f"{module_name}.{form} is for 2-D or more", target)
+            # Any rank is accepted. A grid has three axes, so the host flattens a larger
+            # traversal into one launch axis and `_emit_nd_head` decomposes that position
+            # over the loop's domain -- no rank is refused, and none needs to be.
 
             # One extent per unpacked name. An explicit np.ndindex(a, b, ...) states them
             # itself, so a mismatch is a mistake worth naming; the whole-shape spelling
@@ -2694,12 +2753,6 @@ class FunctionTranslator:
             # ordinary loop and stays allowed.
             if (self.is_kernel and not self.creation_below_loop
                     and self._is_secondary_magic_loop(node)):
-                import sys as _sys
-                import traceback as _tb
-                print(f"DBG refusal in {self.func.__name__} kernel={self.is_kernel} "
-                      f"line={node.lineno} magic_present={self.magic_loop_present}",
-                      file=_sys.stdout)
-                _tb.print_stack(file=_sys.stdout)
                 self._error(
                     "this kernel body has more than one magic loop, and only the first "
                     "becomes the work-item dispatch: a second one would run inside every "
@@ -2713,10 +2766,6 @@ class FunctionTranslator:
             # Bare string literals (e.g. the function docstring) are ignored, not emitted into the kernel
             if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
                 pass
-            elif self._is_work_size_decl(node.value):
-                # gpu.work_size(...) is host-side only: it declares the iteration domain and
-                # produces no device code at all.
-                self._handle_work_size_decl(node.value)
             elif self._is_print_call(node.value):
                 # print(...) maps to device printf calls that print the same text
                 self._emit_print(node.value)
@@ -3696,52 +3745,6 @@ class FunctionTranslator:
         if isinstance(callee, ast.Name):
             return builtin_name_of(self.resolve_global(callee.id))
         return None
-
-    def _is_work_size_decl(self, node:ast.expr)->bool:
-        """True for a `work_size(...)` statement call."""
-        return self._builtin_call_name(node) == "work_size"
-
-    def _handle_work_size_decl(self, call:ast.Call)->None:
-        """`gpu.work_size(x)` declares the iteration domain as x's full shape.
-
-        This is the gid-style counterpart of a magic loop: a kernel that dispatches on
-        `gpu.get_global_id` has no loop to read the domain from, so without this the launch
-        size cannot be derived. The statement is host-side only and emits no device code.
-
-        The single argument is an array parameter, and it contributes ALL of its dimensions,
-        exactly what `for ... in np.ndindex(x.shape)` would give: a 1-D array (the usual
-        reduction) declares one dimension, an (h, w) array declares two. The generated kernel
-        still clamps each work item against those bounds.
-        """
-        if not self.is_kernel:
-            self._error("gpu.work_size() is only meaningful in a @kernel function", call)
-        if call.keywords:
-            self._error("gpu.work_size() takes no keyword arguments", call)
-        if len(call.args) != 1:
-            self._error(
-                "gpu.work_size() takes exactly one array parameter: that array supplies the "
-                "iteration domain, dimension by dimension (like np.ndindex(x.shape)). "
-                "For a 1-D reduction this is gpu.work_size(x).", call)
-        if self.work_size_dims or self.magic_loop_present:
-            self._error(
-                "gpu.work_size() is redundant here: this kernel's magic loop already "
-                "declares the iteration domain", call)
-        if self.declared_work_arrays:
-            self._error("gpu.work_size() must appear only once per kernel", call)
-
-        item:ast.expr = call.args[0]
-        if not isinstance(item, ast.Name):
-            self._error(
-                "gpu.work_size() takes an array parameter, e.g. gpu.work_size(x)", item)
-        name:str = item.id
-        if not is_ptr(self._lookup(name)):
-            self._error(
-                f"gpu.work_size({name}) requires an array parameter; "
-                f"'{name}' is not an array", item)
-
-        # Record the array name; the concrete dimension count comes from its shape at launch
-        # time (a pointer type carries no rank), which PyKernel expands at call time.
-        self.declared_work_arrays = [name]
 
     # ---------- print() -> device printf ----------
 

@@ -95,7 +95,7 @@ __all__ = [
     # CUDA's index vectors (three axes each)
     "blockIdx", "threadIdx", "blockDim", "gridDim",
     # synchronisation and launch shape
-    "barrier", "work_size", "zeros_per_group", "zeros_per_block",
+    "barrier", "zeros_per_group", "zeros_per_block",
     # atomics
     "atomic_add", "atomic_sub", "atomic_min", "atomic_max",
     "atomic_and", "atomic_or", "atomic_xor", "atomic_xchg", "atomic_cas",
@@ -259,15 +259,6 @@ gridDim:Any = _IndexVector(x=lambda: get_num_groups(0), y=lambda: get_num_groups
 
 def barrier() -> None:
     """Wait for every work item of the group. A serial run has nothing to wait for."""
-    return None
-
-
-def work_size(*arrays: Any) -> None:
-    """Declare the iteration domain of a gid-style kernel.
-
-    Host-side only: the translator erases the statement, and the launch derived from it is
-    what the device backends use. Here it only needs to exist so the call is a no-op.
-    """
     return None
 
 

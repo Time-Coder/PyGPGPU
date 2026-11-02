@@ -24,7 +24,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pygpgpu import kernel, get_global_id, work_size
+from pygpgpu import kernel, get_global_id
 
 
 # ---------------------------------------------------------------------------
@@ -352,9 +352,8 @@ def test_return_value_uses_the_outer_parameter(runner):
     assert float(runner(return_outer_scaled, x)) == 3.0
 
 
-@kernel
+@kernel(domain="x")
 def gid_style_outer(x: np.ndarray, out: np.ndarray):
-    work_size(x)
     i = get_global_id(0)
     if i < x.shape[0]:
         out[i] = x[i] * SCALE

@@ -28,7 +28,7 @@ from typing_extensions import ParamSpec
 
 from ..vec_types.layout import pack
 from ..utils import local_size_for_global, detect_work_size, device_limits
-from .python_backend import PythonKernel
+from .python_backend import PythonKernel, analyse
 from . import structs
 from ..numpy import ndarray as gnp
 from .translator import (
@@ -805,7 +805,8 @@ class PyKernel(_KernelBase[_P]):
     gives an editor the caller's parameter names on a published kernel -- see _KernelBase above.
     """
 
-    def __init__(self, func:Callable[..., Any], backend:str, explicit_backend:bool=False):
+    def __init__(self, func:Callable[..., Any], backend:str, explicit_backend:bool=False,
+                 domain:Optional[str]=None):
         if isinstance(func, classmethod):
             raise SyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)") from None
         if isinstance(func, staticmethod):
@@ -816,6 +817,11 @@ class PyKernel(_KernelBase[_P]):
         # True when the decorator named a backend, so set_default_device() must not
         # override it. A backend chosen by probing is only a snapshot, not a binding.
         self._explicit_backend:bool = explicit_backend
+        # The parameter whose shape declares the iteration domain, or None. A gid-style body
+        # has no magic loop to read a domain from, and naming the array here says so as part
+        # of the signature rather than as a statement inside the body that the device never
+        # sees.
+        self._domain:Optional[str] = domain
         self.is_pykernel:bool = True
         self.__name__:str = func.__name__
         self.__doc__:str = func.__doc__ or ""
@@ -1343,41 +1349,54 @@ class PyKernel(_KernelBase[_P]):
                 launch_args[index] = packed_value
             if unpack is not None:
                 unpackers.append((packed_value, unpack))
-        if global_size is None and work_size_dims:
-            # A dim of -1 is an explicit gpu.work_size(x) declaration: that array contributes
+        # The extents the magic loop itself iterates, in launch order (fastest axis first).
+        # Derived whenever the loop states a domain, because an explicit bracket has to agree
+        # with it axis by axis, not merely dimension by dimension.
+        loop_extents:List[int] = []
+        if work_size_dims:
+            # A dim of -1 is an `@kernel(domain=...)` declaration: that array contributes
             # all of its dimensions, matching what np.ndindex(x.shape) would give. An entry
             # with no parameter index is a literal count, as in np.ndindex(2, 3).
-            extents_list:List[int] = []
             member_index:int = 0
             for pi, dim in work_size_dims:
                 if pi is None:
-                    extents_list.append(dim)
+                    loop_extents.append(dim)
                     continue
                 if dim == -2:
                     # A host-side integer supplied as an argument, used as an extent:
                     # `np.ndindex(self.image_height, self.image_width)`.
-                    extents_list.append(int(full[pi]))
+                    loop_extents.append(int(full[pi]))
                     continue
                 if dim == -3:
                     # The extent is a receiver-struct member: full[pi] is the ctypes
                     # structure the caller handed over, and the member holds the count.
                     member_name = launch_meta.get("work_size_members", [])[member_index]
                     member_index += 1
-                    extents_list.append(int(getattr(full[pi], member_name)))
+                    loop_extents.append(int(getattr(full[pi], member_name)))
                     continue
                 shape:Tuple[int, ...] = tuple(int(s) for s in full[pi].shape)
                 if dim >= 0:
-                    extents_list.append(shape[dim])
+                    loop_extents.append(shape[dim])
                 else:
-                    extents_list.extend(shape)
-            if len(extents_list) > 3:
-                source:str = ""
-                if work_size_dims[0][0] is not None:
-                    source = (f" from an array of shape "
-                              f"{tuple(int(s) for s in full[work_size_dims[0][0]].shape)}")
-                raise ValueError(
-                    f"the magic loop of {self.__name__} declared {len(extents_list)} "
-                    f"dimensions{source}; at most 3 are supported")
+                    loop_extents.extend(shape)
+        if global_size is None and work_size_dims:
+            # A dim of -1 is an `@kernel(domain=...)` declaration: that array contributes
+            # all of its dimensions, matching what np.ndindex(x.shape) would give. An entry
+            # with no parameter index is a literal count, as in np.ndindex(2, 3).
+            extents_list:List[int] = list(loop_extents)
+            # A domain of more axes than a device grid has (three) is folded into one flat
+            # axis of `prod(shape)` work items, which is what the original auto-detection
+            # did. Two consequences follow and both are honest: a magic loop recovers the
+            # extra axes by decomposing that position over its own domain (`_emit_nd_head`),
+            # while a gid-style body reads the flat position directly -- `get_global_id(0)`
+            # is that index and the higher axes read 0, so a body that wants the original
+            # axes spelled out should iterate with `np.ndindex` instead.
+            extents:Tuple[int, ...] = tuple(extents_list)
+            if len(extents) > 3:
+                total:int = 1
+                for extent in extents:
+                    total *= int(extent)
+                extents = (total,)
             # `np.ndindex(arr.shape)` means the array's whole shape, but the translator only
             # sees a pointer and cannot know its rank, so it takes one dimension per loop
             # name. `for j, i in np.ndindex(image.shape)` over an RGB image would therefore
@@ -1410,7 +1429,6 @@ class PyKernel(_KernelBase[_P]):
                     f"{len(extents_list)} dimension{'s' if len(extents_list) != 1 else ''}"
                     f"{source}. Give one name per dimension, or iterate an explicit subset, "
                     f"e.g. np.ndindex(image.shape[0], image.shape[1])")
-            extents:Tuple[int, ...] = tuple(extents_list)
             if local_size is None:
                 global_size, local_size = detect_work_size(
                     256, extents, max_work_group_size=device_max_group,
@@ -1431,9 +1449,37 @@ class PyKernel(_KernelBase[_P]):
             raise ValueError(
                 f"{self.__name__}() dispatches on gpu.get_global_id but declares no iteration "
                 f"domain, so the work size cannot be derived. Either give it a magic loop "
-                f"(`for i in range(x.shape[0]): ...`), declare `gpu.work_size(x)` in the body, "
-                f"or pass a bracket: {self.__name__}[(total, local)](...)")
+                f"(`for i in range(x.shape[0]): ...`), name the array in the decorator "
+                f"(`@kernel(domain=\"x\")`), or pass a bracket: "
+                f"{self.__name__}[(total, local)](...)")
         if global_size is not None:
+            # Whether the bracket agrees with the loop is a question about *coverage*, not
+            # about rank: the kernel folds the launch's ids into one flat position and
+            # decomposes it over the loop's own domain, so any launch shape works as long as
+            # it supplies enough work items (see FunctionTranslator._emit_nd_head). A launch
+            # enumerating fewer work items than the loop traverses stops short of part of the
+            # domain and silently leaves it untouched, which is what this rejects. A larger
+            # one is merely wasteful: the per-axis bounds guard skips the excess.
+            #
+            # The check only applies to a *magic* loop (`loop_names >= 1`): a gid-style body
+            # states its domain with the bracket alone, so there is nothing to compare it with.
+            loop_names:int = int(launch_meta.get("loop_names", 0))
+            if loop_names and loop_extents:
+                needed:int = 1
+                for extent in loop_extents:
+                    needed *= int(extent)
+                supplied:int = 1
+                for size in global_size:
+                    supplied *= int(size)
+                if supplied < needed:
+                    raise ValueError(
+                        f"{self.__name__}(): the work size bracket {tuple(global_size)} "
+                        f"launches {supplied} work items, but its magic loop traverses "
+                        f"{tuple(loop_extents)} ({needed} of them), so the rest of the domain "
+                        f"would never be visited. Any launch shape is accepted as long as it "
+                        f"covers {needed} work items (the loop decomposes a flat work-item "
+                        f"position, so even {needed} alone works); a larger grid is fine, and "
+                        f"omitting the bracket lets the loop derive the size itself")
             # Uniform total-work-item semantics (OpenCL/SYCL): global = total number of work items, must be divisible by local;
             # cuda's gridDim is a block count, derived from total/local, transparent to the user
             if local_size is None:
@@ -1750,14 +1796,24 @@ class PyKernel(_KernelBase[_P]):
             raise TypeError(f"{self.__name__}() requires an instance")
         runner:Any = self._python_runner
         if runner is None:
-            runner = PythonKernel(self.raw_func, self._is_method, self._self_param)
+            runner = PythonKernel(self.raw_func, self._is_method, self._self_param,
+                                  domain=self._domain or "")
             self._python_runner = runner
         return runner.call(instance, args, global_size, local_size, launch=launch)
 
     # ---------- source generation ----------
 
     def _source_signature(self)->str:
-        """Python source signature: source changes -> regenerate (recompile when cached content differs)."""
+        """Python source signature: source changes -> regenerate (recompile when cached content differs).
+
+        `@kernel(domain=...)` is deliberately **not** part of this hash, and that is safe only
+        because the domain never reaches the generated code: it picks which array supplies the
+        launch geometry, and geometry is a host-side, per-call fact. Two decorators over one
+        body with different domains therefore share one source (they even compute one C name),
+        and each instance keeps its own `_cache` entry so neither reuses the other's launch.
+        If the domain ever starts to shape the device code, it has to be added here -- otherwise
+        the two would share a source they no longer agree on.
+        """
         try:
             source:str = inspect.getsource(self.raw_func)
         except OSError:
@@ -1822,6 +1878,43 @@ class PyKernel(_KernelBase[_P]):
                 value.bind_cuda()
             # opencl binds at launch time; nothing to do here
 
+    def _apply_declared_domain(self, translator:Any)->None:
+        """Record the array `@kernel(domain=...)` named as the iteration domain.
+
+        The parameter has to exist and be an array: only a pointer carries the shape
+        dimensions a launch is derived from, and a scalar has none to give. Naming a
+        nonexistent parameter is the failure a string-valued decorator argument invites --
+        renaming the parameter leaves the string behind -- so it is reported with the ones
+        that do exist.
+
+        A magic loop already fixes the domain, so a kernel carrying both would have two
+        declarations of the same thing; that is checked here before translation, because the
+        loop scan is what records `magic_loop_present`.
+        """
+        name:str = self._domain
+        parameter_names:List[str] = _positional_argument_names(self.raw_func)
+        if name not in parameter_names:
+            available:str = ", ".join(parameter_names) or "none"
+            raise SyntaxError(
+                f"{self.__name__}(): @kernel(domain={name!r}) names no parameter of this "
+                f"function (its parameters are: {available}). The domain is the array whose "
+                f"shape declares the iteration domain, spelled as the parameter's own name")
+        if _declares_a_magic_loop(self.raw_func):
+            raise SyntaxError(
+                f"{self.__name__}(): @kernel(domain={name!r}) declares the iteration domain, "
+                f"but the body already declares one with a magic loop "
+                f"(`for i in range(x.shape[0])` or `np.ndindex`); keep exactly one of them")
+        index:Optional[int] = None
+        for position, (parameter, _) in enumerate(translator.params):
+            if parameter == name:
+                index = position
+                break
+        if index is None or not is_ptr(translator.params[index][1]):
+            raise SyntaxError(
+                f"{self.__name__}(): @kernel(domain={name!r}) requires an array parameter; "
+                f"'{name}' is not an array, so it has no shape to derive a work size from")
+        translator.declared_work_arrays = [name]
+
     def _compile(self, args:List[Any], arg_types:List[Any], self_types:List[Any],
                  self_attrs:List[str], owner:Optional[type], sig:str,
                  backend:str, device_obj:Any, instance:Any=None,
@@ -1874,6 +1967,11 @@ class PyKernel(_KernelBase[_P]):
             self_struct_type=self_struct_type,
             struct_arg_classes=struct_arg_classes,
             host_creation_values=creation_values)
+        # `@kernel(domain="x")` names the parameter whose shape declares the iteration
+        # domain. It is applied before `translate()` so the declaration is in place while the
+        # magic loop is scanned -- a body cannot carry one of its own any more.
+        if self._domain:
+            self._apply_declared_domain(translator)
         translator.translate()
         # One kernel per magic loop: a body with several renders several, launched in order
         # so the arrays stay on the device between them.
@@ -2083,7 +2181,7 @@ class PyKernel(_KernelBase[_P]):
             if name.startswith("(self)->") else
             (shape_index[name], dim) if name else (None, dim)
             for name, dim in shapes_owner.work_size_dims]
-        # An explicit gpu.work_size(x) declaration: expand each named array into its own
+        # An `@kernel(domain=...)` declaration: expand each named array into its own
         # dimensions. The rank is only known at call time, so record (param, -1) markers and
         # let _invoke substitute the real per-dimension indices.
         if not work_size_dims and shapes_owner.declared_work_arrays:
@@ -2668,6 +2766,15 @@ def _receiver_name(func:Any)->str:
     return first if first in ("self", "cls") else ""
 
 
+def _declares_a_magic_loop(func:Callable)->bool:
+    """True when the kernel body carries a magic loop, i.e. it fixes its own domain.
+
+    The body scan the interpreter already performs answers this without translating: it
+    records the loop's form and the array it iterates.
+    """
+    return analyse(func, _receiver_name(func)).magic_form is not None
+
+
 def _positional_argument_names(func:Any)->List[str]:
     """The python parameter names of a kernel, skipping the `self` parameter if present."""
     code:Any = getattr(func, "__code__", None)
@@ -2774,10 +2881,13 @@ def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:
 
 
 @overload
-def kernel(func:Callable[_P, Any], *, backend:Optional[str]=None)->PyKernel[_P]: ...
+def kernel(func:Callable[_P, Any], *, backend:Optional[str]=None,
+           domain:Optional[str]=None)->PyKernel[_P]: ...
 @overload
-def kernel(func:None=None, *, backend:Optional[str]=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
-def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None):
+def kernel(func:None=None, *, backend:Optional[str]=None,
+           domain:Optional[str]=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
+def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None,
+           domain:Optional[str]=None):
     """The `@kernel` decorator.
 
     When backend is not specified, probe in DEFAULT_BACKEND_ORDER (cuda -> hip -> opencl)
@@ -2810,10 +2920,10 @@ def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None
     """
     def decorator(f:Callable[..., Any])->PyKernel[Any]:
         if backend is not None:
-            return PyKernel(f, backend, explicit_backend=True)
+            return PyKernel(f, backend, explicit_backend=True, domain=domain)
         # No backend named: the call-time default decides, so this snapshot is only used
         # for reporting until set_default_device() (or a bracket) has a say.
-        return PyKernel(f, _default_backend(), explicit_backend=False)
+        return PyKernel(f, _default_backend(), explicit_backend=False, domain=domain)
 
     if func is not None:
         return decorator(func)

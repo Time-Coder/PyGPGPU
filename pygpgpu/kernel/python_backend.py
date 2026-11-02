@@ -14,13 +14,13 @@ arrangements of the same work-item semantics:
   running the function once, as plain Python, is exactly the whole kernel;
 * a **gid-style** kernel (``gpu.get_global_id``) dispatches on the index of the current
   work item instead, so the body is run once per work item of the iteration domain. The
-  domain comes from the ``gpu.work_size(x)`` declaration (all of ``x``'s dimensions, as
+  domain comes from the ``@kernel(domain="x")`` declaration (all of ``x``'s dimensions, as
   ``np.ndindex(x.shape)`` would give) or from a ``(global, local)`` bracket.
 
 Inside a gid-style body, ``gpu.*`` resolves to host implementations installed in a
 thread-local frame for the duration of the call: the indexing builtins report the
 work item the serial loop is currently standing in, atomics are plain read-modify-writes
-(serial execution makes them exact), ``gpu.work_size`` is a no-op, and the vector math
+(serial execution makes them exact), and the vector math
 family delegates to the host-side :mod:`pygpgpu.vec_types.funcs`. Things that are
 meaningful only with real parallel work items -- local (shared) memory -- raise.
 
@@ -53,7 +53,7 @@ from ..utils import local_size_for_global
 # The python backend runs the function body as-is, so the only thing it needs to know
 # is which of the two arrangements above the body uses: does it carry the magic loop
 # (run once), or does it dispatch on gpu.get_global_id (run per work item), and which
-# array declares the domain with gpu.work_size(...)?
+# array declares the domain? The domain is given by `@kernel(domain=...)`, not the body.
 #
 # Unlike the GPU translator this analysis accepts everything else in the body: it
 # never inspects statements or expressions other than those three questions.
@@ -171,7 +171,7 @@ class PythonAnalysis:
     """What the serial runner needs to know about a kernel body."""
 
     def __init__(self) -> None:
-        # Arrays declared by gpu.work_size(...): the gid-style iteration domain.
+        # Arrays the decorator's `domain=` named: the gid-style iteration domain.
         self.declared: List[Holder] = []
         # Work size derivable from the magic loop (reported by
         # gpu.get_global_size/get_local_size/get_num_groups).
@@ -181,13 +181,20 @@ class PythonAnalysis:
         self.uses_index: bool = False
 
 
-def analyse(func: Callable, self_param: str = "") -> PythonAnalysis:
-    """Inspect a kernel body for the two launch styles (never translates anything)."""
+def analyse(func: Callable, self_param: str = "", domain: str = "") -> PythonAnalysis:
+    """Inspect a kernel body for the two launch styles (never translates anything).
+
+    ``domain`` is the parameter name `@kernel(domain=...)` declared, if any, so it seeds the
+    analysis with that declaration instead of requiring the body to carry one.
+    """
     analysis = PythonAnalysis()
     body: Optional[ast.FunctionDef] = _dedented_ast(func)
     if body is None:
         return analysis
     globals_of: Dict[str, Any] = _globals_of(func)
+    if domain:
+        # A parameter is held as ("arg", <name>), the same shape the statement produces.
+        analysis.declared.append(("arg", domain))
 
     for stmt in body.body:
         if not isinstance(stmt, ast.For):
@@ -214,10 +221,6 @@ def analyse(func: Callable, self_param: str = "") -> PythonAnalysis:
             continue
         if attr in INDEX_BUILTINS:
             analysis.uses_index = True
-        elif attr == "work_size" and node.args and not node.keywords:
-            holder = _holder_of(node.args[0], self_param)
-            if holder is not None and holder not in analysis.declared:
-                analysis.declared.append(holder)
 
     return analysis
 
@@ -392,7 +395,8 @@ class PythonKernel:
     with an optional ``(global, local)`` work size.
     """
 
-    def __init__(self, func: Callable, is_method: bool, self_param: str = "") -> None:
+    def __init__(self, func: Callable, is_method: bool, self_param: str = "",
+                 domain: str = "") -> None:
         self.func: Callable = func
         self.is_method: bool = is_method
         self.self_param: str = self_param
@@ -401,7 +405,7 @@ class PythonKernel:
         if is_method and names and names[0] == self_param:
             names = names[1:]
         self.param_names: List[str] = names
-        self.analysis: PythonAnalysis = analyse(func, self_param)
+        self.analysis: PythonAnalysis = analyse(func, self_param, domain)
 
     # ----- argument lookup -----
 
@@ -410,7 +414,7 @@ class PythonKernel:
         if kind == "self":
             if instance is None:
                 raise ValueError(
-                    f"the kernel declares gpu.work_size(self.{name}), but no instance "
+                    f"the kernel declares @kernel(domain='{name}'), but no instance "
                     f"was passed")
             return getattr(instance, name)
         try:
@@ -420,7 +424,7 @@ class PythonKernel:
         if index >= len(args):
             raise TypeError(
                 f"{self.func.__name__}() missing the argument '{name}' declared by "
-                f"gpu.work_size()")
+                f"@kernel(domain=...)")
         return args[index]
 
     def _extents(self, holders: List[Holder], instance: Any,
@@ -431,7 +435,7 @@ class PythonKernel:
             shape = getattr(array, "shape", None)
             if shape is None:
                 raise ValueError(
-                    f"gpu.work_size({holder[1]}) requires an array; the argument has no shape")
+                    f"@kernel(domain='{holder[1]}') requires an array; the argument has no shape")
             extents.extend(int(s) for s in shape)
         return tuple(extents)
 
@@ -487,7 +491,7 @@ class PythonKernel:
             return self._execute(instance, args, frame)
 
         if analysis.declared:
-            # A gid-style body that declared its domain with gpu.work_size(...): the
+            # A gid-style body whose decorator declared the domain: the
             # serial replacement of "one work item per element" is a loop over that
             # domain, each step running the body with gpu.get_global_id reporting the
             # current index. A bracket overrides the declared size, exactly as it does
@@ -500,7 +504,7 @@ class PythonKernel:
                 domain: Tuple[int, ...] = self._extents(analysis.declared, instance, args)
                 if not domain:
                     raise ValueError(
-                        f"gpu.work_size() declares an empty iteration domain for "
+                        f"@kernel(domain=...) declares an empty iteration domain for "
                         f"{self.func.__name__}()")
                 sizes = (domain, local_size if local_size is not None
                          else local_size_for_global(domain))
@@ -516,7 +520,7 @@ class PythonKernel:
             raise ValueError(
                 f"{self.func.__name__}() dispatches on gpu.get_global_id but declares no "
                 f"iteration domain, so the work size cannot be derived. Either declare "
-                f"`gpu.work_size(x)` in the body or pass a bracket: "
+                f"`@kernel(domain=\"x\")` or pass a bracket: "
                 f"{self.func.__name__}[(total, local)](...)")
 
         # No magic loop, no declaration, no dispatch: the body has no notion of a work
@@ -606,7 +610,7 @@ class PythonKernel:
                        ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
         """Validate a bracketed work size, exactly as the GPU backends do.
 
-        The bracket wins over the gpu.work_size() declaration (that is what a bracket
+        The bracket wins over the `@kernel(domain=...)` declaration (that is what a bracket
         does on every backend): padding the global size past the declared extent is
         allowed, and the body has to clamp itself against the real element count -- which
         is what a gid-style kernel must do on a GPU too.

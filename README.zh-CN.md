@@ -85,7 +85,7 @@ from pygpgpu import climport, cuimport, hipimport    # 手写 .cl/.cu/.hip 文�
 ```python
 import math
 import numpy as np
-from pygpgpu import kernel, funcs, float4, atomic_add, get_global_id, work_size
+from pygpgpu import kernel, funcs, float4, atomic_add, get_global_id
 
 def norm2(v: float4) -> float:
     return funcs.dot(v, v)
@@ -100,9 +100,8 @@ def matrix_scale(m: np.ndarray, out: np.ndarray, k: float) -> None:
     for y, x in np.ndindex(out.shape):    # 二维 NDRange
         out[y, x] = m[y, x] * k
 
-@kernel(backend="cuda")
+@kernel(backend="cuda", domain="data")
 def histogram(data: np.ndarray, counts: np.ndarray) -> None:
-    work_size(data)                   # gid 写法需要声明迭代域
     i = get_global_id(0)
     atomic_add(counts, data[i], 1)    # 原子操作, 结果自动回读
 ```
@@ -111,7 +110,7 @@ def histogram(data: np.ndarray, counts: np.ndarray) -> None:
 
 类型注解是可选项: 本 README 里的代码片段带上注解只为便于阅读, 设备端类型来自调用时的实参, 所以同样的代码不写注解也能跑(`self` 不是 kernel 参数, 给它加注解没有任何影响)。
 
-kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `get_global_id` 的写法里声明 `work_size(x)` —— 这条语句只在 host 侧生效, 会被翻译器擦除, 并贡献 `x` 的全部维度。用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
+kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `get_global_id` 的写法里用装饰器指明数组: `@kernel(domain="x")`。迭代域会贡献 `x` 的全部维度, 用 `k[(total, local)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。
 
 ### 数组元素上的 `+=`
 
@@ -235,7 +234,7 @@ saxpy["py"].submit(x, y, out, 2.0)   # 同一次启动, 放到线程池里执行
 | kernel 写法 | `k["python"](...)` 的行为 |
 |---|---|
 | 魔法循环(`for i in range(x.shape[0])`、`enumerate(x)`、`np.ndindex`/`np.ndenumerate`) | 函数只调用一次: 循环本身已经覆盖了所有元素。此时 `(total, local)` 中括号不改变任何东西, 因为决定迭代范围的是循环, 不是启动规模 |
-| gid 写法(`get_global_id`), 迭代域来自 `work_size(x)` | 按声明的迭代域(`x` 的完整 shape)每个工作项跑一遍函数体, `get_global_id` 返回当前索引——也就是按 `np.ndindex` 顺序, 每个元素一步 |
+| gid 写法(`get_global_id`), 迭代域来自 `@kernel(domain="x")` | 按声明的迭代域(`x` 的完整 shape)每个工作项跑一遍函数体, `get_global_id` 返回当前索引——也就是按 `np.ndindex` 顺序, 每个元素一步 |
 | gid 写法, 迭代域来自 `k[(total, local)]` 中括号 | 同上, 按中括号的每个工作项跑一遍, 因此函数体必须像在 GPU 上一样, 自己针对真实元素个数做越界保护 |
 
 这类函数体里的内建函数会解析到 host 侧实现: 索引内建、原子操作(退化为普通读-改-写, 串行执行使其结果精确)、`barrier()`(空操作)以及向量数学函数族(直接调用 `pygpgpu.funcs` 的 host 实现)。有两种东西无法模拟, 会直接报错: `local`(组内共享内存需要并行工作项)与魔法循环函数体里的 `get_global_id`(那里没有"当前工作项", 请改用循环变量)。
@@ -443,7 +442,7 @@ wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
 | 输入数据 | numpy 数组直接用 | 包进 `ti.field`, 手动 `from_numpy`/`to_numpy` | 手动 `cuda.to_device` + `copy_to_host` | 包进 `wp.array` |
 | 子函数 | **普通 Python——不需要装饰器, 注解可选** | `@ti.func` + 标注参数 | `@cuda.jit(device=True)` | `@wp.func` + 标注参数 |
 | 同进程多后端 | **三个都能用, 可自由混用** | 只有一个, 由 `ti.init(arch=...)` 固定 | 仅 CUDA | 仅 CUDA |
-| 启动规模 | 由循环上界推导(或 `work_size(x)` / 中括号) | 由 `range` 推导 | block × thread 手算, 外加守卫 | 显式传 `dim=` |
+| 启动规模 | 由循环上界推导(或 `domain="x"` / 中括号) | 由 `range` 推导 | block × thread 手算, 外加守卫 | 显式传 `dim=` |
 | 边界守卫 | 自动生成 | 自动生成 | 自己写 | 自己写 |
 | 后端 | OpenCL, CUDA, HIP | CPU, CUDA, Vulkan 等 | CPU, CUDA | CPU, CUDA |
 | AMD GPU | HIP(原生 AMD 代码生成)与 OpenCL | 经 Vulkan | 不支持 | 不支持 |

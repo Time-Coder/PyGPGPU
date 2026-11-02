@@ -25,7 +25,7 @@ from pygf import (
     vector3f,
 )
 
-from pygpgpu import kernel
+from pygpgpu import kernel, get_global_id
 from pygpgpu.kernel.translator import _vec_registry
 
 
@@ -159,3 +159,179 @@ def test_an_explicit_subset_is_accepted(runner):
     out = np.zeros((2, 3), dtype=np.float32)
     runner(explicit_subset, image, out)
     np.testing.assert_array_equal(out, np.ones((2, 3), dtype=np.float32))
+
+
+@kernel
+def writes_every_channel(image: np.ndarray, out: np.ndarray):
+    for y, x, c in np.ndindex(image.shape):
+        out[y, x, c] = 1.0
+
+
+def test_a_flat_bracket_launches_the_whole_domain(gpu_backend):
+    """The launch rank is independent of the traversal rank: a flat grid covers every element.
+
+    A 3-D loop launched as a one-dimensional grid used to write 3 of 60 elements -- the loop
+    read one index per launch axis, and a 1-D grid holds the other two axes at 0. The kernel
+    now folds the launch's ids into one flat work-item position and decomposes it over the
+    loop's own domain, so the two ranks no longer have to match.
+    """
+    image = np.zeros((4, 5, 3), dtype=np.float32)
+    out = np.zeros((4, 5, 3), dtype=np.float32)
+    writes_every_channel[gpu_backend][(4 * 5 * 3,)](image, out)
+    np.testing.assert_array_equal(out, np.ones((4, 5, 3), dtype=np.float32))
+
+
+def test_the_loop_derives_a_matching_work_size(gpu_backend):
+    """Without a bracket every channel of the domain is covered."""
+    image = np.zeros((4, 5, 3), dtype=np.float32)
+    out = np.zeros((4, 5, 3), dtype=np.float32)
+    writes_every_channel[gpu_backend](image, out)
+    np.testing.assert_array_equal(out, np.ones((4, 5, 3), dtype=np.float32))
+
+
+def test_a_bracket_of_the_right_rank_in_the_right_order_runs(gpu_backend):
+    """A matching bracket is honoured, and axes are fastest-first (the loop's reverse)."""
+    image = np.zeros((4, 5, 3), dtype=np.float32)
+    out = np.zeros((4, 5, 3), dtype=np.float32)
+    writes_every_channel[gpu_backend][((3, 5, 4), None)](image, out)
+    np.testing.assert_array_equal(out, np.ones((4, 5, 3), dtype=np.float32))
+
+
+def test_a_bracket_with_the_axes_reversed_still_covers_the_domain(gpu_backend):
+    """A right-rank bracket in the other order is just another launch shape now.
+
+    It used to be the second silent failure: each axis was guarded against another axis's
+    bound and the launch stopped at 45 of 60 elements. Because the work-item position is
+    flat and decomposed afterwards, the axis order of the bracket no longer matters.
+    """
+    image = np.zeros((4, 5, 3), dtype=np.float32)
+    out = np.zeros((4, 5, 3), dtype=np.float32)
+    writes_every_channel[gpu_backend][((4, 5, 3), None)](image, out)
+    np.testing.assert_array_equal(out, np.ones((4, 5, 3), dtype=np.float32))
+
+
+def test_a_bracket_that_stops_short_is_refused(gpu_backend):
+    """Coverage is what matters: a launch with too few work items cannot visit the domain."""
+    image = np.zeros((4, 5, 3), dtype=np.float32)
+    out = np.zeros((4, 5, 3), dtype=np.float32)
+    with pytest.raises(ValueError) as caught:
+        writes_every_channel[gpu_backend][(30,)](image, out)
+    message: str = str(caught.value)
+    assert "launches 30 work items" in message, message
+    assert "traverses" in message, message
+
+
+def test_an_oversized_bracket_still_runs(gpu_backend):
+    """A grid larger than the domain is wasteful, not wrong: the bounds guard skips the rest."""
+    image = np.zeros((4, 5, 3), dtype=np.float32)
+    out = np.zeros((4, 5, 3), dtype=np.float32)
+    writes_every_channel[gpu_backend][((8, 8, 8), None)](image, out)
+    np.testing.assert_array_equal(out, np.ones((4, 5, 3), dtype=np.float32))
+
+
+@kernel
+def writes_every_axis_four(a: np.ndarray, out: np.ndarray):
+    """More traversal axes than a device grid has (three), so the launch flattens."""
+    for i, j, k, l in np.ndindex(a.shape):
+        out[i, j, k, l] = 1.0
+
+
+def test_a_four_dimensional_traversal_runs(gpu_backend):
+    """Four axes cannot be launched as a grid, so the launch is one flat axis."""
+    shape = (2, 3, 4, 5)
+    out = np.zeros(shape, dtype=np.float32)
+    writes_every_axis_four[gpu_backend](np.zeros(shape, dtype=np.float32), out)
+    np.testing.assert_array_equal(out, np.ones(shape, dtype=np.float32))
+
+
+@kernel
+def copies_six_axes(src: np.ndarray, dst: np.ndarray):
+    """Rank six, with an index-dependent payload so a mis-mapping shows up as a value."""
+    for a, b, c, d, e, f in np.ndindex(src.shape):
+        dst[a, b, c, d, e, f] = src[a, b, c, d, e, f]
+
+
+def test_an_array_of_any_rank_is_accepted(gpu_backend):
+    """No rank limit survives: an array argument may have more axes than a grid has.
+
+    The axes of an array argument were never capped -- `_shape_var` emits one shape
+    parameter per dimension -- but the *traversal* was, so a rank-six array could not be
+    iterated. The launch now flattens, and every element has to arrive at its own address.
+    """
+    shape = (2, 2, 2, 2, 2, 2)
+    src = np.arange(int(np.prod(shape)), dtype=np.float32).reshape(shape)
+    dst = np.zeros(shape, dtype=np.float32)
+    copies_six_axes[gpu_backend](src, dst)
+    np.testing.assert_array_equal(dst, src)
+
+
+@kernel
+def copies_six_axes_flat(src: np.ndarray, dst: np.ndarray):
+    """The same rank-six traversal, launched explicitly with one flat axis."""
+    for a, b, c, d, e, f in np.ndindex(src.shape):
+        dst[a, b, c, d, e, f] = src[a, b, c, d, e, f]
+
+
+def test_a_high_rank_traversal_takes_a_flat_bracket(gpu_backend):
+    """A rank-six domain is 64 work items, and a flat bracket of that size is accepted."""
+    shape = (2, 2, 2, 2, 2, 2)
+    src = np.arange(int(np.prod(shape)), dtype=np.float32).reshape(shape)
+    dst = np.zeros(shape, dtype=np.float32)
+    copies_six_axes_flat[gpu_backend][(64,)](src, dst)
+    np.testing.assert_array_equal(dst, src)
+
+
+@kernel
+def gid_style_over_a_bracket(out: np.ndarray):
+    """A gid-style body takes its domain from the bracket, so a flat grid is correct."""
+    out[get_global_id(0)] = 1.0
+
+
+def test_a_gid_style_body_keeps_its_flat_bracket(gpu_backend):
+    """The rank check must not touch a body that declares no magic loop."""
+    out = np.zeros(64, dtype=np.float32)
+    gid_style_over_a_bracket[gpu_backend][(64,)](out)
+    np.testing.assert_array_equal(out, np.ones(64, dtype=np.float32))
+
+
+@kernel(domain="src")
+def work_size_over_four_axes(src: np.ndarray, dst: np.ndarray):
+    """A gid-style body whose declared domain has more axes than a grid has."""
+    idx = get_global_id(0)
+    dst[idx, 0, 0, 0] = src[idx, 0, 0, 0]
+
+
+def test_a_domain_of_more_than_three_axes_folds_to_a_flat_launch(gpu_backend):
+    """A grid has three axes, so a wider domain launches as `prod(shape)` work items.
+
+    This is what the original auto-detection did (`math.prod(max_shape)` when the rank
+    exceeded three), and it is legal: the fold changes the launch, not the domain. A
+    gid-style body reads the flat position directly, so `get_global_id(0)` walks the whole
+    domain and the axes it does not name read 0 -- which is why a body that wants the
+    original axes spelled out iterates with `np.ndindex` instead.
+    """
+    shape = (2, 2, 3, 4)
+    src = np.arange(int(np.prod(shape)), dtype=np.float32).reshape(shape)
+    dst = np.zeros(shape, dtype=np.float32)
+    work_size_over_four_axes[gpu_backend](src, dst)
+    np.testing.assert_array_equal(dst[:, 0, 0, 0], src[:, 0, 0, 0])
+
+
+@kernel(domain="src")
+def work_size_over_three_axes(src: np.ndarray, dst: np.ndarray):
+    """The largest domain a grid can carry, reading every axis."""
+    i = get_global_id(0)
+    j = get_global_id(1)
+    k = get_global_id(2)
+    dst[i, j, k] = src[i, j, k]
+
+
+def test_work_size_over_three_axes_still_runs(gpu_backend):
+    """A rank-3 declaration is the boundary case and must keep working."""
+    shape = (2, 3, 4)
+    src = np.arange(int(np.prod(shape)), dtype=np.float32).reshape(shape)
+    dst = np.zeros(shape, dtype=np.float32)
+    work_size_over_three_axes[gpu_backend](src, dst)
+    np.testing.assert_array_equal(dst, src)
+
+

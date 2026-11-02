@@ -16,9 +16,9 @@ simplest to fastest:
                         steps instead of one atomic per work item.
 
 A gid-style kernel (`get_global_id`) has no loop for the automatic work size to read
-the iteration domain from, so each one opens with `work_size(x)`. That statement is
-host-side only -- it is erased at translation, emits no device code, and tells the
-launcher that `x`'s full shape is the domain. Without it, the call raises rather than
+the iteration domain from, so each one names it in the decorator: `@kernel(domain="x")`.
+That is part of the signature and emits no device code; it tells the launcher that
+`x`'s full shape is the domain. Without it, the call raises rather than
 silently launching a one-work-item grid. A bracketed launch such as
 `k[(total, local)](...)` also works, and the total must be a multiple of the per-group
 size.
@@ -34,8 +34,8 @@ Run:
 import numpy as np
 
 from pygpgpu import (kernel, atomic_add, barrier, blockIdx, get_global_id,
-                     get_global_size, get_group_id, get_local_id, get_local_size, zeros_per_group,
-                     work_size)
+                     get_global_size, get_group_id, get_local_id, get_local_size,
+                     zeros_per_group)
 
 
 def launch_size(n, local=256):
@@ -43,15 +43,14 @@ def launch_size(n, local=256):
     return ((n + local - 1) // local) * local
 
 
-@kernel
+@kernel(domain="x")
 def sum_atomic(x: np.ndarray, out: np.ndarray):
     """One atomic add per element: the simplest correct reduction."""
-    work_size(x)  # declare the iteration domain; erased at translation
     i = get_global_id(0)
     atomic_add(out, 0, x[i])
 
 
-@kernel
+@kernel(domain="x")
 def sum_strided(x: np.ndarray, out: np.ndarray, n: np.int32):
     """Each work item sums a strided slice into a register, then one atomic add.
 
@@ -59,7 +58,6 @@ def sum_strided(x: np.ndarray, out: np.ndarray, n: np.int32):
     The bound is `n`, the real element count: the launch size may be rounded up past
     it, so the extra work items must not read out of range.
     """
-    work_size(x)
     i = get_global_id(0)
     stride = get_global_size(0)
 
@@ -75,10 +73,9 @@ def sum_strided(x: np.ndarray, out: np.ndarray, n: np.int32):
 GROUP = 256  # work items per group, matching the local buffer size below
 
 
-@kernel
+@kernel(domain="x")
 def sum_local_tree(x: np.ndarray, out: np.ndarray, n: np.int32):
     """Tree reduction through local (shared) memory: log2(GROUP) steps per group."""
-    work_size(x)
     g = get_group_id(0)
     l = get_local_id(0)
     group_size = get_local_size(0)
@@ -115,7 +112,7 @@ def main():
     expected = int(x.sum(dtype=np.int64))
     print(f"sum of {n} int32 values, expected = {expected}")
 
-    # 1) One atomic per element -- work size from the work_size(x) declaration
+    # 1) One atomic per element -- work size from the domain= declaration
     out = np.zeros(1, dtype=np.int32)
     sum_atomic(x, out)
     assert int(out[0]) == expected, (int(out[0]), expected)
