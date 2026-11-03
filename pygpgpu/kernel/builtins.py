@@ -26,7 +26,15 @@ Usage::
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+
+from numpy.typing import DTypeLike
+
+if TYPE_CHECKING:
+    # The shared-buffer wrapper holds the launch frame the python backend installs; naming
+    # it at runtime would close an import cycle, so the annotations above are strings.
+    import numpy as np
+    from .python_backend import PythonFrame
 
 # The vector half of the namespace (dot/length/normalize/clamp/mix/...) is dual-sided
 # already: `pygpgpu.vec_types.funcs` holds one implementation that serves both sides, so
@@ -333,7 +341,7 @@ class _IndexVector:
 
     __slots__ = ("_readers",)
 
-    def __init__(self, **readers:Any)->None:
+    def __init__(self, **readers:Callable[[], int])->None:
         object.__setattr__(self, "_readers", readers)
 
     def _value(self)->Any:
@@ -342,14 +350,14 @@ class _IndexVector:
         return int3(*[reader() for reader in self._readers.values()])
 
     def __getitem__(self, axis:int)->int:
-        readers:Any = object.__getattribute__(self, "_readers")
+        readers:Dict[str, Callable[[], int]] = object.__getattribute__(self, "_readers")
         if not isinstance(axis, int) or axis < 0 or axis >= len(readers):
             raise IndexError(
                 f"an index vector has three axes; {axis} is out of range")
         return list(readers.values())[axis]()
 
     def __getattr__(self, name:str)->int:
-        readers:Any = object.__getattribute__(self, "_readers")
+        readers:Dict[str, Callable[[], int]] = object.__getattribute__(self, "_readers")
         if name not in readers:
             raise AttributeError(
                 f"an index vector has .x, .y and .z; it has no '{name}'")
@@ -446,15 +454,16 @@ class _GroupSlices:
 
     __slots__ = ("_shape", "_dtype", "_frame", "_slices")
 
-    def __init__(self, shape: Any, dtype: Any, frame: Any)->None:
+    def __init__(self, shape: Union[int, Tuple[int, ...]], dtype: DTypeLike,
+                 frame: "PythonFrame")->None:
         if isinstance(shape, int):
             shape = (shape, )
-        self._shape: Any = tuple(int(s) for s in shape)
-        self._dtype: Any = dtype
-        self._frame: Any = frame
-        self._slices: Dict[Any, Any] = {}
+        self._shape: Tuple[int, ...] = tuple(int(s) for s in shape)
+        self._dtype: DTypeLike = dtype
+        self._frame: "PythonFrame" = frame
+        self._slices: Dict[Tuple[int, ...], "np.ndarray[Any, Any]"] = {}
 
-    def __getitem__(self, group: Any)->Any:
+    def __getitem__(self, group: Union[int, Tuple[int, ...], "_IndexVector"])->"np.ndarray[Any, Any]":
         import numpy as np
 
         key: Tuple[int, ...] = _group_key(group)
@@ -506,42 +515,58 @@ zeros_per_block: Any = zeros_per_group
 # ---------------------------------------------------------------------------
 
 
-def atomic_add(array: Any, index: int, value: Any) -> Any:
+def atomic_add(array: "np.ndarray[Any, Any]",
+            index: Union[int, Tuple[int, ...]],
+            value: "np.number[Any]") -> Any:
     """Add ``value`` to ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current + value)
 
 
-def atomic_sub(array: Any, index: int, value: Any) -> Any:
+def atomic_sub(array: "np.ndarray[Any, Any]",
+            index: Union[int, Tuple[int, ...]],
+            value: "np.number[Any]") -> Any:
     """Subtract ``value`` from ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current - value)
 
 
-def atomic_min(array: Any, index: int, value: Any) -> Any:
+def atomic_min(array: "np.ndarray[Any, Any]",
+            index: Union[int, Tuple[int, ...]],
+            value: "np.number[Any]") -> Any:
     """Keep the smaller of ``array[index]`` and ``value``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: min(current, value))
 
 
-def atomic_max(array: Any, index: int, value: Any) -> Any:
+def atomic_max(array: "np.ndarray[Any, Any]",
+            index: Union[int, Tuple[int, ...]],
+            value: "np.number[Any]") -> Any:
     """Keep the larger of ``array[index]`` and ``value``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: max(current, value))
 
 
-def atomic_and(array: Any, index: int, value: Any) -> Any:
+def atomic_and(array: "np.ndarray[Any, Any]",
+            index: Union[int, Tuple[int, ...]],
+            value: "np.number[Any]") -> Any:
     """Bitwise-and ``value`` into ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current & value)
 
 
-def atomic_or(array: Any, index: int, value: Any) -> Any:
+def atomic_or(array: "np.ndarray[Any, Any]",
+            index: Union[int, Tuple[int, ...]],
+            value: "np.number[Any]") -> Any:
     """Bitwise-or ``value`` into ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current | value)
 
 
-def atomic_xor(array: Any, index: int, value: Any) -> Any:
+def atomic_xor(array: "np.ndarray[Any, Any]",
+            index: Union[int, Tuple[int, ...]],
+            value: "np.number[Any]") -> Any:
     """Bitwise-xor ``value`` into ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current ^ value)
 
 
-def atomic_xchg(array: Any, index: int, value: Any) -> Any:
+def atomic_xchg(array: "np.ndarray[Any, Any]",
+            index: Union[int, Tuple[int, ...]],
+            value: "np.number[Any]") -> Any:
     """Store ``value`` into ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: value)
 

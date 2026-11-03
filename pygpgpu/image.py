@@ -34,6 +34,16 @@ from enum import Enum
 from typing import Any, Optional, Tuple, Union
 
 import numpy as np
+from numpy.typing import DTypeLike
+
+# What a subscript into an image may be: one number, or one per axis. The device accepts
+# any of these spellings too, so the host must not narrow it further.
+ImageIndex = Union[int, float, "np.integer[Any]", "np.floating[Any]", Tuple[object, ...]]
+
+# One sampled value or one value stored: a scalar for a 1-channel image, a vector for
+# 2 or 4 channels. numpy supplies both, and the dtype decides which -- so it is a numpy
+# scalar or array rather than a fixed python type.
+SampleValue = Union["np.generic[Any]", "np.ndarray[Any, Any]"]
 
 
 class StrEnum(str, Enum):
@@ -128,7 +138,7 @@ class Image:
 
     def __init__(self, data:Union[str, np.ndarray, None]=None,
                  shape:Optional[Tuple[int, ...]]=None,
-                 dtype:Any=np.float32,
+                 dtype:DTypeLike=np.float32,
                  channels:Optional[int]=None,
                  filter:Union[ImageFilter, str]=ImageFilter.POINT,
                  address:Union[ImageAddress, str]=ImageAddress.CLAMP):
@@ -238,12 +248,12 @@ class Image:
 
     # ---------- host-side sampling (the python backend runs this) ----------
 
-    def __getitem__(self, index:Any)->Any:
+    def __getitem__(self, index:ImageIndex)->SampleValue:
         """Sample the image, with the same rules the device applies."""
         coords = self._coords(index)
         return self._sample(coords)
 
-    def __setitem__(self, index:Any, value:Any)->None:
+    def __setitem__(self, index:ImageIndex, value:SampleValue)->None:
         """Store one element.
 
         Only the python backend reaches this method; a GPU launch replaces the
@@ -254,7 +264,7 @@ class Image:
         coords = self._coords(index)
         self._store(coords, value)
 
-    def _coords(self, index:Any)->Tuple[float, ...]:
+    def _coords(self, index:ImageIndex)->Tuple[float, ...]:
         """Normalise a subscript into image coordinates.
 
         The host shape is (depth, height, width) -- numpy order -- while the kernel
@@ -285,7 +295,7 @@ class Image:
         # Reverse to (x, y, z); the leading axes of a taller subscript are ignored.
         return tuple(reversed(values[:expected]))
 
-    def _sample(self, coords:Tuple[float, ...])->Any:
+    def _sample(self, coords:Tuple[float, ...])->SampleValue:
         if self._data is None:
             raise RuntimeError("this image has no data; fill it before sampling")
         taps = self._taps(coords)
@@ -344,21 +354,21 @@ class Image:
         position = texel % period
         return position if position < limit else period - position
 
-    def _read_texel(self, texel:Tuple[int, ...])->Any:
+    def _read_texel(self, texel:Tuple[int, ...])->"np.ndarray[Any, Any]":
         """Read one texel as an ndarray of channels (host (z, y, x) order)."""
         index = tuple(reversed(texel))
         if self._channels == 1:
             return np.asarray(self._data[index])
         return np.asarray(self._data[index])
 
-    def _blend(self, taps:list)->Any:
+    def _blend(self, taps:list)->"np.ndarray[Any, Any]":
         total = None
         for weight, texel in taps:
             value = self._read_texel(texel) * weight
             total = value if total is None else total + value
         return total
 
-    def _store(self, coords:Tuple[float, ...], value:Any)->None:
+    def _store(self, coords:Tuple[float, ...], value:SampleValue)->None:
         """Write one texel; writes use point addressing (there is nothing to blend)."""
         if self._data is None:
             # A shape-only image becomes writable on demand: allocate the mirror so a
@@ -374,7 +384,7 @@ class Image:
 
     # ---------- device binding ----------
 
-    def bind_cuda(self)->Any:
+    def bind_cuda(self)->Tuple[Any, Any, Any]:
         """Create both device views this image might need, and cache them.
 
         A kernel reads through a texture object and writes through a surface object,
@@ -493,7 +503,7 @@ class Image:
     __str__ = __repr__
 
 
-def _normalise_channels(channels:Any)->int:
+def _normalise_channels(channels:object)->int:
     """Validate a requested channel count."""
     if isinstance(channels, bool) or not isinstance(channels, int):
         raise TypeError(
@@ -513,7 +523,7 @@ def _normalise_channels(channels:Any)->int:
     return channels
 
 
-def _spatial_shape(shape:Tuple[int, ...], channels:Any, what:str)->Tuple[int, ...]:
+def _spatial_shape(shape:Tuple[int, ...], channels:Optional[int], what:str)->Tuple[int, ...]:
     """Strip the trailing channel axis when channels was given, and validate the rank.
 
     The channel count is never inferred: a trailing axis is a spatial extent unless the

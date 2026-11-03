@@ -39,7 +39,7 @@ needs and the generated source includes it.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Union
 
 __all__ = ["device_function", "device_symbol", "library_headers_for",
            "library_functions", "library_function_name"]
@@ -69,8 +69,8 @@ def device_function(function:Optional[Callable]=None, *,
                     cuda:Optional[str]=None,
                     opencl:Optional[str]=None,
                     hip:Optional[str]=None,
-                    headers:Optional[Dict[str, Any]]=None,
-                    name:Optional[str]=None)->Any:
+                    headers:Optional[Dict[str, Union[str, List[str]]]]=None,
+                    name:Optional[str]=None)->Callable:
     """Register a function as a device-side library function.
 
     ``cuda`` / ``opencl`` / ``hip`` name the symbol the device calls on that backend. A
@@ -121,7 +121,7 @@ def device_function(function:Optional[Callable]=None, *,
     return decorate
 
 
-def device_symbol(target:Any, backend:str)->Optional[str]:
+def device_symbol(target:object, backend:str)->Optional[str]:
     """The device symbol a registered function has on ``backend``, or None.
 
     None means the callee is not a registered device function at all, or it has no
@@ -133,7 +133,7 @@ def device_symbol(target:Any, backend:str)->Optional[str]:
     return entry.symbols.get(backend)
 
 
-def library_function_name(target:Any)->Optional[str]:
+def library_function_name(target:object)->Optional[str]:
     """The registered name of a callee, or None when it is not a registered one."""
     entry:Optional[_DeviceFunction] = _BY_FUNCTION.get(target)
     return entry.name if entry is not None else None
@@ -144,7 +144,7 @@ def library_functions()->Dict[str, _DeviceFunction]:
     return dict(_BY_NAME)
 
 
-def library_headers_for(backend:str, functions:Any=())->Set[str]:
+def library_headers_for(backend:str, functions:Iterable[Union[object, str]]=())->Set[str]:
     """The headers the given functions need on ``backend``.
 
     ``functions`` is any iterable of registered function *objects* (or of their names).
@@ -196,7 +196,7 @@ def _install_header(source:str, directory:str)->str:
     return f'#include "{INCLUDE_FOLDER}/{name}"'
 
 
-def include_lines_for(backend:str, headers:Any, directory:str)->List[str]:
+def include_lines_for(backend:str, headers:Iterable[str], directory:str)->List[str]:
     """The ``#include`` lines the given headers need, as the generated source spells them.
 
     A header given as a **path** is a file of the user's own: it is copied into the

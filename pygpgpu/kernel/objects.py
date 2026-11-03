@@ -89,7 +89,7 @@ class Scan:
     def __init__(self, resolve:Callable[[str], Any])->None:
         self.resolve = resolve
         self.classes:Dict[str, Optional[type]] = {}
-        self.values:Dict[str, Any] = {}
+        self.values:Dict[str, object] = {}
         self.members:Dict[str, List[str]] = {}
         self.methods:Dict[str, List[Tuple[str, Any]]] = {}
         self.lists:Dict[str, List[Any]] = {}
@@ -1207,8 +1207,8 @@ class ObjectBinding:
 
     def __init__(self)->None:
         self.written:List[str] = []
-        self.values:Dict[str, Any] = {}
-        self.instances:Dict[str, Any] = {}
+        self.values:Dict[str, object] = {}
+        self.instances:Dict[str, object] = {}
 
     def write_back(self)->None:
         """Copy the final member values home, for every object the body wrote to."""

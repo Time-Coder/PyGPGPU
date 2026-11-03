@@ -2,14 +2,65 @@ from __future__ import annotations
 
 import copy
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from tree_sitter import Language, Node, Parser
 
 from ..constants import KernelFlags
 
 if TYPE_CHECKING:
-    pass
+    from typing_extensions import Protocol, TypedDict
+
+    class ParsedVar(TypedDict, total=False):
+        """A variable or parameter as the tree walk describes it.
+
+        Built in two stages: `_parse_declaration_head` fills the type-level fields every
+        declaration shares, and `_resolve_declarator` adds the ones that depend on the
+        individual declarator. Every field is present by the time a parser reads the dict,
+        so `total=False` describes the intermediate state rather than a half-usable value.
+        `address`, `access` and `kernel_flags` are backend-neutral by design -- each parser
+        maps them onto its own enum.
+        """
+        name: str
+        type_str: str
+        base_type: str
+        array_shape: Tuple[int, ...]
+        is_ptr: bool
+        address: Optional[str]
+        access: Optional[str]
+        type_qualifiers: List[str]
+        kernel_flags: KernelFlags
+
+    class StructInfoLike(Protocol):
+        """What the tree walk needs from a backend's structure record."""
+        name: str
+        is_union: bool
+        members: Dict[str, "VarInfoLike"]
+
+    class VarInfoLike(Protocol):
+        """What the analysis needs from a backend's variable record."""
+        name: str
+        type_str: str
+        array_shape: Tuple[int, ...]
+        kernel_flags: KernelFlags
+
+    class ArgInfoLike(VarInfoLike, Protocol):
+        """A parameter record: a variable that also belongs to a kernel."""
+        member_infos: Dict[str, VarInfoLike]
+
+    class KernelInfoLike(Protocol):
+        """What the tree walk needs from a backend's kernel record."""
+        name: str
+        args: Dict[str, ArgInfoLike]
+
+    class AnalysisContext(TypedDict):
+        """The read/write analysis's running state, one dict for the whole body walk."""
+        reads: Set[str]
+        writes: Set[str]
+        escapes: Set[str]
+        member_reads: Dict[str, Set[str]]
+        member_writes: Dict[str, Set[str]]
+        struct_args: Set[str]
 
 
 def make_parser(language: Language) -> Parser:
@@ -58,11 +109,11 @@ class TSParserMixin:
     contract visible to a type checker instead of living only in this docstring.
     """
 
-    _parser:Any
+    _parser:Parser
     _clean_code:str
     _parse_code:str
-    _struct_infos:Dict[str, Any]
-    _kernel_infos:Dict[str, Any]
+    _struct_infos:Dict[str, StructInfoLike]
+    _kernel_infos:Dict[str, KernelInfoLike]
 
     @staticmethod
     def _node_text(node:Node)->str:
@@ -86,7 +137,7 @@ class TSParserMixin:
     _cuda_function_qualifiers:Tuple[str, ...] = ("__global__", "__device__", "__host__", "__forceinline__")
 
     def _ts_parse(self)->None:
-        self._function_infos:Dict[str, Any] = {}
+        self._function_infos:Dict[str, KernelInfoLike] = {}
         self._kernel_bodies:Dict[str, Node] = {}
         self._helper_flags:Dict[str, Optional[Dict[str, KernelFlags]]] = {}
         self._analyzing_funcs:Set[str] = set()
@@ -129,7 +180,7 @@ class TSParserMixin:
         # -- but they lay out differently: a union gives every member the same address.
         # The node that named this declaration is the only record of which one it is.
         is_union:bool = node.type == "union_specifier"
-        struct_info:Any = self._new_struct_info(used_name, is_union)
+        struct_info:StructInfoLike = self._new_struct_info(used_name, is_union)
         keys:Set[str] = {used_name}
         if struct_name:
             keys.add(struct_name)
@@ -173,7 +224,7 @@ class TSParserMixin:
             return
 
         func_name:str = self._node_text(declarator.named_children[0])
-        kernel_info:Any = self._new_kernel_info(func_name)
+        kernel_info:KernelInfoLike = self._new_kernel_info(func_name)
 
         param_list:Optional[Node] = next((c for c in declarator.named_children if c.type == "parameter_list"), None)
         if param_list is not None:
@@ -196,7 +247,7 @@ class TSParserMixin:
         if is_kernel:
             self._kernel_infos[func_name] = kernel_info
 
-    def _parse_declaration_head(self, node:Node)->Tuple[Dict[str, Any], List[Node]]:
+    def _parse_declaration_head(self, node:Node)->Tuple[ParsedVar, List[Node]]:
         """Splits a (field|parameter|local) declaration into shared head info and declarator nodes."""
         address:Optional[str] = None
         access:Optional[str] = None
@@ -231,7 +282,7 @@ class TSParserMixin:
             elif child_type in _DECLARATOR_NODE_TYPES:
                 declarators.append(child)
 
-        base_desc:Dict[str, Any] = {
+        base_desc:ParsedVar = {
             "address": address,
             "access": access,
             "type_qualifiers": type_qualifiers,
@@ -239,9 +290,9 @@ class TSParserMixin:
         }
         return base_desc, declarators
 
-    def _resolve_declarator(self, node:Node, base_desc:Dict[str, Any])->Dict[str, Any]:
+    def _resolve_declarator(self, node:Node, base_desc:ParsedVar)->ParsedVar:
         name, is_ptr, array_shape = self._walk_declarator(node)
-        desc:Dict[str, Any] = dict(base_desc)
+        desc:ParsedVar = copy.deepcopy(base_desc)
         desc["name"] = name
         desc["is_ptr"] = is_ptr
         desc["array_shape"] = array_shape
@@ -296,7 +347,7 @@ class TSParserMixin:
             text = text[:brace_pos]
         return " ".join(text.split())
 
-    def _flags_from_desc(self, desc:Dict[str, Any])->KernelFlags:
+    def _flags_from_desc(self, desc:ParsedVar)->KernelFlags:
         kernel_flags:KernelFlags = (KernelFlags.Readed | KernelFlags.Writed)
         if desc["access"] == "read_only" or desc["address"] == "constant" or "const" in desc["type_qualifiers"]:
             kernel_flags = KernelFlags.Readed
@@ -313,28 +364,28 @@ class TSParserMixin:
                 continue
             self._analyze_kernel(kernel_info, body)
 
-    def _analyze_kernel(self, kernel_info:Any, body:Node)->None:
+    def _analyze_kernel(self, kernel_info:KernelInfoLike, body:Node)->None:
         reads, writes, escapes, member_reads, member_writes = self._analyze_body(kernel_info, body)
         for name, flags in self._param_flags(kernel_info, reads, writes, escapes).items():
             kernel_info.args[name].kernel_flags = flags
         self._apply_member_flags(kernel_info, escapes, member_reads, member_writes)
 
-    def _pointer_members(self, arg:Any)->Dict[str, Any]:
+    def _pointer_members(self, arg:VarInfoLike)->Dict[str, VarInfoLike]:
         """Pointer members of a struct-typed argument (empty for non-struct args)."""
         return {}
 
-    def _apply_member_flags(self, kernel_info:Any, escapes:Set[str], member_reads:Dict[str, Set[str]], member_writes:Dict[str, Set[str]])->None:
+    def _apply_member_flags(self, kernel_info:KernelInfoLike, escapes:Set[str], member_reads:Dict[str, Set[str]], member_writes:Dict[str, Set[str]])->None:
         """Derives per-member KernelFlags for pointer members of by-value struct args.
 
         Flags are stored per-arg (arg.member_infos) so each kernel keeps its own
         copy policy; members never touched fall back to Readed|Writed.
         """
         for name, arg in kernel_info.args.items():
-            members:Dict[str, Any] = self._pointer_members(arg)
+            members:Dict[str, VarInfoLike] = self._pointer_members(arg)
             if not members:
                 continue
 
-            member_infos:Dict[str, Any] = {}
+            member_infos:Dict[str, VarInfoLike] = {}
             escaped:bool = (name in escapes)
             for member_name, member in members.items():
                 if escaped:
@@ -351,7 +402,7 @@ class TSParserMixin:
                 elif member.writeonly:
                     flags = KernelFlags.Writed
 
-                member_copy:Any = copy.copy(member)
+                member_copy:VarInfoLike = copy.copy(member)
                 member_copy.kernel_flags = flags
                 member_infos[member_name] = member_copy
 
@@ -362,7 +413,7 @@ class TSParserMixin:
         if func_name in self._helper_flags:
             return self._helper_flags[func_name]
 
-        func_info:Any = self._function_infos.get(func_name)
+        func_info:Optional[KernelInfoLike] = self._function_infos.get(func_name)
         if func_info is None or func_name in self._kernel_infos or func_name in self._analyzing_funcs:
             return None
 
@@ -380,7 +431,7 @@ class TSParserMixin:
         self._helper_flags[func_name] = flags
         return flags
 
-    def _param_flags(self, info:Any, reads:Set[str], writes:Set[str], escapes:Set[str])->Dict[str, KernelFlags]:
+    def _param_flags(self, info:KernelInfoLike, reads:Set[str], writes:Set[str], escapes:Set[str])->Dict[str, KernelFlags]:
         """The copy policy of every pointer argument: what is uploaded, what is read back.
 
         A pointer the body never touches is copied **neither way**. The analysis knows the
@@ -432,10 +483,10 @@ class TSParserMixin:
             return None
         return next((c for c in node.named_children if c.type == "compound_statement"), None)
 
-    def _analyze_body(self, info:Any, body:Node)->Tuple[Set[str], Set[str], Set[str], Dict[str, Set[str]], Dict[str, Set[str]]]:
-        ctx:Dict[str, Any] = {
+    def _analyze_body(self, info:KernelInfoLike, body:Node)->Tuple[Set[str], Set[str], Set[str], Dict[str, Set[str]], Dict[str, Set[str]]]:
+        ctx:AnalysisContext = {
             "reads": set(), "writes": set(), "escapes": set(),
-            "member_reads": {}, "member_writes": {}
+            "member_reads": {}, "member_writes": {}, "struct_args": set()
         }
         roots:Dict[str, Tuple[Optional[str], bool]] = {}
         for name, arg in info.args.items():
@@ -720,7 +771,7 @@ class TSParserMixin:
         actuals:List[Node] = (list(arg_list.named_children) if arg_list is not None else [])
 
         helper_flags:Optional[Dict[str, KernelFlags]] = None
-        helper_info:Any = None
+        helper_info:Optional[KernelInfoLike] = None
         if func_name:
             helper_info = self._function_infos.get(func_name)
             helper_flags = self._call_flags(func_name)

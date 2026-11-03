@@ -9,6 +9,7 @@ import os
 import pathlib
 import sys
 import threading
+from types import TracebackType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -34,6 +35,7 @@ from . import structs
 from ..numpy import ndarray as gnp
 from .translator import (
     PTR,
+    DeviceType,
     FunctionTranslator,
     _assigned_name_of,
     _unpack_count_message,
@@ -48,6 +50,11 @@ from . import source_paths
 
 
 # ---------- typing hooks ----------
+
+if TYPE_CHECKING:
+    # `Image` is imported inside the functions that use it (it is a heavy module and this
+    # package keeps backend imports lazy), so an annotation needs the name here instead.
+    from ..image import Image
 
 # A kernel is a callable object, so the IDE's parameter hints come from its type, not from
 # the ``__call__`` of the class it happens to be. ``PyKernel`` is generic over the decorated
@@ -192,7 +199,7 @@ def _default_target()->Tuple[str, Optional[str]]:
     return _probed_backend, None
 
 
-def _backend_devices(backend:str)->List[Any]:
+def _backend_devices(backend:str)->List[object]:
     """Enumerate the backend's device list (order = numbering used by plain-numeric selectors); raises when the runtime is missing."""
     if backend == "opencl":
         from ..opencl.oop.platforms import Platforms
@@ -336,9 +343,9 @@ def _device_match_keys(sel:str, device:Any)->bool:
     return alias is not None and alias in vendor
 
 
-def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
+def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[object, str]:
     """Resolve a device within a backend: None/index/name substring ("name:ordinal" disambiguates); returns (device object, cache key)."""
-    devices:List[Any] = _backend_devices(backend)
+    devices:List[object] = _backend_devices(backend)
 
     if not devices:
         raise RuntimeError(f"no {backend} devices found")
@@ -360,7 +367,7 @@ def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[Any, str]:
             raise ValueError(f"device index {i} out of range (0..{len(devices)-1}) for backend '{backend}'")
         return devices[i], devices[i].name
 
-    matches:List[Any] = [d for d in devices if _device_match_keys(sel, d)]
+    matches:List[object] = [d for d in devices if _device_match_keys(sel, d)]
     if not matches:
         raise ValueError(
             f"no {backend} device matches '{device_sel}'; available: " + ", ".join(d.name for d in devices))
@@ -379,7 +386,7 @@ def list_devices()->List[str]:
     selectors:List[str] = []
     for backend in DEFAULT_BACKEND_ORDER:
         try:
-            devices:List[Any] = _backend_devices(backend)
+            devices:List[object] = _backend_devices(backend)
         except Exception:
             continue
         for i in range(len(devices)):
@@ -456,7 +463,7 @@ def _bind_arguments(func:Callable, args:Tuple[Any, ...],
             error.__traceback__ = None
             raise
 
-    ordered:List[Any] = []
+    ordered:List[object] = []
     for name, parameter in signature.parameters.items():
         if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
             continue
@@ -503,7 +510,7 @@ def _native_argument_errors(entry:Callable[_P, _R])->Callable[_P, _R]:
             error.__traceback__ = None
             raise
         except Exception as error:
-            body:Optional[Any] = _body_only(error)
+            body:Optional[TracebackType] = _body_only(error)
             if body is None:
                 raise
             error.__traceback__ = body
@@ -512,7 +519,7 @@ def _native_argument_errors(entry:Callable[_P, _R])->Callable[_P, _R]:
     return wrapper
 
 
-def _body_only(error:BaseException)->Optional[Any]:
+def _body_only(error:BaseException)->Optional[TracebackType]:
     """The exceptions raised by a kernel body, without this library's frames.
 
     ``PyKernel._invoke`` puts a stand-in for the body's own line at the end of the chain;
@@ -677,7 +684,7 @@ def _bind_and_reject(func:Callable, signature:inspect.Signature,
         raise
 
 
-def _caller_traceback(traceback:Any)->Any:
+def _caller_traceback(traceback:Optional[TracebackType])->Optional[TracebackType]:
     """The first frame of ``traceback`` that is not inside this package."""
     if traceback is None:
         return None
@@ -746,7 +753,7 @@ def _is_body_stand_in(code:Any)->bool:
     return False
 
 
-def _body_frame(func:Callable, error:BaseException)->Optional[Any]:
+def _body_frame(func:Callable, error:BaseException)->Optional[TracebackType]:
     """A frame standing in for ``func``'s own body at the line that failed.
 
     Native python would show exactly two: the caller's line and the failing line inside the
@@ -817,7 +824,7 @@ def _body_frame(func:Callable, error:BaseException)->Optional[Any]:
     return None
 
 
-def _user_traceback(error:BaseException, func:Callable)->Any:
+def _user_traceback(error:BaseException, func:Callable)->Optional[TracebackType]:
     """The traceback native python would have produced: the caller, then the failing line.
 
     Everything between the two belongs to this library, so it is spliced out. The head is
@@ -831,7 +838,7 @@ def _user_traceback(error:BaseException, func:Callable)->Any:
     interpreter assembles one -- raise once from the stand-in, then drop that one frame --
     which leaves exactly the frames of a native failure.
     """
-    body:Any = _body_frame(func, error)
+    body:Optional[TracebackType] = _body_frame(func, error)
     if body is None:
         return _caller_traceback(error.__traceback__)
     body.tb_next = None
@@ -1177,7 +1184,7 @@ class PyKernel(_KernelBase[_P]):
         for name, value in (created_objects or {}).items():
             localns[name] = value
 
-        touched:List[Any] = []
+        touched:List[object] = []
         for statement in statements:
             for node in ast.walk(statement):
                 if isinstance(node, ast.Name) and node.id in localns:
@@ -1256,7 +1263,7 @@ class PyKernel(_KernelBase[_P]):
         device_obj, device_key = _resolve_device(backend, device_sel)
         device_max_group, device_max_items = device_limits(device_obj)
 
-        self_values:List[Any] = []
+        self_values:List[object] = []
         self_attrs:List[str] = []
         owner:Optional[type] = None
         self_struct_members:Dict[str, str] = {}
@@ -1333,7 +1340,7 @@ class PyKernel(_KernelBase[_P]):
         args = convert_object_arguments(self.raw_func, args, self._resolve_global,
                                         self._self_param, object_binding,
                                         self_value=instance)
-        arg_types:List[Any] = [infer_ctype(a) for a in args]
+        arg_types:List[DeviceType] = [infer_ctype(a) for a in args]
         if not self_struct_members:
             self_types = []
             for name, value in zip(self_attrs, self_values):
@@ -1359,7 +1366,7 @@ class PyKernel(_KernelBase[_P]):
         (kernel_obj, shape_sources, work_size_dims, local_sizes, uses_global_id,
          image_samplers, returns, outer_vars, launch_meta) = entry
         # One entry per magic loop, launched in order; a single-loop body has exactly one.
-        active_kernels:List[Any] = list(launch_meta.get("kernels") or [kernel_obj])
+        active_kernels:List[object] = list(launch_meta.get("kernels") or [kernel_obj])
         # The extent arguments each phase kernel declares, in phase order.
         kernel_shapes:List[List[Tuple[int, int]]] = list(
             launch_meta.get("kernel_shapes") or [[] for _ in active_kernels])
@@ -1387,14 +1394,14 @@ class PyKernel(_KernelBase[_P]):
         # first (it is a method's first parameter), then the caller's arguments, then the
         # ndarray attributes. `arg_types` and `self_types` already lead with the receiver
         # type, so the values have to lead with the receiver too.
-        receiver_values:List[Any] = (list(self_values[:1]) if self_struct_members else [])
-        argument_values:List[Any] = (list(self_values[1:]) if self_struct_members
+        receiver_values:List[object] = (list(self_values[:1]) if self_struct_members else [])
+        argument_values:List[object] = (list(self_values[1:]) if self_struct_members
                                      else list(self_values))
         prefix_names:List[str] = (receiver_name
                                   + list(_positional_argument_names(self.raw_func))[:len(args)]
                                   + self_attr_names
                                   + list(launch_meta.get("carried") or []))
-        full:List[Any] = [_kernel_scalar_argument(value, t)
+        full:List[object] = [_kernel_scalar_argument(value, t)
                           for value, t in zip(receiver_values + list(args) + argument_values,
                                               arg_types + self_types)]
         # A carried scalar is one of the kernel's own parameters (declared before the shape
@@ -1449,7 +1456,7 @@ class PyKernel(_KernelBase[_P]):
                                           if name in created}
 
         outer_writable = list(outer_state["writable"])
-        runtime_values:List[Any] = list(outer_state["full"]) + _created_arguments(created)
+        runtime_values:List[object] = list(outer_state["full"]) + _created_arguments(created)
         return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
                                       if returns else {})
         # Launch order must match the device signature: own arguments, shape extents, then
@@ -1465,7 +1472,7 @@ class PyKernel(_KernelBase[_P]):
 
         def build_phase_args(extents:List[Tuple[int, int]],
                              extra_created:Optional[List[str]],
-                             phase_index:int=0)->List[Any]:
+                             phase_index:int=0)->List[object]:
             """The launch arguments for one phase kernel.
 
             The shared prefix is the device parameter list up to `own_count`; the extents
@@ -1478,7 +1485,7 @@ class PyKernel(_KernelBase[_P]):
             # slots by name; a phase's own signature may name a different subset (a gap
             # value only one pass reads, or a carried scalar this pass writes). Align the
             # values to the signature rather than assuming the prefix matches it.
-            prefix_values:List[Any] = list(full[:own_count])
+            prefix_values:List[object] = list(full[:own_count])
             by_name:Dict[str, Any] = dict(zip(prefix_names, prefix_values))
             # Only the names declared *before* the shape extents participate in the aligned
             # prefix: outer-scope values and host-created objects are declared after them and
@@ -1492,12 +1499,12 @@ class PyKernel(_KernelBase[_P]):
                 # reads, or a carried scalar this pass writes, is not in the shared prefix.
                 # Outer-scope names are excluded here -- the signature declares them last,
                 # and the block below appends them in the host's own order.
-                phase_args:List[Any] = [by_name.get(name, gap_slots.get(name, 0))
+                phase_args:List[object] = [by_name.get(name, gap_slots.get(name, 0))
                                         for name in declared]
             else:
                 # No per-phase metadata (a gid-style body): the shared prefix *is* the
                 # parameter list, in order.
-                phase_args:List[Any] = prefix_values
+                phase_args:List[object] = prefix_values
             for param_index, dim in extents:
                 phase_args.append(int(full[param_index].shape[dim]))
             # The signature declares the sampler and local-memory arguments right after the
@@ -1528,12 +1535,14 @@ class PyKernel(_KernelBase[_P]):
         # written the host arrays since. The upload below reads those arrays' memory, so it
         # must see the callbacks' result: wait once, before anything is uploaded.
         self._sync_device(backend, device_obj)
-        launch_args:List[Any] = build_phase_args(shape_sources, None)
+        launch_args:List[object] = build_phase_args(shape_sources, None)
         # Vector values travel in the layout the backend's ABI defines: OpenCL pads a
         # 3-component vector to four slots, CUDA/HIP take the host's three. The host keeps
         # the three-component form everywhere, so each argument is converted here and its
         # result copied back once the launch has finished.
-        unpackers:List[Any] = []
+        # Every entry pairs the value handed to the launch with the callable that copies it
+        # back into the caller's own form once the launch has finished.
+        unpackers:List[Tuple[object, Callable[[object], None]]] = []
         for index, argument in enumerate(launch_args):
             packed_value, unpack = pack(argument, backend)
             if packed_value is not argument:
@@ -1797,8 +1806,8 @@ class PyKernel(_KernelBase[_P]):
         _write_back_outer and _with_returns). An outer array is passed as itself, and the
         backend's read/write analysis reads it back when the kernel wrote it.
         """
-        args:List[Any] = []
-        full:List[Any] = []
+        args:List[object] = []
+        full:List[object] = []
         writable:List[Dict[str, Any]] = []
         for name, outer in outer_vars.items():
             kind:str = outer["kind"]
@@ -1874,7 +1883,7 @@ class PyKernel(_KernelBase[_P]):
                 "site": np.zeros(1, dtype=np.int32)}
 
     def _finish_returns(self, return_state:Dict[str, Any],
-                        returns:Dict[str, Any], full:List[Any],
+                        returns:Dict[str, Any], full:List[object],
                         created:Optional[Dict[str, Any]]=None)->Any:
         """Rebuild the python result of a finished launch.
 
@@ -1894,7 +1903,7 @@ class PyKernel(_KernelBase[_P]):
         if not layout["positions"]:
             # The winning site was a bare `return` (or `return None`).
             return None
-        values:List[Any] = []
+        values:List[object] = []
         for entry in layout["positions"]:
             if entry["kind"] == "array":
                 name:str = entry["name"]
@@ -1926,7 +1935,7 @@ class PyKernel(_KernelBase[_P]):
     def _with_returns(self, future:Any,
                       return_state:Dict[str, Any],
                       returns:Optional[Dict[str, Any]],
-                      full:List[Any],
+                      full:List[object],
                       outer_state:Optional[Dict[str, Any]]=None,
                       created:Optional[Dict[str, Any]]=None)->Any:
         """Wrap an asynchronous launch so its future resolves to the returned value.
@@ -2132,7 +2141,7 @@ class PyKernel(_KernelBase[_P]):
                 f"'{name}' is not an array, so it has no shape to derive a work size from")
         translator.declared_work_arrays = [name]
 
-    def _compile(self, args:List[Any], arg_types:List[Any], self_types:List[Any],
+    def _compile(self, args:List[object], arg_types:List[object], self_types:List[object],
                  self_attrs:List[str], owner:Optional[type], sig:str,
                  backend:str, device_obj:Any, instance:Any=None,
                  self_struct_members:Optional[Dict[str, str]]=None,
@@ -2243,7 +2252,7 @@ class PyKernel(_KernelBase[_P]):
                                    + list(translator.nested_kernels))
         device_prefix.extend(entry["code"] for entry in own_entries)
 
-        structure_dtypes:List[Any] = list(translator.structure_dtypes())
+        structure_dtypes:List[DeviceType] = list(translator.structure_dtypes())
         for entry in device_cache.values():
             for dtype in entry.get("structs", ()):
                 if dtype not in structure_dtypes:
@@ -2362,7 +2371,7 @@ class PyKernel(_KernelBase[_P]):
                     linked = "<<<" in file.read()
             except OSError:
                 linked = False
-        kernels:List[Any] = [
+        kernels:List[object] = [
             self._backend_compile(source_path, name, backend, device_obj, linked=linked)
             for name, _ in rendered]
         # A phase kernel declares only the shapes it indexes itself, so its launch needs its
@@ -2556,8 +2565,8 @@ class PyKernel(_KernelBase[_P]):
 
     # ---------- launch ----------
 
-    def _build_launch_args(self, args:List[Any], arg_types:List[Any], shape_sources:List[Tuple[int, int]])->List[Any]:
-        launch_args:List[Any] = list(args)
+    def _build_launch_args(self, args:List[object], arg_types:List[object], shape_sources:List[Tuple[int, int]])->List[object]:
+        launch_args:List[object] = list(args)
         for param_index, dim in shape_sources:
             launch_args.append(int(args[param_index].shape[dim]))
         return launch_args
@@ -2611,7 +2620,7 @@ class _LinkedImage:
         self.prefix:str = "nvcc"
 
 
-def _compile_linked_cuda(source_path:str, c_name:str, device_obj:Any)->Any:
+def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->Any:
     """Compile a source that launches a kernel from device code, through nvcc.
 
     NVRTC cannot produce a loadable image for such a source: the child kernel is resolved
@@ -2731,7 +2740,7 @@ def _check_image_address(image:Any, backend:str)->None:
         % (backend, image.address.value))
 
 
-def _image_sampler(image:Any)->Any:
+def _image_sampler(image:"Image")->object:
     """The OpenCL sampler matching an Image's sampling rules.
 
     OpenCL takes the sampler as a kernel argument while CUDA bakes it into the
@@ -2762,19 +2771,19 @@ def _image_sampler(image:Any)->Any:
                      filter_mode=filter_mode)
 
 
-def _outer_slot_dtype(t:Any)->Any:
+def _outer_slot_dtype(t:DeviceType)->np.dtype[Any]:
     """The numpy dtype of a one-element buffer carrying a declared outer scalar."""
     return np.dtype(_SCALAR_SLOT_DTYPES[t])
 
 
-def _scalar_slot_value(value:Any, t:Any)->Any:
+def _scalar_slot_value(value:object, t:DeviceType)->object:
     """An outer scalar as the element its buffer stores."""
     if t == "bool":
         return np.uint8(1 if value else 0)
     return value
 
 
-def _outer_scope_value(raw:Any, t:Any)->Any:
+def _outer_scope_value(raw:object, t:DeviceType)->object:
     """A declared outer scalar's buffer element as the python value to store back."""
     if t == "bool":
         return bool(int(raw))
@@ -2798,7 +2807,7 @@ _SCALAR_SLOT_DTYPES:Dict[str, Any] = {
 }
 
 
-def _check_shape_indices(kernel_name:str, full:List[Any],
+def _check_shape_indices(kernel_name:str, full:List[object],
                          shape_sources:List[Tuple[int, int]],
                          work_size_dims:List[Tuple[Optional[int], int]],
                          launch_meta:Dict[str, Any])->None:
@@ -2893,7 +2902,7 @@ def _check_shape_indices(kernel_name:str, full:List[Any],
         raise error from None
 
 
-def _kernel_scalar_argument(value:Any, t:Any)->Any:
+def _kernel_scalar_argument(value:object, t:DeviceType)->object:
     """A kernel argument in the type the device signature declares for it.
 
     Only `bool` needs converting: the translator passes it as a byte, because a real
@@ -2906,7 +2915,7 @@ def _kernel_scalar_argument(value:Any, t:Any)->Any:
     return value
 
 
-def _host_regions(func:Any)->List[Any]:
+def _host_regions(func:Any)->List[object]:
     """The statements a kernel body runs on the host, before and between its magic loops."""
     from .translator import _parse_kernel_source, _outside_loops, get_dedented_source
 
@@ -2916,7 +2925,7 @@ def _host_regions(func:Any)->List[Any]:
         return []
     if not (tree.body and isinstance(tree.body[0], ast.ImportFrom)):
         pass
-    body:List[Any] = tree.body[0].body if tree.body else []
+    body:List[object] = tree.body[0].body if tree.body else []
     return list(_outside_loops(body))
 
 
@@ -2995,7 +3004,7 @@ def _host_created_values(func:Any,
     values:Dict[str, Any] = {}
     names:List[str] = []
     try:
-        assignments:List[Any] = _creation_assignments(func)
+        assignments:List[object] = _creation_assignments(func)
     except SyntaxError:
         return values, names
     if not assignments:
@@ -3078,7 +3087,7 @@ def _positional_argument_names(func:Any)->List[str]:
     return names
 
 
-def _created_arguments(created:Dict[str, Any])->List[Any]:
+def _created_arguments(created:Dict[str, Any])->List[object]:
     """The launch arguments for the objects a kernel body created, in declaration order."""
     return [_kernel_scalar_argument(value, infer_ctype(value)) for value in created.values()]
 

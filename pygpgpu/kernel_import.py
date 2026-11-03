@@ -34,7 +34,7 @@ import sys
 import os
 import types
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 # The extension each backend's sources carry, in the probe order `@kernel` uses.
@@ -112,7 +112,7 @@ def normalized_signature(args:List[Tuple[str, str]])->Tuple[Tuple[str, str], ...
     return tuple(normalized)
 
 
-def _scalar_tables(backend:str)->Dict[str, Dict[str, Any]]:
+def _scalar_tables(backend:str)->Dict[str, Dict[str, type]]:
     """The scalar/vector ctypes tables one backend parses and checks types against."""
     if backend == "opencl":
         from .opencl.driver import CLInfo
@@ -165,7 +165,8 @@ class _BackendSource:
 
     # ---------- kernels ----------
 
-    def kernel(self, name:str, device_sel:Optional[str], bracket:Any)->Any:
+    def kernel(self, name:str, device_sel:Optional[str],
+               bracket:Optional[Union[int, str, Tuple[int, ...]]])->Any:
         """The backend's own `Kernel`, bound to a device and to the bracket's work size.
 
         The device is resolved through the decorator's resolver, so every spelling the
@@ -249,7 +250,7 @@ class _BackendSource:
         return self._compiler
 
 
-def _work_size_item(bracket:Any)->Tuple[Any, Any]:
+def _work_size_item(bracket:Union[int, str, Tuple[int, ...]])->Tuple[Optional[int], Optional[int]]:
     """The bracket as the backend `Kernel.__getitem__` wants it: a ``(blocks, threads)`` pair.
 
     A bare count (`k[n]`, `k[(n,)]`) is a total with an automatic group size, which every
@@ -321,7 +322,7 @@ class KernelImportWrapper:
         wrapper.__dict__.update(self.__dict__)
         return wrapper
 
-    def __getitem__(self, item:Any)->"KernelImportWrapper":
+    def __getitem__(self, item:Union[int, str, Tuple[int, ...]])->"KernelImportWrapper":
         from .kernel.decorator import _parse_selector, _parse_work_item
 
         if isinstance(item, str):
@@ -400,9 +401,9 @@ class KernelImportWrapper:
         bound:Optional[List[Any]] = self._bind_arguments(signature, args, kwargs)
         if bound is None:
             return False
-        tables:Dict[str, Any] = _scalar_tables(backend)
-        scalar_types:Dict[str, Any] = tables.get("basic", {})
-        vec_types:Dict[str, Any] = tables.get("vec", {})
+        tables:Dict[str, Dict[str, type]] = _scalar_tables(backend)
+        scalar_types:Dict[str, type] = tables.get("basic", {})
+        vec_types:Dict[str, type] = tables.get("vec", {})
         uncertain:bool = False
         for (_name, type_str), value in zip(signature, bound):
             pointer:bool = type_str.strip().endswith("*")

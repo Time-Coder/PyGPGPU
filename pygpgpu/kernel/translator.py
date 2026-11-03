@@ -10,7 +10,11 @@ import os
 import re
 import textwrap
 import types
-from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple, Union
+
+# TypedDict is 3.8+ in typing; this package supports 3.7, so it comes from the
+# backport the rest of the package already uses (see cparser/ts_parser.py).
+from typing_extensions import TypedDict
 
 import numpy as np
 
@@ -204,7 +208,7 @@ def _helper_globals(func:Callable, fallback:Callable[[str], Any])->Callable[[str
     return resolve
 
 
-def self_attr_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
+def self_attr_kind(owner:Optional[type], name:str)->Translated:
     """Classify what ``self.name`` refers to on the kernel's own class.
 
     Returns ``(kind, target)`` where kind is one of:
@@ -328,7 +332,7 @@ def _magic_method_of(cls:type, name:str)->Optional[Callable]:
     return function if callable(function) else None
 
 
-def _self_member_call_kind(owner:Optional[type], name:str)->Tuple[str, Any]:
+def _self_member_call_kind(owner:Optional[type], name:str)->Translated:
     """Classify ``self.name(...)``: what the attribute read yields, then called.
 
     A staticmethod read through an instance is a plain function, so a call site has to
@@ -579,6 +583,41 @@ _CUDA_TYPE_NAMES:Dict[str, str] = {
 # the kernel, which only ever samples or stores through it.
 IMAGE = "image"
 
+# The type of a translated expression. A device type is one of a closed set of shapes:
+#
+# * a **scalar or vector name** -- `"int"`, `"float3"`, `"quatf"`, a struct name;
+# * a **pointer** -- `("*", base)`, an array parameter;
+# * an **image** -- `("image", channels, scalar)`, opaque storage the body samples;
+# * a **shared slice** -- `("shared_slice", ...)`, one group's zeros_per_group buffer;
+#
+# `is_ptr` / `is_vec` / `is_image` / `is_int` decide which, so the union says exactly what
+# those predicates accept. It used to be spelled `Any` at every one of these sites, which
+# threw away the one piece of type information the translator carries around most.
+DeviceType = Union[str, Tuple[Any, ...]]
+
+# A translated expression is its C text plus the type above -- the pair every `_visit_*`
+# returns and every emitter consumes.
+Translated = Tuple[str, DeviceType]
+
+# One value slot a `return` fills: the C type the launch declares for it, and the device
+# type the body produced. Two return sites whose values share a C type share the slot.
+class ReturnLayoutEntry(TypedDict):
+    ctype: str
+    type: DeviceType
+
+# One position of one `return` statement, as `_visit_kernel_return` sees it. A `value`
+# position travels as a one-element buffer (`code` is how the body reads it back) and an
+# `array` position travels as the array parameter itself, named by `name`. `ordinal` and
+# `slot` appear once the slot map has assigned them.
+class ReturnPosition(TypedDict, total=False):
+    kind: str
+    type: DeviceType
+    code: str
+    name: str
+    ordinal: int
+    slot: int
+    slot_parameter: str
+
 # A python class can give an operator a meaning of its own, and device code has to keep
 # it: `a + b` on a class that defines `__add__` is that method, exactly as `ray.at(t)` is
 # `Ray_at`. The keys are the `ast` operator class names the dispatchers already use, so one
@@ -675,7 +714,7 @@ def is_vec(t:Any)->bool:
 # A 3-component vector is padded to 16 bytes for the device ABI, so its ctypes struct carries
 # a trailing `_` field that is not a component. Everything that names components counts them
 # through this helper, so the padding never reaches a constructor, a swizzle or a print.
-def _vec_components(vec:str)->List[Tuple[str, Any]]:
+def _vec_components(vec:str)->List[Translated]:
     """The real (field name, ctypes type) components of a vector type, in order."""
     return [field for field in _vec_registry()[vec]._fields_ if field[0] != "_"]
 
@@ -1533,7 +1572,7 @@ class FunctionTranslator:
         except SyntaxError as e:
             raise SyntaxError(f"cannot parse function source: {e}") from None
 
-        self.params:List[Tuple[str, Any]] = []
+        self.params:List[Translated] = []
         self.shapes_used:List[Tuple[str, int]] = []
         # Structure parameters whose members the body assigns: a parameter in this set is
         # emitted without `const` (see render_kernel / render_device).
@@ -1614,8 +1653,8 @@ class FunctionTranslator:
         #   return site whose value has that C type.
         # return_sites: per `return` statement, its positions as the translator saw them.
         # _site_slot_map: per site, (position ordinal, slot index) pairs it writes.
-        self.return_layout:List[Dict[str, Any]] = []
-        self.return_sites:List[List[Dict[str, Any]]] = []
+        self.return_layout:List[ReturnLayoutEntry] = []
+        self.return_sites:List[List[ReturnPosition]] = []
         self._site_slot_map:Dict[int, List[Tuple[int, int]]] = {}
         # True when statements currently being visited run once per work item after the
         # magic loop (see _visit_region and _visit_kernel_return).
@@ -2147,7 +2186,7 @@ class FunctionTranslator:
     def _is_shape0_range(self, iter_node:ast.expr)->bool:
         return (self._shape0_range_param(iter_node) is not None)
 
-    def _enumerate_magic_target(self, iter_node:ast.expr)->Optional[Tuple[str, Any]]:
+    def _enumerate_magic_target(self, iter_node:ast.expr)->Optional[Translated]:
         """Resolve the array parameter of `for i, x in enumerate(arr)`, returning (parameter name, pointer type)."""
         if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
                 and iter_node.func.id == "enumerate" and len(iter_node.args) == 1 and not iter_node.keywords):
@@ -2501,7 +2540,7 @@ class FunctionTranslator:
         # builtin has no work item and fails.
         self.body_tail = list(body[_magic_loop_end(body):])
         magic_index:Optional[int] = None
-        enumerate_form:Optional[Tuple[str, Any]] = None
+        enumerate_form:Optional[Translated] = None
         nd_form:Optional[Tuple[str, str, str]] = None
         for idx, stmt in enumerate(body):
             if not isinstance(stmt, ast.For):
@@ -2509,7 +2548,7 @@ class FunctionTranslator:
             if self._is_shape0_range(stmt.iter):
                 magic_index = idx
                 break
-            enum_info:Optional[Tuple[str, Any]] = self._enumerate_magic_target(stmt.iter)
+            enum_info:Optional[Translated] = self._enumerate_magic_target(stmt.iter)
             if enum_info is not None:
                 magic_index = idx
                 enumerate_form = enum_info
@@ -3048,7 +3087,7 @@ class FunctionTranslator:
         if not isinstance(node.target, ast.Name):
             self._error("loop target must be a plain variable", node.target)
 
-        values:List[Tuple[str, Any]] = [self._visit_expression(a) for a in args]
+        values:List[Translated] = [self._visit_expression(a) for a in args]
         for a, (_, t) in zip(args, values):
             if not is_int(t):
                 self._error("range() arguments must be integers", a)
@@ -3157,7 +3196,7 @@ class FunctionTranslator:
     # binding table has no bool entry), and char also travels as an unsigned byte because
     # OpenCL's `char` binds to ctypes.c_char (|S1), which is not an integer array at all.
     # The host converts when it reads the slot back.
-    RETURN_SLOT_TYPES:Dict[str, Tuple[str, Any]] = {
+    RETURN_SLOT_TYPES:Dict[str, Translated] = {
         "bool": ("uchar", np.uint8),
         "char": ("uchar", np.uint8),
         "uchar": ("uchar", np.uint8),
@@ -3391,7 +3430,7 @@ class FunctionTranslator:
             # A structure value travels as a one-element buffer of that structure, so the
             # slot element is the structure type itself.
             return t
-        slot:Optional[Tuple[str, Any]] = self.RETURN_SLOT_TYPES.get(t)
+        slot:Optional[Translated] = self.RETURN_SLOT_TYPES.get(t)
         if slot is None:
             self._error(f"cannot return a value of type {t}")
         return self._device_type(slot[0])
@@ -3504,7 +3543,7 @@ class FunctionTranslator:
             return tuple(self._eval_constant(element) for element in node.elts)
         raise SyntaxError("not a compile-time constant expression")
 
-    def _private_element_type(self, dtype_value:Any)->Optional[Tuple[str, Any]]:
+    def _private_element_type(self, dtype_value:Any)->Optional[Translated]:
         """(C element type, translator type) for a private array's element, or None."""
         from . import structs
 
@@ -3692,8 +3731,8 @@ class FunctionTranslator:
                     "tuple assignment targets must be plain variables or array elements",
                     node)
 
-            values:List[Tuple[str, Any]] = [self._visit_expression(v) for v in node.value.elts]
-            temps:List[Tuple[str, Any]] = []
+            values:List[Translated] = [self._visit_expression(v) for v in node.value.elts]
+            temps:List[Translated] = []
             for code, t in values:
                 if is_ptr(t):
                     self._error("cannot swap array parameters", node)
@@ -3771,7 +3810,7 @@ class FunctionTranslator:
             # A string subscript on a structure value writes a member: `s["i"] = 1` becomes
             # `s.i = 1`. Recognized before the array path, which rejects a structure base
             # because a structure is a value, not a pointer.
-            member:Optional[Tuple[str, Any]] = self._struct_member_access(target)
+            member:Optional[Translated] = self._struct_member_access(target)
             if member is not None:
                 # A member store makes the structure parameter writable: it must not be
                 # declared `const` (see render_kernel / render_device).
@@ -3982,8 +4021,8 @@ class FunctionTranslator:
             return library_function_name(self.resolve_global(callee.id))
         return None
 
-    def _emit_library_function(self, name:str, args:List[Tuple[str, Any]],
-                               node:ast.Call)->Tuple[str, Any]:
+    def _emit_library_function(self, name:str, args:List[Translated],
+                               node:ast.Call)->Translated:
         """A call to a registered device-side library function.
 
         The device gets the symbol the registry names for this backend; the headers the
@@ -4575,7 +4614,7 @@ class FunctionTranslator:
                 called = magic or ""
             if owner is not None:
                 _cls, method = owner
-                call:Tuple[str, Any] = self._emit_device_call(
+                call:Translated = self._emit_device_call(
                     called, method, [(target_code, target_t), (value_code, value_t)],
                     node, self_param=_receiver_param_of(method), receiver_as_argument=True)
                 self._emit(f"{target_code} = {call[0]};")
@@ -4625,7 +4664,7 @@ class FunctionTranslator:
     def _lookup_type_of_index(self, node:ast.AugAssign)->Any:
         return "int"
 
-    def _visit_target(self, target:ast.expr)->Tuple[str, Any]:
+    def _visit_target(self, target:ast.expr)->Translated:
         if isinstance(target, ast.Name):
             outer:Optional[Dict[str, Any]] = self.outer_vars.get(target.id)
             if outer is not None:
@@ -4649,7 +4688,7 @@ class FunctionTranslator:
             # A string subscript on a structure value writes a member: `s["i"] = 1` becomes
             # `s.i = 1`. It has to be recognized before the array path, which would reject a
             # structure base (it is a value, not a pointer).
-            member:Optional[Tuple[str, Any]] = self._struct_member_access(target)
+            member:Optional[Translated] = self._struct_member_access(target)
             if member is not None:
                 return member
             # A store into a zeros_per_group() slice: the same flattening as the read side.
@@ -4716,7 +4755,7 @@ class FunctionTranslator:
             return False
         return np.dtype(dtype.fields[target.attr][0]).name == "bool"
 
-    def _visit_array_target(self, node:ast.expr)->Tuple[str, Any]:
+    def _visit_array_target(self, node:ast.expr)->Translated:
         code, t = self._visit_expression(node)
         if is_image(t):
             # An image keeps its own marker: indexing it means sampling, not
@@ -4757,7 +4796,7 @@ class FunctionTranslator:
             self.subscript_columns[name] = getattr(node, "col_offset", 0) or 0
         self.subscript_indices[name] = max(previous, count)
 
-    def _visit_subscript_index(self, node:ast.Subscript)->Tuple[str, Any]:
+    def _visit_subscript_index(self, node:ast.Subscript)->Translated:
         self._record_subscript_indices(node)
         return self._flatten_index(node.slice, node.value, node)
 
@@ -4774,7 +4813,7 @@ class FunctionTranslator:
         return shape
 
     def _flatten_index(self, index:ast.expr, target:ast.expr,
-                       node:ast.AST)->Tuple[str, Any]:
+                       node:ast.AST)->Translated:
         """One flat offset for an index that may name several axes.
 
         A tuple index (`a[i, j]`) is row-major flattening over the *declared* shape, which is
@@ -4789,7 +4828,7 @@ class FunctionTranslator:
             if slice_shape is not None:
                 # An atomic on a shared buffer names the group's slice as its array, and the
                 # slice carries its own shape, so the flattening needs no `_shape_var`.
-                dims:List[Tuple[str, Any]] = [self._visit_expression(e) for e in index.elts]
+                dims:List[Translated] = [self._visit_expression(e) for e in index.elts]
                 terms:List[str] = []
                 for d, (code, t) in enumerate(dims):
                     if not is_int(t):
@@ -4810,7 +4849,7 @@ class FunctionTranslator:
                     "a shared buffer is indexed by its group first, so pass the tuple after "
                     "the group: `buf[blockIdx][i, j]`", node)
             array_name:str = self._array_name(target)
-            dims:List[Tuple[str, Any]] = [self._visit_expression(e) for e in index.elts]
+            dims:List[Translated] = [self._visit_expression(e) for e in index.elts]
             terms:List[str] = []
             for d, (code, t) in enumerate(dims):
                 if not is_int(t):
@@ -4837,7 +4876,7 @@ class FunctionTranslator:
 
     # ---------- expressions ----------
 
-    def _visit_expression(self, node:ast.expr)->Tuple[str, Any]:
+    def _visit_expression(self, node:ast.expr)->Translated:
         if isinstance(node, ast.Constant):
             return self._visit_constant(node)
         if isinstance(node, ast.Name):
@@ -4869,7 +4908,7 @@ class FunctionTranslator:
             return self._visit_attribute(node)
         self._error(f"unsupported expression: {node.__class__.__name__}", node)
 
-    def _visit_enum_constant(self, entry:Tuple[Any, Any], node:ast.AST)->Tuple[str, Any]:
+    def _visit_enum_constant(self, entry:Tuple[Any, Any], node:ast.AST)->Translated:
         """Emit an enum member as the constant it stands for.
 
         An `IntEnum` member's value is an int and an `Enum`'s may be anything; only the
@@ -4895,7 +4934,7 @@ class FunctionTranslator:
             f"no device equivalent: give the member a numeric value (an int or a float), or "
             f"read the value on the host and pass it as a scalar argument", node)
 
-    def _visit_constant(self, node:ast.Constant)->Tuple[str, Any]:
+    def _visit_constant(self, node:ast.Constant)->Translated:
         value:Any = node.value
         if isinstance(value, bool):
             return ("true" if value else "false"), "bool"
@@ -4910,7 +4949,7 @@ class FunctionTranslator:
             return text, "float"
         self._error(f"unsupported constant: {value!r}", node)
 
-    def _visit_name(self, node:ast.Name)->Tuple[str, Any]:
+    def _visit_name(self, node:ast.Name)->Translated:
         host:Optional[Dict[str, Any]] = self.host_values.get(node.id)
         if host is not None:
             # The host created this object; on the device it is just the parameter that
@@ -5013,7 +5052,7 @@ class FunctionTranslator:
         return self._vec_maker(vec, ", ".join(terms))
 
     def _emit_quaternion_binop(self, operator:str, left:str, lt:Any, right:str, rt:Any,
-                               node:ast.BinOp)->Optional[Tuple[str, Any]]:
+                               node:ast.BinOp)->Optional[Translated]:
         """A quaternion operation, as a call to one of the header's functions.
 
         `pygf` gives a quaternion three meanings: `q * q` composes two rotations, `q * v`
@@ -5041,7 +5080,7 @@ class FunctionTranslator:
             return None
 
         def call(name:str, dtype:np.dtype, args:str, result:Any,
-                 mixed:bool = False) -> Tuple[str, Any]:
+                 mixed:bool = False) -> Translated:
             # The types and their arithmetic both come from the fixed header; all this records
             # is which widths are in use, so the compile step can enable their blocks. A mixed
             # operation touches both, because its body widens one width to the other.
@@ -5135,7 +5174,7 @@ class FunctionTranslator:
                 return descriptor
         return _property_carrier(classes, name)
 
-    def _emit_property_write(self, cls:Optional[type], name:str, base:Tuple[str, Any],
+    def _emit_property_write(self, cls:Optional[type], name:str, base:Translated,
                              value:ast.expr, node:ast.AST)->bool:
         """`box.total = v` as a device call to the property's setter, or False.
 
@@ -5152,7 +5191,7 @@ class FunctionTranslator:
                 f"property '{name}' has no setter: give the class a '@{name}.setter'",
                 node)
         value_code, value_t = self._visit_expression(value)
-        call:Tuple[str, Any] = self._emit_device_call(
+        call:Translated = self._emit_device_call(
             name, setter, [base, (value_code, value_t)], node,
             self_param=_receiver_param_of(setter), receiver_as_argument=True)
         self._emit(f"{call[0]};")
@@ -5167,8 +5206,8 @@ class FunctionTranslator:
                 self.member_writes.add(written_name)
         return True
 
-    def _emit_property_read(self, cls:Optional[type], name:str, base:Tuple[str, Any],
-                            node:ast.AST)->Optional[Tuple[str, Any]]:
+    def _emit_property_read(self, cls:Optional[type], name:str, base:Translated,
+                            node:ast.AST)->Optional[Translated]:
         """`box.total` as a device call to the property's getter, or None.
 
         A property is a member the class computes, so the read is a method call with the
@@ -5186,7 +5225,7 @@ class FunctionTranslator:
             self_param=_receiver_param_of(getter), receiver_as_argument=True)
 
     def _emit_magic_conversion(self, magic:str, code:str, t:Any,
-                               node:ast.AST)->Optional[Tuple[str, Any]]:
+                               node:ast.AST)->Optional[Translated]:
         """`int(box)` / `abs(box)` and friends as a device call to the class's method.
 
         A class that defines the conversion gives the builtin a meaning the device keeps:
@@ -5202,7 +5241,7 @@ class FunctionTranslator:
             self_param=_receiver_param_of(method), receiver_as_argument=True)
 
     def _emit_magic_binop(self, magic:str, left:str, lt:Any, right:str, rt:Any,
-                          node:ast.BinOp)->Optional[Tuple[str, Any]]:
+                          node:ast.BinOp)->Optional[Translated]:
         """`a op b` as a device call to the class's magic method, or None.
 
         Python resolves `a + b` as `a.__add__(b)`, and then -- if the left class does not
@@ -5230,7 +5269,7 @@ class FunctionTranslator:
         return None
 
     def _emit_magic_compare(self, magic:str, left:str, lt:Any, right:str, rt:Any,
-                            op:ast.cmpop)->Optional[Tuple[str, Any]]:
+                            op:ast.cmpop)->Optional[Translated]:
         """`a == b` as a device call to the class's comparison, or None."""
         # A containment test asks the RIGHT operand: `x in box` is `box.__contains__(x)`.
         # Its result is a truth value, so `not in` negates the same call. A chained form
@@ -5239,7 +5278,7 @@ class FunctionTranslator:
             owner:Optional[Tuple[type, Any]] = self._magic_owner(rt, magic)
             if owner is not None:
                 _cls, method = owner
-                call:Tuple[str, Any] = self._emit_device_call(
+                call:Translated = self._emit_device_call(
                     magic, method, [(right, rt), (left, lt)], op,
                     self_param=_receiver_param_of(method), receiver_as_argument=True)
                 if op.__class__.__name__ == "NotIn":
@@ -5341,7 +5380,7 @@ class FunctionTranslator:
             f"move the computation into a host method before the kernel -- which is how a "
             f"quaternion rotation belongs, unless a dedicated device function for it exists")
 
-    def _visit_binop(self, node:ast.BinOp)->Tuple[str, Any]:
+    def _visit_binop(self, node:ast.BinOp)->Translated:
         left, lt = self._visit_expression(node.left)
         right, rt = self._visit_expression(node.right)
         name:str = node.op.__class__.__name__
@@ -5349,7 +5388,7 @@ class FunctionTranslator:
         # A quaternion is a structure too, but its arithmetic *does* have a device meaning
         # (pygf defines it), so it is handled by generated device functions before the
         # general structure refusal below.
-        quat_result:Optional[Tuple[str, Any]] = self._emit_quaternion_binop(
+        quat_result:Optional[Translated] = self._emit_quaternion_binop(
             name, left, lt, right, rt, node)
         if quat_result is not None:
             return quat_result
@@ -5360,7 +5399,7 @@ class FunctionTranslator:
         # inherited identity comparison cannot silently answer for a structure.
         magic:Optional[str] = MAGIC_METHODS.get(name)
         if magic is not None:
-            call:Optional[Tuple[str, Any]] = self._emit_magic_binop(
+            call:Optional[Translated] = self._emit_magic_binop(
                 magic, left, lt, right, rt, node)
             if call is not None:
                 return call
@@ -5436,7 +5475,7 @@ class FunctionTranslator:
             self._error(f"unsupported operator: {name}", node)
         return f"({left} {symbol} {right})", promote(lt, rt)
 
-    def _visit_unaryop(self, node:ast.UnaryOp)->Tuple[str, Any]:
+    def _visit_unaryop(self, node:ast.UnaryOp)->Translated:
         code, t = self._visit_expression(node.operand)
         name:str = node.op.__class__.__name__
         # A class that defines `__neg__` / `__pos__` / `__invert__` gives the unary operator
@@ -5467,7 +5506,7 @@ class FunctionTranslator:
             return f"(!{code})", "bool"
         self._error(f"unsupported unary operator: {name}", node)
 
-    def _visit_compare(self, node:ast.Compare)->Tuple[str, Any]:
+    def _visit_compare(self, node:ast.Compare)->Translated:
         symbols:Dict[str, str] = {"Lt": "<", "LtE": "<=", "Gt": ">", "GtE": ">=",
                                   "Eq": "==", "NotEq": "!=", "In": "in", "NotIn": "not in"}
 
@@ -5496,7 +5535,7 @@ class FunctionTranslator:
             # a meaning, and the translation keeps it as a device call.
             magic:Optional[str] = MAGIC_METHODS.get(name)
             if magic is not None:
-                call:Optional[Tuple[str, Any]] = self._emit_magic_compare(
+                call:Optional[Translated] = self._emit_magic_compare(
                     magic, left, lt, right, rt, op)
                 if call is not None:
                     # A chained comparison cannot be a single call: `a < b < c` means
@@ -5515,7 +5554,7 @@ class FunctionTranslator:
         code = (" && ".join(parts)) if len(parts) > 1 else parts[0]
         return f"({code})", "bool"
 
-    def _visit_subscript(self, node:ast.Subscript)->Tuple[str, Any]:
+    def _visit_subscript(self, node:ast.Subscript)->Translated:
         value:ast.expr = node.value
         if isinstance(value, ast.Attribute) and value.attr == "shape":
             array_name:str = self._array_name(value.value)
@@ -5533,7 +5572,7 @@ class FunctionTranslator:
         # A string subscript on a structure value reads a member: numpy's spelling for a
         # record field, emitted as C member access. It covers nested structures
         # (`s["inner"]["a"]`) because the member itself is a structure-typed value.
-        member:Optional[Tuple[str, Any]] = self._struct_member_access(node)
+        member:Optional[Translated] = self._struct_member_access(node)
         if member is not None:
             return member
 
@@ -5570,7 +5609,7 @@ class FunctionTranslator:
         # `buf[k]` on a `zeros_per_group(...)` value: the index selects a work group, and only
         # caller's own group is reachable from inside a work item, so `k` must be the block
         # id. The result is that group's slice, which is then indexed normally.
-        shared:Optional[Tuple[str, Any]] = self._visit_shared_slice(node)
+        shared:Optional[Translated] = self._visit_shared_slice(node)
         if shared is not None:
             return shared
 
@@ -5587,7 +5626,7 @@ class FunctionTranslator:
         index_code, _ = self._visit_subscript_index(node)
         return f"{base_code}[{index_code}]", base_t
 
-    def _visit_shared_index(self, code:str, t:Any, node:ast.Subscript)->Tuple[str, Any]:
+    def _visit_shared_index(self, code:str, t:Any, node:ast.Subscript)->Translated:
         """Index a shared slice: `buf[blockIdx][i]`, `[i, j]`, and `[i][j]` all flatten.
 
         A tuple subscript consumes several axes at once; a single subscript consumes one and
@@ -5630,7 +5669,7 @@ class FunctionTranslator:
         combined:str = f"({offset_base}) + ({flat})" if offset_base else flat
         return f"{code}", (SHARED_SLICE, ctype, remaining, combined)
 
-    def _scalar_position(self, code:str, t:Any, node:ast.AST)->Tuple[str, Any]:
+    def _scalar_position(self, code:str, t:Any, node:ast.AST)->Translated:
         """A shared slice's element, refusing a partly indexed one.
 
         `buf[blockIdx]` with `(2, 2)` axes and one index is a slice of a row; it has no
@@ -5643,7 +5682,7 @@ class FunctionTranslator:
                 f"than an element: index every axis, as `buf[blockIdx][i, j]`", node)
         return code, t
 
-    def _visit_shared_slice(self, node:ast.Subscript)->Optional[Tuple[str, Any]]:
+    def _visit_shared_slice(self, node:ast.Subscript)->Optional[Translated]:
         """`buf[blockIdx]` on a shared buffer: **this** group's storage, and nothing more.
 
         The subscript picks *which* group's slice is meant, which is a real choice on the
@@ -5698,7 +5737,7 @@ class FunctionTranslator:
             return False
         return self._builtin_call_name(node) == "get_group_id"
 
-    def _struct_member_access(self, node:ast.Subscript)->Optional[Tuple[str, Any]]:
+    def _struct_member_access(self, node:ast.Subscript)->Optional[Translated]:
         """`s["field"]` on a structure value, or `v["x"]` on a vector, or None.
 
         A string subscript is numpy's spelling for a record field, and it works for a vector
@@ -5760,7 +5799,7 @@ class FunctionTranslator:
             "support. Use the cuda, opencl or python backend for image kernels."
             % action, node)
 
-    def _emit_image_read(self, image_code:str, image_t:Any, node:ast.Subscript)->Tuple[str, Any]:
+    def _emit_image_read(self, image_code:str, image_t:Any, node:ast.Subscript)->Translated:
         """Translate ``img[x, y]`` into the sampling call of the current backend.
 
         Coordinates are texel space, as :mod:`pygpgpu.image` documents: an integer
@@ -5822,7 +5861,7 @@ class FunctionTranslator:
             return "(%s).x" % call, scalar
         return call, scalar
 
-    def _image_indices(self, node:ast.Subscript)->List[Tuple[str, Any]]:
+    def _image_indices(self, node:ast.Subscript)->List[Translated]:
         """Compile an image subscript into (x, y, z) order.
 
         A kernel writes ``img[y, x]`` because that mirrors the host array's row-major
@@ -5943,7 +5982,7 @@ class FunctionTranslator:
             INDEX_VECTOR_AXES_OPENCL if self.backend == "opencl" else INDEX_VECTOR_AXES_CUDA)
         return table[base.id][axis]
 
-    def _visit_attribute(self, node:ast.Attribute)->Tuple[str, Any]:
+    def _visit_attribute(self, node:ast.Attribute)->Translated:
         # self.xxx -> the receiver struct's member, or an extra parameter _self_xxx for an
         # ndarray attribute (the read/write analysis and the shape plumbing need it apart).
         if (self.self_param and isinstance(node.value, ast.Name) and node.value.id == self.self_param):
@@ -6075,7 +6114,7 @@ class FunctionTranslator:
                 # only for a name that is not a real member -- a property name that
                 # shadows a field would be a field read in python too, because the class
                 # body's descriptor replaces the field of the same name.
-                property_read:Optional[Tuple[str, Any]] = self._emit_property_read(
+                property_read:Optional[Translated] = self._emit_property_read(
                     structs.declared_classes(dtype), node.attr, (base_code, base_t), node)
                 if property_read is not None:
                     return property_read
@@ -6119,7 +6158,7 @@ class FunctionTranslator:
         if need is not None:
             self.quaternion_needs.add(need)
 
-    def _emit_quaternion_call(self, node:ast.Call)->Optional[Tuple[str, Any]]:
+    def _emit_quaternion_call(self, node:ast.Call)->Optional[Translated]:
         """`conjugate(q)` as the generated device function for the same meaning.
 
         `pygf.funcs.conjugate` is an ordinary python function, so without this it was
@@ -6149,7 +6188,7 @@ class FunctionTranslator:
 
         if callee is not pygf_funcs.conjugate:
             return None
-        argument:Tuple[str, Any] = self._visit_expression(node.args[0])
+        argument:Translated = self._visit_expression(node.args[0])
         # The argument may travel as a pointer: unwrap the type, dereference the value.
         arg_code:str = argument[0]
         arg_type:Any = argument[1]
@@ -6163,7 +6202,7 @@ class FunctionTranslator:
         self._require_quaternion_header(dtype)
         return f"{type_name}_conjugate({arg_code})", type_name
 
-    def _visit_call(self, node:ast.Call)->Tuple[str, Any]:
+    def _visit_call(self, node:ast.Call)->Translated:
         func:ast.expr = node.func
         if node.keywords:
             # A structure constructor takes member names as keywords -- Ray(origin=p) is
@@ -6192,7 +6231,7 @@ class FunctionTranslator:
         # A builtin is recognized by the *object* the callee resolves to, never by the
         # spelling of the name, so it does not matter whether it was imported, reached
         # through the package, or is a user function that merely shares the name.
-        quaternion_result:Optional[Tuple[str, Any]] = self._emit_quaternion_call(node)
+        quaternion_result:Optional[Translated] = self._emit_quaternion_call(node)
         if quaternion_result is not None:
             return quaternion_result
 
@@ -6208,7 +6247,7 @@ class FunctionTranslator:
             # scalar index stays a flat offset, so the 1-D spelling keeps working on a
             # multidimensional array. The array is the first argument, which is where the
             # declared shape comes from.
-            args:List[Tuple[str, Any]] = []
+            args:List[Translated] = []
             for position, argument in enumerate(node.args):
                 if (builtin in ATOMIC_BUILTINS and position == 1
                         and isinstance(argument, ast.Tuple)):
@@ -6221,7 +6260,7 @@ class FunctionTranslator:
         # resolves to, like a builtin, and emitted as the symbol the registry names.
         library:Optional[str] = self._library_call_name(node)
         if library is not None:
-            library_args:List[Tuple[str, Any]] = [
+            library_args:List[Translated] = [
                 self._visit_expression(argument) for argument in node.args]
             return self._emit_library_function(library, library_args, node)
 
@@ -6246,7 +6285,7 @@ class FunctionTranslator:
                 # `int(box)` is `box.__int__()`, the way `abs(box)` is `box.__abs__()`:
                 # a class that defines the conversion gives it a meaning, and a device
                 # keeps it rather than casting the aggregate.
-                converted:Optional[Tuple[str, Any]] = self._emit_magic_conversion(
+                converted:Optional[Translated] = self._emit_magic_conversion(
                     CONVERSION_METHODS[name], arg_codes[0], args[0][1], node)
                 if converted is not None:
                     return converted
@@ -6308,7 +6347,7 @@ class FunctionTranslator:
                                            if isinstance(func.value, ast.Name) else None)
             if (receiver_name is not None and self.self_param
                     and receiver_name == self.self_param):
-                args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+                args:List[Translated] = [self._visit_expression(a) for a in node.args]
                 # The method belongs to the class the *receiver* is, not necessarily to the
                 # kernel's own class: inside `Camera.render`, `scene.ray_color(...)` reaches
                 # a Scene method, and a helper bound to a Scene receiver calls Scene's own
@@ -6352,7 +6391,7 @@ class FunctionTranslator:
                     if func.attr in _NUMPY_DEVICE_TYPES:
                         # np.float32(x): a cast, exactly what `(float)x` means on the device.
                         return self._emit_numpy_cast(func.attr, args, node)
-                    elementwise:Optional[Tuple[str, Any]] = self._emit_numpy_elementwise(
+                    elementwise:Optional[Translated] = self._emit_numpy_elementwise(
                         func.attr, args, node)
                     if elementwise is not None:
                         return elementwise
@@ -6430,7 +6469,7 @@ class FunctionTranslator:
                 self._error(
                     f"a device-side launch takes at most (global, local): '{name}' was given "
                     f"{len(work.elts)} work sizes", work)
-            parts:List[Tuple[str, Any]] = [self._visit_expression(e) for e in work.elts]
+            parts:List[Translated] = [self._visit_expression(e) for e in work.elts]
             global_code, global_type = parts[0]
             local_code, local_type = parts[1] if len(parts) > 1 else ("", None)
         else:
@@ -6484,7 +6523,7 @@ class FunctionTranslator:
                 self.nested_helpers.append(code)
         return c_name
 
-    def _emit_method_on_value(self, func:ast.Attribute, node:ast.Call)->Tuple[str, Any]:
+    def _emit_method_on_value(self, func:ast.Attribute, node:ast.Call)->Translated:
         """`value.method(args)` as a device call whose first argument is the value.
 
         A structure's methods are ordinary python functions defined in the class the caller
@@ -6554,7 +6593,7 @@ class FunctionTranslator:
             f"cannot call '.{func.attr}()' on {owner.__name__}: it is "
             f"{self._why_not_callable(kind, func.attr)}", node)
 
-    def _emit_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+    def _emit_builtin(self, name:str, args:List[Translated], node:ast.Call)->Translated:
         if name == "pow":
             # python's builtin, which differs from math.pow only in that integer arguments
             # stay exact; the device form is the same floating-point power.
@@ -6607,7 +6646,7 @@ class FunctionTranslator:
 
         self._error(f"unsupported builtin: {name}", node)
 
-    def _emit_len(self, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+    def _emit_len(self, args:List[Translated], node:ast.Call)->Translated:
         """``len(array)`` -> the array's extent along its only axis.
 
         A kernel works on one-dimensional arrays and its extents arrive as int
@@ -6704,7 +6743,7 @@ class FunctionTranslator:
         return ast.Call(func=node.func, args=ordered, keywords=[])
 
     def _emit_numpy_elementwise_nodes(self, attr:str,
-                                      node:ast.Call)->Optional[Tuple[str, Any]]:
+                                      node:ast.Call)->Optional[Translated]:
         """``_emit_numpy_elementwise`` for the calls that read their own argument syntax.
 
         ``np.clip`` treats a literal ``None`` bound as "no bound on this side" and
@@ -6740,7 +6779,7 @@ class FunctionTranslator:
                     "cannot represent; use np.where(cond, a, b)", node)
             if len(node.args) != 3:
                 self._error("np.where() takes exactly 3 arguments in a kernel", node)
-            args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
+            args:List[Translated] = [self._visit_expression(a) for a in node.args]
             for code, t in args:
                 if is_ptr(t) or is_image(t):
                     self._error_numpy_array_form("where", node)
@@ -6753,8 +6792,8 @@ class FunctionTranslator:
             f"returning a new array, which a per-work-item kernel cannot represent. "
             f"Index the element first, e.g. np.{attr}(arr[i], ...)", node)
 
-    def _emit_numpy_elementwise(self, attr:str, args:List[Tuple[str, Any]],
-                                node:ast.Call)->Optional[Tuple[str, Any]]:
+    def _emit_numpy_elementwise(self, attr:str, args:List[Translated],
+                                node:ast.Call)->Optional[Translated]:
         """numpy functions that make sense on one element, translated into device code.
 
         A kernel body works on single values, so the array form of these functions cannot
@@ -6808,8 +6847,8 @@ class FunctionTranslator:
             return self._emit_where(args, node)
         return None
 
-    def _emit_where(self, args:List[Tuple[str, Any]],
-                    node:ast.Call)->Tuple[str, Any]:
+    def _emit_where(self, args:List[Translated],
+                    node:ast.Call)->Translated:
         """`np.where(cond, a, b)` as a conditional expression."""
         cond_code, cond_t = args[0]
         then_code, then_t = args[1]
@@ -6863,7 +6902,7 @@ class FunctionTranslator:
             code = f"{pick_min}(({element})({code}), ({element})({hi}))"
         return f"({code})"
 
-    def _clip_bound(self, bound:Tuple[str, Any],
+    def _clip_bound(self, bound:Translated,
                     node:Optional[ast.expr], call:ast.Call)->Optional[str]:
         """One bound of np.clip: its code, or None when the bound is None."""
         if node is None:
@@ -6874,7 +6913,7 @@ class FunctionTranslator:
                 "np.clip() bounds must be scalars, not arrays", call)
         return code
 
-    def _emit_math_call(self, attr:str, args:List[Tuple[str, Any]], node:ast.Call, module_name:str="math")->Tuple[str, Any]:
+    def _emit_math_call(self, attr:str, args:List[Translated], node:ast.Call, module_name:str="math")->Translated:
         if attr not in _MATH_FUNCS:
             self._error(f"{module_name}.{attr} is not supported", node)
         ret_override:Optional[str] = _MATH_FUNCS[attr]
@@ -6938,8 +6977,8 @@ class FunctionTranslator:
         c_func:str = _math_device_name(attr, self.backend)
         return f"{c_func}({', '.join(arg_codes)})", ret
 
-    def _emit_numpy_cast(self, name:str, args:List[Tuple[str, Any]],
-                         node:ast.Call)->Tuple[str, Any]:
+    def _emit_numpy_cast(self, name:str, args:List[Translated],
+                         node:ast.Call)->Translated:
         """np.float32(x) / np.int32(x): a plain C cast to the matching device type."""
         if len(args) != 1:
             self._error(f"np.{name}() takes exactly 1 argument", node)
@@ -7013,7 +7052,7 @@ class FunctionTranslator:
         return structs.structure_dtype_of(candidate) is not None
 
     def _visit_structure_constructor_call(self, node:ast.Call,
-                                          candidate:Any)->Tuple[str, Any]:
+                                          candidate:Any)->Translated:
         """A structure constructor called with keywords: `Ray(origin=p, direction=d)`.
 
         A member name is a keyword, exactly as python's ctypes spelling addresses one, and
@@ -7041,8 +7080,8 @@ class FunctionTranslator:
         if dtype is None:
             self._error(f"'{ast.unparse(node.func)}' is not a structure type", node)
         order:List[str] = list(dtype.names or ())
-        args:List[Tuple[str, Any]] = [self._visit_expression(a) for a in node.args]
-        supplied:Dict[str, Tuple[str, Any]] = {}
+        args:List[Translated] = [self._visit_expression(a) for a in node.args]
+        supplied:Dict[str, Translated] = {}
         for position, value in enumerate(args):
             if position >= len(parameters):
                 self._error(
@@ -7067,9 +7106,9 @@ class FunctionTranslator:
                                                 args, node, supplied=supplied)
 
     def _emit_structure_constructor(self, name:str, dtype:np.dtype,
-                                    args:List[Tuple[str, Any]], node:ast.expr,
-                                    supplied:Optional[Dict[str, Tuple[str, Any]]] = None
-                                    )->Tuple[str, Any]:
+                                    args:List[Translated], node:ast.expr,
+                                    supplied:Optional[Dict[str, Translated]] = None
+                                    )->Translated:
         """`Ray(origin, direction)` as a compound literal keyed by member name.
 
         A `ctypes.Structure` class describes a layout, so a call to it is a structure *value*
@@ -7187,12 +7226,12 @@ class FunctionTranslator:
             return False
         return np.dtype(dtype.fields[member][0]).name == "bool"
 
-    def _emit_vec_constructor(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+    def _emit_vec_constructor(self, name:str, args:List[Translated], node:ast.Call)->Translated:
         cls:Any = _vec_registry()[name]
         # A 3-component vector is padded to 16 bytes for the device ABI, so its ctypes struct
         # carries a trailing `_` field that is not a component: `float3(a, b, c)` takes
         # three arguments, not four. Count the real components, not the storage fields.
-        components:List[Tuple[str, Any]] = [f for f in cls._fields_ if f[0] != "_"]
+        components:List[Translated] = [f for f in cls._fields_ if f[0] != "_"]
         expected:int = len(components)
         field_type:str = _C_FIELD_TYPES[(name, components[0][0])]
         # `pygf` accepts three forms, and the device call has to mean the same thing:
@@ -7221,7 +7260,7 @@ class FunctionTranslator:
 
     # ---------- gpu.* device builtins ----------
 
-    def _emit_gpu_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+    def _emit_gpu_builtin(self, name:str, args:List[Translated], node:ast.Call)->Translated:
         if name in INDEX_BUILTINS:
             if len(args) != 1 or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, int):
                 self._error(f"gpu.{name}(dim) requires a constant integer dimension (0, 1 or 2)", node)
@@ -7292,8 +7331,8 @@ class FunctionTranslator:
 
         self._error(f"unknown gpu builtin: gpu.{name}", node)
 
-    def _emit_cuda_only_builtin(self, name:str, args:List[Tuple[str, Any]],
-                                node:ast.Call)->Tuple[str, Any]:
+    def _emit_cuda_only_builtin(self, name:str, args:List[Translated],
+                                node:ast.Call)->Translated:
         """A device intrinsic only the CUDA and HIP backends have.
 
         The fast approximations, the correctly-rounded forms and the special functions
@@ -7367,8 +7406,8 @@ class FunctionTranslator:
             self.device_helpers.append(source)
         return device_name
 
-    def _emit_shared_math_builtin(self, name:str, args:List[Tuple[str, Any]],
-                                  node:ast.Call)->Tuple[str, Any]:
+    def _emit_shared_math_builtin(self, name:str, args:List[Translated],
+                                  node:ast.Call)->Translated:
         """A math function both backends have.
 
         OpenCL spells it under the plain name and CUDA under the `f`-suffixed one, except
@@ -7419,7 +7458,7 @@ class FunctionTranslator:
         device_name:str = SHARED_MATH_BUILTINS[name][self.launch_backend]
         return f"{device_name}({', '.join(arg_codes)})"
 
-    def _emit_generic_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+    def _emit_generic_builtin(self, name:str, args:List[Translated], node:ast.Call)->Translated:
         arg_codes:List[str] = [c for c, _ in args]
         arg_types:List[Any] = [t for _, t in args]
         vec_t:Any = next((t for t in arg_types if is_vec(t)), None)
@@ -7660,9 +7699,9 @@ class FunctionTranslator:
             for c in components)
         return f"{maker}({inner})"
 
-    def _emit_vec_swizzle(self, code:str, vec:str, swizzle:str, node:ast.Attribute)->Tuple[str, Any]:
+    def _emit_vec_swizzle(self, code:str, vec:str, swizzle:str, node:ast.Attribute)->Translated:
         """Read a swizzle: opencl uses native v.xy; cuda generates per-component make_float2(v.x, v.y)."""
-        components:List[Tuple[str, Any]] = _vec_components(vec)
+        components:List[Translated] = _vec_components(vec)
         valid:Set[str] = {f_name for f_name, _ in components}
         chars:Set[str] = set(swizzle)
         if not chars <= valid:
@@ -7777,7 +7816,7 @@ class FunctionTranslator:
         terms:str = " + ".join(f"(({lcode}.{c}) * ({rcode}.{c}))" for c in components)
         return f"({terms})"
 
-    def _emit_vec_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+    def _emit_vec_builtin(self, name:str, args:List[Translated], node:ast.Call)->Translated:
         opencl_name, _ = GENERIC_BUILTINS[name]
         expected_args:int = (1 if name in ("normalize", "length") else 2)
         if len(args) != expected_args:
@@ -7828,9 +7867,9 @@ class FunctionTranslator:
             self._error(f"gpu.cross() requires a 3 or 4 component vector, got {vec}")
         return f"{maker}({inner})"
 
-    def _emit_device_call(self, name:str, target:Any, args:List[Tuple[str, Any]], node:ast.Call,
+    def _emit_device_call(self, name:str, target:Any, args:List[Translated], node:ast.Call,
                           self_param:str="",
-                          receiver_as_argument:bool=False)->Tuple[str, Any]:
+                          receiver_as_argument:bool=False)->Translated:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
         if is_kernel_ref:
@@ -7990,7 +8029,7 @@ class FunctionTranslator:
         return f"&{name}" if outer["writable"] else name
 
     def _emit_self_method_call(self, kind:str, target:Any, attr:str,
-                               args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
+                               args:List[Translated], node:ast.Call)->Translated:
         """Call self.<attr>(...) where the member is a method of the kernel's own class."""
         if getattr(target, "is_pykernel", False):
             self._error(
@@ -8219,8 +8258,10 @@ class FunctionTranslator:
             for lc_name, lc_type, lc_count in self.local_buffers:
                 # `_device_type` because CUDA C has no `uint`: the shared array has to be
                 # declared in the backend's spelling, not the translator's internal one.
+                # One indent level, like a body statement: these lines are the kernel's
+                # first declarations, not part of the signature.
                 body_lines.append(
-                    f"__shared__ {self._device_type(lc_type)} {lc_name}[{lc_count}];")
+                    f"    __shared__ {self._device_type(lc_type)} {lc_name}[{lc_count}];")
         body_lines.extend(self.lines)
         # A blank line between the shared-memory declarations and the body reads as a
         # separate preamble; the renderer collapses and trims whatever follows.

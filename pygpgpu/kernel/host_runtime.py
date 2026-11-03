@@ -14,19 +14,25 @@ call instead (see ``device_builtins.py``).
 from __future__ import annotations
 
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Tuple, TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    # The frame is owned by the python backend, which imports this module -- naming it
+    # here would close the cycle, so the annotations below are strings.
+    import numpy as np
+    from .python_backend import PythonFrame
 
 # Installed by the python backend for the duration of one kernel call, on the calling
 # thread only.
 _FRAME = threading.local()
 
 
-def set_host_frame(frame: Optional[Any]) -> None:
+def set_host_frame(frame: Optional["PythonFrame"]) -> None:
     """Install the active python-backend frame for this thread (None clears it)."""
     _FRAME.frame = frame
 
 
-def get_host_frame() -> Optional[Any]:
+def get_host_frame() -> Optional["PythonFrame"]:
     """The frame installed by the python backend on this thread, or None."""
     return getattr(_FRAME, "frame", None)
 
@@ -38,9 +44,9 @@ def _dimension(dim: Any, what: str) -> int:
     return dim
 
 
-def require_frame(what: str) -> Any:
+def require_frame(what: str) -> "PythonFrame":
     """The current launch's frame, or a message explaining why there is none."""
-    frame: Optional[Any] = get_host_frame()
+    frame: Optional["PythonFrame"] = get_host_frame()
     if frame is None:
         raise SyntaxError(
             f"{what}() is only available inside a @kernel function body: on a device "
@@ -49,9 +55,9 @@ def require_frame(what: str) -> Any:
     return frame
 
 
-def work_item(dim: Any, what: str) -> int:
+def work_item(dim: int, what: str) -> int:
     """The global id of the current work item along ``dim``."""
-    frame: Any = require_frame(what)
+    frame: "PythonFrame" = require_frame(what)
     axis: int = _dimension(dim, what)
     if frame.coords is None:
         raise SyntaxError(
@@ -65,16 +71,16 @@ def work_item(dim: Any, what: str) -> int:
     return frame.coords[axis]
 
 
-def local_extent(dim: Any, what: str) -> int:
+def local_extent(dim: int, what: str) -> int:
     """How many work items a group holds along ``dim``."""
-    frame: Any = require_frame(what)
+    frame: "PythonFrame" = require_frame(what)
     axis: int = _dimension(dim, what)
     return frame.local_size[axis] if axis < len(frame.local_size) else 1
 
 
-def work_size_extent(dim: Any, what: str) -> Any:
+def work_size_extent(dim: int, what: str) -> Tuple[int, int]:
     """The (global, local) extents of the launch along ``dim``."""
-    frame: Any = require_frame(what)
+    frame: "PythonFrame" = require_frame(what)
     axis: int = _dimension(dim, what)
     if axis >= len(frame.global_size):
         raise ValueError(
@@ -85,14 +91,14 @@ def work_size_extent(dim: Any, what: str) -> Any:
             frame.local_size[axis] if axis < len(frame.local_size) else 1)
 
 
-def _flat_position(array: Any, index: Any) -> int:
+def _flat_position(array: "np.ndarray[Any, Any]", index: Union[int, Tuple[int, ...]]) -> int:
     """The flat offset an atomic's index names.
 
     A tuple (`atomic_add(a, (i, j), v)`) is row-major flattening over the array's real
     shape, matching what the translator emits for the same call; a scalar is already flat.
     """
     if isinstance(index, tuple):
-        shape: Any = getattr(array, "shape", ())
+        shape: Tuple[int, ...] = tuple(int(s) for s in getattr(array, "shape", ()))
         if len(index) > len(shape):
             raise SyntaxError(
                 f"this array has {len(shape)} dimension(s), so it cannot be indexed with "
@@ -104,7 +110,9 @@ def _flat_position(array: Any, index: Any) -> int:
     return int(index)
 
 
-def atomic_in_place(array: Any, index: Any, apply: Any) -> Any:
+def atomic_in_place(array: "np.ndarray[Any, Any]",
+                    index: Union[int, Tuple[int, ...]],
+                    apply: Callable[[Any], Any]) -> Any:
     """Read-modify-write one element of ``array`` and return the previous value.
 
     ``index`` is a *flat* offset, because that is what the device code means: the emitted

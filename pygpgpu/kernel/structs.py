@@ -21,6 +21,7 @@ import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from numpy.typing import DTypeLike
 
 # Dtypes that a `ctypes.Structure` class declared. A dtype cannot say whether it means a
 # vector or a structure -- `{float x; float y;}` and `float2` compare and hash equal -- so the
@@ -32,7 +33,7 @@ _DECLARED: Dict[np.dtype, type] = {}
 _DECLARED_ALL: Dict[np.dtype, List[type]] = {}
 
 
-def is_record(dtype:Any)->bool:
+def is_record(dtype:DTypeLike)->bool:
     """True for a structured dtype that is a *structure* or a *union*, not a vector.
 
     A dtype whose layout coincides with a vector type is a structure when a
@@ -49,7 +50,7 @@ def is_record(dtype:Any)->bool:
     return True
 
 
-def is_union_dtype(dtype:Any)->bool:
+def is_union_dtype(dtype:DTypeLike)->bool:
     """True when a record dtype describes a **union** rather than a structure.
 
     A C union gives every member the same address, and numpy records exactly that as a list
@@ -101,7 +102,7 @@ def _scalar_type(dtype:np.dtype)->Optional[str]:
     return DTYPE_MAP.get(dtype.name)
 
 
-def field_type(field_dtype:Any, backend:str)->Tuple[str, str]:
+def field_type(field_dtype:DTypeLike, backend:str)->Tuple[str, str]:
     """(C base type, array suffix) for one field: scalar, vector, nested structure, or array."""
     from ..vec_types.layout import _vector_dtype_name
 
@@ -182,7 +183,7 @@ def _class_source_file(cls:type) -> str:
     return ""
 
 
-def declared_file(dtype:Any) -> str:
+def declared_file(dtype:DTypeLike) -> str:
     """The python file the class behind this structure was declared in, or "".
 
     A structure belongs where its python class lives: that module's generated file holds
@@ -264,7 +265,7 @@ _SETTLED_NAMES: Dict[np.dtype, str] = {}
 _DECLARED_FILES: Dict[np.dtype, str] = {}
 
 
-def register_name_hint(dtype:Any, cls:type) -> None:
+def register_name_hint(dtype:DTypeLike, cls:type) -> None:
     """Spell this dtype's C structure after the python class the value came from.
 
     A structure describes a layout a hash can name, but the hash says nothing a reader
@@ -292,7 +293,7 @@ def _safe_identifier(name:str) -> str:
     return f"_{cleaned}" if cleaned and cleaned[0].isdigit() else (cleaned or "_anon")
 
 
-def register(dtype:Any) -> str:
+def register(dtype:DTypeLike) -> str:
     """Record a structure dtype and return its C type name."""
     dtype:np.dtype = np.dtype(dtype)
     name:str = struct_name(dtype)
@@ -366,7 +367,7 @@ def register_class(cls:Any) -> Optional[np.dtype]:
     return dtype
 
 
-def declared_class(dtype:Any) -> Optional[type]:
+def declared_class(dtype:DTypeLike) -> Optional[type]:
     """The `ctypes.Structure` class a registered structure dtype came from, or None.
 
     A caller's methods live on that class, and a dtype alone cannot name it -- two classes
@@ -375,14 +376,14 @@ def declared_class(dtype:Any) -> Optional[type]:
     return _DECLARED.get(np.dtype(dtype)) if isinstance(dtype, (np.dtype, type)) else None
 
 
-def declared_classes(dtype:Any) -> List[type]:
+def declared_classes(dtype:DTypeLike) -> List[type]:
     """Every class registered for this layout, in registration order."""
     if not isinstance(dtype, (np.dtype, type)):
         return []
     return list(_DECLARED_ALL.get(np.dtype(dtype), ()))
 
 
-def declared_class_carrying(dtype:Any, attribute:str) -> Optional[type]:
+def declared_class_carrying(dtype:DTypeLike, attribute:str) -> Optional[type]:
     """The registered class for this layout that defines `attribute`, or None.
 
     Two classes can share one dtype (two `Ray`s with the same two members, defined in two
@@ -448,7 +449,7 @@ def _add_subscript_access(cls:Any) -> None:
     cls.__getitem__ = __getitem__
 
 
-def is_declared_structure(dtype:Any) -> bool:
+def is_declared_structure(dtype:DTypeLike) -> bool:
     """True when a `ctypes` structure or union class produced this dtype's layout.
 
     Alignment is the evidence, not just the registry: `np.dtype(cls)` over a
