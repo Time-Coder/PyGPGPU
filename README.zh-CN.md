@@ -47,6 +47,7 @@ saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运�
 - **设备内建直接从顶层导出**: `get_global_id`、`barrier`、`atomic_add`、`dot` 等都是普通函数, 从 `pygpgpu` 直接导入即可。在 `@kernel` 函数体里, 翻译器按**它解析到的函数对象**识别(而非名字), 再映射成各后端的调用, 所以同一份函数体在 OpenCL / CUDA / HIP 和解释器后端上都能跑。
 - **多维遍历**: `np.ndindex(shape)` / `np.ndenumerate(arr)` 魔法循环(2D/3D), `enumerate(arr)` 一维索引+值快照。
 - **三层缓存**: 解析元信息 / 编译产物 / 生成源码, 全部按 mtime 自动失效, 源码不变则零重编译。
+- **用 ctypes 绑定的宿主端 CUDA 库** —— cuBLAS、cuBLASLt、cuSOLVER、cuFFT、cuSPARSE 以及 CUDA runtime, 形态与驱动一致(惰性加载的 DLL、签名表、库自己的错误信息), 其上还有一层面向 numpy 的封装(`gemm`、`axpy`、`scal`、`dot`、`rfft`、`csrmv`)。详见下文"宿主端 CUDA 库"。
 
 ## 安装
 
@@ -73,12 +74,12 @@ Python ≥ 3.7。GPU 运行时按需自备(任一即可):
 from pygpgpu import kernel, funcs, float4             # @kernel / 双面函数库 / 向量类型
 from pygpgpu import get_global_id, atomic_add        # 设备内建也是顶层普通函数
 from pygpgpu import list_devices, get_device
-from pygpgpu import climport, cuimport, hipimport    # 手写 .cl/.cu/.hip 文件的 import 钩子
+from pygpgpu import kernel_import                    # 手写 .cl/.cu/.hip 文件的 import 钩子
 ```
 
 子包路径(`pygpgpu.kernel` / `pygpgpu.vec_types` / `pygpgpu.opencl` / ...)依然可用。顶层 `pygpgpu.kernel` 指的是 `@kernel` 装饰器, 要取子模块里的东西请写 `from pygpgpu.kernel import ...`。
 
-三个 import 钩子是延迟加载的: 只有真正调用它们时才加载对应后端, 所以 `import pygpgpu` 本身不需要任何 GPU 运行时。
+`kernel_import` 的导入与安装都不需要 GPU 运行时; 合并模块里的某个 kernel 在首次调用时才加载它自己那个后端。
 
 ### @kernel 装饰器
 
@@ -272,20 +273,109 @@ __kernel void vecadd(__global const float* a, __global const float* b,
 ```
 
 ```python
-from pygpgpu import climport             # cuimport / hipimport 同理
+from pygpgpu import kernel_import
 import numpy as np
-import vecadd                          # 就像 import Python 模块
+
+kernel_import.install()
+import vecadd                          # 一个 .cl 文件 = 只有一个后端的模块
 
 a = np.random.rand(1_000_000).astype(np.float32)
 out = np.zeros_like(a)
-vecadd.vecadd(a, a, out, np.int32(len(a)))    # 自动推断 work size
-vecadd.vecadd[(1_000_192, 256)](a, a, out, np.int32(len(a)))   # 手动指定(总数, 每组)
+vecadd.vecadd(a, a, out, np.int32(len(a)))        # 自动推断 work size
+vecadd.vecadd[(3907, 256)](a, a, out, np.int32(len(a)))   # (blocks, threads)
 ```
 
 注意那个 `n` 参数: 手写 kernel 必须按真实元素个数做守卫, 因为启动的 work size 会被向上取整到
 local size 的整数倍。`get_global_size(0)` 返回的是取整后的启动尺寸、不是缓冲区长度, 所以不能拿它当边界。
 
 struct 定义自动映射为 ctypes 类型; kernel 旁自动生成 `.pyi`, IDE 补全可用。
+
+### 一个 kernel, 多个后端
+
+同名的 `.cl` / `.cu` / `.hip` 文件就是同一个模块。把 `vecops.cl`、`vecops.cu`、
+`vecops.hip` 放进一个包目录(带 `__init__.py`), 然后:
+
+```python
+from pygpgpu import kernel_import
+
+kernel_import.install()
+from kernel_import import vecops        # 存放三份源文件的包
+
+vecops.add_offset(a, b, out, offset, n)      # 默认设备, 用法与 @kernel 相同
+vecops.add_offset["cuda"](a, b, out, ...)    # 中括号选择后端
+vecops.add_offset["opencl:1"][(blocks, threads)](...)   # 设备 + work size, 顺序任意
+```
+
+三份文件如何合成一个模块:
+
+* 同名且**参数表相同**的 kernel 是同一个函数的多个后端实现 -- 中括号选择实现, 调用保持
+  kernel 自己的签名;
+* **参数表不同**则为重载 -- pyi 里每个参数表一个 `@overload`, 调用时由实参类型选定实现
+  (不带括号时按与 `@kernel` 相同的 `cuda -> hip -> opencl` 探测);
+* 只在一个文件里声明的 kernel 依然存在, 中括号指到没有实现的后端时在括号处抛 `KeyError`。
+
+合并模块同样生成 `.pyi`: 每个 kernel 一个 `class Kernel_<name>`, 每个不同参数表一个
+`__call__`, struct 取第一份声明它的文件。
+
+### 科学计算函数库
+
+设备端的数学函数和别的内建函数一样, 就是普通的名字:
+
+```python
+from pygpgpu import erf, tgamma, fast_exp, normal_cdf
+
+@kernel
+def integrate(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = erf(x[i]) * tgamma(x[i] + 1.0)
+```
+
+分三组, 区别很重要:
+
+* **两个后端都有**的函数 -- `erf`、`erfc`、`tgamma`、`lgamma`、`rint`、`remainder`、
+  `fmin`、`fmax`、`fdim`、`copysign`、`nextafter`、`ldexp`、`fract`、`sign`, 以及
+  `native_*` 一族。它们在 OpenCL、CUDA、HIP 上都能跑。
+* **只有 CUDA 有**的函数 -- 快速近似(`fast_exp`、`fast_log`、`fast_sin` ...)、正确舍入
+  形式(`exact_recip`、`exact_divide`、`exact_sqrt` ...)、特殊函数(`erf_inverse`、
+  `normal_cdf`、`reciprocal_hypot`、`sin_pi`、`cos_pi`、贝塞尔函数)以及转换
+  (`float_to_int_nearest`、`int_to_float` ...)。用到它们的 kernel 就是 **CUDA kernel**:
+  在 OpenCL 上翻译器会**指名道姓**地拒绝, 消息里写明是哪个函数没有 OpenCL 对应物,
+  而不是丢给你一句编译器的 "undeclared identifier"。
+* `mad` / `fma` 一族与向量运算 -- 这些 pygf 已经发布, 这里用的就是 pygf 自己的对象
+  (见 `pygpgpu.funcs`)。
+
+有两个名字值得提醒, 因为以设备端文档为准时, 拼写本身会骗人:
+
+* CUDA 的 `rhypotf` 是斜边的**倒数**(`1/sqrt(x²+y²)`), 所以这里叫 `reciprocal_hypot`;
+  斜边本身叫 `hypot`。
+* CUDA 的 `sinpif` 是 `sin(πx)`, **不是** sinc 函数, 所以这里叫 `sin_pi`。
+
+### 给已有的设备端函数起个名字
+
+不是内建的设备端函数 -- 你自己头文件里的 `__device__` 函数, 或者你想换个拼写的编译器
+内建 -- 可以注册:
+
+```python
+from pygpgpu import device_function
+
+@device_function(cuda="my_fast_rcp", opencl="native_recip",
+                 headers={"cuda": "myclib.h"})
+def my_fast_rcp(x: float) -> float:
+    """宿主端实现; 设备端调用注册表里指名的那个符号。"""
+    return 1.0 / x
+
+@kernel
+def use_it(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = my_fast_rcp(x[i])
+```
+
+设备端调用表里指名的符号; 头文件会被复制进缓存并写进生成的源码, 所以你不必知道缓存在哪
+(写成完整 `#include` 行的头文件则原样带进源码, 系统头文件如 `#include <cuda_fp16.h>` 需要这样)。
+某个后端没有对应符号时, 会像 CUDA-only 内建那样按名字拒绝。
+
+函数体是**宿主端**的实现 -- `python` 后端跑的就是它 -- 所以两侧必须一致, 与内建函数的
+要求完全一样。
 
 ### 类方法
 
@@ -616,6 +706,88 @@ Image(arr, filter="linear")                       # 等价写法
 
 HIP 后端拒绝图像: 它复用 CUDA 代码生成, 其中没有纹理对象类型, 且在不支持纹理的硬件上
 驱动会拒绝 `hipTexObjectCreate`。
+
+## 宿主端 CUDA 库
+
+CUDA *驱动*(`pygpgpu/cuda/driver`)是底层 API: context、stream、module、内存。CUDA *数学库*
+则是以独立 DLL 形式随它一起安装的, 负责真正的数学计算。它们用 ctypes 绑定在
+`pygpgpu/cuda/libraries` 下, 形态与驱动一致 —— 惰性加载的 DLL、每个库一张签名表, 以及
+被转换成 `RuntimeError`(带上该库自己的说明文字)的错误码:
+
+```python
+from pygpgpu.cuda.libraries import driver_for
+
+CUBLAS = driver_for("cublas")          # cuBLAS 的入口点
+CUFFT  = driver_for("cufft")           # cuFFT 的入口点
+```
+
+| 库 | 已绑定的操作 |
+|---|---|
+| **cuBLAS** | `gemm`(float32/float64)、`axpy`、`scal`、`dot`、`GemmEx`, 以及 handle 与 stream 管理 |
+| **cuBLASLt** | 通用 `matmul`(由启发式挑选算法)、矩阵布局、epilogue |
+| **cuFFT** | `plan1d`、`exec`(R2C / C2R / C2C)、销毁 plan、绑定 stream |
+| **cuSPARSE** | `csrmv`(createCsr / createDnVec / SpMV)、稠密与稀疏描述符 |
+| **cuSOLVER** | `potrf`(Cholesky)、`gesvd`(SVD)、`getrf`(LU), 以及各自的 workspace 查询 |
+| **CUDA runtime** | `cudaMalloc`、`cudaFree`、`cudaMemcpy`、`cudaMemset`、设备数量与属性 |
+
+在原始入口点之上还有一层很薄的、面向 numpy 的封装, 调用时传数组而不是设备指针:
+
+```python
+import numpy as np
+from pygpgpu.cuda_libraries import gemm, axpy, dot, rfft, csrmv
+
+a = np.random.rand(3, 4).astype(np.float32)
+b = np.random.rand(4, 2).astype(np.float32)
+
+c = gemm(a, b)                  # a @ b, 跑在 GPU 上
+d = axpy(2.0, a[0], b[0])       # 逐元素
+e = dot(a[0], b[0])             # 一个标量
+f = rfft(a[0])                  # n/2+1 个复数, 与 np.fft.rfft 一致
+g = csrmv(row_offsets, column_indices, values, x)   # 稀疏乘法
+```
+
+同样的名字也可以作为模块属性访问, 两种写法都成立:
+
+```python
+from pygpgpu import cuda_libraries
+cuda_libraries.gemm(a, b)
+
+from pygpgpu.cuda_libraries import gemm
+gemm(a, b)
+```
+
+封装层采用 numpy 的 **row-major** 布局, 返回的也是同样的布局; cuBLAS 读的是 column-major,
+这个差异在内部处理掉了, 所以 `gemm(a, b)` 就是 `a @ b`。一维的情形遵循 numpy 自己 `@` 的
+规则, 矩阵与向量相乘不需要调用方自己 reshape。
+
+**必须先有 current 的 CUDA context。** 库 handle 归属于创建它时 current 的那个 context,
+因此封装层会在没有 current context 时自行置上一个; 但如果你直接使用原始入口点, 就需要
+自己先置好:
+
+```python
+from pygpgpu import get_device
+
+device = get_device("cuda:0")
+device.default_context.make_current()      # 在第一次调用库之前
+```
+
+否则调用会以 `CUDA_ERROR_INVALID_CONTEXT` 失败, 而错误信息里会写明这一点。
+
+**这些是宿主端操作, 不是设备内建。** 一次 `gemm` 是把整个数组搬到设备上跑一次库调用;
+而 `@kernel` 的函数体是逐线程的算术。这就是为什么 `@kernel` 里不能调用
+`cuda_libraries.gemm` —— 两者是不同层次, 混用意味着每个 work item 都去启动一次库调用。
+对应的设备端版本(逐元素乘法、逐元素点积)是顶层已经导出的设备内建。
+
+这些库是**惰性加载**的: `import pygpgpu` 完全不会加载任何 CUDA 库, 每个库的 DLL 都在第一次
+真正用到它的调用时才加载。没有装 CUDA Toolkit 的机器依然可以 import 这个包, 失败会在调用
+时以加载器自己的错误暴露出来。
+
+**cuSOLVER 需要消费级显卡上并没有的 kernel。** NVIDIA 并未为每种架构都提供 cuSOLVER 的稠密
+分解 kernel, 没有这些 kernel 的卡不是在准备阶段失败, 而是在执行阶段失败: 调用返回一个失败码,
+同时 context 报告非法内存访问。在开发这个功能的机器上实测(GeForce RTX 4070 Laptop, 计算能力
+8.9, CUDA 12.6), `potrf`、`getrf`、`gesvd`、`gesvdj` 和 `syevj` 都是这样失败的,
+`compute-sanitizer` 把出错点定位在 cuSOLVER 自己的 DLL 内部。绑定本身是正确的, 测试会带着
+这个原因跳过, 而不是失败。
 
 ## 设备选择
 
