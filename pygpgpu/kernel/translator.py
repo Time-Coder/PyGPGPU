@@ -618,6 +618,37 @@ class ReturnPosition(TypedDict, total=False):
     slot: int
     slot_parameter: str
 
+# One entry of `return_site_layout`: the positions a site hands back, in return order, and
+# whether it returned a tuple (which the host unpacks rather than passes through).
+class ReturnSiteLayout(TypedDict):
+    positions: List[ReturnPosition]
+    is_tuple: bool
+
+# One host-facing rebuild entry: a `value` names the slot it reads (or, when the value
+# already lives in a parameter, the parameter itself through `reused`), and an `array`
+# names the parameter to hand back.
+class ReturnSitePosition(TypedDict, total=False):
+    kind: str
+    ordinal: int
+    slot: int
+    name: str
+    reused: str
+
+# An outer-scope name the body reads: the device type it travels as, whether the body
+# writes it (which makes it a one-element buffer), and how the host reaches it -- a
+# closure cell, the kernel's module globals, or a helper's own module (`scope`).
+class OuterVarEntry(TypedDict, total=False):
+    type: DeviceType
+    writable: bool
+    kind: str
+    scope: Optional[types.ModuleType]
+
+# An object the body creates above the loop and the host therefore builds: the device
+# type, plus the expression the host evaluates to make it.
+class HostValueEntry(TypedDict):
+    expr: str
+    type: DeviceType
+
 # A python class can give an operator a meaning of its own, and device code has to keep
 # it: `a + b` on a class that defines `__add__` is that method, exactly as `ray.at(t)` is
 # `Ray_at`. The keys are the `ast` operator class names the dispatchers already use, so one
@@ -932,7 +963,7 @@ def image_scalar(t:Any)->str:
     """The C scalar type of one image channel."""
     return t[2]
 
-def promote(t1:Any, t2:Any)->Any:
+def promote(t1:DeviceType, t2:DeviceType)->DeviceType:
     if is_ptr(t1) or is_ptr(t2):
         raise SyntaxError("cannot mix arrays with scalars in arithmetic") from None
     if is_vec(t1) or is_vec(t2):
@@ -946,7 +977,7 @@ def promote(t1:Any, t2:Any)->Any:
         return t1 if rank.index(t1) >= rank.index(t2) else t2
     return "int"
 
-def infer_ctype(value:Any)->Any:
+def infer_ctype(value:object)->DeviceType:
     """Actual call argument -> C type."""
     from ..vec_types.layout import _vector_dtype_name
     from . import structs
@@ -1670,16 +1701,16 @@ class FunctionTranslator:
         # records how the host reaches the name ("closure" through a cell, "global" through
         # func.__globals__), its device type, and whether the body declares it writable
         # (`nonlocal`/`global`) -- which decides between `T* name` + `*name` and a plain `T`.
-        self.outer_vars:Dict[str, Dict[str, Any]] = {}
+        self.outer_vars:Dict[str, OuterVarEntry] = {}
         # Values the host creates for the kernel: an assignment above the magic loop whose
         # right-hand side only builds data (np.zeros, np.full, ...) is executed by the
         # interpreter, not translated, and the object travels as a parameter (see
         # _host_created_assignment).
-        self.host_values:Dict[str, Dict[str, Any]] = {}
+        self.host_values:Dict[str, HostValueEntry] = {}
         self.return_type:Optional[Any] = None
         self.lines:List[str] = []
         self._indent:int = 1
-        self.scopes:List[Dict[str, Any]] = []
+        self.scopes:List[Dict[str, DeviceType]] = []
 
         args:List[ast.arg] = self.tree.args.args
         if self.tree.args.vararg or self.tree.args.kwarg or self.tree.args.kwonlyargs:
@@ -1708,7 +1739,7 @@ class FunctionTranslator:
         # appended before the arguments rather than after them. The slot it occupies in
         # `param_types` stays where the host packs it (after the positional arguments), so
         # the type is taken from there and the two lists keep their own orders.
-        scope:Dict[str, Any] = {}
+        scope:Dict[str, DeviceType] = {}
         if self.self_struct_members:
             struct_type:Any = (param_types[len(args)] if len(param_types) > len(args)
                                else self.self_struct_type)
@@ -1800,14 +1831,14 @@ class FunctionTranslator:
         if self.lines and self.lines[-1] != "":
             self.lines.append("")
 
-    def _lookup(self, name:str)->Any:
+    def _lookup(self, name:str)->DeviceType:
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
         # A host-created object and an outer variable are device parameters too, so a
         # type query has to see them; the magic-loop scan asks which arrays exist before
         # any statement of the body has been visited.
-        host:Optional[Dict[str, Any]] = self.host_values.get(name)
+        host:Optional[HostValueEntry] = self.host_values.get(name)
         if host is not None:
             return host["type"]
         for scope in reversed(self.scopes):
@@ -1816,7 +1847,7 @@ class FunctionTranslator:
                 if isinstance(declared, tuple) and len(declared) == 2 and declared[0] == "carried":
                     return declared
                 break
-        outer:Optional[Dict[str, Any]] = self.outer_vars.get(name)
+        outer:Optional[OuterVarEntry] = self.outer_vars.get(name)
         if outer is not None:
             # A declared outer scalar is a pointer on the device (see _visit_name).
             if outer["writable"] and not is_ptr(outer["type"]):
@@ -1824,10 +1855,10 @@ class FunctionTranslator:
             return outer["type"]
         return None
 
-    def _define(self, name:str, t:Any, node:Optional[ast.AST])->None:
+    def _define(self, name:str, t:DeviceType, node:Optional[ast.AST])->None:
         """Record a variable's type; node is optional because some declarations have no
         source node to blame in an error message."""
-        existing:Any = self._lookup(name)
+        existing:DeviceType = self._lookup(name)
         if existing is None:
             self.scopes[-1][name] = t
         elif existing != t:
@@ -1841,7 +1872,7 @@ class FunctionTranslator:
 
         Its signature carries `const`, so an alias of it cannot be mutable.
         """
-        binding:Any = self._lookup(name)
+        binding:DeviceType = self._lookup(name)
         if not (isinstance(binding, tuple) and is_ptr(binding)
                 and isinstance(binding[1], str)):
             return False
@@ -1866,14 +1897,15 @@ class FunctionTranslator:
         if base:
             self.member_writes.add(base)
             # The alias case (`q = p; q.a = ...`) writes the same buffer.
-            alias:Any = self.scopes[-1].get(base) if self.scopes else None
+            alias:Optional[DeviceType] = (self.scopes[-1].get(base)
+                                          if self.scopes else None)
             if isinstance(alias, tuple) and len(alias) == 2 and alias[0] == "alias":
                 self.member_writes.add(alias[1])
 
     def _shape_var(self, array_name:str, dim:int)->str:
         # A private array created in the work-item body has a constant shape, so its extents
         # are compile-time numbers rather than launch parameters.
-        binding:Any = self._lookup(array_name)
+        binding:DeviceType = self._lookup(array_name)
         if isinstance(binding, tuple) and len(binding) == 4 and binding[0] == "bodyarr":
             shape:Tuple[int, ...] = binding[2]
             if 0 <= dim < len(shape):
@@ -2092,7 +2124,7 @@ class FunctionTranslator:
             value:Any = self.resolve_global(name)
             if value is _UNRESOLVED:
                 continue
-            entry:Optional[Dict[str, Any]] = self._outer_var_entry(name, value, code, declared)
+            entry:Optional[OuterVarEntry] = self._outer_var_entry(name, value, code, declared)
             if entry is None:
                 continue
             # Which module's namespace the name came from. A helper imported from its own
@@ -2106,7 +2138,7 @@ class FunctionTranslator:
                 self.params.append((name, entry["type"]))
 
     def _outer_var_entry(self, name:str, value:Any, code:Any,
-                         declared:Set[str])->Optional[Dict[str, Any]]:
+                         declared:Set[str])->Optional[OuterVarEntry]:
         """The device parameter for one outer name, or None when it is not a value.
 
         A module, a class, a builtin or a helper function is not a value a parameter can
@@ -2122,7 +2154,7 @@ class FunctionTranslator:
             return None
         writable:bool = name in declared
         try:
-            device_type:Any = infer_ctype(value)
+            device_type:DeviceType = infer_ctype(value)
         except SyntaxError as error:
             if not writable:
                 # Not a name this feature handles; the normal "unknown name" path will
@@ -2200,7 +2232,7 @@ class FunctionTranslator:
             param = f"_self_{arg.attr}"
         else:
             return None
-        t:Any = self._lookup(param)
+        t:DeviceType = self._lookup(param)
         if not is_ptr(t):
             return None
         return param, t
@@ -2270,7 +2302,7 @@ class FunctionTranslator:
             param = f"_self_{arg.attr}"
         if not param:
             return None
-        holder_type:Any = self._lookup(param)
+        holder_type:DeviceType = self._lookup(param)
         # An array contributes its extents as pointer parameters; an image carries
         # its extents in its own descriptor, which the backend knows at launch. Both
         # can define the iteration domain of a magic loop.
@@ -2294,7 +2326,7 @@ class FunctionTranslator:
                 holder:Optional[str] = self._shape_holder_param(arg)
                 if holder is None:
                     return None
-                holder_type:Any = self._lookup(holder)
+                holder_type:DeviceType = self._lookup(holder)
                 if not (is_ptr(holder_type) or is_image(holder_type)):
                     return None
                 self._nd_shape_holder = holder
@@ -2355,7 +2387,7 @@ class FunctionTranslator:
         holder:Optional[str] = self._shape_holder_param(node.value)
         if holder is None:
             return None
-        holder_type:Any = self._lookup(holder)
+        holder_type:DeviceType = self._lookup(holder)
         if not (is_ptr(holder_type) or is_image(holder_type)):
             return None
         return holder, node.slice.value
@@ -2521,7 +2553,7 @@ class FunctionTranslator:
             if name not in names and name in written:
                 names.append(name)
         for name in names:
-            declared:Any = self._lookup(name)
+            declared:DeviceType = self._lookup(name)
             if declared is not None:
                 continue
             self.carried_scalars.append(name)
@@ -2664,7 +2696,7 @@ class FunctionTranslator:
             self.gid_param = param
             self._emit_nd_head(names, param)
             if form == "ndenumerate":
-                arr_t:Any = self._lookup(param)
+                arr_t:DeviceType = self._lookup(param)
                 elem_t:Any = arr_t[1]
                 self._define(value_name, elem_t, None)
                 self._emit(f"{elem_t} {value_name} = {param}[{self._nd_flat_index(names, param)}];")
@@ -2685,8 +2717,8 @@ class FunctionTranslator:
         bound:ast.expr = range_call.args[0]
 
         array_name:str = (self._shape_holder_param(bound.value) or "")
-        outer:Optional[Dict[str, Any]] = self.outer_vars.get(array_name)
-        host:Optional[Dict[str, Any]] = self.host_values.get(array_name)
+        outer:Optional[OuterVarEntry] = self.outer_vars.get(array_name)
+        host:Optional[HostValueEntry] = self.host_values.get(array_name)
         is_outer_array:bool = ((outer is not None and is_ptr(outer["type"]))
                                or (host is not None and is_ptr(host["type"])))
         if not is_outer_array and not is_ptr(self._lookup(array_name)):
@@ -2752,7 +2784,7 @@ class FunctionTranslator:
                     f"data, but it could not be evaluated on the host; build it from values "
                     f"that exist at call time (a shape, a constant, another array)",
                     value)
-            device_type:Any = infer_ctype(produced)
+            device_type:DeviceType = infer_ctype(produced)
             self.host_values[name] = {"expr": value, "type": device_type}
             # The object travels as a parameter, appended after the outer-scope values
             # (see render_kernel and PyKernel._invoke_inner for the launch order).
@@ -3134,7 +3166,7 @@ class FunctionTranslator:
         if isinstance(holder, ast.Name):
             stop:str = self._shape_var(holder.id, 0)
         elif isinstance(holder, ast.Attribute) and isinstance(holder.value, ast.Name):
-            base_t:Any = self._lookup(holder.value.id)
+            base_t:DeviceType = self._lookup(holder.value.id)
             base_element:Any = base_t[1] if is_ptr(base_t) else base_t
             dtype:Optional[np.dtype] = (structs_dtype_for(base_element)
                                         if isinstance(base_element, str) else None)
@@ -3210,7 +3242,7 @@ class FunctionTranslator:
         "double": ("double", np.float64),
     }
 
-    def _return_position(self, node:ast.expr)->Dict[str, Any]:
+    def _return_position(self, node:ast.expr)->ReturnPosition:
         """Classify one returned expression as an array position or a value position."""
         if isinstance(node, ast.Subscript):
             # A slice/element of an array is not an array: it would be a single element,
@@ -3255,7 +3287,7 @@ class FunctionTranslator:
                     "slot_parameter": node.id}
         return {"kind": "value", "type": t, "code": code}
 
-    def _return_site(self, node:ast.Return)->List[Dict[str, Any]]:
+    def _return_site(self, node:ast.Return)->List[ReturnPosition]:
         """The shape of one `return` statement, regardless of what other sites return."""
         if node.value is None:
             return []
@@ -3332,7 +3364,7 @@ class FunctionTranslator:
         # that type to tell a reused parameter from a value needing a slot of its own.
         if self.is_kernel:
             self._promote_returned_parameters(node)
-        positions:List[Dict[str, Any]] = self._return_site(node)
+        positions:List[ReturnPosition] = self._return_site(node)
         if self.after_magic_loop and any(position["kind"] == "value" for position in positions):
             # The statements after the loop run once per work item, so a value accumulated
             # there is that work item's -- unless it is read from a *carried* slot, which is
@@ -3382,7 +3414,7 @@ class FunctionTranslator:
     def _return_slot(self, index:int)->str:
         return f"_ret{index}"
 
-    def _record_return_slots(self, site:int, positions:List[Dict[str, Any]],
+    def _record_return_slots(self, site:int, positions:List[ReturnPosition],
                              node:ast.Return)->None:
         """Give each value position of this site a slot, extending the shared layout.
 
@@ -3412,10 +3444,10 @@ class FunctionTranslator:
                 return index
         return None
 
-    def _site_slots(self, site:int)->List[Tuple[int, Dict[str, Any]]]:
+    def _site_slots(self, site:int)->List[Tuple[int, ReturnPosition]]:
         """(slot, position) pairs this site stores into."""
-        positions:List[Dict[str, Any]] = self.return_sites[site]
-        pairs:List[Tuple[int, Dict[str, Any]]] = []
+        positions:List[ReturnPosition] = self.return_sites[site]
+        pairs:List[Tuple[int, ReturnPosition]] = []
         for ordinal, slot in self._site_slot_map.get(site, []):
             pairs.append((slot, positions[ordinal]))
         return pairs
@@ -3435,7 +3467,7 @@ class FunctionTranslator:
             self._error(f"cannot return a value of type {t}")
         return self._device_type(slot[0])
 
-    def return_slot_dtype(self, index:int)->Any:
+    def return_slot_dtype(self, index:int)->np.dtype[Any]:
         """The numpy dtype the host uses for one value slot.
 
         A vector slot uses the *host* layout (a 3-component vector has three components);
@@ -3445,7 +3477,7 @@ class FunctionTranslator:
         from ..vec_types.layout import _host_classes
         from . import structs
 
-        entry:Dict[str, Any] = (self.return_layout or [])[index]
+        entry:ReturnLayoutEntry = (self.return_layout or [])[index]
         if is_vec(entry["type"]):
             return _host_classes()[entry["type"]].numpy_dtype()
         structure:Any = structs.dtype_for(entry["type"]) if isinstance(entry["type"], str) else None
@@ -3468,16 +3500,16 @@ class FunctionTranslator:
         params.append(f"{qualifier}int* {self.RETURN_SITE}")
         return params
 
-    def return_site_layout(self)->List[Dict[str, Any]]:
+    def return_site_layout(self)->List[ReturnSiteLayout]:
         """What the host needs to rebuild the result of each return site.
 
         Per site: the positions in return order, each "value" with its slot index or
         "array" with the parameter name to hand back, plus whether the site returned a
         tuple. A site with no positions is a bare `return`, i.e. None.
         """
-        layout:List[Dict[str, Any]] = []
+        layout:List[ReturnSiteLayout] = []
         for site, positions in enumerate(self.return_sites):
-            entries:List[Dict[str, Any]] = [
+            entries:List[ReturnSitePosition] = [
                 {"kind": "value", "ordinal": ordinal, "slot": slot,
                  # A negative slot means the value already lives in the parameter it
                  # travelled in, so the host reads it from the launch arguments.
@@ -3693,7 +3725,7 @@ class FunctionTranslator:
             from . import structs as _structs_module  # noqa: PLC0415
 
             member:str = self.self_struct_members.get(target.attr, target.attr)
-            receiver_t:Any = self._lookup(self.self_param)
+            receiver_t:DeviceType = self._lookup(self.self_param)
             receiver_dtype:Optional[np.dtype] = (
                 _structs_module.dtype_for(receiver_t[1])
                 if isinstance(receiver_t, tuple) and is_ptr(receiver_t) else None)
@@ -3751,7 +3783,7 @@ class FunctionTranslator:
                     self._emit(f"{code}[{index_code}] = {tmp};")
                     continue
                 name:str = target_item.id
-                existing:Any = self._lookup(name)
+                existing:DeviceType = self._lookup(name)
                 if existing is not None and is_ptr(existing):
                     self._error(f"cannot assign to array parameter '{name}'", node)
                 is_new:bool = (existing is None)
@@ -3778,7 +3810,7 @@ class FunctionTranslator:
             if outer is not None:
                 self._emit(f"{target.id}[0] = {code};")
                 return
-            existing:Any = self._lookup(target.id)
+            existing:DeviceType = self._lookup(target.id)
             if isinstance(existing, tuple) and len(existing) == 2 and existing[0] == "carried":
                 # One location for the whole launch: store through the pointer, exactly as
                 # the outer-scalar path does.
@@ -3977,7 +4009,7 @@ class FunctionTranslator:
             node = node.value
         if not isinstance(node, ast.Name):
             return False
-        t:Any = self._lookup(node.id)
+        t:DeviceType = self._lookup(node.id)
         return isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"
 
     def _builtin_call_name(self, node:ast.expr)->Optional[str]:
@@ -4661,12 +4693,12 @@ class FunctionTranslator:
         else:
             self._error(f"unsupported operator: {name}", node)
 
-    def _lookup_type_of_index(self, node:ast.AugAssign)->Any:
+    def _lookup_type_of_index(self, node:ast.AugAssign)->str:
         return "int"
 
     def _visit_target(self, target:ast.expr)->Translated:
         if isinstance(target, ast.Name):
-            outer:Optional[Dict[str, Any]] = self.outer_vars.get(target.id)
+            outer:Optional[OuterVarEntry] = self.outer_vars.get(target.id)
             if outer is not None:
                 if not outer["writable"]:
                     self._error(
@@ -4678,7 +4710,7 @@ class FunctionTranslator:
                 # by the static read/write analysis, which decides whether the value is
                 # read back to the host.
                 return f"{target.id}[0]", outer["type"]
-            t:Any = self._lookup(target.id)
+            t:DeviceType = self._lookup(target.id)
             if t is None:
                 self._error(f"variable '{target.id}' used before assignment", target)
             if is_ptr(t):
@@ -4748,7 +4780,7 @@ class FunctionTranslator:
             return False
         if value_t == "bool":
             return False
-        base_t:Any = self._lookup(target.value.id)
+        base_t:DeviceType = self._lookup(target.value.id)
         struct_t:Any = base_t[1] if is_ptr(base_t) else base_t
         dtype:Any = structs.dtype_for(struct_t) if isinstance(struct_t, str) else None
         if dtype is None or target.attr not in (dtype.names or ()):
@@ -4804,7 +4836,7 @@ class FunctionTranslator:
         """The shape a `zeros_per_group` slice was declared with, or None if it is not one."""
         if not isinstance(node, ast.Subscript) or not isinstance(node.value, ast.Name):
             return None
-        t:Any = self._lookup(node.value.id)
+        t:DeviceType = self._lookup(node.value.id)
         if not (isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"):
             return None
         if not self._is_block_id_expression(node.slice):
@@ -4950,7 +4982,7 @@ class FunctionTranslator:
         self._error(f"unsupported constant: {value!r}", node)
 
     def _visit_name(self, node:ast.Name)->Translated:
-        host:Optional[Dict[str, Any]] = self.host_values.get(node.id)
+        host:Optional[HostValueEntry] = self.host_values.get(node.id)
         if host is not None:
             # The host created this object; on the device it is just the parameter that
             # carries it (see _host_created_assignment).
@@ -4962,7 +4994,7 @@ class FunctionTranslator:
             if outer["writable"]:
                 return f"(*{node.id})", outer["type"]
             return node.id, outer["type"]
-        t:Any = self._lookup(node.id)
+        t:DeviceType = self._lookup(node.id)
         if isinstance(t, tuple) and len(t) == 2 and t[0] == "carried":
             # One location for the whole launch. A subscript rather than (*name) for the
             # same reason an outer scalar uses one: the read/write analysis only recognizes
@@ -5149,7 +5181,7 @@ class FunctionTranslator:
 
         return None
 
-    def _magic_receiver_type(self, t:Any)->Any:
+    def _magic_receiver_type(self, t:DeviceType)->DeviceType:
         """The type a magic method's receiver parameter takes.
 
         A structure argument travels as a pointer, so a class method's receiver is a
@@ -5558,7 +5590,7 @@ class FunctionTranslator:
         value:ast.expr = node.value
         if isinstance(value, ast.Attribute) and value.attr == "shape":
             array_name:str = self._array_name(value.value)
-            t:Any = self._lookup(array_name)
+            t:DeviceType = self._lookup(array_name)
             # A private array created in the body has a constant shape, so `.shape[d]` is a
             # compile-time number just like for a parameter (see _shape_var).
             private:bool = (isinstance(t, tuple) and len(t) == 4 and t[0] == "bodyarr")
@@ -5585,7 +5617,7 @@ class FunctionTranslator:
             # for. A shared buffer (`bins[blockIdx]`) and an array are indexed by the paths
             # below, and visiting their base here would raise the shared-buffer refusal
             # before that path could handle the outer subscript.
-            binding:Any = self._lookup(node.value.id)
+            binding:DeviceType = self._lookup(node.value.id)
             # A structure travels as a pointer too, so `is_ptr` alone would call it an
             # array and skip the `__getitem__` its class may define.
             is_struct_ptr:bool = (isinstance(binding, tuple) and is_ptr(binding)
@@ -5702,7 +5734,7 @@ class FunctionTranslator:
             # `[j]` is visited, so that subscript indexes an array and is not a group
             # selection.
             return None
-        t:Any = self._lookup(node.value.id)
+        t:DeviceType = self._lookup(node.value.id)
         if not (isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"):
             return None
         ctype, c_name, shape = t[1], t[2], t[4]
@@ -5993,7 +6025,7 @@ class FunctionTranslator:
                 # fields of that pointer.
                 from . import structs as _structs_module  # noqa: PLC0415
 
-                pointer_t:Any = self._lookup(self.self_param)
+                pointer_t:DeviceType = self._lookup(self.self_param)
                 if isinstance(pointer_t, tuple) and is_ptr(pointer_t):
                     pointer_dtype:Optional[np.dtype] = _structs_module.dtype_for(
                         pointer_t[1])
@@ -6024,7 +6056,7 @@ class FunctionTranslator:
                 # (`def hit(self, ...)` called with a Scene) is a structure pointer with no
                 # field set: read its members through the pointer, like any other
                 # structure parameter.
-                receiver_t:Any = self._lookup(self.self_param)
+                receiver_t:DeviceType = self._lookup(self.self_param)
                 if isinstance(receiver_t, tuple) and is_ptr(receiver_t):
                     from . import structs as _structs_module  # noqa: PLC0415
 
@@ -6270,7 +6302,7 @@ class FunctionTranslator:
             arg_codes:List[str] = [c for c, _ in args]
             # `v(args)` on a structure value is `v.__call__(args)`: the callee is a value,
             # not a function, and a class that defines `__call__` gives it a meaning.
-            holder:Any = self._lookup(name)
+            holder:DeviceType = self._lookup(name)
             if holder is not None and self._is_structure_operand(holder):
                 owner:Optional[Tuple[type, Any]] = self._magic_owner(holder, CALL_METHOD)
                 if owner is not None:
@@ -6289,7 +6321,7 @@ class FunctionTranslator:
                     CONVERSION_METHODS[name], arg_codes[0], args[0][1], node)
                 if converted is not None:
                     return converted
-                t:Any = {"int": "int", "float": "float", "bool": "bool"}[name]
+                t:DeviceType = {"int": "int", "float": "float", "bool": "bool"}[name]
                 return f"(({t})({arg_codes[0]}))", t
 
             if name in ("abs", "min", "max", "round", "pow"):
@@ -6354,7 +6386,7 @@ class FunctionTranslator:
                 # methods through `self.`. The receiver's dtype names that class.
                 from . import structs as _structs_module  # noqa: PLC0415
 
-                receiver_t:Any = self._lookup(self.self_param)
+                receiver_t:DeviceType = self._lookup(self.self_param)
                 receiver_owner:Optional[type] = None
                 if isinstance(receiver_t, tuple) and is_ptr(receiver_t):
                     dtype:Optional[np.dtype] = _structs_module.dtype_for(receiver_t[1])
@@ -6671,7 +6703,7 @@ class FunctionTranslator:
             # `len(bag.items)` on a member array: the argument spelling differs but the
             # length is the same compile-time shape variable, keyed on the base's name.
             if isinstance(holder, ast.Attribute) and isinstance(holder.value, ast.Name):
-                base_t:Any = self._lookup(holder.value.id)
+                base_t:DeviceType = self._lookup(holder.value.id)
                 element_t:Any = base_t[1] if is_ptr(base_t) else base_t
                 dtype:Optional[np.dtype] = (structs_dtype_for(element_t)
                                             if isinstance(element_t, str) else None)

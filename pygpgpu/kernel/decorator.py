@@ -414,7 +414,7 @@ def get_device(selector:str)->Any:
 
 
 def _bind_arguments(func:Callable, args:Tuple[Any, ...],
-                    kwargs:Dict[str, Any],
+                    kwargs:Dict[str, object],
                     skip_first:bool=False)->Tuple[Any, ...]:
     """Turn a call into the positional tuple the launch path expects.
 
@@ -476,7 +476,7 @@ def _bind_arguments(func:Callable, args:Tuple[Any, ...],
 
 
 def _bound_arguments_for_call(func:Callable, args:Tuple[Any, ...],
-                              kwargs:Dict[str, Any],
+                              kwargs:Dict[str, object],
                               skip_first:bool=False)->Tuple[Any, ...]:
     """``_bind_arguments`` as the entry points call it (see _native_argument_errors)."""
     return _bind_arguments(func, args, kwargs, skip_first)
@@ -589,7 +589,7 @@ def _signature_stub(signature:inspect.Signature, func:Callable)->Callable:
     body:str = ("from __future__ import annotations\n"
                 f"def _signature_stub{source_signature}:\n"
                 f"    return None\n")
-    namespace:Dict[str, Any] = {"__name__": "pygpgpu.kernel._signature_stub"}
+    namespace:Dict[str, object] = {"__name__": "pygpgpu.kernel._signature_stub"}
     exec(compile(body, "<kernel signature>", "exec"), namespace)  # noqa: S102 - a builder, not a container
     stub = namespace["_signature_stub"]
     # CPython prints the qualified name in its message, so an error reads
@@ -664,7 +664,7 @@ def _check_annotated_argument(func:Callable, name:str, value:Any, qualname:str) 
 
 def _bind_and_reject(func:Callable, signature:inspect.Signature,
                      stub:Callable, args:Tuple[Any, ...],
-                     kwargs:Dict[str, Any], skip_first:bool)->inspect.BoundArguments:
+                     kwargs:Dict[str, object], skip_first:bool)->inspect.BoundArguments:
     """Let CPython bind the call, re-raising its TypeError from the caller's own frame.
 
     Native python reports a bad call with one frame -- the call site -- and the traceback
@@ -802,7 +802,7 @@ def _body_frame(func:Callable, error:BaseException)->Optional[TracebackType]:
                   + f"def {func_name}():\n"
                   + padding + f"'{_FRAME_MARKER}'\n"
                   + padding + "raise _PYGPGPU_FRAME_EXCEPTION\n")
-    namespace:Dict[str, Any] = {"_PYGPGPU_FRAME_EXCEPTION": error}
+    namespace:Dict[str, object] = {"_PYGPGPU_FRAME_EXCEPTION": error}
     try:
         exec(compile(source, filename, "exec"), namespace)  # noqa: S102 - a frame stand-in
         frame_func:Any = namespace[func_name]
@@ -902,7 +902,7 @@ class _KernelCall(_KernelBase[_P]):
             instance, call_args, self._backend, self._device, self._global_size, self._local_size)
 
     def _launch(self, launch:str, args:Tuple[Any, ...],
-                kwargs:Optional[Dict[str, Any]]=None)->Any:
+                kwargs:Optional[Dict[str, object]]=None)->Any:
         """Shared body of the three launch styles, honouring the bracket selectors."""
         instance:Any = self._instance
         if self._kernel._is_method and instance is None:
@@ -1433,8 +1433,8 @@ class PyKernel(_KernelBase[_P]):
         # assigned, the way consecutive statements of a function body do.
         gap_namespaces:List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         for _ in (launch_meta.get("phase_gaps") or []):
-            region_globals:Dict[str, Any] = dict(self.raw_func.__globals__)
-            region_locals:Dict[str, Any] = {}
+            region_globals:Dict[str, object] = dict(self.raw_func.__globals__)
+            region_locals:Dict[str, object] = {}
             for name, value in zip(_positional_argument_names(self.raw_func), args):
                 region_locals[name] = value
             receiver:str = _receiver_name(self.raw_func)

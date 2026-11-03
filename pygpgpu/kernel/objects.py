@@ -92,14 +92,14 @@ class Scan:
         self.values:Dict[str, object] = {}
         self.members:Dict[str, List[str]] = {}
         self.methods:Dict[str, List[Tuple[str, Any]]] = {}
-        self.lists:Dict[str, List[Any]] = {}
+        self.lists:Dict[str, List[type]] = {}
         self.written:List[str] = []
         # The values the body builds itself and hands around, keyed by its own local name.
         self.constructed:Dict[str, Any] = {}
         self.visited:set = set()
         # Every function the walk reached: their bodies may construct a class too, and each
         # of those constructions needs a structure the translator can hand the call.
-        self.functions_reached:List[Any] = []
+        self.functions_reached:List["ast.Call"] = []
 
     def add_path(self, path:str, value:Any)->None:
         self.classes.setdefault(path, type(value))
@@ -107,7 +107,7 @@ class Scan:
         self.members.setdefault(path, [])
         self.methods.setdefault(path, [])
 
-    def add_list(self, path:str, items:List[Any])->None:
+    def add_list(self, path:str, items:List[type])->None:
         """A path that is a list of objects: element values, one class among them."""
         if not items:
             raise SyntaxError(f"'{path}' is an empty list, so no element structure can be "
