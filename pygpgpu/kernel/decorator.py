@@ -2260,6 +2260,21 @@ class PyKernel(_KernelBase[_P]):
             include_lines = quaternion_header.include_line(
                 tuple(sorted(quaternion_needs)), backend, self._cache_dir(backend))
 
+        # A registered device-side library function may need headers the compilation does
+        # not have yet. A header the user ships as a *path* is copied into the cache's
+        # include folder and included by name; a header given as a full `#include` line
+        # (a system header, say) is carried into the generated source verbatim.
+        library_header_lines:List[str] = []
+        if translator.device_library_headers:
+            from .device_library import include_lines_for
+
+            library_header_lines = include_lines_for(
+                backend, translator.device_library_headers, self._cache_dir(backend))
+        if library_header_lines:
+            library_includes:str = "\n".join(library_header_lines)
+            include_lines = (f"{include_lines}\n{library_includes}" if include_lines
+                             else library_includes)
+
         # Every top-level definition is separated by one blank line: helper from helper,
         # helper from kernel. A trailing blank on each piece makes the join produce exactly
         # one, and the final trim drops the one after the last definition.

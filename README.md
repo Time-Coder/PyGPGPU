@@ -47,6 +47,7 @@ No C code to write, no build system to configure; the first call translates, com
 - **Device builtins, exported at the top level**: `get_global_id`, `barrier`, `atomic_add`, `dot`, ... are plain functions imported from `pygpgpu`. Inside a `@kernel` body the translator recognizes each one by the object it resolves to and maps it to the call of every backend, so the same kernel body runs on OpenCL, CUDA, HIP and in the interpreter.
 - **Multi-dimensional iteration**: `np.ndindex(shape)` / `np.ndenumerate(arr)` magic loops (2D/3D), `enumerate(arr)` for a 1D index plus value snapshot.
 - **Three cache layers**: parsed metadata / compiled artifacts / generated sources, all invalidated by mtime — unchanged sources mean zero recompilation.
+- **Host-side CUDA libraries bound with ctypes** — cuBLAS, cuBLASLt, cuSOLVER, cuFFT, cuSPARSE and the CUDA runtime, in the same shape as the driver (lazy DLL, signature table, the library's own error messages), with a numpy-friendly layer over them (`gemm`, `axpy`, `scal`, `dot`, `rfft`, `csrmv`). See "Host-side CUDA libraries" below.
 
 ## Installation
 
@@ -72,12 +73,12 @@ Every commonly used API is importable straight from the `pygpgpu` top level — 
 ```python
 from pygpgpu import kernel, funcs, float4             # @kernel / dual-sided funcs / vector types
 from pygpgpu import list_devices, get_device
-from pygpgpu import climport, cuimport, hipimport    # import hooks for handwritten .cl/.cu/.hip files
+from pygpgpu import kernel_import                    # the import hook for handwritten .cl/.cu/.hip files
 ```
 
 The submodule paths (`pygpgpu.kernel` / `pygpgpu.vec_types` / `pygpgpu.opencl` / ...) still work. Note that top-level `pygpgpu.kernel` is the `@kernel` decorator; to reach things inside the submodule write `from pygpgpu.kernel import ...`.
 
-The three import hooks load lazily: the corresponding backend is only loaded when you actually use the hook, so `import pygpgpu` itself needs no GPU runtime at all.
+`kernel_import` needs no GPU runtime to be imported or installed, and a merged kernel loads only its own backend's runtime when it is first called.
 
 ### The @kernel decorator
 
@@ -273,14 +274,16 @@ __kernel void vecadd(__global const float* a, __global const float* b,
 ```
 
 ```python
-from pygpgpu import climport             # cuimport / hipimport work the same way
+from pygpgpu import kernel_import
 import numpy as np
-import vecadd                          # just like importing a Python module
+
+kernel_import.install()
+import vecadd                          # one .cl file = a module with one backend
 
 a = np.random.rand(1_000_000).astype(np.float32)
 out = np.zeros_like(a)
-vecadd.vecadd(a, a, out, np.int32(len(a)))    # work size inferred
-vecadd.vecadd[(1_000_192, 256)](a, a, out, np.int32(len(a)))   # explicit (total, per group)
+vecadd.vecadd(a, a, out, np.int32(len(a)))        # work size inferred
+vecadd.vecadd[(3907, 256)](a, a, out, np.int32(len(a)))   # (blocks, threads)
 ```
 
 Note the `n` argument: a handwritten kernel must clamp against the real element count, because the
@@ -288,6 +291,101 @@ launch size is rounded up to a multiple of the local size. `get_global_size(0)` 
 size, not the buffer length, so it is not a usable bound.
 
 Struct definitions map to ctypes types; a `.pyi` stub is generated next to the kernel so IDE completion works.
+
+### One kernel, several backends
+
+Same-named `.cl` / `.cu` / `.hip` files are ONE module. Put `vecops.cl`, `vecops.cu` and
+`vecops.hip` in a package directory (with an `__init__.py`), then:
+
+```python
+from pygpgpu import kernel_import
+
+kernel_import.install()
+from kernel_import import vecops        # the package that holds the three sources
+
+vecops.add_offset(a, b, out, offset, n)      # default device, like a @kernel call
+vecops.add_offset["cuda"](a, b, out, ...)    # a bracket names the backend
+vecops.add_offset["opencl:1"][(blocks, threads)](...)   # device + work size, either order
+```
+
+What makes one module out of three files:
+
+* a kernel declared with the **same parameter list** in several files is one function with one
+  implementation per backend -- the bracket picks the implementation, the call keeps the kernel's
+  own signature;
+* declared with **different parameter lists** it is a set of overloads -- the stub declares one
+  `@overload` per list, and the argument types pick the implementation at call time (a bare call
+  walks the same `cuda -> hip -> opencl` probe a `@kernel` uses);
+* declared in only one file it still exists, and a bracket naming a backend without an
+  implementation raises `KeyError` at the bracket.
+
+A `.pyi` stub is generated for the merged module: one `class Kernel_<name>` per kernel, one
+`__call__` per distinct parameter list, and the structs from the first file that declares each.
+
+### The scientific-computing vocabulary
+
+The device-side math functions are plain names, like every other builtin:
+
+```python
+from pygpgpu import erf, tgamma, fast_exp, normal_cdf
+
+@kernel
+def integrate(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = erf(x[i]) * tgamma(x[i] + 1.0)
+```
+
+Three groups, and the difference matters:
+
+* the functions **both** backends have -- `erf`, `erfc`, `tgamma`, `lgamma`, `rint`,
+  `remainder`, `fmin`, `fmax`, `fdim`, `copysign`, `nextafter`, `ldexp`, `fract`, `sign`,
+  and the `native_*` family. These run on OpenCL, CUDA and HIP alike.
+* the functions **only CUDA has** -- the fast approximations (`fast_exp`, `fast_log`,
+  `fast_sin`, ...), the correctly-rounded forms (`exact_recip`, `exact_divide`,
+  `exact_sqrt`, ...), the special functions (`erf_inverse`, `normal_cdf`,
+  `reciprocal_hypot`, `sin_pi`, `cos_pi`, the Bessel functions) and the conversions
+  (`float_to_int_nearest`, `int_to_float`, ...). A kernel that uses one of these is a
+  **CUDA kernel**: on OpenCL the translator refuses it *by name*, so the message says
+  which function has no OpenCL counterpart rather than leaving you with an
+  "undeclared identifier" from the compiler.
+* the `mad` / `fma` family and the vector operations, which pygf already publishes and
+  which are pygf's own objects here (see `pygpgpu.funcs`).
+
+Two names are worth a warning, because the device's documentation is the authority and
+the spelling does not tell you:
+
+* CUDA's `rhypotf` is the **reciprocal** of the hypotenuse (`1/sqrt(x²+y²)`), so the name
+  here is `reciprocal_hypot`; the plain hypotenuse is `hypot`.
+* CUDA's `sinpif` is `sin(πx)`, **not** the sinc function -- so the name here is `sin_pi`.
+
+### Naming a device function that already exists
+
+A device function that is not one of the builtins -- a `__device__` function in a header
+you ship, or a compiler intrinsic with a spelling of your own -- is registered:
+
+```python
+from pygpgpu import device_function
+
+@device_function(cuda="my_fast_rcp", opencl="native_recip",
+                 headers={"cuda": "myclib.h"})
+def my_fast_rcp(x: float) -> float:
+    """The host's implementation; the device gets the symbol the registry names."""
+    return 1.0 / x
+
+@kernel
+def use_it(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = my_fast_rcp(x[i])
+```
+
+The device calls the symbol the table names; the header is copied into the cache and
+included in the generated source, so you do not have to know where the cache is (a header
+given as a full `#include` line is carried into the source verbatim instead, which is what
+a system header such as `#include <cuda_fp16.h>` needs). A backend with no symbol for the
+function is refused by name, the same way the CUDA-only builtins are.
+
+The body is the **host's** implementation -- the `python` backend runs it -- so the two
+sides have to agree, exactly as they do for the builtins.
 
 ### Class methods
 
@@ -640,6 +738,97 @@ three, so a kernel that needs wrap or mirror can run there.
 The HIP backend refuses images: it reuses CUDA code generation, which has no texture
 object type, and the driver rejects `hipTexObjectCreate` on hardware without texture
 support.
+
+## Host-side CUDA libraries
+
+The CUDA *driver* (`pygpgpu/cuda/driver`) is the low-level API: contexts, streams,
+modules, memory. The CUDA *math libraries* ship as separate DLLs next to it and do
+the actual mathematics. They are bound with ctypes under `pygpgpu/cuda/libraries`, in
+the same shape as the driver — a lazily loaded DLL, a signature table per library, and
+an error code turned into a `RuntimeError` carrying the library's own message:
+
+```python
+from pygpgpu.cuda.libraries import driver_for
+
+CUBLAS = driver_for("cublas")          # the cuBLAS entry points
+CUFFT  = driver_for("cufft")           # the cuFFT entry points
+```
+
+| Library | Bound operations |
+|---|---|
+| **cuBLAS** | `gemm` (float32/float64), `axpy`, `scal`, `dot`, `GemmEx`, handle and stream management |
+| **cuBLASLt** | the generic `matmul` with a heuristically chosen algorithm, matrix layouts, epilogues |
+| **cuFFT** | `plan1d`, `exec` (R2C / C2R / C2C), plan destruction, stream binding |
+| **cuSPARSE** | `csrmv` (createCsr / createDnVec / SpMV), dense and sparse descriptors |
+| **cuSOLVER** | `potrf` (Cholesky), `gesvd` (SVD), `getrf` (LU), with their workspace queries |
+| **CUDA runtime** | `cudaMalloc`, `cudaFree`, `cudaMemcpy`, `cudaMemset`, the device count and properties |
+
+A thin, numpy-friendly layer sits on top of the raw entry points, so a call takes
+arrays rather than device pointers:
+
+```python
+import numpy as np
+from pygpgpu.cuda_libraries import gemm, axpy, dot, rfft, csrmv
+
+a = np.random.rand(3, 4).astype(np.float32)
+b = np.random.rand(4, 2).astype(np.float32)
+
+c = gemm(a, b)                  # a @ b, on the GPU
+d = axpy(2.0, a[0], b[0])       # elementwise
+e = dot(a[0], b[0])             # a scalar
+f = rfft(a[0])                  # n/2+1 complex numbers, like np.fft.rfft
+g = csrmv(row_offsets, column_indices, values, x)   # a sparse product
+```
+
+The same names are reachable as attributes of the module, so both spellings work:
+
+```python
+from pygpgpu import cuda_libraries
+cuda_libraries.gemm(a, b)
+
+from pygpgpu.cuda_libraries import gemm
+gemm(a, b)
+```
+
+The wrappers take numpy's **row-major** layout and return the same layout; cuBLAS
+reads column-major, and the difference is handled inside, so `gemm(a, b)` is just
+`a @ b`. The 1-D cases follow numpy's own rules for `@`, so a matrix and a vector
+multiply without the caller reshaping anything.
+
+**A CUDA context has to be current.** A library handle belongs to the context that
+was current when it was created, so the wrappers make one current if none is — but
+if you use the raw entry points, make one current yourself first:
+
+```python
+from pygpgpu import get_device
+
+device = get_device("cuda:0")
+device.default_context.make_current()      # before the first library call
+```
+
+Without it the call fails with `CUDA_ERROR_INVALID_CONTEXT`, and the message says
+so.
+
+**These are host-side operations, not device builtins.** A `gemm` moves whole arrays
+to the device and runs one library call; a `@kernel` body is per-thread arithmetic.
+That is why a `@kernel` cannot call `cuda_libraries.gemm` — the two are different
+layers, and mixing them would mean a kernel launching a library call per work item.
+The device-side counterparts (a per-element multiply, a per-element dot) are the
+device builtins the top level already exports.
+
+The libraries are **loaded lazily**: `import pygpgpu` loads no CUDA library at all,
+and each library's DLL is loaded on the first call that needs it. A machine without
+the CUDA toolkit still imports the package, and the failure surfaces at the call with
+the loader's own error.
+
+**cuSOLVER needs kernels the consumer cards do not have.** NVIDIA does not ship
+cuSOLVER's dense factorization kernels for every architecture, and a card without
+them fails at execution rather than at setup: the call returns a failure code and the
+context reports an illegal memory access. Measured on the machine this was developed
+on (an RTX 4070 Laptop, compute capability 8.9, CUDA 12.6), `potrf`, `getrf`,
+`gesvd`, `gesvdj` and `syevj` all fail that way, with `compute-sanitizer` putting the
+fault inside cuSOLVER's own DLL. The bindings are correct and the test skips with
+that reason instead of failing.
 
 ## Device selection
 

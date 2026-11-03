@@ -288,11 +288,18 @@ class Kernel_{kernel_name}(KernelWrapper):
         return self._kernel_infos
 
     def _preprocess(self, file_name:str, includes:List[str], defines:Dict[str, Any]):
+        # The source's own directory is on the include path: a `#include "..."` in a
+        # generated source names a file beside it (the package's own header lives in the
+        # cache's `include/` folder, and a user's header is copied there too).
+        search_paths:List[str] = list(includes) if includes else []
+        source_directory:str = os.path.dirname(os.path.abspath(file_name))
+        if source_directory not in search_paths:
+            search_paths.append(source_directory)
         (
             self._clean_code,
             self._line_map,
             self._related_files
-        ) = CPreprocessor.macros_expand_file(file_name, includes, defines)
+        ) = CPreprocessor.macros_expand_file(file_name, search_paths, defines)
         self._struct_infos.clear()
         self._struct_types.clear()
         self._kernel_infos.clear()

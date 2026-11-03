@@ -15,21 +15,23 @@ def map_test1(a: NDArray) -> NDArray:
     return out
 
 @kernel
-def map_test2(a: NDArray, out: NDArray) -> NDArray:
+def map_test2(a: NDArray, out: NDArray) -> None:
     i = threadIdx.x
     out[i] = a[i] + 10
 
 
-SIZE = 4
-a = np.arange(SIZE)
-out_spec = map_spec(a)
+if __name__ == "__main__":
+    SIZE = 4
+    a = np.arange(SIZE)
 
-out1 = map_test1[1, SIZE](a)
+    out_spec = map_spec(a)
 
-print()
+    out1 = map_test1[1, SIZE](a)
 
-out2 = np.zeros_like(a)
-map_test2[1, SIZE](a, out2)
+    out2 = np.zeros_like(a)
+    map_test2[1, SIZE](a, out2)
 
-assert np.all(out1 == out_spec)
-assert np.all(out2 == out_spec)
+    print(out1, out2, out_spec)
+
+    assert np.all(out1 == out_spec)
+    assert np.all(out2 == out_spec)

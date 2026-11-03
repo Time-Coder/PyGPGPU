@@ -15,9 +15,12 @@ from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple
 import numpy as np
 
 from .builtin_registry import builtin_name_of
+from .device_library import library_function_name, library_functions
 from .structs import dtype_for as structs_dtype_for, member_types as structs_member_types
 from .device_builtins import (
     ATOMIC_BUILTINS,
+    CUDA_ONLY_BUILTINS,
+    CUDA_ONLY_CONVERSIONS,
     GENERIC_BUILTINS,
     INDEX_BUILTINS,
     INDEX_VECTOR_AXES_CUDA,
@@ -25,6 +28,8 @@ from .device_builtins import (
     INDEX_VECTOR_BUILTINS,
     INDEX_VECTOR_OPENCL,
     MATH_BUILTINS,
+    SHARED_MATH_BUILTINS,
+    SHARED_MATH_TEMPLATES,
     emit_atomic,
     emit_barrier,
     emit_index,
@@ -125,7 +130,11 @@ def _normalize_ast_legacy_nodes(tree:ast.AST)->ast.AST:
         return _copy_ast(tree, ast.Constant, {"value": Ellipsis, "kind": None})
     for _field, _value in ast.iter_fields(tree):
         if isinstance(_value, list):
-            _value[:] = [_normalize_ast_legacy_nodes(v) for v in _value]
+            # A field list can hold plain strings as well as nodes (`Global.names` is
+            # `list[str]`), and only nodes can be rewritten -- recursing into a string
+            # made `ast.iter_fields` fail with "'str' object has no attribute '_fields'".
+            _value[:] = [_normalize_ast_legacy_nodes(v) if isinstance(v, ast.AST) else v
+                         for v in _value]
         elif isinstance(_value, ast.AST):
             setattr(tree, _field, _normalize_ast_legacy_nodes(_value))
     return tree
@@ -1551,6 +1560,10 @@ class FunctionTranslator:
         # The quaternion blocks a generated source needs, as the `QUAT_NEED_*` macro names. One
         # header serves both widths; only the blocks in use have to be compiled.
         self.quaternion_needs:Set[str] = set()
+        # The headers a registered device-side library function asked for: what the registry
+        # spells for them (a path, or a full `#include` line). The compile step turns them
+        # into the include lines the generated source carries.
+        self.device_library_headers:List[str] = []
         # The array whose whole shape a `np.ndindex(arr.shape)` loop iterates, when that is
         # how the domain was spelled: the launch checks its rank against the loop's names.
         self.nd_whole_shape_param:str = ""
@@ -2184,9 +2197,6 @@ class FunctionTranslator:
         if form == "ndindex":
             explicit:Optional[List[Tuple[str, int]]] = self._ndindex_extents(iter_node)
             if explicit is None:
-                import sys as _sys
-                print(f"DBG ndindex extents None: members={self.self_struct_members} "
-                      f"attr_types={list(self.self_attr_types)}", file=_sys.stdout)
                 return None
             self._nd_loop_extents = explicit or None
             # A literal-only domain (np.ndindex(2, 3)) names no array, which is valid: the
@@ -3934,6 +3944,59 @@ class FunctionTranslator:
         if isinstance(callee, ast.Name):
             return builtin_name_of(self.resolve_global(callee.id))
         return None
+
+    def _library_call_name(self, node:ast.expr)->Optional[str]:
+        """The registered device function this call invokes, or None.
+
+        The same identity rule as the builtins: the callee is resolved the way python
+        would resolve it and the resulting object is looked up in the registry, so a
+        user's own function that happens to share a name is not mistaken for the
+        registered one.
+        """
+        if not isinstance(node, ast.Call):
+            return None
+        callee:ast.expr = node.func
+        if isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
+            owner:Any = self.resolve_global(callee.value.id)
+            if owner is None:
+                return None
+            return library_function_name(getattr(owner, callee.attr, None))
+        if isinstance(callee, ast.Name):
+            return library_function_name(self.resolve_global(callee.id))
+        return None
+
+    def _emit_library_function(self, name:str, args:List[Tuple[str, Any]],
+                               node:ast.Call)->Tuple[str, Any]:
+        """A call to a registered device-side library function.
+
+        The device gets the symbol the registry names for this backend; the headers the
+        registry asks for are recorded, so the compilation includes them.
+        """
+        entry:Any = library_functions().get(name)
+        symbol:Optional[str] = (entry.symbols.get(self.backend) if entry is not None else None)
+        if symbol is None:
+            available:str = (", ".join(sorted(entry.symbols)) if entry is not None else "")
+            self._error(
+                f"gpu.{name}() is a registered device function that the {self.backend} "
+                f"backend has no implementation for"
+                + (f" (it has: {available})" if available else ""), node)
+        # The headers the function needs: they go into the generated source, so the symbol
+        # the registry names is actually declared.
+        for header in entry.headers.get(self.backend, ()):
+            if header not in self.device_library_headers:
+                self.device_library_headers.append(header)
+        arg_codes:List[str] = [code for code, _ in args]
+        for code, t in args:
+            if is_vec(t):
+                self._error(
+                    f"gpu.{name}() takes scalars: a registered device function is called "
+                    f"as it is declared, and CUDA has no vector overload for it", node)
+        # The result type: the first argument's type, unless the function is registered
+        # with a different one. A function that takes nothing answers nothing.
+        result_t:Any = args[0][1] if args else "float"
+        if not arg_codes:
+            result_t = "void"
+        return f"{symbol}({', '.join(arg_codes)})", result_t
 
     # ---------- print() -> device printf ----------
 
@@ -6129,6 +6192,14 @@ class FunctionTranslator:
                     args.append(self._visit_expression(argument))
             return self._emit_gpu_builtin(builtin, args, node)
 
+        # A registered device-side library function: recognized by the object the callee
+        # resolves to, like a builtin, and emitted as the symbol the registry names.
+        library:Optional[str] = self._library_call_name(node)
+        if library is not None:
+            library_args:List[Tuple[str, Any]] = [
+                self._visit_expression(argument) for argument in node.args]
+            return self._emit_library_function(library, library_args, node)
+
         if isinstance(func, ast.Name):
             name:str = func.id
             args = [self._visit_expression(a) for a in node.args]
@@ -7187,15 +7258,137 @@ class FunctionTranslator:
                                compare_code,
                                is_local=self._is_local_buffer(node.args[0])), arr_t[1]
 
-        if name in GENERIC_BUILTINS:
+        if (name in GENERIC_BUILTINS
+                or name in SHARED_MATH_BUILTINS
+                or name in SHARED_MATH_TEMPLATES
+                or name in CUDA_ONLY_BUILTINS
+                or name in CUDA_ONLY_CONVERSIONS):
             return self._emit_generic_builtin(name, args, node)
 
         self._error(f"unknown gpu builtin: gpu.{name}", node)
+
+    def _emit_cuda_only_builtin(self, name:str, args:List[Tuple[str, Any]],
+                                node:ast.Call)->Tuple[str, Any]:
+        """A device intrinsic only CUDA has.
+
+        The fast approximations, the correctly-rounded forms and the special functions
+        CUDA adds have no OpenCL counterpart, so a kernel that uses one is a CUDA kernel.
+        On OpenCL the call is refused *by name* -- "undeclared identifier" from the
+        compiler would not say which of the two the user should reach for.
+        """
+        if self.backend != "cuda":
+            self._error(
+                f"gpu.{name}() is a CUDA device intrinsic that the OpenCL backend has no "
+                f"counterpart for: the OpenCL kernel language has no such function, so "
+                f"this kernel cannot run there. Either specialize the kernel for CUDA, "
+                f"or use the function all three backends have (see the ones listed in "
+                f"pygpgpu.kernel.builtins)", node)
+
+        if name in CUDA_ONLY_CONVERSIONS:
+            # A conversion answers an int, so the result type is the int one.
+            conversion:str = CUDA_ONLY_CONVERSIONS[name]
+            expected:int = (1 if name.startswith("float_to_int")
+                            else 2 if name.startswith("double_to_int") else 1)
+            if len(args) != expected:
+                self._error(f"gpu.{name}() takes exactly {expected} argument", node)
+            code, t = args[0]
+            if is_vec(t):
+                self._error(
+                    f"gpu.{name}() takes a scalar: CUDA has no vector overload for the "
+                    f"conversion, so convert the components one at a time", node)
+            # The conversion's own name says what it converts FROM, so the argument is
+            # cast to that type first: `__float2int_rn` takes a float, and a double
+            # argument would pick the wrong overload.
+            source_type:str = ("float" if "float_to_int" in name
+                               else "double" if "double_to_int" in name else "int")
+            return f"({conversion}(({source_type})({code})))", "int"
+
+        cuda_name:str = CUDA_ONLY_BUILTINS[name]
+        if len(args) not in (1, 2, 3):
+            self._error(f"gpu.{name}() takes 1 to 3 arguments", node)
+        arg_codes:List[str] = [code for code, _ in args]
+        for code, t in args:
+            if is_vec(t):
+                self._error(
+                    f"gpu.{name}() takes a scalar: CUDA spells this intrinsic for scalars "
+                    f"only, so apply it per component", node)
+        # The argument's type decides the overload: `__expf` takes a float, and a double
+        # argument would pick the (different, less accurate) double form.
+        argument_type:str = "float"
+        for _, t in args:
+            if t == "double":
+                argument_type = "double"
+        if argument_type == "double":
+            # The double form of the fast intrinsics is spelled without the `f`.
+            cuda_name = cuda_name[:-1] if cuda_name.endswith("f") else cuda_name
+        cast_arguments:List[str] = [f"({argument_type})({code})" for code in arg_codes]
+        return f"{cuda_name}({', '.join(cast_arguments)})", argument_type
+
+    def _emit_shared_math_builtin(self, name:str, args:List[Tuple[str, Any]],
+                                  node:ast.Call)->Tuple[str, Any]:
+        """A math function both backends have.
+
+        OpenCL spells it under the plain name and CUDA under the `f`-suffixed one, except
+        for the `native_*` family, which CUDA spells with the double-underscore
+        intrinsics (that is where the "native" comes from: the device's own instruction).
+
+        A vector argument is expanded per component, the way the ordinary math
+        intrinsics are: the device has no vector overload for the scalar-only ones
+        (``erf``, ``tgamma``, ...), and the ones that are component-wise (``fract``,
+        ``sign``, ``fmin``) work per component as well.
+        """
+        if len(args) not in (1, 2, 3):
+            self._error(f"gpu.{name}() takes 1 to 3 arguments", node)
+        arg_codes:List[str] = [code for code, _ in args]
+        vec_t:Any = next((t for t, _ in args if is_vec(t)), None)
+        # The functions that are component-wise: they take a vector and answer one.
+        component_wise:bool = name in ("fract", "sign", "fmin", "fmax", "ldexp")
+        for code, t in args:
+            if is_vec(t) and not component_wise:
+                self._error(
+                    f"gpu.{name}() takes a scalar: the device has no vector overload for "
+                    f"it, so apply it per component", node)
+        result_t:Any = args[0][1]
+        # The functions that answer a different type than they take: the rounding
+        # functions answer an int, and the conversions answer one too.
+        if name in ("rint", "round", "trunc", "floor", "ceil"):
+            result_t = "int"
+        if vec_t is not None:
+            # The component-wise ones: expand per component and rebuild the vector.
+            components:List[str] = _vec_field_names(_vec_registry()[vec_t])
+            terms:List[str] = []
+            for component in components:
+                piece_args:List[str] = [
+                    (f"({self._component(code, t, component)})"
+                     if is_vec(t) else code)
+                    for code, t in args]
+                terms.append(self._shared_math_call(name, piece_args))
+            return self._vec_maker(vec_t, ", ".join(terms)), vec_t
+        return self._shared_math_call(name, arg_codes), result_t
+
+    def _shared_math_call(self, name:str, arg_codes:List[str])->str:
+        """One call to a shared math function, in the spelling this backend uses."""
+        if name in SHARED_MATH_TEMPLATES:
+            # The two backends spell this one differently, so the template says which
+            # spelling this backend uses.
+            template:str = SHARED_MATH_TEMPLATES[name][self.backend]
+            return template.format(code=arg_codes[0])
+        if self.backend == "opencl":
+            device_name:str = name
+        else:
+            device_name = SHARED_MATH_BUILTINS[name]
+        return f"{device_name}({', '.join(arg_codes)})"
 
     def _emit_generic_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
         arg_codes:List[str] = [c for c, _ in args]
         arg_types:List[Any] = [t for _, t in args]
         vec_t:Any = next((t for t in arg_types if is_vec(t)), None)
+
+        if name in CUDA_ONLY_BUILTINS or name in CUDA_ONLY_CONVERSIONS:
+            return self._emit_cuda_only_builtin(name, args, node)
+
+        if name in SHARED_MATH_BUILTINS or name in SHARED_MATH_TEMPLATES:
+            return self._emit_shared_math_builtin(name, args, node)
 
         if name in ("rsqrt", "exp2"):
             if len(args) != 1:

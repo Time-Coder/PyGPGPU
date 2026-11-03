@@ -10,12 +10,13 @@ matching the rest of the repository.
 ## Dependencies
 
 - Any single GPU backend is enough to run `01`–`05` (with no backend specified, they probe `cuda -> hip -> opencl`);
-- `06` needs the runtime for the handwritten-kernel import hook (OpenCL by default, available on nearly every platform);
+- `06` imports one handwritten `.cl` file (OpenCL by default, available on nearly every platform);
 - `07` uses the low-level OOP API, on the default OpenCL device;
 - `08` compares backends only across the backends actually present on your machine — a missing one is skipped, so it always produces results;
 - `09` uses only `@kernel` plus atomics, so any single backend works;
 - `10` uses `submit`/`async_call` on a decorated kernel (any backend);
-- `11` needs no GPU at all: it runs entirely on the pure-Python backend.
+- `11` needs no GPU at all: it runs entirely on the pure-Python backend;
+- `15` needs whichever of the three backends it finds: `vecops` has one source per backend, and a missing runtime only makes that backend's bracket unavailable.
 
 ## Contents
 
@@ -26,7 +27,7 @@ matching the rest of the repository.
 | [03_nd_loop_and_class_method.py](03_nd_loop_and_class_method.py) | Multi-dimensional `np.ndindex`/`np.ndenumerate`, plus class methods and static methods; helpers reached through a name: another method of the same class, a static method of any class, a module function |
 | [04_vector_types.py](04_vector_types.py) | Vector types (float4/...), swizzles, and the dual-sided function library `pygpgpu.funcs` |
 | [05_gnp_zero_copy_and_atomics.py](05_gnp_zero_copy_and_atomics.py) | Zero-copy with device-resident `gnp` arrays, atomic histograms, and local-memory reduction |
-| [06_handwritten_kernels.py](06_handwritten_kernels.py) | Importing handwritten `.cl`/`.cu`/`.hip` files like Python modules |
+| [06_handwritten_kernels.py](06_handwritten_kernels.py) | Importing one handwritten `.cl` file as a module: single-backend case, struct arguments, and the KeyError a bracket for another backend raises |
 | [07_low_level_oop.py](07_low_level_oop.py) | Low-level OOP API: Platforms/Device/Context/Buffer/Program/Kernel |
 | [08_compare_backends.py](08_compare_backends.py) | The same kernel benchmarked on OpenCL / CUDA / HIP |
 | [09_reduction.py](09_reduction.py) | Array-sum reduction: per-element atomics, strided private sums, and a local-memory tree reduction |
@@ -36,6 +37,8 @@ matching the rest of the repository.
 | [12_print_in_kernel.py](12_print_in_kernel.py) | `print()` inside a kernel: translated to device `printf` with python's exact rendering |
 | [13_image.py](13_image.py) | One backend-neutral `Image` type: a kernel indexes it like an array (`src[y, x]`), translated into `tex2D`/`surf2Dwrite` on CUDA and `read_imagef`/`write_imagef` on OpenCL, and executed by a host implementation on the `python` backend so all three agree element for element |
 | [14_heterogeneous_data.py](14_heterogeneous_data.py) | Every kind of value a kernel carries, in all three roles (argument, object built in the body, return value): scalars, 1/2/3-D scalar arrays, vectors by value, 1/2/3-D vector arrays, `ctypes.Structure` classes with every kind of member (scalar, vector, array, nested structure, array of structures), and 1/2/3-D structure arrays |
+| [15_kernel_import.py](15_kernel_import.py) | `kernel_import`: same-named `.cl`/`.cu`/`.hip` files (in [kernel_import/](kernel_import/)) merged into one module; the bracket language, overloads, and the KeyError a missing implementation raises |
+| [16_scientific_math.py](16_scientific_math.py) | The scientific-computing vocabulary (`erf`, `tgamma`, `normal_cdf`, the fast and correctly-rounded CUDA intrinsics), and `device_function`: naming a device function that already exists -- here the `__device__` function in [mylib.h](mylib.h) |
 
 `@kernel` function bodies accept a docstring (the leading string literal is ignored by the
 translator and never reaches the generated GPU source), so writing explanations inside a
@@ -69,9 +72,11 @@ parallel work items.
 
 ## About backend initialization
 
-Importing the `pygpgpu` top level needs no GPU runtime at all (`climport`/`cuimport`/`hipimport`
-are lazy). But **importing a backend subpackage** (`pygpgpu.cuda` / `pygpgpu.hip`) initializes
-that runtime immediately: a missing `nvcuda.dll` / `amdhip64.dll` raises right away. So on a
-machine without a given runtime, only run the examples that use the default backend or OpenCL;
-`02` and `08` are the exceptions — they probe through `list_devices()` and adapt to
-whatever runtimes exist, so they never fail because a backend is missing.
+Importing the `pygpgpu` top level needs no GPU runtime at all. A backend's runtime load failure is
+**deferred to first use**: `import pygpgpu.cuda` succeeds without `nvcuda.dll`, and the failure
+surfaces — as the driver's own error — when an operation actually needs it (device enumeration, a
+compile, a launch). `kernel_import` relies on that: a module parses every backend source it finds
+even on a machine with no CUDA, and the same-named `.cu` only fails if you actually bracket
+`["cuda"]`. So `06` and `15` run on any machine and adapt to whatever runtimes exist; a bracket
+naming a backend without an implementation raises `KeyError`, and one whose runtime is missing
+raises the driver's own error at the call.

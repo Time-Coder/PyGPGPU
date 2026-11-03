@@ -1,4 +1,4 @@
-from .cl import CL
+from .cl import CL, _start_init as _start_cl_init
 from ...constants import (
     Constant,
     IntConstant,

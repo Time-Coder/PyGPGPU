@@ -42,6 +42,10 @@ class MetaPlatforms(type):
         return self.__platforms_list[index]
     
     def device(self, keyword:str)->Device:
+        # A Device instance answers for itself: the decorator's resolver hands one over
+        # (see kernel_import), and a name lookup cannot run on it.
+        if isinstance(keyword, Device):
+            return keyword
         keyword:str = keyword.lower()
         device:Optional[Device] = None
 

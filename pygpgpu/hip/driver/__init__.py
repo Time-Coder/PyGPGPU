@@ -10,7 +10,7 @@ from .hiptypes import (
     CUDA_RESOURCE_DESC, CUDA_TEXTURE_DESC,
     CUDA_ARRAY_FLAG_SURFACE_LDST,
 )
-from .hip import HIP
+from .hip import HIP, _start_init as _start_hip_init
 from .hipinfo import HIPInfo
 
 __all__ = [

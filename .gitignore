@@ -17,7 +17,10 @@ dist/
 
 # Type stubs generated next to handwritten .cl/.cu/.hip kernels on import. The vector-type
 # stubs under pygpgpu/vec_types are committed on purpose; these are per-kernel byproducts of
-# running examples/ and should not be tracked.
+# running examples/ and should not be tracked. The pattern reaches into subdirectories too,
+# because a merged kernel_import module writes its stub beside its sources
+# (examples/kernel_import/vecops.pyi is such a byproduct).
+examples/**/*.pyi
 examples/*.pyi
 
 # Editor state. A per-machine .vscode/settings.json records the local interpreter choice,

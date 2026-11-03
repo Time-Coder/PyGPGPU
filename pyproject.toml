@@ -148,9 +148,11 @@ ignore = [
 # F601 reports these as repeated keys because it compares case-insensitively, which is a false
 # positive. The file is produced from templates, so edit the template, not this file.
 "pygpgpu/vec_types/genVec*.py" = ["F601"]
-# This example installs the .cl import hook on purpose before importing the kernel module,
+# This example installs the kernel_import hook on purpose before importing the kernel module,
 # so the `import vecadd` cannot sit at the top of the file.
 "examples/06_handwritten_kernels.py" = ["E402"]
+# The same shape in the multi-backend example: the merged-module import follows install().
+"examples/15_kernel_import.py" = ["E402"]
 
 # ---------------------------------------------------------------------------
 # ty -- Python type checking. Run: python -m ty check
@@ -160,10 +162,11 @@ ignore = [
 # ---------------------------------------------------------------------------
 [tool.ty]
 environment.python-version = "3.12"
-# pygf lives in a sibling checkout on this machine. Installing it (`pip install -e ../pygf`)
-# is what the runtime imports, and the type checker reads the checkout directly so a change
-# in one repo is visible in the other without a reinstall.
-environment.extra-paths = ["../pygf"]
+# pygf is resolved from the Python environment ty is pointed at, like every other dependency:
+# `pip install pygf` and `pip install -e ../pygf` both work, and a checkout of this repository
+# on its own type-checks without a sibling pygf tree. It is deliberately NOT named as an
+# `environment.extra-paths` entry: that hard-fails the whole run when the directory is absent,
+# and it can shadow the installed distribution with whatever a local checkout happens to hold.
 src.exclude = [
     # auto-generated stubs
     "**/*.pyi",

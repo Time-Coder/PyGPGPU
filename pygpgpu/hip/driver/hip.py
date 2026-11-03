@@ -2,10 +2,41 @@ from __future__ import annotations
 
 import glob
 import os
+import threading
 from ctypes import CDLL, c_int
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from .hipinfo import HIPInfo, func_signatures
+
+# Same background-initialization contract as the CUDA driver (see pygpgpu/cuda/driver/cuda.py):
+# the runtime is initialized off the import path, and `Func.__call__` waits for it. Both
+# functions are private -- the backend package starts the thread when it is imported, and a
+# caller never asks for the initialization or waits for it explicitly.
+_INIT_DONE = threading.Event()
+_INIT_THREAD:Optional[threading.Thread] = None
+_INIT_LOCK = threading.Lock()
+
+
+def _start_init()->None:
+    """Run `init()` once, on a background thread (idempotent)."""
+    global _INIT_THREAD
+    with _INIT_LOCK:
+        if _INIT_THREAD is not None:
+            return
+
+        def _run()->None:
+            try:
+                HIP.init()
+            finally:
+                _INIT_DONE.set()
+
+        _INIT_THREAD = threading.Thread(target=_run, name="pygpgpu-hip-init")
+        _INIT_THREAD.start()
+
+
+def _wait_ready()->None:
+    """Block until the background runtime initialization has finished (or failed)."""
+    _INIT_DONE.wait()
 
 
 def _add_dll_folder(folder:Optional[str])->None:
@@ -34,6 +65,10 @@ class MetaHIP(type):
 
     __dll = None
     __func_map:Dict[str, Callable] = {}
+    # The exception init() hit when the machine has no runtime (usually the RuntimeError
+    # from loading amdhip64). Diagnostic only: every real call re-raises what the driver
+    # itself raises, so nothing here can make a broken runtime look usable.
+    last_init_error:Optional[BaseException] = None
 
     @staticmethod
     def rocm_roots():
@@ -41,9 +76,22 @@ class MetaHIP(type):
         env = os.environ.get("HIP_PATH")
         if env:
             roots.append(env.replace("\\", "/"))
+        # The installer's own default is "C:\Program Files\AMD\ROCm" (one version folder
+        # under it), and a zip install usually lands on a drive root. Both are looked at;
+        # the version folder is folded into the root so "root/bin/clang.exe" stays the
+        # layout every caller assumes.
         for drive in ("C:", "D:", "E:"):
             roots.extend(glob.glob(f"{drive}/AMD/ROCm*"))
-        return roots
+            roots.extend(glob.glob(f"{drive}/Program Files/AMD/ROCm"))
+            roots.extend(glob.glob(f"{drive}/Program Files (x86)/AMD/ROCm"))
+        expanded:List[str] = []
+        for root in roots:
+            versions = sorted(glob.glob(f"{root}/*"))
+            if versions and any(os.path.isfile(os.path.join(v, "bin", "clang.exe")) for v in versions):
+                expanded.extend(versions)
+            else:
+                expanded.append(root)
+        return expanded
 
     @classmethod
     def dll(cls):
@@ -91,6 +139,9 @@ class HIP(metaclass=MetaHIP):
             self.name:str = name
 
         def __call__(self, *args, **kwargs):
+            # The one synchronization point with the background initialization (see cuda.py).
+            _wait_ready()
+
             if HIP.print_call:
                 print(self.name + "(...)", end="", flush=True)
 
@@ -131,20 +182,34 @@ class HIP(metaclass=MetaHIP):
 
     @staticmethod
     def init():
-        for func_name, func_info in func_signatures.items():
-            if "dll_func" in func_info:
-                continue
+        """Pre-bind the driver's entry points, once, at import time.
 
-            try:
+        A runtime the machine does not have must not fail the import: the entries are
+        bound lazily anyway (`Func.__call__` loads them on first use), so a missing DLL
+        here only means "nothing to pre-bind". The error is recorded for the diagnostic
+        and every real call then re-raises what the driver itself raises -- nothing can
+        make a broken runtime look usable.
+        """
+        try:
+            for func_name, func_info in func_signatures.items():
+                if "dll_func" in func_info:
+                    continue
+
                 func = getattr(MetaHIP.dll(), func_name)
                 func.argtypes = list(func_info["args"].values())
                 func.restype = func_info["restype"]
                 func_info["dll_func"] = func
-            except (TypeError, AttributeError):
-                if HIP.print_info:
-                    print(f"warning: failed to load {func_name} from amdhip64, skipped.")
+        except BaseException as error:
+            MetaHIP.last_init_error = error
+            if HIP.print_info:
+                print(f"warning: could not pre-bind the HIP runtime "
+                      f"({type(error).__name__}: {error}); "
+                      f"calls will fail when one is made.")
 
+        # preheat -- through the raw dll, NOT through Func.__call__: init itself runs on
+        # the background thread, and Func waits for init, so going through Func here
+        # would wait for itself.
         try:
-            HIP.hipInit(0)
-        except Exception:
-            pass
+            MetaHIP.dll().hipInit(0)
+        except BaseException as error:
+            MetaHIP.last_init_error = error

@@ -5,15 +5,14 @@ remember subpackage names::
 
     from pygpgpu import kernel, gpu, float4             # @kernel / device builtins / vector types
     from pygpgpu import list_devices, get_device
-    from pygpgpu import climport, cuimport, hipimport    # import hooks for handwritten .cl/.cu/.hip files
+    from pygpgpu import kernel_import                    # import hook for handwritten .cl/.cu/.hip files
 
 Subpackage paths (pygpgpu.kernel / pygpgpu.vec_types / pygpgpu.opencl / ...)
 still work. Note that top-level `pygpgpu.kernel` refers to the @kernel
 decorator (same name as the subpackage; the top level exports the decorator),
 so to use things from the submodules write `from pygpgpu.kernel import ...`.
 """
-import importlib
-from typing import Any, List
+from typing import List
 
 # pygf owns the whole numpy surface for its types: importing it patches numpy.array
 # (patch_nparray), the array constructors, and installs the VectorArray view whose
@@ -41,6 +40,11 @@ from .kernel import (
 from .kernel.builtins import *  # noqa: F403
 from .kernel.builtins import __all__ as _builtin_names
 
+# The device-side library function registry: a way to name a device function that already
+# exists (a compiler intrinsic, or a `__device__` function in a header) and call it from a
+# kernel body under a name of your own.
+from .kernel.device_library import device_function
+
 # ---------- Top-level exports: public API of vec_types ----------
 
 from .vec_types import (
@@ -63,41 +67,13 @@ from .vec_types import funcs          # dual-purpose function library: runs on t
 from .image import Image, ImageAddress, ImageFilter
 
 
-# ---------- Top-level exports: import hooks for handwritten kernel files ----------
+# ---------- Top-level export: the import hook for handwritten kernel files ----------
 
-class _LazyBackendHook:
-    """Lazy proxy for a backend import hook.
-
-    Backend packages initialize their runtime at import time (nvcuda/amdhip64/
-    OpenCL) and raise immediately when the runtime is missing; this defers
-    loading the backend package until a hook method is actually called, so
-    `from pygpgpu import climport, cuimport, hipimport` works on any machine
-    and only the backend you use requires its runtime.
-    """
-
-    def __init__(self, module_name:str, attr_name:str):
-        self._module_name:str = module_name
-        self._attr_name:str = attr_name
-        self._target:Any = None
-
-    def _resolve(self)->Any:
-        if self._target is None:
-            module = importlib.import_module(self._module_name, __name__)
-            self._target = getattr(module, self._attr_name)
-        return self._target
-
-    def __getattr__(self, name:str):
-        if name.startswith("__") and name.endswith("__"):
-            raise AttributeError(name)
-        return getattr(self._resolve(), name)
-
-    def __repr__(self)->str:
-        return f"<lazy hook {self._module_name}.{self._attr_name}>"
-
-
-climport = _LazyBackendHook(".opencl.climport", "climport")
-cuimport = _LazyBackendHook(".cuda.cuimport", "cuimport")
-hipimport = _LazyBackendHook(".hip.hipimport", "hipimport")
+# The one hook: same-named `.cl`/`.cu`/`.hip` files become one module, and a single-backend
+# file is a module with one backend. It is runtime-free by construction -- the file system
+# until a kernel is actually called, and only that kernel's backend then -- so it imports
+# directly rather than through a lazy proxy.
+from .kernel_import import kernel_import  # noqa: E402  (needs the imports above)
 
 
 # ---------- Top-level export: the progress-logging switch ----------
@@ -108,6 +84,75 @@ hipimport = _LazyBackendHook(".hip.hipimport", "hipimport")
 from .utils import get_print_info, set_print_info  # noqa: E402  (needs to follow the imports above)
 
 
+# ---------- Top-level export: the host-side CUDA libraries ----------
+#
+# The CUDA math libraries (cuBLAS, cuSOLVER, cuFFT, cuSPARSE, the CUDA runtime) are
+# bound with ctypes under pygpgpu/cuda/libraries. They are HOST-side: a gemm is an
+# array-level operation the host performs, not something a @kernel body can call.
+#
+# They are reached through a lazy module proxy, because importing one of them pulls
+# in the CUDA driver and therefore starts its background initialization -- which
+# `import pygpgpu` must not do. The proxy imports the real module on the first
+# attribute read, so the cost is paid by the caller who actually uses a library.
+import importlib  # noqa: E402
+import sys  # noqa: E402
+import types  # noqa: E402
+
+# The names the proxy publishes: the pythonic wrappers and the two entry points
+# that name the libraries themselves.
+_CUDA_LIBRARY_EXPORTS = (
+    "gemm", "lt_gemm", "axpy", "scal", "dot", "rfft", "irfft", "csrmv",
+    "ensure_context",
+    "library_names", "driver_for",
+)
+
+
+def _make_cuda_libraries_proxy()->types.ModuleType:
+    """A module object that imports the CUDA libraries on first attribute read.
+
+    The proxy is a real module (so it has a name, a docstring and a repr), but its
+    attributes are resolved through ``__getattr__``, which imports the real package
+    the first time one is read. After that the real module is in ``sys.modules`` and
+    every later read is an ordinary attribute lookup.
+
+    The proxy is registered in ``sys.modules`` under its own name, which is what
+    makes BOTH natural spellings work::
+
+        from pygpgpu import cuda_libraries          # the attribute
+        from pygpgpu.cuda_libraries import gemm     # the import
+
+    The second one looks the name up in ``sys.modules`` first, so a proxy that was
+    not registered there would answer "No module named ...". Registering it changes
+    nothing about the laziness: the real package is still imported only when an
+    attribute is read.
+    """
+    proxy = types.ModuleType("pygpgpu.cuda_libraries")
+    proxy.__doc__ = (
+        "The host-side CUDA math libraries, bound with ctypes.\n\n"
+        "These are HOST-side operations: a gemm moves whole arrays to the device and\n"
+        "runs one library call, so it is not expressible inside a @kernel body.\n"
+        "The CUDA driver is loaded on first use, never at import time."
+    )
+    proxy.__all__ = list(_CUDA_LIBRARY_EXPORTS)
+
+    def _resolve(name:str):
+        if name not in _CUDA_LIBRARY_EXPORTS:
+            raise AttributeError(
+                f"module 'pygpgpu.cuda_libraries' has no attribute {name!r}")
+
+        module = importlib.import_module(".cuda.libraries", __name__)
+        value = getattr(module, name)
+        setattr(proxy, name, value)
+        return value
+
+    proxy.__getattr__ = _resolve  # type: ignore[attr-defined]
+    sys.modules[proxy.__name__] = proxy
+    return proxy
+
+
+cuda_libraries = _make_cuda_libraries_proxy()
+
+
 __all__ = [
     # kernel
     "kernel", "PyKernel", "DEFAULT_BACKEND_ORDER",
@@ -115,6 +160,8 @@ __all__ = [
     "set_default_device", "get_default_device",
     # device builtins (dual-sided functions; see pygpgpu/kernel/builtins.py)
     *_builtin_names,
+    # the device-side library function registry
+    "device_function",
     # images
     "Image", "ImageFilter", "ImageAddress",
     # logging
@@ -130,8 +177,11 @@ __all__ = [
     "float2", "float3", "float4", "float8", "float16",
     "double2", "double3", "double4", "double8", "double16",
     "genVec", "genVec2", "genVec3", "genVec4", "genVec8", "genVec16",
-    # import hooks for handwritten kernel files
-    "climport", "cuimport", "hipimport",
+    # the import hook for handwritten kernel files (same-named .cl/.cu/.hip sources)
+    "kernel_import",
+    # the host-side CUDA libraries (cuBLAS, cuSOLVER, cuFFT, cuSPARSE, the runtime);
+    # the proxy imports them on first use, so `import pygpgpu` still loads no runtime
+    "cuda_libraries",
 ]
 
 

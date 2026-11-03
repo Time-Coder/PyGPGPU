@@ -86,6 +86,84 @@ from ..vec_types.funcs import cbrt as cbrt
 
 from .host_runtime import atomic_in_place, local_extent, work_item, work_size_extent
 
+# The CUDA scientific-computing vocabulary: the functions both backends have, and the ones
+# only CUDA has (the fast intrinsics, the correctly-rounded forms, the special functions
+# CUDA adds). They are re-exported here so the whole set a kernel body may call is visible
+# in one namespace -- see sci_math.py for what each one means on either side.
+from .sci_math import erf as erf
+from .sci_math import erfc as erfc
+from .sci_math import tgamma as tgamma
+from .sci_math import lgamma as lgamma
+from .sci_math import rint as rint
+from .sci_math import remainder as remainder
+from .sci_math import fmin as fmin
+from .sci_math import fmax as fmax
+from .sci_math import fdim as fdim
+from .sci_math import copysign as copysign
+from .sci_math import nextafter as nextafter
+
+# These three pygf publishes, so they are *pygf's* objects re-exported here rather than a
+# second implementation: a kernel that imported one copy has to translate as the builtin.
+# (`fma` is not among them: pygf's is already published here as `mad`, OpenCL's spelling.)
+from ..vec_types.funcs import ldexp as ldexp
+from ..vec_types.funcs import fract as fract
+from ..vec_types.funcs import sign as sign
+from .sci_math import native_recip as native_recip
+from .sci_math import native_divide as native_divide
+from .sci_math import native_sqrt as native_sqrt
+from .sci_math import native_rsqrt as native_rsqrt
+from .sci_math import native_exp as native_exp
+from .sci_math import native_log as native_log
+from .sci_math import native_sin as native_sin
+from .sci_math import native_cos as native_cos
+from .sci_math import native_tan as native_tan
+from .sci_math import native_exp2 as native_exp2
+from .sci_math import native_log2 as native_log2
+from .sci_math import native_exp10 as native_exp10
+from .sci_math import native_powr as native_powr
+from .sci_math import fast_exp as fast_exp
+from .sci_math import fast_log as fast_log
+from .sci_math import fast_log2 as fast_log2
+from .sci_math import fast_log10 as fast_log10
+from .sci_math import fast_sin as fast_sin
+from .sci_math import fast_cos as fast_cos
+from .sci_math import fast_tan as fast_tan
+from .sci_math import fast_exp10 as fast_exp10
+from .sci_math import fast_pow as fast_pow
+from .sci_math import fast_divide as fast_divide
+from .sci_math import exact_recip as exact_recip
+from .sci_math import exact_recip_rz as exact_recip_rz
+from .sci_math import exact_divide as exact_divide
+from .sci_math import exact_divide_rz as exact_divide_rz
+from .sci_math import exact_sqrt as exact_sqrt
+from .sci_math import exact_sqrt_rz as exact_sqrt_rz
+from .sci_math import exact_add as exact_add
+from .sci_math import exact_sub as exact_sub
+from .sci_math import exact_mul as exact_mul
+from .sci_math import exact_fma as exact_fma
+from .sci_math import erf_inverse as erf_inverse
+from .sci_math import normal_cdf as normal_cdf
+from .sci_math import normal_cdf_inverse as normal_cdf_inverse
+from .sci_math import reciprocal_hypot as reciprocal_hypot
+from .sci_math import sin_pi as sin_pi
+from .sci_math import cos_pi as cos_pi
+from .sci_math import bessel_j0 as bessel_j0
+from .sci_math import bessel_j1 as bessel_j1
+from .sci_math import bessel_y0 as bessel_y0
+from .sci_math import bessel_y1 as bessel_y1
+from .sci_math import bessel_i0 as bessel_i0
+from .sci_math import bessel_i1 as bessel_i1
+from .sci_math import float_to_int_nearest as float_to_int_nearest
+from .sci_math import float_to_int_zero as float_to_int_zero
+from .sci_math import float_to_int_down as float_to_int_down
+from .sci_math import float_to_int_up as float_to_int_up
+from .sci_math import int_to_float as int_to_float
+from .sci_math import uint_to_float as uint_to_float
+from .sci_math import double_to_int_nearest as double_to_int_nearest
+from .sci_math import double_to_int_zero as double_to_int_zero
+from .sci_math import double_to_int_down as double_to_int_down
+from .sci_math import double_to_int_up as double_to_int_up
+
 # Everything a kernel body may call, so `from pygpgpu import *` and an editor completing
 # `pygpgpu.` show exactly the supported set and nothing else.
 __all__ = [
@@ -132,6 +210,23 @@ __all__ = [
     "fmod",
     "hypot",
     "cbrt",
+    # the scientific-computing vocabulary (see sci_math.py): the functions both backends
+    # have, and the ones only CUDA has
+    "erf", "erfc", "tgamma", "lgamma", "rint", "remainder", "fmin", "fmax",
+    "fdim", "copysign", "nextafter", "ldexp", "fract", "sign",
+    "native_recip", "native_divide", "native_sqrt", "native_rsqrt", "native_exp",
+    "native_log", "native_sin", "native_cos", "native_tan", "native_exp2", "native_log2",
+    "native_exp10", "native_powr",
+    "fast_exp", "fast_log", "fast_log2", "fast_log10", "fast_sin", "fast_cos",
+    "fast_tan", "fast_exp10", "fast_pow", "fast_divide",
+    "exact_recip", "exact_recip_rz", "exact_divide", "exact_divide_rz",
+    "exact_sqrt", "exact_sqrt_rz", "exact_add", "exact_sub", "exact_mul", "exact_fma",
+    "erf_inverse", "normal_cdf", "normal_cdf_inverse", "reciprocal_hypot",
+    "sin_pi", "cos_pi",
+    "bessel_j0", "bessel_j1", "bessel_y0", "bessel_y1", "bessel_i0", "bessel_i1",
+    "float_to_int_nearest", "float_to_int_zero", "float_to_int_down", "float_to_int_up",
+    "int_to_float", "uint_to_float",
+    "double_to_int_nearest", "double_to_int_zero", "double_to_int_down", "double_to_int_up",
 ]
 
 

@@ -283,7 +283,11 @@ class Kernel(HIPObject):
 
         if global_work_size is None or local_work_size is None:
             if global_work_size is None:
-                global_work_size, local_work_size = self.__detect_work_size()
+                # The shape comes from this call's binding (see the OpenCL backend): the
+                # per-ArgInfo mem_obj the detection used to read stopped being filled
+                # when bindings became per-call, so a bare call launched (1, 1, 1) and
+                # silently wrote one element.
+                global_work_size, local_work_size = self.__detect_work_size(bound)
             else:
                 # When only grid is given, derive block from that grid (must divide evenly)
                 max_group, max_items = device_limits(self._program.context.device)
@@ -399,17 +403,27 @@ class Kernel(HIPObject):
 
         return used_kwargs
     
-    def __detect_work_size(self):
+    def __detect_work_size(self, bound:Dict[str, Any]):
         max_shape = None
         for arg in self._arg_list:
             if arg.need_read_back:
-                if arg.mem_obj is None:
-                    # The binding for this launch is recorded separately (see
-                    # _process_arg), so a shared ArgInfo may carry no buffer at all --
-                    # the CUDA backend guards the same way. Skipping keeps this fallback
-                    # from raising where it used to work.
+                # The binding for this launch is recorded separately (see
+                # __prepare_call), so a shared ArgInfo may carry no buffer at all --
+                # reading arg.mem_obj answered None for every argument and the launch
+                # degraded to a single work item.
+                entry = bound.get(arg.name)
+                if entry is None:
                     continue
-                arg_shape = (arg.mem_obj.data.shape if arg.mem_obj.data is not None else arg.mem_obj.shape)
+                mem_obj:Any = entry[0]
+                if mem_obj is None:
+                    # A texture handle carries no buffer; a scalar argument carries no
+                    # shape. Neither contributes a launch extent.
+                    arg_shape:Optional[Tuple[int, ...]] = getattr(entry[1], "shape", None)
+                    if arg_shape is None:
+                        continue
+                    arg_shape = tuple(arg_shape)
+                else:
+                    arg_shape = (mem_obj.data.shape if mem_obj.data is not None else mem_obj.shape)
                 if ((
                         arg.base_type_str in HIPInfo.vec_types and
                         len(arg_shape) >= 2 and
