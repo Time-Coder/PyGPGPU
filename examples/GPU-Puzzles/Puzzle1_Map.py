@@ -26,12 +26,10 @@ if __name__ == "__main__":
 
     out_spec = map_spec(a)
 
-    out1 = map_test1[1, SIZE](a)
+    out1 = map_test1[(1, 1), (SIZE, 1)](a)
 
     out2 = np.zeros_like(a)
-    map_test2[1, SIZE](a, out2)
-
-    print(out1, out2, out_spec)
+    map_test2[(1, 1), (SIZE, 1)](a, out2)
 
     assert np.all(out1 == out_spec)
     assert np.all(out2 == out_spec)

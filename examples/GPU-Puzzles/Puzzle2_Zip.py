@@ -28,10 +28,10 @@ if __name__ == "__main__":
     b = np.arange(SIZE)
 
     out_spec = zip_spec(a, b)
-    out1 = zip_test1[1, SIZE](a, b)
+    out1 = zip_test1[(1, 1), (SIZE, 1)](a, b)
 
     out2 = np.zeros_like(a)
-    zip_test2[1, SIZE](a, b, out2)
+    zip_test2[(1, 1), (SIZE, 1)](a, b, out2)
 
     assert np.all(out1 == out_spec)
     assert np.all(out2 == out_spec)
