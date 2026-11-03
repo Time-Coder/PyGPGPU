@@ -125,10 +125,35 @@ def _normalize_ast_legacy_nodes(tree:ast.AST)->ast.AST:
         return _copy_ast(tree, ast.Constant, {"value": Ellipsis, "kind": None})
     for _field, _value in ast.iter_fields(tree):
         if isinstance(_value, list):
-            _value[:] = [_normalize_ast_legacy_nodes(v) for v in _value]
+            # A list field holds AST nodes for some nodes (`ast.Module.body`) but plain
+            # values for others (`ast.Global.names` is a list of strings), and only the
+            # former can be rewritten. Recursing into a string is what raised
+            # "'str' object has no attribute '_fields'".
+            _value[:] = [_normalize_ast_legacy_nodes(v) if isinstance(v, ast.AST) else v
+                         for v in _value]
         elif isinstance(_value, ast.AST):
             setattr(tree, _field, _normalize_ast_legacy_nodes(_value))
     return tree
+
+
+def _unpack_count_message(names:int, values:int)->str:
+    """The wording CPython uses when a tuple unpacking cannot name what it asks for.
+
+    A magic loop states its rank in the source (`for i, j, k in ...`) while an array's shape is
+    only known from the value passed at call time, so the mismatch can only be reported at
+    launch -- and it has to read the way the interpreter reads it for the same body:
+    `not enough values to unpack (expected 3, got 2)`. Naming more indices than the array has
+    dimensions is that sentence -- the loop's target asks for more names than the shape
+    supplies. Naming fewer is python's other sentence, `too many values to unpack (expected
+    N)`, which it phrases with the target's count only: the data has more values than the
+    names can take, so it never prints how many.
+
+    The callers append what only the launch knows -- the kernel and the array with its shape --
+    because python's own message cannot name either.
+    """
+    if names > values:
+        return f"not enough values to unpack (expected {names}, got {values})"
+    return f"too many values to unpack (expected {names})"
 
 
 def _returns_a_value(body:List[ast.stmt])->bool:
