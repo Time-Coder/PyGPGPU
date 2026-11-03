@@ -1,17 +1,52 @@
 from __future__ import annotations
 import os
 import platform
-from typing import Dict, Callable
+import threading
+from typing import Dict, Callable, Optional
 from ctypes import c_int, c_void_p, c_uint, pointer, addressof, _Pointer, Array, CDLL
 
 from .clinfo import CLInfo
 from .cltypes import ErrorCode
+
+# Same background-initialization contract as the CUDA driver (see pygpgpu/cuda/driver/cuda.py):
+# the runtime is initialized off the import path, and `Func.__call__` waits for it. Both
+# functions are private -- the backend package starts the thread when it is imported, and a
+# caller never asks for the initialization or waits for it explicitly.
+_INIT_DONE = threading.Event()
+_INIT_THREAD:Optional[threading.Thread] = None
+_INIT_LOCK = threading.Lock()
+
+
+def _start_init()->None:
+    """Run `init()` once, on a background thread (idempotent)."""
+    global _INIT_THREAD
+    with _INIT_LOCK:
+        if _INIT_THREAD is not None:
+            return
+
+        def _run()->None:
+            try:
+                CL.init()
+            finally:
+                _INIT_DONE.set()
+
+        _INIT_THREAD = threading.Thread(target=_run, name="pygpgpu-opencl-init")
+        _INIT_THREAD.start()
+
+
+def _wait_ready()->None:
+    """Block until the background runtime initialization has finished (or failed)."""
+    _INIT_DONE.wait()
 
 
 class MetaCL(type):
 
     __dll = None
     __func_map:Dict[str, Callable] = {}
+    # The exception init() hit when the machine has no runtime (usually the CDLL OSError
+    # for OpenCL.dll). Diagnostic only: every real call re-raises what the driver itself
+    # raises, so nothing here can make a broken runtime look usable.
+    last_init_error:Optional[BaseException] = None
 
     @staticmethod
     def opencl_lib_path():
@@ -63,6 +98,9 @@ class CL(metaclass=MetaCL):
             self.name = name
 
         def __call__(self, *args, **kwargs):
+            # The one synchronization point with the background initialization (see cuda.py).
+            _wait_ready()
+
             if CL.print_call:
                 call_str = self.name + "(" + ", ".join([self.__str_arg(arg) for arg in args] + [f"{key}={self.__str_arg(value)}" for key, value in kwargs.items()]) + ")"
                 print(call_str, end="", flush=True)
@@ -178,6 +216,14 @@ class CL(metaclass=MetaCL):
         
     @staticmethod
     def init():
+        """Pre-bind the driver's entry points, once, at import time.
+
+        A runtime the machine does not have must not fail the import: the entries are
+        bound lazily anyway (`Func.__call__` loads them on first use), so a missing DLL
+        here only means "nothing to pre-bind". The error is recorded for the diagnostic
+        and every real call then re-raises what the driver itself raises -- nothing can
+        make a broken runtime look usable.
+        """
         try:
             for func_name, func_info in CLInfo.func_signatures.items():
                 if "dll_func" in func_info:
@@ -188,9 +234,11 @@ class CL(metaclass=MetaCL):
                 func.restype = func_info["restype"]
                 func_info["dll_func"] = func
 
-            # preheat
+            # preheat -- through the raw dll, NOT through Func.__call__: init itself runs
+            # on the background thread, and Func waits for init, so going through Func
+            # here would wait for itself.
             n_platforms = c_uint()
             ptr_n_platforms = pointer(n_platforms)
-            CL.clGetPlatformIDs(0, None, ptr_n_platforms)
-        except:
-            pass
+            MetaCL.dll().clGetPlatformIDs(0, None, ptr_n_platforms)
+        except BaseException as error:
+            MetaCL.last_init_error = error

@@ -1,16 +1,56 @@
 from __future__ import annotations
 import platform
-from typing import Dict, Callable
+import threading
+from typing import Dict, Callable, Optional
 from ctypes import c_int, c_void_p, CDLL, _Pointer, Array, addressof
 
 from .cuinfo import CUInfo
 from .cutypes import CUresult
+
+# The driver is initialized on a background thread started at import, so `import
+# pygpgpu.cuda` does not block on DLL load + cuInit (which is a GIL-releasing C call and
+# overlaps with whatever the importing thread does next). Every driver call goes through
+# `Func.__call__`, which waits for that initialization to finish before touching the
+# driver -- the wait is the whole synchronization story, and nothing else needs to know.
+#
+# Both functions are private: the backend package starts the thread when it is imported,
+# and a caller never asks for the initialization or waits for it explicitly.
+_INIT_DONE = threading.Event()
+_INIT_THREAD:Optional[threading.Thread] = None
+_INIT_LOCK = threading.Lock()
+
+
+def _start_init()->None:
+    """Run `init()` once, on a background thread (idempotent)."""
+    global _INIT_THREAD
+    with _INIT_LOCK:
+        if _INIT_THREAD is not None:
+            return
+
+        def _run()->None:
+            try:
+                CUDA.init()
+            finally:
+                _INIT_DONE.set()
+
+        _INIT_THREAD = threading.Thread(target=_run, name="pygpgpu-cuda-init")
+        _INIT_THREAD.start()
+
+
+def _wait_ready()->None:
+    """Block until the background driver initialization has finished (or failed)."""
+    _INIT_DONE.wait()
 
 
 class MetaCUDA(type):
 
     __dll = None
     __func_map:Dict[str, Callable] = {}
+    # The exception init() hit when the machine has no runtime (usually the CDLL OSError
+    # for nvcuda.dll). None once a call has actually succeeded. Diagnostic only: every
+    # real call re-raises whatever the driver itself raises, so nothing here can make a
+    # broken runtime look usable.
+    last_init_error:Optional[BaseException] = None
 
     @staticmethod
     def cuda_lib_path():
@@ -52,6 +92,11 @@ class CUDA(metaclass=MetaCUDA):
             self.name = name
 
         def __call__(self, *args, **kwargs):
+            # The one synchronization point with the background initialization: a call
+            # made before it finished simply waits for it, then runs (or fails with the
+            # driver's own error, if the runtime is missing).
+            _wait_ready()
+
             if CUDA.print_call:
                 call_str = self.name + "(" + ", ".join([self.__str_arg(arg) for arg in args] + [f"{key}={self.__str_arg(value)}" for key, value in kwargs.items()]) + ")"
                 print(call_str, end="", flush=True)
@@ -167,21 +212,30 @@ class CUDA(metaclass=MetaCUDA):
         
     @staticmethod
     def init():
-        for func_name, func_info in CUInfo.func_signatures.items():
-            if "dll_func" in func_info:
-                continue
+        # A runtime the machine does not have must not fail the import: the entries are
+        # bound lazily anyway (Func.__call__ loads them on first use), so a missing DLL
+        # here only means "nothing to pre-bind". The error is recorded for the diagnostic
+        # and the next real driver call fails with the same OSError it always raised.
+        try:
+            for func_name, func_info in CUInfo.func_signatures.items():
+                if "dll_func" in func_info:
+                    continue
 
-            try:
                 func = getattr(MetaCUDA.dll(), func_name)
                 func.argtypes = list(func_info["args"].values())
                 func.restype = func_info["restype"]
                 func_info["dll_func"] = func
-            except TypeError:
-                if CUDA.print_info:
-                    print(f"warning: failed to load {func_name} from cuda driver, skipped.")
+        except BaseException as error:
+            MetaCUDA.last_init_error = error
+            if CUDA.print_info:
+                print(f"warning: could not pre-bind the CUDA driver "
+                      f"({type(error).__name__}: {error}); "
+                      f"calls will fail when one is made.")
 
-        # preheat
+        # preheat -- through the raw dll, NOT through Func.__call__: init itself runs on
+        # the background thread, and Func waits for init, so going through Func here
+        # would wait for itself.
         try:
-            CUDA.cuInit(0)
-        except:
-            pass
+            MetaCUDA.dll().cuInit(0)
+        except BaseException as error:
+            MetaCUDA.last_init_error = error

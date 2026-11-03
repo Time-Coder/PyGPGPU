@@ -3,17 +3,53 @@ import platform
 import shutil
 import glob
 import os
-from typing import Dict, Callable, List
+import threading
+from typing import Dict, Callable, List, Optional
 from ctypes import c_int, c_void_p, pointer, CDLL, addressof, _Pointer, Array
 
 from .nvrtcinfo import NVRTCInfo
 from .nvrtctypes import nvrtcResult
+
+# Same background-initialization contract as the CUDA driver (see cuda.py): the compiler
+# is initialized off the import path, and `Func.__call__` waits for it. Both functions are
+# private -- the backend package starts the thread when it is imported, and a caller never
+# asks for the initialization or waits for it explicitly.
+_INIT_DONE = threading.Event()
+_INIT_THREAD:Optional[threading.Thread] = None
+_INIT_LOCK = threading.Lock()
+
+
+def _start_init()->None:
+    """Run `init()` once, on a background thread (idempotent)."""
+    global _INIT_THREAD
+    with _INIT_LOCK:
+        if _INIT_THREAD is not None:
+            return
+
+        def _run()->None:
+            try:
+                NVRTC.init()
+            finally:
+                _INIT_DONE.set()
+
+        _INIT_THREAD = threading.Thread(target=_run, name="pygpgpu-nvrtc-init")
+        _INIT_THREAD.start()
+
+
+def _wait_ready()->None:
+    """Block until the background compiler initialization has finished (or failed)."""
+    _INIT_DONE.wait()
 
 
 class MetaNVRTC(type):
 
     __dll = None
     __func_map:Dict[str, Callable] = {}
+    # The exception init() hit when the machine has no CUDA toolkit (usually the
+    # FileNotFoundError for nvcc.exe / the nvrtc dll). Diagnostic only: every real call
+    # re-raises what the loader itself raises, so nothing here can make a broken setup
+    # look usable.
+    last_init_error:Optional[BaseException] = None
 
     @staticmethod
     def nvrtc_lib_path():
@@ -64,6 +100,9 @@ class NVRTC(metaclass=MetaNVRTC):
             self.name = name
 
         def __call__(self, *args, **kwargs):
+            # The one synchronization point with the background initialization (see cuda.py).
+            _wait_ready()
+
             if NVRTC.print_call:
                 call_str = self.name + "(" + ", ".join([self.__str_arg(arg) for arg in args] + [f"{key}={self.__str_arg(value)}" for key, value in kwargs.items()]) + ")"
                 print(call_str, end="", flush=True)
@@ -176,25 +215,38 @@ class NVRTC(metaclass=MetaNVRTC):
         
     @staticmethod
     def init():
-        for func_name, func_info in NVRTCInfo.func_signatures.items():
-            if "dll_func" in func_info:
-                continue
+        """Pre-bind the compiler's entry points, once, at import time.
 
-            try:
+        A toolkit the machine does not have must not fail the import: the entries are
+        bound lazily anyway (`Func.__call__` loads them on first use), so a missing DLL
+        here only means "nothing to pre-bind". The error is recorded for the diagnostic
+        and every real call then re-raises what the loader itself raises -- nothing can
+        make a broken setup look usable.
+        """
+        try:
+            for func_name, func_info in NVRTCInfo.func_signatures.items():
+                if "dll_func" in func_info:
+                    continue
+
                 func = getattr(MetaNVRTC.dll(), func_name)
                 func.argtypes = list(func_info["args"].values())
                 func.restype = func_info["restype"]
                 func_info["dll_func"] = func
-            except TypeError:
-                if NVRTC.print_info:
-                    print(f"warning: failed to load {func_name} from nvrtc, skipped.")
+        except BaseException as error:
+            MetaNVRTC.last_init_error = error
+            if NVRTC.print_info:
+                print(f"warning: could not pre-bind NVRTC "
+                      f"({type(error).__name__}: {error}); "
+                      f"calls will fail when one is made.")
 
-        # preheat
+        # preheat -- through the raw dll, NOT through Func.__call__: init itself runs on
+        # the background thread, and Func waits for init, so going through Func here
+        # would wait for itself.
         try:
             major = c_int(0)
             minor = c_int(0)
             ptr_major = pointer(major)
             ptr_minor = pointer(minor)
-            NVRTC.nvrtcVersion(ptr_major, ptr_minor)
-        except:
-            pass
+            MetaNVRTC.dll().nvrtcVersion(ptr_major, ptr_minor)
+        except BaseException as error:
+            MetaNVRTC.last_init_error = error
