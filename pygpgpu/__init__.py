@@ -84,6 +84,75 @@ from .kernel_import import kernel_import  # noqa: E402  (needs the imports above
 from .utils import get_print_info, set_print_info  # noqa: E402  (needs to follow the imports above)
 
 
+# ---------- Top-level export: the host-side CUDA libraries ----------
+#
+# The CUDA math libraries (cuBLAS, cuSOLVER, cuFFT, cuSPARSE, the CUDA runtime) are
+# bound with ctypes under pygpgpu/cuda/libraries. They are HOST-side: a gemm is an
+# array-level operation the host performs, not something a @kernel body can call.
+#
+# They are reached through a lazy module proxy, because importing one of them pulls
+# in the CUDA driver and therefore starts its background initialization -- which
+# `import pygpgpu` must not do. The proxy imports the real module on the first
+# attribute read, so the cost is paid by the caller who actually uses a library.
+import importlib  # noqa: E402
+import sys  # noqa: E402
+import types  # noqa: E402
+
+# The names the proxy publishes: the pythonic wrappers and the two entry points
+# that name the libraries themselves.
+_CUDA_LIBRARY_EXPORTS = (
+    "gemm", "lt_gemm", "axpy", "scal", "dot", "rfft", "irfft", "csrmv",
+    "ensure_context",
+    "library_names", "driver_for",
+)
+
+
+def _make_cuda_libraries_proxy()->types.ModuleType:
+    """A module object that imports the CUDA libraries on first attribute read.
+
+    The proxy is a real module (so it has a name, a docstring and a repr), but its
+    attributes are resolved through ``__getattr__``, which imports the real package
+    the first time one is read. After that the real module is in ``sys.modules`` and
+    every later read is an ordinary attribute lookup.
+
+    The proxy is registered in ``sys.modules`` under its own name, which is what
+    makes BOTH natural spellings work::
+
+        from pygpgpu import cuda_libraries          # the attribute
+        from pygpgpu.cuda_libraries import gemm     # the import
+
+    The second one looks the name up in ``sys.modules`` first, so a proxy that was
+    not registered there would answer "No module named ...". Registering it changes
+    nothing about the laziness: the real package is still imported only when an
+    attribute is read.
+    """
+    proxy = types.ModuleType("pygpgpu.cuda_libraries")
+    proxy.__doc__ = (
+        "The host-side CUDA math libraries, bound with ctypes.\n\n"
+        "These are HOST-side operations: a gemm moves whole arrays to the device and\n"
+        "runs one library call, so it is not expressible inside a @kernel body.\n"
+        "The CUDA driver is loaded on first use, never at import time."
+    )
+    proxy.__all__ = list(_CUDA_LIBRARY_EXPORTS)
+
+    def _resolve(name:str):
+        if name not in _CUDA_LIBRARY_EXPORTS:
+            raise AttributeError(
+                f"module 'pygpgpu.cuda_libraries' has no attribute {name!r}")
+
+        module = importlib.import_module(".cuda.libraries", __name__)
+        value = getattr(module, name)
+        setattr(proxy, name, value)
+        return value
+
+    proxy.__getattr__ = _resolve  # type: ignore[attr-defined]
+    sys.modules[proxy.__name__] = proxy
+    return proxy
+
+
+cuda_libraries = _make_cuda_libraries_proxy()
+
+
 __all__ = [
     # kernel
     "kernel", "PyKernel", "DEFAULT_BACKEND_ORDER",
@@ -112,6 +181,7 @@ __all__ = [
     "kernel_import",
     # the host-side CUDA libraries (cuBLAS, cuSOLVER, cuFFT, cuSPARSE, the runtime);
     # the proxy imports them on first use, so `import pygpgpu` still loads no runtime
+    "cuda_libraries",
 ]
 
 
