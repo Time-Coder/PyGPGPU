@@ -82,15 +82,21 @@ def test_the_error_is_not_a_bare_index_error(gpu_backend, runner):
 
 
 def test_a_partial_subscript_is_refused(gpu_backend, runner):
-    """`out[i, j]` on a 3-D array means a slice in python, and used to write one element."""
+    """`out[i, j]` on a 3-D array means a slice in python, and used to write one element.
+
+    Python raises nothing here -- `out[i, j]` selects a sub-array -- so this is a *device* limit
+    rather than a mirror of the interpreter, and it is reported as a ValueError to keep it
+    apart from the IndexError a real indexing mistake raises.
+    """
     a = np.arange(24, dtype=np.float32).reshape(2, 3, 4) + 100
     out = np.zeros((2, 3, 4), dtype=np.float32)
     with pytest.raises(ValueError) as caught:
         runner(partial_subscript, a, out)
+    assert not isinstance(caught.value, IndexError)
     message: str = str(caught.value)
     assert "sub-array" in message
     assert "shape (2, 3, 4)" in message
-    assert "indexed with 2 indices" in message
+    assert "Index every dimension" in message
     # Nothing was written, so a caller cannot mistake a partial result for success.
     np.testing.assert_allclose(out, np.zeros((2, 3, 4), dtype=np.float32))
 

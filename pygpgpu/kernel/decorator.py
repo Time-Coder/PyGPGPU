@@ -781,14 +781,20 @@ def _body_frame(func:Callable, error:BaseException)->Optional[Any]:
     qualname:str = getattr(func, "__qualname__", None) or getattr(func, "__name__", "kernel")
     # A nested function's qualname carries its outer names; the frame shows the last one.
     func_name:str = qualname.rsplit(".", 1)[-1]
-    # `def <name>():` has to sit far enough above the failing line that the `raise` lands on
-    # it. The stand-in is three lines (def, marker, raise), so its `def` starts at
-    # `lineno - 3`. The marker string is what identifies this stand-in later (see
-    # _is_body_stand_in); it is dead code, because the `raise` below it always happens.
+    # The caret's start column: what python underlines is the offending expression, and the
+    # translator records where it begins (see `_check_shape_indices`). A line-only message
+    # would point at the statement with no indication of *which* part of it failed.
+    column:int = max(int(getattr(error, "column", 0) or 0), 0)
+    # The statements need the block's own four spaces *plus* the caret's column, so an
+    # error with no recorded column still compiles as an ordinary indented body.
+    padding:str = " " * (column + 4)
+    # The marker is a real string CONSTANT in the code object, which is what identifies this
+    # stand-in later (see _is_body_stand_in). It sits on the line *above* the raise so the
+    # raise stays on `lineno`; a comment would not reach `co_consts`.
     source:str = ("\n" * max(lineno - 3, 0)
                   + f"def {func_name}():\n"
-                  + f"    '{_FRAME_MARKER}'\n"
-                  + "    raise _PYGPGPU_FRAME_EXCEPTION\n")
+                  + padding + f"'{_FRAME_MARKER}'\n"
+                  + padding + "raise _PYGPGPU_FRAME_EXCEPTION\n")
     namespace:Dict[str, Any] = {"_PYGPGPU_FRAME_EXCEPTION": error}
     try:
         exec(compile(source, filename, "exec"), namespace)  # noqa: S102 - a frame stand-in
@@ -2493,6 +2499,13 @@ class PyKernel(_KernelBase[_P]):
                  "kernel_created_all": sorted({name
                                                for names in phase_created for name in names}),
                  "subscript_indices": dict(translator.subscript_indices),
+                 # name -> the line of its widest subscript, and the offset that turns a
+                 # parsed-copy line into the user's own: the launch blames that statement,
+                 # not the loop, when a subscript names more indices than the rank.
+                 "subscript_lines": dict(translator.subscript_lines),
+                 "subscript_columns": dict(translator.subscript_columns),
+                 "source_first_line": int(getattr(translator, "first_line", 1) or 1),
+                 "loop_line": int(getattr(translator, "magic_loop_line", 0) or 0),
                  # How many index names the magic loop unpacks: the launch checks it against
                  # the number of dimensions its iteration domain actually has.
                  "loop_names": len(translator.work_item_indices),
@@ -2787,69 +2800,93 @@ def _check_shape_indices(kernel_name:str, full:List[Any],
                          launch_meta:Dict[str, Any])->None:
     """Refuse a dimension the array does not have, in the caller's own terms.
 
-    A magic loop's index count is written in the source (``for i, j, k in ...``) while an
-    array's rank is only known from the value passed at call time, so the mismatch can
-    only be found here. The python backend reports it as ``not enough values to unpack
-    (expected 3, got 2)``; a device launch used to say ``tuple index out of range``,
-    which names neither the array nor the loop.
+    Two different mistakes reach this function, and they have to stay apart because python
+    reports them differently:
 
-    The same read is applied to how the body subscripts each array: ``out[i, j]`` on a
-    3-D array selects a *slice* in python, which a work item cannot represent, and used to
-    compile into a single flat element -- a silently wrong answer.
+    * a magic loop whose *iteration domain* names more axes than the array has
+      (``for i, j in np.ndindex(arr.shape)`` over a 1-D array) is an unpacking error:
+      ``not enough values to unpack (expected 2, got 1)``. Its rank is written in the
+      source while the array's shape is known only from the value passed at call time, so
+      it can only be found here.
+    * a *subscript* that names more indices than the array has dimensions (``a[i, i]``
+      over a 1-D array) is an ``IndexError``: ``too many indices for array: array is
+      1-dimensional, but 2 were indexed``. A subscript naming fewer indices than the
+      dimensions (``out[i, j]`` on a 3-D array) is legal python that selects a sub-array,
+      which a work item cannot represent, so that one stays refused with its own wording.
+
+    The two used to share one check driven by ``shape_sources``, which carries both the
+    loop's extents and the dimensions a subscript asks for. A body indexing ``a[i, i]``
+    therefore claimed the *loop* wanted two dimensions of ``a`` and reported an unpacking
+    error about a loop that never iterated ``a`` at all.
     """
     param_names:Dict[int, str] = launch_meta["param_names"]
+    name_to_index:Dict[str, int] = {name: index for index, name in param_names.items()}
 
-    # The highest dimension referenced per array, from the shape arguments the kernel
-    # receives and from the work-size derivation of the magic loop.
-    highest:Dict[int, int] = {}
-    for param_index, dim in shape_sources:
-        highest[param_index] = max(highest.get(param_index, -1), dim)
-    for param_index, dim in work_size_dims:
-        if param_index is not None and dim >= 0:
-            highest[param_index] = max(highest.get(param_index, -1), dim)
+    def shape_of(param_index:Optional[int])->Optional[Tuple[int, ...]]:
+        if param_index is None:
+            return None
+        shape:Any = getattr(full[param_index], "shape", None)
+        return None if shape is None else tuple(int(s) for s in shape)
 
-    for param_index, dim in sorted(highest.items()):
-        value:Any = full[param_index]
-        shape:Any = getattr(value, "shape", None)
+    # The loop's own iteration domain, and only that: every axis it names has to exist.
+    first_line:int = int(launch_meta.get("source_first_line", 1) or 1)
+    for param_index, dim in sorted({(pi, d) for pi, d in work_size_dims if pi is not None}):
+        if dim < 0:
+            continue                      # -1 is a whole-shape domain, checked below
+        shape = shape_of(param_index)
         if shape is None:
             continue
         rank:int = len(shape)
         if dim < rank:
             continue
-        name:str = param_names.get(param_index, f"argument {param_index}")
-        indexed:int = dim + 1
-        raise ValueError(
-            f"{kernel_name}(): not enough values to unpack "
-            f"(expected {indexed}, got {rank}): '{name}' has shape "
-            f"{tuple(int(s) for s in shape)}, so it cannot be indexed with {indexed} "
-            f"indices. The magic loop unpacks {indexed} names and must match the number "
-            f"of dimensions of the array it iterates"
-        ) from None
+        name = param_names.get(param_index, f"argument {param_index}")
+        error:BaseException = ValueError(
+            f"{kernel_name}(): {_unpack_count_message(dim + 1, rank)}: the magic loop "
+            f"iterates {dim + 1} axes but '{name}' has shape {shape}, so it has "
+            f"{rank} dimension{'s' if rank != 1 else ''}")
+        # The loop is the statement python blames, so point there.
+        loop_line:int = int(launch_meta.get("loop_line", 0) or 0)
+        if loop_line:
+            error.lineno = first_line + loop_line - 1  # type: ignore[attr-defined]
+        raise error from None
 
-    name_to_index:Dict[str, int] = {name: index for index, name in param_names.items()}
+    # A subscript asks for *its* number of indices; that is what python counts.
     for name, count in sorted(launch_meta["subscript_indices"].items()):
         param_index:int = name_to_index.get(name, -1)
         if param_index < 0:
-            continue  # a local buffer or an image: no numpy value to measure
-        value = full[param_index]
-        shape = getattr(value, "shape", None)
+            continue                      # a local buffer or an image: no numpy value
+        shape = shape_of(param_index)
         if shape is None:
             continue
         rank = len(shape)
         if count == rank:
             continue
+        # The statement that subscripts the array is the one worth blaming, not the loop:
+        # the parsed copy's line is offset by `source_first_line`, so the caret lands on
+        # `a[i, i]` in the user's file, exactly where python would point.
+        subscript_line:int = int(launch_meta.get("subscript_lines", {}).get(name, 0) or 0)
+        first_line:int = int(launch_meta.get("source_first_line", 1) or 1)
         if count > rank:
-            raise ValueError(
-                f"{kernel_name}(): too many indices for '{name}': it has shape "
-                f"{tuple(int(s) for s in shape)} and is indexed with {count} indices, "
-                f"but only {rank} dimension{'s' if rank != 1 else ''} exist"
-            ) from None
-        raise ValueError(
-            f"{kernel_name}(): '{name}' has shape {tuple(int(s) for s in shape)} and is "
-            f"indexed with {count} indices; python would select a sub-array there, which "
-            f"a work item cannot represent. Index every dimension, e.g. "
-            f"'{name}[i, j, k]' for a 3-D array"
-        ) from None
+            # numpy's own sentence and exception type: python raises exactly this for
+            # `a[i, i]` on a 1-D array, so the device does too.
+            error:BaseException = IndexError(
+                f"too many indices for array: array is {rank}-dimensional, "
+                f"but {count} were indexed ('{name}' has shape {shape})")
+        else:
+            # Python raises nothing here -- `out[i, j]` on a 3-D array selects a sub-array --
+            # so this is a device limit, not a mirror of the interpreter's. A ValueError
+            # keeps it apart from the indexing errors above.
+            error = ValueError(
+                f"too few indices for '{name}': python would select a sub-array from its "
+                f"shape {shape}, which a work item cannot represent. Index every dimension, "
+                f"e.g. '{name}[i, j, k]' for a 3-D array")
+        if subscript_line:
+            # `_body_frame` reads these back to place a frame on that line, and the column
+            # decides where CPython starts the caret -- on the subscript expression.
+            error.lineno = first_line + subscript_line - 1  # type: ignore[attr-defined]
+            error.column = int(  # type: ignore[attr-defined]
+                launch_meta.get("subscript_columns", {}).get(name, 0) or 0)
+        raise error from None
 
 
 def _kernel_scalar_argument(value:Any, t:Any)->Any:

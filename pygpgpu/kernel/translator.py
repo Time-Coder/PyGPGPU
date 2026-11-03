@@ -1542,6 +1542,12 @@ class FunctionTranslator:
         # name -> how many indices the body subscripts that array with (see
         # _record_subscript_indices); checked against the real shape at launch.
         self.subscript_indices:Dict[str, int] = {}
+        # name -> the line of the widest such subscript, so the launch can blame that
+        # statement rather than the loop when the count exceeds the array's rank.
+        self.subscript_lines:Dict[str, int] = {}
+        # name -> the column that subscript starts at, so the caret lands on the indexed
+        # expression (`a[i, i]`), the way numpy's own IndexError points at it.
+        self.subscript_columns:Dict[str, int] = {}
         # The magic loop's index variables, in unpack order. A subscript formed from
         # exactly these names addresses a different element per work item, which is what
         # makes a plain read-modify-write safe (see _augassign_is_race_free).
@@ -1578,6 +1584,9 @@ class FunctionTranslator:
         # Set once a magic loop is detected: it fixes the iteration domain, so a
         # `@kernel(domain=...)` declaration would be redundant.
         self.magic_loop_present:bool = False
+        # The line of that loop (in the parsed copy's numbering), so a launch-time rank
+        # check can blame the `for` statement instead of the whole kernel.
+        self.magic_loop_line:int = 0
         # Image parameters that an OpenCL kernel samples. Each one needs a sampler
         # constant emitted next to the kernel, and the host side builds one sampler
         # per image, so this set drives that generation.
@@ -2517,6 +2526,7 @@ class FunctionTranslator:
         # The magic loop already fixes the iteration domain, so a `domain=` declaration is
         # redundant: PyKernel rejects a kernel that carries both before it reaches here.
         self.magic_loop_present = True
+        self.magic_loop_line = int(getattr(body[magic_index], "lineno", 0) or 0)
         for stmt in _outside_loops(body):
             # A creation the device cannot perform is executed by the interpreter instead
             # and becomes a parameter; that is only possible here, above the loop, because
@@ -4730,7 +4740,15 @@ class FunctionTranslator:
         if not is_ptr(self._lookup(name)):
             return
         count:int = len(node.slice.elts) if isinstance(node.slice, ast.Tuple) else 1
-        self.subscript_indices[name] = max(self.subscript_indices.get(name, 0), count)
+        previous:int = self.subscript_indices.get(name, 0)
+        if count >= previous:
+            # The widest subscript is the one that decides, so it is also the statement
+            # worth pointing at. Its line is in the parsed copy's numbering, which
+            # _body_frame converts back to the user's file; the column is where the
+            # subscript expression itself starts, so the caret underlines the indexing.
+            self.subscript_lines[name] = getattr(node, "lineno", 0) or 0
+            self.subscript_columns[name] = getattr(node, "col_offset", 0) or 0
+        self.subscript_indices[name] = max(previous, count)
 
     def _visit_subscript_index(self, node:ast.Subscript)->Tuple[str, Any]:
         self._record_subscript_indices(node)
