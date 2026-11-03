@@ -2236,7 +2236,11 @@ class PyKernel(_KernelBase[_P]):
 
         # A nested launch needs the callee's own `__global__` function in this same source:
         # the launch statement names a device function, and C requires it before its caller.
-        device_prefix:List[str] = list(translator.nested_helpers) + list(translator.nested_kernels)
+        # A built-in that a backend spells with a helper contributes one too, and it is a
+        # device function the kernel calls, so it goes in the same place.
+        device_prefix:List[str] = (list(translator.device_helpers)
+                                   + list(translator.nested_helpers)
+                                   + list(translator.nested_kernels))
         device_prefix.extend(entry["code"] for entry in own_entries)
 
         structure_dtypes:List[Any] = list(translator.structure_dtypes())

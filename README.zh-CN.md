@@ -332,17 +332,26 @@ def integrate(x: np.ndarray, out: np.ndarray):
 
 分三组, 区别很重要:
 
-* **两个后端都有**的函数 -- `erf`、`erfc`、`tgamma`、`lgamma`、`rint`、`remainder`、
+* **三个后端都有**的函数 -- `erf`、`erfc`、`tgamma`、`lgamma`、`rint`、`remainder`、
   `fmin`、`fmax`、`fdim`、`copysign`、`nextafter`、`ldexp`、`fract`、`sign`, 以及
   `native_*` 一族。它们在 OpenCL、CUDA、HIP 上都能跑。
-* **只有 CUDA 有**的函数 -- 快速近似(`fast_exp`、`fast_log`、`fast_sin` ...)、正确舍入
+* **CUDA 与 HIP 有、OpenCL 没有**的函数 -- 快速近似(`fast_exp`、`fast_log`、`fast_sin` ...)、正确舍入
   形式(`exact_recip`、`exact_divide`、`exact_sqrt` ...)、特殊函数(`erf_inverse`、
   `normal_cdf`、`reciprocal_hypot`、`sin_pi`、`cos_pi`、贝塞尔函数)以及转换
-  (`float_to_int_nearest`、`int_to_float` ...)。用到它们的 kernel 就是 **CUDA kernel**:
+  (`float_to_int_nearest`、`int_to_float` ...)。用到它们的 kernel 就是 **CUDA 或 HIP 的 kernel**:
   在 OpenCL 上翻译器会**指名道姓**地拒绝, 消息里写明是哪个函数没有 OpenCL 对应物,
   而不是丢给你一句编译器的 "undeclared identifier"。
 * `mad` / `fma` 一族与向量运算 -- 这些 pygf 已经发布, 这里用的就是 pygf 自己的对象
   (见 `pygpgpu.funcs`)。
+
+同一个名字在 CUDA 与 HIP 上答案相同, 但两者不是同一块设备, 差别值得知道:
+
+* HIP 没有 `__exp2f`, 所以那里的 `native_exp2` 写作 `exp2f` -- 普通拼写, HIP 有。
+* HIP **完全没有**向零舍入的内建(`__frcp_rz`、`__fdiv_rz`、`__fsqrt_rz`), 所以
+  `exact_recip_rz`、`exact_divide_rz`、`exact_sqrt_rz` 在 HIP 上由包发射的一个设备端辅助函数
+  算出来: 它取正确舍入的值, 用融合乘加判断精确结果落在它的哪一侧, 若在另一侧就朝零方向挪
+  一个最小单位。结果与 CUDA 自己的内建**逐位相同**(除法是唯一的例外 -- 两块硬件的除法单元在
+  最后一位上舍入不同, 但**舍入方向**两边一致)。
 
 有两个名字值得提醒, 因为以设备端文档为准时, 拼写本身会骗人:
 

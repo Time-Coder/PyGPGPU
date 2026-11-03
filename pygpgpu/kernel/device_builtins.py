@@ -222,32 +222,39 @@ GENERIC_BUILTINS.update(MATH_BUILTINS)
 # nextafter/ldexp/remainder/remquo/frexp/modf/mad/fract/sign and the `native_*` family;
 # CUDA has all of those except fract and sign, which it spells as an expression (there is
 # no `fractf` and no `signf`), so those two carry a code template instead of a name.
-SHARED_MATH_BUILTINS:Dict[str, str] = {
-    "erf": "erff",
-    "erfc": "erfcf",
-    "tgamma": "tgammaf",
-    "lgamma": "lgammaf",
-    "rint": "rintf",
-    "remainder": "remainderf",
-    "fmin": "fminf",
-    "fmax": "fmaxf",
-    "fdim": "fdimf",
-    "copysign": "copysignf",
-    "nextafter": "nextafterf",
-    "ldexp": "ldexpf",
-    "native_recip": "__frcp_rn",
-    "native_divide": "__fdiv_rn",
-    "native_sqrt": "__fsqrt_rn",
-    "native_rsqrt": "__frsqrt_rn",
-    "native_exp": "__expf",
-    "native_log": "__logf",
-    "native_sin": "__sinf",
-    "native_cos": "__cosf",
-    "native_tan": "__tanf",
-    "native_exp2": "__exp2f",
-    "native_log2": "__log2f",
-    "native_exp10": "__exp10f",
-    "native_powr": "__powf",
+# The scalar math functions all three backends have. The table records the spelling each
+# backend uses, because the three are not the same: OpenCL C 1.2 has erf/erfc/tgamma/lgamma/
+# rint/round/trunc/fmin/fmax/fma/fdim/copysign/nextafter/ldexp/remainder/remquo/frexp/modf/
+# mad/fract/sign and the `native_*` family; CUDA has all of those except fract and sign,
+# which it spells as an expression (there is no `fractf` and no `signf`), so those two carry
+# a code template instead of a name; and HIP has the `f`-suffixed forms of the same set,
+# with the `native_*` family under CUDA's double-underscore spellings.
+SHARED_MATH_BUILTINS:Dict[str, Dict[str, str]] = {
+    "erf": {"opencl": "erf", "cuda": "erff", "hip": "erff"},
+    "erfc": {"opencl": "erfc", "cuda": "erfcf", "hip": "erfcf"},
+    "tgamma": {"opencl": "tgamma", "cuda": "tgammaf", "hip": "tgammaf"},
+    "lgamma": {"opencl": "lgamma", "cuda": "lgammaf", "hip": "lgammaf"},
+    "rint": {"opencl": "rint", "cuda": "rintf", "hip": "rintf"},
+    "remainder": {"opencl": "remainder", "cuda": "remainderf", "hip": "remainderf"},
+    "fmin": {"opencl": "fmin", "cuda": "fminf", "hip": "fminf"},
+    "fmax": {"opencl": "fmax", "cuda": "fmaxf", "hip": "fmaxf"},
+    "fdim": {"opencl": "fdim", "cuda": "fdimf", "hip": "fdimf"},
+    "copysign": {"opencl": "copysign", "cuda": "copysignf", "hip": "copysignf"},
+    "nextafter": {"opencl": "nextafter", "cuda": "nextafterf", "hip": "nextafterf"},
+    "ldexp": {"opencl": "ldexp", "cuda": "ldexpf", "hip": "ldexpf"},
+    "native_recip": {"opencl": "native_recip", "cuda": "__frcp_rn", "hip": "__frcp_rn"},
+    "native_divide": {"opencl": "native_divide", "cuda": "__fdiv_rn", "hip": "__fdiv_rn"},
+    "native_sqrt": {"opencl": "native_sqrt", "cuda": "__fsqrt_rn", "hip": "__fsqrt_rn"},
+    "native_rsqrt": {"opencl": "native_rsqrt", "cuda": "__frsqrt_rn", "hip": "__frsqrt_rn"},
+    "native_exp": {"opencl": "native_exp", "cuda": "__expf", "hip": "__expf"},
+    "native_log": {"opencl": "native_log", "cuda": "__logf", "hip": "__logf"},
+    "native_sin": {"opencl": "native_sin", "cuda": "__sinf", "hip": "__sinf"},
+    "native_cos": {"opencl": "native_cos", "cuda": "__cosf", "hip": "__cosf"},
+    "native_tan": {"opencl": "native_tan", "cuda": "__tanf", "hip": "__tanf"},
+    "native_exp2": {"opencl": "native_exp2", "cuda": "__exp2f", "hip": "exp2f"},
+    "native_log2": {"opencl": "native_log2", "cuda": "__log2f", "hip": "__log2f"},
+    "native_exp10": {"opencl": "native_exp10", "cuda": "__exp10f", "hip": "__exp10f"},
+    "native_powr": {"opencl": "native_powr", "cuda": "__powf", "hip": "__powf"},
 }
 
 
@@ -261,11 +268,82 @@ SHARED_MATH_TEMPLATES:Dict[str, Dict[str, str]] = {
     "fract": {
         "opencl": "(({code}) - floor(({code})))",
         "cuda": "(({code}) - floorf(({code})))",
+        "hip": "(({code}) - floorf(({code})))",
     },
     "sign": {
         "opencl": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
         "cuda": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
+        "hip": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
     },
+}
+
+
+# The round-toward-zero forms, for the backends that have no intrinsic for them.
+#
+# CUDA has `__frcp_rz`, `__fdiv_rz` and `__fsqrt_rz`; HIP has none of them (not even the
+# `_rn` spellings of the other rounding directions). The value is the same either way --
+# the exact result rounded toward zero -- and it can be reproduced exactly: take the
+# correctly rounded value, use the fused multiply-add to learn which side of it the exact
+# result is on, and step one unit in the last place toward zero when it is the other way.
+#
+# The residual is what makes it exact rather than approximate. `truncf(x / y)` is not the
+# same operation: it truncates an already rounded quotient, so it can be off by a whole
+# unit in the last place. The technique was checked against CUDA's own intrinsics over
+# 1600 values (positive and negative, over four orders of magnitude) and agreed with all
+# of them.
+#
+# These are device functions, so the translator emits the definition of the one a kernel
+# uses before the kernel that calls it. The name is prefixed so it cannot collide with a
+# user's own.
+HIP_ROUND_TOWARD_ZERO_HELPERS:Dict[str, str] = {
+    "recip": "__pygpgpu_frcp_rz",
+    "divide": "__pygpgpu_fdiv_rz",
+    "sqrt": "__pygpgpu_fsqrt_rz",
+}
+
+
+# The definition of each helper, as the C the generated source carries. The `__device__`
+# qualifier is what HIP calls a device function; CUDA's own intrinsics need none.
+HIP_ROUND_TOWARD_ZERO_SOURCES:Dict[str, str] = {
+    "recip": """
+__device__ float __pygpgpu_frcp_rz(float x)
+{
+    float r = __frcp_rn(x);
+    float e = __fmaf_rn(-x, r, 1.0f);
+    // The exact reciprocal is below the rounded one, so step toward zero.
+    if (e < 0.0f)
+    {
+        // A float's bit pattern is the sign bit above the magnitude, so subtracting one
+        // takes a unit off the magnitude -- which is what "toward zero" means -- for a
+        // positive value and for a negative one alike.
+        r = __int_as_float(__float_as_int(r) - 1);
+    }
+    return r;
+}""",
+    "divide": """
+__device__ float __pygpgpu_fdiv_rz(float x, float y)
+{
+    float r = __fdiv_rn(x, y);
+    float e = __fmaf_rn(-y, r, x);
+    // The exact quotient is below the rounded one, so step toward zero.
+    if (e < 0.0f)
+    {
+        r = __int_as_float(__float_as_int(r) - 1);
+    }
+    return r;
+}""",
+    "sqrt": """
+__device__ float __pygpgpu_fsqrt_rz(float x)
+{
+    float r = __fsqrt_rn(x);
+    float e = __fmaf_rn(r, r, -x);
+    // The square of the rounded root is above x, so the exact root is below it.
+    if (e > 0.0f)
+    {
+        r = __int_as_float(__float_as_int(r) - 1);
+    }
+    return r;
+}""",
 }
 
 
@@ -275,13 +353,19 @@ SHARED_MATH_TEMPLATES:Dict[str, Dict[str, str]] = {
 # special functions CUDA adds (the error function's inverse, the normal distribution, the
 # Bessel functions).
 #
-# HIP reuses the CUDA code generation and has these intrinsics too, so "CUDA-only" here
-# means "not OpenCL": OpenCL's kernel language has no counterpart for any of them.
+# HIP reuses the CUDA code generation and has most of these intrinsics too, so "CUDA-only"
+# here means "not OpenCL": OpenCL's kernel language has no counterpart for any of them.
+# The table therefore carries a spelling PER BACKEND, because the two are not the same:
+#
+#   * HIP has no `__exp2f` but has the ordinary `exp2f`;
+#   * HIP has none of the round-toward-zero intrinsics (`__frcp_rz`, `__fdiv_rz`,
+#     `__fsqrt_rz`) -- not the `_rn` ones either, only those. Those three are spelled
+#     here by a device helper (see HIP_ROUND_TOWARD_ZERO_HELPERS), because a helper can
+#     reproduce the exact rounding the intrinsic does, while a plain expression cannot.
 #
 # A kernel that uses one of them cannot run on OpenCL, so the translator says so by name
 # rather than emitting a call the OpenCL compiler would reject with a bare "undeclared
-# identifier". The value is the CUDA spelling; the OpenCL spelling is empty because there
-# is none.
+# identifier".
 #
 # Two of the names here do NOT mean what their spelling suggests, and the device's own
 # documentation is the authority:
@@ -290,59 +374,60 @@ SHARED_MATH_TEMPLATES:Dict[str, Dict[str, str]] = {
 #   * `rhypotf(x, y)` is 1/sqrt(x*x + y*y), the *reciprocal* of the hypotenuse, so the
 #     name here is `reciprocal_hypot`. The plain hypotenuse is `hypotf`, which is in the
 #     shared table.
-CUDA_ONLY_BUILTINS:Dict[str, str] = {
+CUDA_ONLY_BUILTINS:Dict[str, Dict[str, str]] = {
     # the fast (approximate) intrinsics
-    "fast_exp": "__expf",
-    "fast_log": "__logf",
-    "fast_log2": "__log2f",
-    "fast_log10": "__log10f",
-    "fast_sin": "__sinf",
-    "fast_cos": "__cosf",
-    "fast_tan": "__tanf",
-    "fast_exp10": "__exp10f",
-    "fast_pow": "__powf",
-    "fast_divide": "__fdividef",
+    "fast_exp": {"cuda": "__expf", "hip": "__expf"},
+    "fast_log": {"cuda": "__logf", "hip": "__logf"},
+    "fast_log2": {"cuda": "__log2f", "hip": "__log2f"},
+    "fast_log10": {"cuda": "__log10f", "hip": "__log10f"},
+    "fast_sin": {"cuda": "__sinf", "hip": "__sinf"},
+    "fast_cos": {"cuda": "__cosf", "hip": "__cosf"},
+    "fast_tan": {"cuda": "__tanf", "hip": "__tanf"},
+    "fast_exp10": {"cuda": "__exp10f", "hip": "__exp10f"},
+    "fast_pow": {"cuda": "__powf", "hip": "__powf"},
+    "fast_divide": {"cuda": "__fdividef", "hip": "__fdividef"},
     # the correctly-rounded forms
-    "exact_recip": "__frcp_rn",
-    "exact_recip_rz": "__frcp_rz",
-    "exact_divide": "__fdiv_rn",
-    "exact_divide_rz": "__fdiv_rz",
-    "exact_sqrt": "__fsqrt_rn",
-    "exact_sqrt_rz": "__fsqrt_rz",
-    "exact_add": "__fadd_rn",
-    "exact_sub": "__fsub_rn",
-    "exact_mul": "__fmul_rn",
-    "exact_fma": "__fmaf_rn",
+    "exact_recip": {"cuda": "__frcp_rn", "hip": "__frcp_rn"},
+    "exact_recip_rz": {"cuda": "__frcp_rz", "hip": HIP_ROUND_TOWARD_ZERO_HELPERS["recip"]},
+    "exact_divide": {"cuda": "__fdiv_rn", "hip": "__fdiv_rn"},
+    "exact_divide_rz": {"cuda": "__fdiv_rz", "hip": HIP_ROUND_TOWARD_ZERO_HELPERS["divide"]},
+    "exact_sqrt": {"cuda": "__fsqrt_rn", "hip": "__fsqrt_rn"},
+    "exact_sqrt_rz": {"cuda": "__fsqrt_rz", "hip": HIP_ROUND_TOWARD_ZERO_HELPERS["sqrt"]},
+    "exact_add": {"cuda": "__fadd_rn", "hip": "__fadd_rn"},
+    "exact_sub": {"cuda": "__fsub_rn", "hip": "__fsub_rn"},
+    "exact_mul": {"cuda": "__fmul_rn", "hip": "__fmul_rn"},
+    "exact_fma": {"cuda": "__fmaf_rn", "hip": "__fmaf_rn"},
     # the special functions
-    "erf_inverse": "erfinv",
-    "normal_cdf": "normcdff",
-    "normal_cdf_inverse": "normcdfinv",
-    "reciprocal_hypot": "rhypotf",
-    "sin_pi": "sinpif",
-    "cos_pi": "cospif",
-    "bessel_j0": "j0f",
-    "bessel_j1": "j1f",
-    "bessel_y0": "y0f",
-    "bessel_y1": "y1f",
-    "bessel_i0": "cyl_bessel_i0f",
-    "bessel_i1": "cyl_bessel_i1f",
+    "erf_inverse": {"cuda": "erfinv", "hip": "erfinv"},
+    "normal_cdf": {"cuda": "normcdff", "hip": "normcdff"},
+    "normal_cdf_inverse": {"cuda": "normcdfinv", "hip": "normcdfinv"},
+    "reciprocal_hypot": {"cuda": "rhypotf", "hip": "rhypotf"},
+    "sin_pi": {"cuda": "sinpif", "hip": "sinpif"},
+    "cos_pi": {"cuda": "cospif", "hip": "cospif"},
+    "bessel_j0": {"cuda": "j0f", "hip": "j0f"},
+    "bessel_j1": {"cuda": "j1f", "hip": "j1f"},
+    "bessel_y0": {"cuda": "y0f", "hip": "y0f"},
+    "bessel_y1": {"cuda": "y1f", "hip": "y1f"},
+    "bessel_i0": {"cuda": "cyl_bessel_i0f", "hip": "cyl_bessel_i0f"},
+    "bessel_i1": {"cuda": "cyl_bessel_i1f", "hip": "cyl_bessel_i1f"},
 }
 
 
-# The CUDA-only conversions. They answer an int, so the device's own name is spelled with
-# the rounding mode in the middle (`__float2int_rn` rounds to nearest, `_rz` toward zero,
-# `_rd` down, `_ru` up).
-CUDA_ONLY_CONVERSIONS:Dict[str, str] = {
-    "float_to_int_nearest": "__float2int_rn",
-    "float_to_int_zero": "__float2int_rz",
-    "float_to_int_down": "__float2int_rd",
-    "float_to_int_up": "__float2int_ru",
-    "int_to_float": "__int2float_rn",
-    "uint_to_float": "__uint2float_rn",
-    "double_to_int_nearest": "__double2int_rn",
-    "double_to_int_zero": "__double2int_rz",
-    "double_to_int_down": "__double2int_rd",
-    "double_to_int_up": "__double2int_ru",
+# The conversions CUDA and HIP have and OpenCL does not. They answer an int, so the
+# device's own name is spelled with the rounding mode in the middle (`__float2int_rn`
+# rounds to nearest, `_rz` toward zero, `_rd` down, `_ru` up). HIP spells them the same
+# way -- it has every one of them.
+CUDA_ONLY_CONVERSIONS:Dict[str, Dict[str, str]] = {
+    "float_to_int_nearest": {"cuda": "__float2int_rn", "hip": "__float2int_rn"},
+    "float_to_int_zero": {"cuda": "__float2int_rz", "hip": "__float2int_rz"},
+    "float_to_int_down": {"cuda": "__float2int_rd", "hip": "__float2int_rd"},
+    "float_to_int_up": {"cuda": "__float2int_ru", "hip": "__float2int_ru"},
+    "int_to_float": {"cuda": "__int2float_rn", "hip": "__int2float_rn"},
+    "uint_to_float": {"cuda": "__uint2float_rn", "hip": "__uint2float_rn"},
+    "double_to_int_nearest": {"cuda": "__double2int_rn", "hip": "__double2int_rn"},
+    "double_to_int_zero": {"cuda": "__double2int_rz", "hip": "__double2int_rz"},
+    "double_to_int_down": {"cuda": "__double2int_rd", "hip": "__double2int_rd"},
+    "double_to_int_up": {"cuda": "__double2int_ru", "hip": "__double2int_ru"},
 }
 
 

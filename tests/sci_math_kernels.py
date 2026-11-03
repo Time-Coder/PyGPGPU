@@ -11,7 +11,9 @@ from pygpgpu import kernel
 from pygpgpu.kernel.builtins import (
     erf, erfc, tgamma, lgamma, fmin, fmax, fract, sign, copysign, fdim,
     remainder, nextafter, ldexp, fast_exp, fast_log, fast_sin, fast_cos,
-    exact_recip, exact_sqrt, normal_cdf, reciprocal_hypot, sin_pi, cos_pi,
+    exact_recip, exact_sqrt, exact_add, exact_fma, exact_divide, rint,
+    bessel_j0, bessel_i0, normal_cdf, reciprocal_hypot, sin_pi, cos_pi,
+    exact_recip_rz, exact_divide_rz, exact_sqrt_rz,
     float_to_int_nearest,
 )
 
@@ -131,6 +133,42 @@ def probe_exact_sqrt(x: np.ndarray, out: np.ndarray):
 
 
 @kernel
+def probe_exact_add(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = exact_add(x[i], 1.0)
+
+
+@kernel
+def probe_exact_fma(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = exact_fma(x[i], 2.0, 1.0)
+
+
+@kernel
+def probe_exact_divide(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = exact_divide(x[i], 2.0)
+
+
+@kernel
+def probe_rint(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = rint(x[i])
+
+
+@kernel
+def probe_bessel_j0(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = bessel_j0(x[i])
+
+
+@kernel
+def probe_bessel_i0(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = bessel_i0(x[i])
+
+
+@kernel
 def probe_normal_cdf(x: np.ndarray, out: np.ndarray):
     for i in range(out.shape[0]):
         out[i] = normal_cdf(x[i])
@@ -161,6 +199,24 @@ def probe_float_to_int_nearest(x: np.ndarray, out: np.ndarray):
 
 
 @kernel
+def probe_exact_recip_rz(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = exact_recip_rz(x[i])
+
+
+@kernel
+def probe_exact_divide_rz(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = exact_divide_rz(x[i], 3.0)
+
+
+@kernel
+def probe_exact_sqrt_rz(x: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = exact_sqrt_rz(x[i])
+
+
+@kernel
 def probe_vector_argument(vectors: np.ndarray, out: np.ndarray):
     for i in range(out.shape[0]):
         out[i] = erf(vectors[i])
@@ -188,8 +244,17 @@ PROBES = {
     "fast_cos": probe_fast_cos,
     "exact_recip": probe_exact_recip,
     "exact_sqrt": probe_exact_sqrt,
+    "exact_add": probe_exact_add,
+    "exact_fma": probe_exact_fma,
+    "exact_divide": probe_exact_divide,
+    "rint": probe_rint,
+    "bessel_j0": probe_bessel_j0,
+    "bessel_i0": probe_bessel_i0,
     "normal_cdf": probe_normal_cdf,
     "reciprocal_hypot": probe_reciprocal_hypot,
     "sin_pi": probe_sin_pi,
     "cos_pi": probe_cos_pi,
+    "exact_recip_rz": probe_exact_recip_rz,
+    "exact_divide_rz": probe_exact_divide_rz,
+    "exact_sqrt_rz": probe_exact_sqrt_rz,
 }

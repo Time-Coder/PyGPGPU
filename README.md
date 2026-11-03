@@ -337,19 +337,32 @@ def integrate(x: np.ndarray, out: np.ndarray):
 
 Three groups, and the difference matters:
 
-* the functions **both** backends have -- `erf`, `erfc`, `tgamma`, `lgamma`, `rint`,
+* the functions **all three backends have** -- `erf`, `erfc`, `tgamma`, `lgamma`, `rint`,
   `remainder`, `fmin`, `fmax`, `fdim`, `copysign`, `nextafter`, `ldexp`, `fract`, `sign`,
   and the `native_*` family. These run on OpenCL, CUDA and HIP alike.
-* the functions **only CUDA has** -- the fast approximations (`fast_exp`, `fast_log`,
-  `fast_sin`, ...), the correctly-rounded forms (`exact_recip`, `exact_divide`,
-  `exact_sqrt`, ...), the special functions (`erf_inverse`, `normal_cdf`,
+* the functions **CUDA and HIP have** and OpenCL does not -- the fast approximations
+  (`fast_exp`, `fast_log`, `fast_sin`, ...), the correctly-rounded forms (`exact_recip`,
+  `exact_divide`, `exact_sqrt`, ...), the special functions (`erf_inverse`, `normal_cdf`,
   `reciprocal_hypot`, `sin_pi`, `cos_pi`, the Bessel functions) and the conversions
   (`float_to_int_nearest`, `int_to_float`, ...). A kernel that uses one of these is a
-  **CUDA kernel**: on OpenCL the translator refuses it *by name*, so the message says
-  which function has no OpenCL counterpart rather than leaving you with an
+  **CUDA or HIP kernel**: on OpenCL the translator refuses it *by name*, so the message
+  says which function has no OpenCL counterpart rather than leaving you with an
   "undeclared identifier" from the compiler.
 * the `mad` / `fma` family and the vector operations, which pygf already publishes and
   which are pygf's own objects here (see `pygpgpu.funcs`).
+
+CUDA and HIP answer the same thing by the same name, but they are not the same device and
+the difference is worth knowing:
+
+* HIP has no `__exp2f`, so `native_exp2` is spelled `exp2f` there -- the ordinary name,
+  which HIP does have.
+* HIP has **none** of the round-toward-zero intrinsics (`__frcp_rz`, `__fdiv_rz`,
+  `__fsqrt_rz`), so `exact_recip_rz`, `exact_divide_rz` and `exact_sqrt_rz` are computed
+  on HIP by a device helper the package emits: it takes the correctly rounded value, uses
+  the fused multiply-add to learn which side of it the exact result is on, and steps one
+  unit toward zero when it is the other way. The result agrees with CUDA's own intrinsic
+  bit for bit (a division is the one exception, because the two hardware divide units
+  round differently in the last bit -- the rounding *direction* is the same either way).
 
 Two names are worth a warning, because the device's documentation is the authority and
 the spelling does not tell you:

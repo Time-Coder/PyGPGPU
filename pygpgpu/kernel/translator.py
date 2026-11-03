@@ -22,6 +22,8 @@ from .device_builtins import (
     CUDA_ONLY_BUILTINS,
     CUDA_ONLY_CONVERSIONS,
     GENERIC_BUILTINS,
+    HIP_ROUND_TOWARD_ZERO_HELPERS,
+    HIP_ROUND_TOWARD_ZERO_SOURCES,
     INDEX_BUILTINS,
     INDEX_VECTOR_AXES_CUDA,
     INDEX_VECTOR_AXES_OPENCL,
@@ -1466,6 +1468,11 @@ class FunctionTranslator:
         self.nested_seen:Dict[Callable, str] = {}
         # Device helpers a nested kernel needs, emitted once for the whole source.
         self.nested_helpers:List[str] = []
+        # Device helpers this kernel's own body needs, emitted once for the whole source.
+        # A built-in that a backend spells with a helper (the round-toward-zero forms, which
+        # HIP has no intrinsic for) contributes one of these; C requires the definition
+        # before the kernel that calls it.
+        self.device_helpers:List[str] = []
         # One entry per magic loop when a body has several; each becomes its own kernel.
         self.phases:List[List[ast.stmt]] = []
         # Locals initialized above the magic loop and written inside it: one location for the
@@ -7287,24 +7294,24 @@ class FunctionTranslator:
 
     def _emit_cuda_only_builtin(self, name:str, args:List[Tuple[str, Any]],
                                 node:ast.Call)->Tuple[str, Any]:
-        """A device intrinsic only CUDA has.
+        """A device intrinsic only the CUDA and HIP backends have.
 
         The fast approximations, the correctly-rounded forms and the special functions
-        CUDA adds have no OpenCL counterpart, so a kernel that uses one is a CUDA kernel.
-        On OpenCL the call is refused *by name* -- "undeclared identifier" from the
+        CUDA adds have no OpenCL counterpart, so a kernel that uses one is a CUDA or a HIP
+        kernel. On OpenCL the call is refused *by name* -- "undeclared identifier" from the
         compiler would not say which of the two the user should reach for.
         """
-        if self.backend != "cuda":
+        if self.launch_backend == "opencl":
             self._error(
                 f"gpu.{name}() is a CUDA device intrinsic that the OpenCL backend has no "
                 f"counterpart for: the OpenCL kernel language has no such function, so "
-                f"this kernel cannot run there. Either specialize the kernel for CUDA, "
-                f"or use the function all three backends have (see the ones listed in "
+                f"this kernel cannot run there. Either specialize the kernel for CUDA or "
+                f"HIP, or use the function all three backends have (see the ones listed in "
                 f"pygpgpu.kernel.builtins)", node)
 
         if name in CUDA_ONLY_CONVERSIONS:
             # A conversion answers an int, so the result type is the int one.
-            conversion:str = CUDA_ONLY_CONVERSIONS[name]
+            conversion:str = CUDA_ONLY_CONVERSIONS[name][self.launch_backend]
             expected:int = (1 if name.startswith("float_to_int")
                             else 2 if name.startswith("double_to_int") else 1)
             if len(args) != expected:
@@ -7321,7 +7328,11 @@ class FunctionTranslator:
                                else "double" if "double_to_int" in name else "int")
             return f"({conversion}(({source_type})({code})))", "int"
 
-        cuda_name:str = CUDA_ONLY_BUILTINS[name]
+        device_name:str = CUDA_ONLY_BUILTINS[name][self.launch_backend]
+        # HIP spells the round-toward-zero forms with a device helper rather than an
+        # intrinsic (it has no such intrinsic), so the definition goes into the source
+        # before the kernel that calls it.
+        helper:Optional[str] = self._round_toward_zero_helper(device_name)
         if len(args) not in (1, 2, 3):
             self._error(f"gpu.{name}() takes 1 to 3 arguments", node)
         arg_codes:List[str] = [code for code, _ in args]
@@ -7336,11 +7347,25 @@ class FunctionTranslator:
         for _, t in args:
             if t == "double":
                 argument_type = "double"
-        if argument_type == "double":
+        if argument_type == "double" and helper is None:
             # The double form of the fast intrinsics is spelled without the `f`.
-            cuda_name = cuda_name[:-1] if cuda_name.endswith("f") else cuda_name
+            device_name = device_name[:-1] if device_name.endswith("f") else device_name
         cast_arguments:List[str] = [f"({argument_type})({code})" for code in arg_codes]
-        return f"{cuda_name}({', '.join(cast_arguments)})", argument_type
+        return f"{device_name}({', '.join(cast_arguments)})", argument_type
+
+    def _round_toward_zero_helper(self, device_name:str)->Optional[str]:
+        """The helper a round-toward-zero call needs, or None for an ordinary symbol.
+
+        The helper is emitted once for the whole source, the first time a call needs it.
+        """
+        if device_name not in HIP_ROUND_TOWARD_ZERO_HELPERS.values():
+            return None
+        key:str = next(key for key, value in HIP_ROUND_TOWARD_ZERO_HELPERS.items()
+                       if value == device_name)
+        source:str = HIP_ROUND_TOWARD_ZERO_SOURCES[key]
+        if source not in self.device_helpers:
+            self.device_helpers.append(source)
+        return device_name
 
     def _emit_shared_math_builtin(self, name:str, args:List[Tuple[str, Any]],
                                   node:ast.Call)->Tuple[str, Any]:
@@ -7387,14 +7412,11 @@ class FunctionTranslator:
     def _shared_math_call(self, name:str, arg_codes:List[str])->str:
         """One call to a shared math function, in the spelling this backend uses."""
         if name in SHARED_MATH_TEMPLATES:
-            # The two backends spell this one differently, so the template says which
+            # The backends spell this one differently, so the template says which
             # spelling this backend uses.
-            template:str = SHARED_MATH_TEMPLATES[name][self.backend]
+            template:str = SHARED_MATH_TEMPLATES[name][self.launch_backend]
             return template.format(code=arg_codes[0])
-        if self.backend == "opencl":
-            device_name:str = name
-        else:
-            device_name = SHARED_MATH_BUILTINS[name]
+        device_name:str = SHARED_MATH_BUILTINS[name][self.launch_backend]
         return f"{device_name}({', '.join(arg_codes)})"
 
     def _emit_generic_builtin(self, name:str, args:List[Tuple[str, Any]], node:ast.Call)->Tuple[str, Any]:
