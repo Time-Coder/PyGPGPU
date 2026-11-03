@@ -9,7 +9,7 @@ def zip_spec(a: NDArray, b: NDArray) -> NDArray:
 @kernel
 def zip_test(a: NDArray, b: NDArray) -> NDArray:
     out = np.zeros_like(a)
-    for i in range(out.shape[0]):
+    for i in np.ndindex(out.shape[0]):
         out[i] = a[i] + b[i]
 
     return out
