@@ -18,10 +18,11 @@ from .driver import (
     double2, double3, double4, double8, double16,
     CL
 )
-from .oop import KernelWrapper
+from .driver import _start_cl_init
 
-from .common import compile
-from .climport import climport
-
-CL.init()
-climport.install()
+# The runtime is initialized on a background thread: `import pygpgpu.opencl` returns without
+# waiting for the DLL load and the platform-count preheat. Every driver call waits for the
+# initialization it needs (see `Func.__call__` in the driver), so nothing observes a
+# half-initialized runtime. A runtime the machine lacks is recorded by the driver's init,
+# not raised here.
+_start_cl_init()

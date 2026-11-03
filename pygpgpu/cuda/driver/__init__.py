@@ -1,4 +1,4 @@
-from .cuda import CUDA
+from .cuda import CUDA, _start_init as _start_cuda_init
 from .cuinfo import CUInfo
 from .cutypes import (
     CUresult,
@@ -55,7 +55,7 @@ from .cutypes import (
 )
 from .cudaTextureObject_t import cudaTextureObject_t
 from .cudaSurfaceObject_t import cudaSurfaceObject_t
-from .nvrtc import NVRTC
+from .nvrtc import NVRTC, _start_init as _start_nvrtc_init
 from .nvrtcinfo import NVRTCInfo
 from .nvrtctypes import (
     nvrtcProgram,

@@ -5,15 +5,14 @@ remember subpackage names::
 
     from pygpgpu import kernel, gpu, float4             # @kernel / device builtins / vector types
     from pygpgpu import list_devices, get_device
-    from pygpgpu import climport, cuimport, hipimport    # import hooks for handwritten .cl/.cu/.hip files
+    from pygpgpu import kernel_import                    # import hook for handwritten .cl/.cu/.hip files
 
 Subpackage paths (pygpgpu.kernel / pygpgpu.vec_types / pygpgpu.opencl / ...)
 still work. Note that top-level `pygpgpu.kernel` refers to the @kernel
 decorator (same name as the subpackage; the top level exports the decorator),
 so to use things from the submodules write `from pygpgpu.kernel import ...`.
 """
-import importlib
-from typing import Any, List
+from typing import List
 
 # pygf owns the whole numpy surface for its types: importing it patches numpy.array
 # (patch_nparray), the array constructors, and installs the VectorArray view whose
@@ -63,41 +62,13 @@ from .vec_types import funcs          # dual-purpose function library: runs on t
 from .image import Image, ImageAddress, ImageFilter
 
 
-# ---------- Top-level exports: import hooks for handwritten kernel files ----------
+# ---------- Top-level export: the import hook for handwritten kernel files ----------
 
-class _LazyBackendHook:
-    """Lazy proxy for a backend import hook.
-
-    Backend packages initialize their runtime at import time (nvcuda/amdhip64/
-    OpenCL) and raise immediately when the runtime is missing; this defers
-    loading the backend package until a hook method is actually called, so
-    `from pygpgpu import climport, cuimport, hipimport` works on any machine
-    and only the backend you use requires its runtime.
-    """
-
-    def __init__(self, module_name:str, attr_name:str):
-        self._module_name:str = module_name
-        self._attr_name:str = attr_name
-        self._target:Any = None
-
-    def _resolve(self)->Any:
-        if self._target is None:
-            module = importlib.import_module(self._module_name, __name__)
-            self._target = getattr(module, self._attr_name)
-        return self._target
-
-    def __getattr__(self, name:str):
-        if name.startswith("__") and name.endswith("__"):
-            raise AttributeError(name)
-        return getattr(self._resolve(), name)
-
-    def __repr__(self)->str:
-        return f"<lazy hook {self._module_name}.{self._attr_name}>"
-
-
-climport = _LazyBackendHook(".opencl.climport", "climport")
-cuimport = _LazyBackendHook(".cuda.cuimport", "cuimport")
-hipimport = _LazyBackendHook(".hip.hipimport", "hipimport")
+# The one hook: same-named `.cl`/`.cu`/`.hip` files become one module, and a single-backend
+# file is a module with one backend. It is runtime-free by construction -- the file system
+# until a kernel is actually called, and only that kernel's backend then -- so it imports
+# directly rather than through a lazy proxy.
+from .kernel_import import kernel_import  # noqa: E402  (needs the imports above)
 
 
 # ---------- Top-level export: the progress-logging switch ----------
@@ -115,6 +86,7 @@ __all__ = [
     "set_default_device", "get_default_device",
     # device builtins (dual-sided functions; see pygpgpu/kernel/builtins.py)
     *_builtin_names,
+    # the device-side library function registry
     # images
     "Image", "ImageFilter", "ImageAddress",
     # logging
@@ -130,8 +102,10 @@ __all__ = [
     "float2", "float3", "float4", "float8", "float16",
     "double2", "double3", "double4", "double8", "double16",
     "genVec", "genVec2", "genVec3", "genVec4", "genVec8", "genVec16",
-    # import hooks for handwritten kernel files
-    "climport", "cuimport", "hipimport",
+    # the import hook for handwritten kernel files (same-named .cl/.cu/.hip sources)
+    "kernel_import",
+    # the host-side CUDA libraries (cuBLAS, cuSOLVER, cuFFT, cuSPARSE, the runtime);
+    # the proxy imports them on first use, so `import pygpgpu` still loads no runtime
 ]
 
 
