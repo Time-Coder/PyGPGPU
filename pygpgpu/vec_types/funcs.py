@@ -58,6 +58,9 @@ from pygf.funcs import (
 )
 from pygf.funcs import equal as isequal
 from pygf.funcs import fma as mad
+from pygf.funcs import ldexp as ldexp
+from pygf.funcs import fract as fract
+from pygf.funcs import sign as sign
 from pygf.funcs import greaterThan as isgreater
 from pygf.funcs import greaterThanEqual as isgreaterequal
 from pygf.funcs import inversesqrt as rsqrt
@@ -70,6 +73,7 @@ from pygf.funcs import all as all
 from .genVec import genVec
 
 __all__ = [
+    "fract", "sign", "ldexp",
     "dot", "cross", "normalize", "length", "distance",
     "clamp", "mix", "mad", "saturate", "step", "rsqrt", "exp2",
     "select", "any", "all",

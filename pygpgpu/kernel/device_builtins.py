@@ -213,6 +213,139 @@ MATH_BUILTINS:Dict[str, Tuple[str, str]] = {
 GENERIC_BUILTINS.update(MATH_BUILTINS)
 
 
+# The scalar math functions OpenCL C 1.2 has and CUDA spells with an `f` suffix. Both
+# backends have every one of them, so they are dual-sided; the table only records the CUDA
+# spelling (the OpenCL one is the name itself).
+#
+# The list is what the two compilers actually accept, verified by compiling each call:
+# OpenCL C 1.2 has erf/erfc/tgamma/lgamma/rint/round/trunc/fmin/fmax/fma/fdim/copysign/
+# nextafter/ldexp/remainder/remquo/frexp/modf/mad/fract/sign and the `native_*` family;
+# CUDA has all of those except fract and sign, which it spells as an expression (there is
+# no `fractf` and no `signf`), so those two carry a code template instead of a name.
+SHARED_MATH_BUILTINS:Dict[str, str] = {
+    "erf": "erff",
+    "erfc": "erfcf",
+    "tgamma": "tgammaf",
+    "lgamma": "lgammaf",
+    "rint": "rintf",
+    "remainder": "remainderf",
+    "fmin": "fminf",
+    "fmax": "fmaxf",
+    "fdim": "fdimf",
+    "copysign": "copysignf",
+    "nextafter": "nextafterf",
+    "ldexp": "ldexpf",
+    "native_recip": "__frcp_rn",
+    "native_divide": "__fdiv_rn",
+    "native_sqrt": "__fsqrt_rn",
+    "native_rsqrt": "__frsqrt_rn",
+    "native_exp": "__expf",
+    "native_log": "__logf",
+    "native_sin": "__sinf",
+    "native_cos": "__cosf",
+    "native_tan": "__tanf",
+    "native_exp2": "__exp2f",
+    "native_log2": "__log2f",
+    "native_exp10": "__exp10f",
+    "native_powr": "__powf",
+}
+
+
+# The functions the two backends spell differently, as a code template per backend.
+#
+# `fract` is the clearest case: OpenCL's `fract` takes a second argument (it writes the
+# integer part through a pointer) and CUDA has no `fractf` at all, so both spell it as
+# `x - floor(x)`. `sign` is the same story -- OpenCL has no one-argument `sign`, and CUDA
+# has no `signf`, so both compare against zero.
+SHARED_MATH_TEMPLATES:Dict[str, Dict[str, str]] = {
+    "fract": {
+        "opencl": "(({code}) - floor(({code})))",
+        "cuda": "(({code}) - floorf(({code})))",
+    },
+    "sign": {
+        "opencl": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
+        "cuda": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
+    },
+}
+
+
+# The device intrinsics CUDA has and OpenCL does not. They are the CUDA-only half of the
+# scientific-computing vocabulary: the fast approximations (`__expf` and friends, which
+# trade accuracy for speed), the correctly-rounded forms (`__frcp_rn` and friends), and the
+# special functions CUDA adds (the error function's inverse, the normal distribution, the
+# Bessel functions).
+#
+# HIP reuses the CUDA code generation and has these intrinsics too, so "CUDA-only" here
+# means "not OpenCL": OpenCL's kernel language has no counterpart for any of them.
+#
+# A kernel that uses one of them cannot run on OpenCL, so the translator says so by name
+# rather than emitting a call the OpenCL compiler would reject with a bare "undeclared
+# identifier". The value is the CUDA spelling; the OpenCL spelling is empty because there
+# is none.
+#
+# Two of the names here do NOT mean what their spelling suggests, and the device's own
+# documentation is the authority:
+#   * `sinpif(x)` is sin(pi*x), NOT the sinc function sin(pi*x)/(pi*x) -- CUDA has no
+#     sinc, so the name here is `sin_pi` and it computes the sine of pi times x;
+#   * `rhypotf(x, y)` is 1/sqrt(x*x + y*y), the *reciprocal* of the hypotenuse, so the
+#     name here is `reciprocal_hypot`. The plain hypotenuse is `hypotf`, which is in the
+#     shared table.
+CUDA_ONLY_BUILTINS:Dict[str, str] = {
+    # the fast (approximate) intrinsics
+    "fast_exp": "__expf",
+    "fast_log": "__logf",
+    "fast_log2": "__log2f",
+    "fast_log10": "__log10f",
+    "fast_sin": "__sinf",
+    "fast_cos": "__cosf",
+    "fast_tan": "__tanf",
+    "fast_exp10": "__exp10f",
+    "fast_pow": "__powf",
+    "fast_divide": "__fdividef",
+    # the correctly-rounded forms
+    "exact_recip": "__frcp_rn",
+    "exact_recip_rz": "__frcp_rz",
+    "exact_divide": "__fdiv_rn",
+    "exact_divide_rz": "__fdiv_rz",
+    "exact_sqrt": "__fsqrt_rn",
+    "exact_sqrt_rz": "__fsqrt_rz",
+    "exact_add": "__fadd_rn",
+    "exact_sub": "__fsub_rn",
+    "exact_mul": "__fmul_rn",
+    "exact_fma": "__fmaf_rn",
+    # the special functions
+    "erf_inverse": "erfinv",
+    "normal_cdf": "normcdff",
+    "normal_cdf_inverse": "normcdfinv",
+    "reciprocal_hypot": "rhypotf",
+    "sin_pi": "sinpif",
+    "cos_pi": "cospif",
+    "bessel_j0": "j0f",
+    "bessel_j1": "j1f",
+    "bessel_y0": "y0f",
+    "bessel_y1": "y1f",
+    "bessel_i0": "cyl_bessel_i0f",
+    "bessel_i1": "cyl_bessel_i1f",
+}
+
+
+# The CUDA-only conversions. They answer an int, so the device's own name is spelled with
+# the rounding mode in the middle (`__float2int_rn` rounds to nearest, `_rz` toward zero,
+# `_rd` down, `_ru` up).
+CUDA_ONLY_CONVERSIONS:Dict[str, str] = {
+    "float_to_int_nearest": "__float2int_rn",
+    "float_to_int_zero": "__float2int_rz",
+    "float_to_int_down": "__float2int_rd",
+    "float_to_int_up": "__float2int_ru",
+    "int_to_float": "__int2float_rn",
+    "uint_to_float": "__uint2float_rn",
+    "double_to_int_nearest": "__double2int_rn",
+    "double_to_int_zero": "__double2int_rz",
+    "double_to_int_down": "__double2int_rd",
+    "double_to_int_up": "__double2int_ru",
+}
+
+
 def dim_component(dim:int)->str:
     if dim not in (0, 1, 2):
         raise ValueError(f"dimension index must be 0, 1 or 2, got {dim}")

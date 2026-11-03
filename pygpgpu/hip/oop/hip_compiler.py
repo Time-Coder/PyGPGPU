@@ -101,7 +101,13 @@ class HipCompiler:
         clean_path:str = os.path.join(cache_dir, f"{parser.base_name}_{parser.md5}_clean.hip")
         obj_path:str = os.path.join(cache_dir, f"{parser.base_name}_{parser.md5}_{arch}.o")
 
-        clean_code:str = '#include <hip/hip_runtime.h>\nextern "C" {\n#line 1\n' + parser.clean_code + "\n}"
+        # `<cmath>` is here for the math functions the device code calls. HIP's own
+        # device header declares only a part of them (the fast intrinsics, the error
+        # function, the Bessel functions); the rest -- `fminf`, `fmaxf`, `fmaf`,
+        # `copysignf`, `remainderf`, `nextafterf`, `ldexpf`, `powf` -- are the C++
+        # standard library's, and a device source that calls one needs this header.
+        clean_code:str = ('#include <hip/hip_runtime.h>\n#include <cmath>\n'
+                          'extern "C" {\n#line 1\n' + parser.clean_code + "\n}")
         existing:Optional[str] = None
         if os.path.isfile(clean_path):
             with open(clean_path, "r", encoding="utf-8") as file:

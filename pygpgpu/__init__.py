@@ -40,6 +40,11 @@ from .kernel import (
 from .kernel.builtins import *  # noqa: F403
 from .kernel.builtins import __all__ as _builtin_names
 
+# The device-side library function registry: a way to name a device function that already
+# exists (a compiler intrinsic, or a `__device__` function in a header) and call it from a
+# kernel body under a name of your own.
+from .kernel.device_library import device_function
+
 # ---------- Top-level exports: public API of vec_types ----------
 
 from .vec_types import (
@@ -87,6 +92,7 @@ __all__ = [
     # device builtins (dual-sided functions; see pygpgpu/kernel/builtins.py)
     *_builtin_names,
     # the device-side library function registry
+    "device_function",
     # images
     "Image", "ImageFilter", "ImageAddress",
     # logging

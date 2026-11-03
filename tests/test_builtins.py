@@ -40,6 +40,10 @@ def _dispatched_names() -> list[str]:
     return sorted(set(builtin_tables.INDEX_BUILTINS)
                   | set(builtin_tables.ATOMIC_BUILTINS)
                   | set(builtin_tables.GENERIC_BUILTINS)
+                  | set(builtin_tables.SHARED_MATH_BUILTINS)
+                  | set(builtin_tables.SHARED_MATH_TEMPLATES)
+                  | set(builtin_tables.CUDA_ONLY_BUILTINS)
+                  | set(builtin_tables.CUDA_ONLY_CONVERSIONS)
                   | {"zeros_per_group"})
 
 
