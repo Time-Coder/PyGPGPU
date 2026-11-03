@@ -123,15 +123,22 @@ def two_names_over_three_dimensions(image: np.ndarray, out: np.ndarray):
 
 
 def test_a_short_unpacking_is_refused(gpu_backend, runner):
-    """The channel axis would never vary, so the kernel would be silently wrong."""
+    """The channel axis would never vary, so the kernel would be silently wrong.
+
+    The message mirrors what the interpreter says for the same body -- two names cannot
+    take three values -- and then adds what only the launch knows: the array, its shape,
+    and the supported way to iterate a subset of the dimensions.
+    """
     image = np.zeros((2, 3, 3), dtype=np.uint8)
     out = np.zeros((2, 3), dtype=np.float32)
     with pytest.raises(ValueError) as caught:
         runner(two_names_over_three_dimensions, image, out)
     message: str = str(caught.value)
-    assert "unpacks 2 index names" in message
-    assert "3 dimensions" in message
-    assert "image.shape[0], image.shape[1]" in message
+    # python's own wording for naming fewer indices than the data has dimensions
+    assert "too many values to unpack (expected 2)" in message
+    # what the device path can say and python's message cannot
+    assert "'image' has shape (2, 3, 3)" in message
+    assert "np.ndindex(....shape) iterates every dimension" in message
 
 
 @kernel
