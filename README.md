@@ -48,6 +48,7 @@ No C code to write, no build system to configure; the first call translates, com
 - **Multi-dimensional iteration**: `np.ndindex(shape)` / `np.ndenumerate(arr)` magic loops (2D/3D), `enumerate(arr)` for a 1D index plus value snapshot.
 - **Three cache layers**: parsed metadata / compiled artifacts / generated sources, all invalidated by mtime — unchanged sources mean zero recompilation.
 - **Host-side CUDA libraries bound with ctypes** — cuBLAS, cuBLASLt, cuSOLVER, cuFFT, cuSPARSE and the CUDA runtime, in the same shape as the driver (lazy DLL, signature table, the library's own error messages), with a numpy-friendly layer over them (`gemm`, `axpy`, `scal`, `dot`, `rfft`, `csrmv`). See "Host-side CUDA libraries" below.
+- **Host-side HIP libraries bound the same way** — hipBLAS and hipBLASLt, sharing the binding machinery with the CUDA side and deriving their signature tables from it. The *values* are hipBLAS's own, though (its `HIPBLAS_OP_N` is 111, not cuBLAS's 0), so the enums live here. See "Host-side HIP libraries" below.
 
 ## Installation
 
@@ -842,6 +843,72 @@ on (an RTX 4070 Laptop, compute capability 8.9, CUDA 12.6), `potrf`, `getrf`,
 `gesvd`, `gesvdj` and `syevj` all fail that way, with `compute-sanitizer` putting the
 fault inside cuSOLVER's own DLL. The bindings are correct and the test skips with
 that reason instead of failing.
+
+## Host-side HIP libraries
+
+hipBLAS and hipBLASLt are AMD's ports of cuBLAS and cuBLASLt, so they are bound the
+same way and reached through the same kind of layer:
+
+```python
+from pygpgpu import hip_libraries
+
+c = hip_libraries.gemm(a, b)          # a @ b, on the GPU
+d = hip_libraries.axpy(2.0, x, y)     # y = 2*x + y
+e = hip_libraries.dot(x, y)           # a scalar
+```
+
+The two natural spellings work, exactly as they do for CUDA:
+
+```python
+from pygpgpu import hip_libraries
+hip_libraries.gemm(a, b)
+
+from pygpgpu.hip_libraries import gemm
+gemm(a, b)
+```
+
+`gemm`, `lt_gemm`, `axpy`, `scal` and `dot` take numpy arrays in numpy's row-major
+layout and return the same layout — hipBLAS reads column-major, and the difference is
+handled inside, so `gemm(a, b)` is just `a @ b`, including numpy's 1-D rules for `@`
+and the `transpose_a`/`transpose_b` flags. `ensure_context`, `allocate`, `free`,
+`to_device`, `to_host`, `synchronize`, `create_handle`, `destroy_handle` and
+`set_stream` are there too, so the raw entry points are usable without a second
+allocator: `allocate` goes through the HIP runtime the backend already uses.
+
+**The API is cuBLAS's, but the values are not — and that is the trap.** hipBLAS's
+`HIPBLAS_OP_N` is **111** where `CUBLAS_OP_N` is 0, its status codes are numbered
+separately (`HIPBLAS_STATUS_ALLOC_FAILED` is 2 where cuBLAS's is 3), and its compute
+types are a dense 0..10 where cuBLAS's are 64..77. So the enums and the status
+messages here are hipBLAS's own (`pygpgpu/hip/libraries/_enums.py`), read from ROCm's
+headers. Passing a cuBLAS value to a hipBLAS call makes it answer
+`HIPBLAS_STATUS_INVALID_ENUM` for an ordinary gemm.
+
+The **signature tables**, on the other hand, really are cuBLAS's: the argument lists
+are identical, so they are derived from the CUDA ones rather than written out again,
+and each entry is copied rather than shared (a shared entry would carry one library's
+bound function into the other). Only the names change, and not uniformly: hipBLAS
+drops the ABI version suffix CUDA 12 carries (`cublasSgemm_v2` is `hipblasSgemm`), and
+hipBLASLt spells its entry points `hipblasLt*` even though its DLL is `hipblaslt.dll`.
+
+**hipBLASLt needs a kernel library your device may not have.** rocBLASLt loads its
+kernels from a Tensile file named after the architecture
+(`TensileLibrary_lazy_<arch>.dat`), and ROCm ships them for the discrete GPUs only —
+on the machine this was developed on (an integrated Radeon 610M, `gfx1036`) that file
+does not exist, so every `lt_gemm` fails inside rocBLASLt while the binding itself is
+fine. `gemm` does not depend on it. The message says so, because the status code is
+`INVALID_VALUE` and points at the arguments otherwise.
+
+**hipFFT, hipSPARSE and hipSOLVER are not bound.** Their entry points exist and load,
+but their signatures are not cuFFT's / cuSPARSE's / cuSOLVER's in every case —
+hipFFT's plan handle and its exec call in particular — so a table copied from the CUDA
+side binds symbols it cannot then call. They will come with their own tables; the
+binding machinery under `pygpgpu/libraries` is already shared between the two
+backends, so only the tables are missing.
+
+Like the CUDA ones, these are **host-side operations**: a `gemm` moves whole arrays to
+the device and runs one library call, while a `@kernel` body is per-thread arithmetic.
+A kernel body cannot call any of this, and the libraries are loaded lazily — `import
+pygpgpu` loads no HIP library.
 
 ## Device selection
 

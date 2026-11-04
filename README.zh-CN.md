@@ -48,6 +48,7 @@ saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运�
 - **多维遍历**: `np.ndindex(shape)` / `np.ndenumerate(arr)` 魔法循环(2D/3D), `enumerate(arr)` 一维索引+值快照。
 - **三层缓存**: 解析元信息 / 编译产物 / 生成源码, 全部按 mtime 自动失效, 源码不变则零重编译。
 - **用 ctypes 绑定的宿主端 CUDA 库** —— cuBLAS、cuBLASLt、cuSOLVER、cuFFT、cuSPARSE 以及 CUDA runtime, 形态与驱动一致(惰性加载的 DLL、签名表、库自己的错误信息), 其上还有一层面向 numpy 的封装(`gemm`、`axpy`、`scal`、`dot`、`rfft`、`csrmv`)。详见下文"宿主端 CUDA 库"。
+- **同样方式绑定的宿主端 HIP 库** —— hipBLAS 与 hipBLASLt, 与 CUDA 那边共用绑定机制, 签名表也由那边派生。但**数值**是 hipBLAS 自己的(它的 `HIPBLAS_OP_N` 是 111, 不是 cuBLAS 的 0), 所以枚举放在这一侧。详见下文"宿主端 HIP 库"。
 
 ## 安装
 
@@ -797,6 +798,63 @@ device.default_context.make_current()      # 在第一次调用库之前
 8.9, CUDA 12.6), `potrf`、`getrf`、`gesvd`、`gesvdj` 和 `syevj` 都是这样失败的,
 `compute-sanitizer` 把出错点定位在 cuSOLVER 自己的 DLL 内部。绑定本身是正确的, 测试会带着
 这个原因跳过, 而不是失败。
+
+## 宿主端 HIP 库
+
+hipBLAS 与 hipBLASLt 是 AMD 对 cuBLAS 与 cuBLASLt 的移植, 所以绑定方式相同, 访问方式也是同一
+种层次:
+
+```python
+from pygpgpu import hip_libraries
+
+c = hip_libraries.gemm(a, b)          # 在 GPU 上做 a @ b
+d = hip_libraries.axpy(2.0, x, y)     # y = 2*x + y
+e = hip_libraries.dot(x, y)           # 一个标量
+```
+
+两种自然写法都可用, 与 CUDA 那边完全一致:
+
+```python
+from pygpgpu import hip_libraries
+hip_libraries.gemm(a, b)
+
+from pygpgpu.hip_libraries import gemm
+gemm(a, b)
+```
+
+`gemm`、`lt_gemm`、`axpy`、`scal`、`dot` 接收 numpy 数组并按 numpy 的行主序返回 —— hipBLAS
+读的是列主序, 差异在内部处理, 所以 `gemm(a, b)` 就是 `a @ b`, 包括 numpy 对 `@` 的 1 维
+规则和 `transpose_a`/`transpose_b` 开关。另有 `ensure_context`、`allocate`、`free`、
+`to_device`、`to_host`、`synchronize`、`create_handle`、`destroy_handle`、`set_stream`,
+所以原始入口也能直接用而不必另建一套分配器: `allocate` 走的就是后端已经在用的 HIP runtime。
+
+**API 是 cuBLAS 的, 但数值不是 —— 这就是陷阱。** hipBLAS 的 `HIPBLAS_OP_N` 是 **111**,
+而 `CUBLAS_OP_N` 是 0; 它的状态码独立编号(`HIPBLAS_STATUS_ALLOC_FAILED` 是 2, cuBLAS 的是 3);
+它的 compute type 是 0..10 的密集编号, 而 cuBLAS 的是 64..77。所以这里的枚举和状态消息是
+hipBLAS 自己的([`pygpgpu/hip/libraries/_enums.py`](pygpgpu/hip/libraries/_enums.py)), 从 ROCm
+的头文件里读出。把 cuBLAS 的数值传给 hipBLAS 调用, 一次普通的 gemm 就会返回
+`HIPBLAS_STATUS_INVALID_ENUM`。
+
+而**签名表**确实就是 cuBLAS 的: 参数表完全相同, 所以它由 CUDA 那份**派生**而来而不是重写一遍,
+并且每条都做了**拷贝**而非共享(共享的话, 一个库把绑好的函数缓存进去, 另一个库就会用到它)。
+只有名字不同, 而且并不统一: hipBLAS 去掉了 CUDA 12 的 ABI 版本后缀(`cublasSgemm_v2` 是
+`hipblasSgemm`), hipBLASLt 的入口是 `hipblasLt*` 而它的 DLL 叫 `hipblaslt.dll`。
+
+**hipBLASLt 需要你的设备上可能没有的 kernel 库。** rocBLASLt 从按架构命名的 Tensile 文件
+(`TensileLibrary_lazy_<arch>.dat`)加载 kernel, 而 ROCm 只为独立显卡提供这些文件 —— 在开发
+这个功能的机器上(集成显卡 Radeon 610M, `gfx1036`)该文件并不存在, 所以每次 `lt_gemm` 都在
+rocBLASLt 内部失败, 而绑定本身没问题。`gemm` 不依赖它。消息里会说明这一点, 因为状态码是
+`INVALID_VALUE`, 否则会让人去怀疑参数。
+
+**hipFFT、hipSPARSE、hipSOLVER 尚未绑定。** 它们的入口存在也能加载, 但签名并不处处等同于
+cuFFT / cuSPARSE / cuSOLVER —— 尤其是 hipFFT 的 plan handle 与它的 exec 调用 —— 所以照抄
+CUDA 那份表会绑上一批随后调不动的符号。它们会带着自己的表加入; 两个后端共用的绑定机制已经在
+[`pygpgpu/libraries`](pygpgpu/libraries) 里, 缺的只是表。
+
+与 CUDA 那些一样, 这些是**宿主端**操作: 一次 `gemm` 把整块数组搬到设备上跑一次库调用, 而
+`@kernel` 的函数体是逐线程的算术。kernel 里不能调用它们, 而且这些库是惰性加载的 ——
+`import pygpgpu` 不加载任何 HIP 库。
+
 
 ## 设备选择
 
