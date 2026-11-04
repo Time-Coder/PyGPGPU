@@ -107,7 +107,7 @@ _CUDA_LIBRARY_EXPORTS = (
 )
 
 _HIP_LIBRARY_EXPORTS = (
-    "gemm", "lt_gemm", "axpy", "scal", "dot",
+    "gemm", "lt_gemm", "axpy", "scal", "dot", "rfft", "irfft",
     "ensure_context", "allocate", "free", "to_device", "to_host", "synchronize",
     "create_handle", "destroy_handle", "set_stream",
     "library_names", "driver_for",

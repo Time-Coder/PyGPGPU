@@ -48,7 +48,7 @@ No C code to write, no build system to configure; the first call translates, com
 - **Multi-dimensional iteration**: `np.ndindex(shape)` / `np.ndenumerate(arr)` magic loops (2D/3D), `enumerate(arr)` for a 1D index plus value snapshot.
 - **Three cache layers**: parsed metadata / compiled artifacts / generated sources, all invalidated by mtime — unchanged sources mean zero recompilation.
 - **Host-side CUDA libraries bound with ctypes** — cuBLAS, cuBLASLt, cuSOLVER, cuFFT, cuSPARSE and the CUDA runtime, in the same shape as the driver (lazy DLL, signature table, the library's own error messages), with a numpy-friendly layer over them (`gemm`, `axpy`, `scal`, `dot`, `rfft`, `csrmv`). See "Host-side CUDA libraries" below.
-- **Host-side HIP libraries bound the same way** — hipBLAS and hipBLASLt, sharing the binding machinery with the CUDA side and deriving their signature tables from it. The *values* are hipBLAS's own, though (its `HIPBLAS_OP_N` is 111, not cuBLAS's 0), so the enums live here. See "Host-side HIP libraries" below.
+- **Host-side HIP libraries bound the same way** — hipBLAS, hipBLASLt, hipFFT, hipSPARSE and hipSOLVER. The two BLAS ones share their signature tables with the CUDA side; the other three need their own, because HIP's plan handle is a pointer and several entries differ in arity. The *values* are HIP's own throughout (its `HIPBLAS_OP_N` is 111, not cuBLAS's 0). See "Host-side HIP libraries" below.
 
 ## Installation
 
@@ -898,12 +898,54 @@ does not exist, so every `lt_gemm` fails inside rocBLASLt while the binding itse
 fine. `gemm` does not depend on it. The message says so, because the status code is
 `INVALID_VALUE` and points at the arguments otherwise.
 
-**hipFFT, hipSPARSE and hipSOLVER are not bound.** Their entry points exist and load,
-but their signatures are not cuFFT's / cuSPARSE's / cuSOLVER's in every case —
-hipFFT's plan handle and its exec call in particular — so a table copied from the CUDA
-side binds symbols it cannot then call. They will come with their own tables; the
-binding machinery under `pygpgpu/libraries` is already shared between the two
-backends, so only the tables are missing.
+### hipFFT, hipSPARSE and hipSOLVER
+
+These three are bound too, and their signature tables are **written from ROCm's own
+headers** rather than derived from the CUDA ones, because the signatures genuinely
+differ:
+
+| | cuFFT / cuSPARSE / cuSOLVER | HIP |
+|---|---|---|
+| `ExecuteC2C` | 3 arguments | **4** — the transform direction |
+| `GetSize1d` | 4 arguments | **5** — `nx, type, batch, workSize` |
+| `GetVersion` | 1 argument (sparse) | **2** — the handle comes first |
+| `CreateDnMat` | 6 arguments | **7** — an `order` |
+| `GetVersion` | present (solver) | **absent** — hipSOLVER has none |
+| the plan handle | `int` | **a pointer** |
+
+That last row is the one that matters: HIP spells `hipfftHandle` as
+`struct hipfftHandle_t*` on the AMD platform (the `int` spelling lives inside
+`#ifdef __HIP_PLATFORM_NVIDIA__`), while cuFFT's `cufftHandle` is an `int`. A table
+copied from the CUDA side passes a 4-byte integer where the library reads an 8-byte
+pointer — an access violation inside the first call, not a wrong answer.
+
+`rfft` and `irfft` sit on top and agree with numpy's:
+
+```python
+from pygpgpu import hip_libraries
+
+spectrum = hip_libraries.rfft(signal)          # n//2+1 complex, like np.fft.rfft
+back = hip_libraries.irfft(spectrum, n)        # the inverse, scaled as numpy does
+```
+
+**Two of the three cannot run on every device, and one of them fails silently.**
+rocSPARSE and rocSOLVER resolve their kernels out of a runtime directory beside the
+DLL, and ROCm 7.2's Windows install creates one for rocBLAS and rocFFT and **none** for
+either of them (`bin/rocblas/library` exists; `bin/rocsparse` and `bin/rocsolver` do
+not). The consequences differ, and both are worth knowing:
+
+* `hipsparseCreate` answers `HIPSPARSE_STATUS_INTERNAL_ERROR` and leaves a null handle,
+  so nothing can be built on it — a plain failure.
+* `hipsolverDnCreate` **succeeds**, and a factorization then answers **success with
+  `devInfo == 0` while leaving the matrix untouched**. A caller gets a wrong answer with
+  no error at all. If you use hipSOLVER, check the numbers rather than the status code;
+  `hipsolverDnSgetrf_bufferSize` answering zero for a matrix that needs workspace is the
+  cheap tell.
+
+The tests for both skip with those reasons instead of failing, because the binding is
+verified and the *library* is what this machine cannot run. `hipfft` is unaffected —
+`rfft`/`irfft` are verified against numpy above.
+
 
 Like the CUDA ones, these are **host-side operations**: a `gemm` moves whole arrays to
 the device and runs one library call, while a `@kernel` body is per-thread arithmetic.

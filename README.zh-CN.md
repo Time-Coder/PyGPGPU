@@ -48,7 +48,7 @@ saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运�
 - **多维遍历**: `np.ndindex(shape)` / `np.ndenumerate(arr)` 魔法循环(2D/3D), `enumerate(arr)` 一维索引+值快照。
 - **三层缓存**: 解析元信息 / 编译产物 / 生成源码, 全部按 mtime 自动失效, 源码不变则零重编译。
 - **用 ctypes 绑定的宿主端 CUDA 库** —— cuBLAS、cuBLASLt、cuSOLVER、cuFFT、cuSPARSE 以及 CUDA runtime, 形态与驱动一致(惰性加载的 DLL、签名表、库自己的错误信息), 其上还有一层面向 numpy 的封装(`gemm`、`axpy`、`scal`、`dot`、`rfft`、`csrmv`)。详见下文"宿主端 CUDA 库"。
-- **同样方式绑定的宿主端 HIP 库** —— hipBLAS 与 hipBLASLt, 与 CUDA 那边共用绑定机制, 签名表也由那边派生。但**数值**是 hipBLAS 自己的(它的 `HIPBLAS_OP_N` 是 111, 不是 cuBLAS 的 0), 所以枚举放在这一侧。详见下文"宿主端 HIP 库"。
+- **同样方式绑定的宿主端 HIP 库** —— hipBLAS、hipBLASLt、hipFFT、hipSPARSE、hipSOLVER。两个 BLAS 库的签名表与 CUDA 那边共用; 另外三个必须有自己的一份, 因为 HIP 的 plan handle 是指针, 且多个入口的参数个数不同。**数值**则处处是 HIP 自己的(它的 `HIPBLAS_OP_N` 是 111, 不是 cuBLAS 的 0)。详见下文"宿主端 HIP 库"。
 
 ## 安装
 
@@ -846,10 +846,45 @@ hipBLAS 自己的([`pygpgpu/hip/libraries/_enums.py`](pygpgpu/hip/libraries/_enu
 rocBLASLt 内部失败, 而绑定本身没问题。`gemm` 不依赖它。消息里会说明这一点, 因为状态码是
 `INVALID_VALUE`, 否则会让人去怀疑参数。
 
-**hipFFT、hipSPARSE、hipSOLVER 尚未绑定。** 它们的入口存在也能加载, 但签名并不处处等同于
-cuFFT / cuSPARSE / cuSOLVER —— 尤其是 hipFFT 的 plan handle 与它的 exec 调用 —— 所以照抄
-CUDA 那份表会绑上一批随后调不动的符号。它们会带着自己的表加入; 两个后端共用的绑定机制已经在
-[`pygpgpu/libraries`](pygpgpu/libraries) 里, 缺的只是表。
+**hipFFT、hipSPARSE、hipSOLVER 也已绑定**, 而且它们的签名表是**照 ROCm 自己的头文件写的**,
+不是从 CUDA 那份派生的, 因为签名确实不同:
+
+| | cuFFT / cuSPARSE / cuSOLVER | HIP |
+|---|---|---|
+| `ExecuteC2C` | 3 个参数 | **4** 个 —— 多了变换方向 |
+| `GetSize1d` | 4 个参数 | **5** 个 —— `nx, type, batch, workSize` |
+| `GetVersion`(sparse) | 1 个参数 | **2** 个 —— handle 在前 |
+| `CreateDnMat` | 6 个参数 | **7** 个 —— 多一个 `order` |
+| `GetVersion`(solver) | 有 | **没有** —— hipSOLVER 不提供 |
+| plan handle | `int` | **一个指针** |
+
+最后一行最要紧: 在 AMD 平台上 HIP 把 `hipfftHandle` 拼成 `struct hipfftHandle_t*`
+(`int` 那种拼法在 `#ifdef __HIP_PLATFORM_NVIDIA__` 里面), 而 cuFFT 的 `cufftHandle` 是
+`int`。照抄 CUDA 的表会在库里读 8 字节指针的地方传进一个 4 字节整数 —— 那是第一次调用里
+的访问违例, 不是一个错答案。
+
+`rfft` 与 `irfft` 建在这之上, 答案与 numpy 一致:
+
+```python
+from pygpgpu import hip_libraries
+
+spectrum = hip_libraries.rfft(signal)          # n//2+1 个复数, 同 np.fft.rfft
+back = hip_libraries.irfft(spectrum, n)        # 逆变换, 缩放与 numpy 相同
+```
+
+**这三个里有两个并非每台设备都能跑, 其中一个还是静默失败。** rocSPARSE 与 rocSOLVER 从
+DLL 旁边的运行时目录里找 kernel, 而 ROCm 7.2 的 Windows 安装为 rocBLAS 和 rocFFT 建了该
+目录, 为这两个**都没建**(`bin/rocblas/library` 存在, `bin/rocsparse` 与 `bin/rocsolver`
+不存在)。后果不同, 两者都值得知道:
+
+* `hipsparseCreate` 返回 `HIPSPARSE_STATUS_INTERNAL_ERROR` 并留下空句柄, 所以什么都建不起来
+  —— 一个干脆的失败。
+* `hipsolverDnCreate` 却**成功**, 随后一次分解返回**成功、`devInfo == 0`, 而矩阵原样未动**。
+  调用者拿到的是错答案, 且没有任何错误。若你用 hipSOLVER, 请核对数值而不是状态码;
+  `hipsolverDnSgetrf_bufferSize` 对一个需要工作区的矩阵返回 0, 是那个便宜的判断依据。
+
+这两个库的测试带着上述原因跳过而不是失败, 因为绑定是验证过的, 是**库**在这台机器上跑不了。
+hipFFT 不受影响 —— 上面的 `rfft`/`irfft` 已对着 numpy 验证。
 
 与 CUDA 那些一样, 这些是**宿主端**操作: 一次 `gemm` 把整块数组搬到设备上跑一次库调用, 而
 `@kernel` 的函数体是逐线程的算术。kernel 里不能调用它们, 而且这些库是惰性加载的 ——
