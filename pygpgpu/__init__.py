@@ -12,7 +12,7 @@ still work. Note that top-level `pygpgpu.kernel` refers to the @kernel
 decorator (same name as the subpackage; the top level exports the decorator),
 so to use things from the submodules write `from pygpgpu.kernel import ...`.
 """
-from typing import List
+from typing import Any, List
 
 # pygf owns the whole numpy surface for its types: importing it patches numpy.array
 # (patch_nparray), the array constructors, and installs the VectorArray view whose
@@ -106,9 +106,17 @@ _CUDA_LIBRARY_EXPORTS = (
     "library_names", "driver_for",
 )
 
+_HIP_LIBRARY_EXPORTS = (
+    "gemm", "lt_gemm", "axpy", "scal", "dot",
+    "ensure_context", "allocate", "free", "to_device", "to_host", "synchronize",
+    "create_handle", "destroy_handle", "set_stream",
+    "library_names", "driver_for",
+)
 
-def _make_cuda_libraries_proxy()->types.ModuleType:
-    """A module object that imports the CUDA libraries on first attribute read.
+
+def _make_library_proxy(proxy_name:str, package:str, exports:Any,
+                        doc:str)->types.ModuleType:
+    """A module object that imports a backend's libraries on first attribute read.
 
     The proxy is a real module (so it has a name, a docstring and a repr), but its
     attributes are resolved through ``__getattr__``, which imports the real package
@@ -126,21 +134,15 @@ def _make_cuda_libraries_proxy()->types.ModuleType:
     nothing about the laziness: the real package is still imported only when an
     attribute is read.
     """
-    proxy = types.ModuleType("pygpgpu.cuda_libraries")
-    proxy.__doc__ = (
-        "The host-side CUDA math libraries, bound with ctypes.\n\n"
-        "These are HOST-side operations: a gemm moves whole arrays to the device and\n"
-        "runs one library call, so it is not expressible inside a @kernel body.\n"
-        "The CUDA driver is loaded on first use, never at import time."
-    )
-    proxy.__all__ = list(_CUDA_LIBRARY_EXPORTS)
+    proxy = types.ModuleType(proxy_name)
+    proxy.__doc__ = doc
+    proxy.__all__ = list(exports)
 
     def _resolve(name:str):
-        if name not in _CUDA_LIBRARY_EXPORTS:
-            raise AttributeError(
-                f"module 'pygpgpu.cuda_libraries' has no attribute {name!r}")
+        if name not in exports:
+            raise AttributeError(f"module {proxy_name!r} has no attribute {name!r}")
 
-        module = importlib.import_module(".cuda.libraries", __name__)
+        module = importlib.import_module(package, __name__)
         value = getattr(module, name)
         setattr(proxy, name, value)
         return value
@@ -150,7 +152,19 @@ def _make_cuda_libraries_proxy()->types.ModuleType:
     return proxy
 
 
-cuda_libraries = _make_cuda_libraries_proxy()
+cuda_libraries = _make_library_proxy(
+    "pygpgpu.cuda_libraries", ".cuda.libraries", _CUDA_LIBRARY_EXPORTS,
+    "The host-side CUDA math libraries, bound with ctypes.\n\n"
+    "These are HOST-side operations: a gemm moves whole arrays to the device and\n"
+    "runs one library call, so it is not expressible inside a @kernel body.\n"
+    "The CUDA driver is loaded on first use, never at import time.")
+
+hip_libraries = _make_library_proxy(
+    "pygpgpu.hip_libraries", ".hip.libraries", _HIP_LIBRARY_EXPORTS,
+    "The host-side HIP math libraries (hipBLAS, hipBLASLt), bound with ctypes.\n\n"
+    "These are HOST-side operations: a gemm moves whole arrays to the device and\n"
+    "runs one library call, so it is not expressible inside a @kernel body.\n"
+    "The HIP runtime is loaded on first use, never at import time.")
 
 
 __all__ = [
@@ -182,6 +196,8 @@ __all__ = [
     # the host-side CUDA libraries (cuBLAS, cuSOLVER, cuFFT, cuSPARSE, the runtime);
     # the proxy imports them on first use, so `import pygpgpu` still loads no runtime
     "cuda_libraries",
+    # the host-side HIP libraries (hipBLAS, hipBLASLt), reached the same way
+    "hip_libraries",
 ]
 
 
