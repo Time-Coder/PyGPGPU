@@ -2,6 +2,7 @@ __pycache__
 __clcache__
 __cucache__
 __hipcache__
+__metalcache__
 .VSCodeCounter
 *.egg-info
 .dsh-acl-recovery

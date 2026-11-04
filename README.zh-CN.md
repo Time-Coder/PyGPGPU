@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-装饰一个 Python 函数, 它就运行在 GPU 上——同一份代码, 三个后端 (**OpenCL / CUDA / HIP**), 外加一个纯 Python 解释器后端。
+装饰一个 Python 函数, 它就运行在 GPU 上——同一份代码, 四个后端 (**OpenCL / CUDA / HIP / Metal**), 外加一个纯 Python 解释器后端。
 
 ```python
 import numpy as np
@@ -16,7 +16,7 @@ def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float) -> None:
 x = np.arange(1_000_000, dtype=np.float32)
 out = np.zeros_like(x)
 
-saxpy(x, x, out, 2.0)              # 未指定后端: 按 cuda -> hip -> opencl 探测第一个可用后端
+saxpy(x, x, out, 2.0)              # 未指定后端: 按 cuda -> hip -> metal -> opencl 探测第一个可用后端
 saxpy["cuda"](x, x, out, 2.0)      # 中括号切后端
 saxpy["hip:gfx1036"](x, x, out, 2.0)   # 后端:设备
 saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运行(不需要 GPU)
@@ -28,20 +28,21 @@ saxpy["python"](x, x, out, 2.0)    # 同一个函数, 在解释器里串行运�
 
 - **`@kernel` 装饰器** —— 直接装饰 Python 函数(含类方法/静态方法), 调用时按实参类型翻译为后端源码并编译(单态化);
 - **普通 Python 子函数** —— kernel 里调用的子函数不需要任何装饰器, 类型注解也是可选的: 它会被翻译成设备函数, 并在调用点按实参类型单态化; 子函数继续调子函数也支持(递归展开)。经由名字取得的子函数同样支持: `module.func(...)`、`SomeClass.static_method(...)`、`self.static_method(...)`, 以及同一个类里 `self.other_method(...)` 这种实例方法互调。
-- **同一进程内三后端并存** —— 由中括号在每次调用时选择后端, 所以一个进程(甚至同一个 kernel 对象)可以混用 OpenCL / CUDA / HIP; 每个 "后端 + 设备" 组合单独单态化并缓存。
+- **同一进程内各后端并存** —— 由中括号在每次调用时选择后端, 所以一个进程(甚至同一个 kernel 对象)可以混用 OpenCL / CUDA / HIP / Metal; 每个 "后端 + 设备" 组合单独单态化并缓存。
 - **纯 Python 后端** —— `k["python"]` 用解释器运行同一份 `@kernel` 函数体, 在 CPU 上串行执行: 不需要 GPU、不需要编译器、不需要任何运行时; 适合测试、小规模数据和作为 GPU 语义的参照实现。
-- **手写 kernel 文件 import** —— `.cl` / `.cu` / `.hip` 文件像 Python 模块一样 `import`, kernel 与 struct 类型成为模块属性, 自动生成 `.pyi` 类型提示;
+- **手写 kernel 文件 import** —— `.cl` / `.cu` / `.hip` / `.metal` 文件像 Python 模块一样 `import`, kernel 与 struct 类型成为模块属性, 自动生成 `.pyi` 类型提示;
 - **底层 OOP API** —— Devices/Context/Buffer/Program/Kernel, 需要精细控制时使用。
 - **统一的中括号语法**指定后端/设备/work size(与手写 kernel 完全一致, 顺序不限):
   ```python
   k(args)                          # 全自动
-  k["cuda"](args)                  # 后端 (opencl/cuda/hip/python, 含别名 ocl/cu/rocm/amd/py)
+  k["cuda"](args)                  # 后端 (opencl/cuda/hip/metal/python, 含别名 ocl/cu/rocm/amd/mtl/py)
   k["opencl:gfx1036"](args)        # 后端:设备
   k[(1024, 256)](args)             # work size: (总数, 每组), None 为自动
   k["cuda"][(1024, 256)](args)     # 组合
   ```
 - **所有后端统一用 CUDA 的中括号**: (blocks_per_grid, threads_per_block), 也就是 CUDA/HIP 用户本来就这么写的形式。k[(4, 256)] 表示 4 个 block、每个 256 个 thread(共 1024 个 work item);k[(n,)] 是只给总个数、block 尺寸自动推导,None 为全自动。同一个中括号在每个后端、@kernel 和低层 oop API 上都成立,block 数不再需要能被什么整除:总量本就是 locks * threads。
 - **静态读写分析**: 解析 kernel 函数体, 推断每个指针参数是只读/只写/读写——只写参数跳过上传, 只读参数跳过回读, 连续调用间数据留在设备上(gnp 数组零中间拷贝)。
+- **`pygpgpu.numpy` —— 常驻设备的数组**: 形如 numpy 的数组(`gnp.zeros`、`gnp.arange` 等)可以把字节留在设备上, 跨越任意多次 kernel 调用; 公开的 `to_device`/`to_host` 是异步拷贝, 跨设备经宿主中转, 零拷贝只在驱动能保证的后端兑现(cuda/hip/metal), 不能保证时抛出说明原因的异常(opencl); 并支持与 `torch.Tensor` 双向互转。
 - **向量类型**: 50 个向量类型(float4/int3/...), 支持 `.x/.y/.z/.w` 成员与 swizzle、构造、算术(标量广播)、比较、逐分量 math。
 - **双面函数库** `pygpgpu.funcs`(即 `pygpgpu.vec_types.funcs`): `dot/cross/normalize/clamp/...` 在宿主 Python 直接可运行, 在 `@kernel` 里自动翻译为设备内建。
 - **设备内建直接从顶层导出**: `get_global_id`、`barrier`、`atomic_add`、`dot` 等都是普通函数, 从 `pygpgpu` 直接导入即可。在 `@kernel` 函数体里, 翻译器按**它解析到的函数对象**识别(而非名字), 再映射成各后端的调用, 所以同一份函数体在 OpenCL / CUDA / HIP 和解释器后端上都能跑。
@@ -62,10 +63,11 @@ Python ≥ 3.7。GPU 运行时按需自备(任一即可):
 |---|---|---|
 | OpenCL | GPU 驱动(通常已带) | 零额外安装, 支持 NVIDIA/AMD/Intel 多平台 |
 | CUDA | NVIDIA 驱动(含 NVRTC) | Toolkit 不必需, 驱动自带 nvrtc 即可 |
-| HIP | AMD HIP SDK | Windows 上编译走 SDK 自带 clang; 若 MSVC/Windows SDK 不在默认路径, 用 `PYGPGPU_HIP_INCLUDES` 指定 include 目录(os.pathsep 分隔) |
+| HIP | AMD HIP SDK | 编译走 SDK 自带 clang: Windows 上是 `<ROCm>/bin/clang.exe`, 自动发现 MSVC/Windows SDK 头文件(若不在默认路径, 用 `PYGPGPU_HIP_INCLUDES` 指定 include 目录, os.pathsep 分隔); Linux 上是 `<ROCm>/bin/clang`(或 `PATH` 上的 `hipcc`), 系统头文件由它自己找到 |
+| Metal | Apple 硬件上的 macOS | Metal 后端走框架自带的运行期编译器, 不需要 Xcode 命令行工具; 它必须有真实 Apple GPU, Mac 虚拟机上没有 Metal 设备, 因此该后端在那里不可用 |
 | Python | 无 | 在解释器里串行执行 `@kernel` 函数体; 用 `k["python"]` 显式选择, 不参与自动探测 |
 
-`@kernel` 未指定 `backend` 时, 按 **cuda -> hip -> opencl** 顺序探测, 取第一个枚举到设备的后端。
+`@kernel` 未指定 `backend` 时, 按 **cuda -> hip -> metal -> opencl** 顺序探测, 取第一个枚举到设备的后端。把 Metal 排在 OpenCL 之前, 是因为 macOS 上的 OpenCL 已废弃且只暴露 CPU 设备。
 
 ## 快速上手
 
@@ -312,7 +314,7 @@ vecops.add_offset["opencl:1"][(blocks, threads)](...)   # 设备 + work size, �
 * 同名且**参数表相同**的 kernel 是同一个函数的多个后端实现 -- 中括号选择实现, 调用保持
   kernel 自己的签名;
 * **参数表不同**则为重载 -- pyi 里每个参数表一个 `@overload`, 调用时由实参类型选定实现
-  (不带括号时按与 `@kernel` 相同的 `cuda -> hip -> opencl` 探测);
+  (不带括号时按与 `@kernel` 相同的 `cuda -> hip -> metal -> opencl` 探测);
 * 只在一个文件里声明的 kernel 依然存在, 中括号指到没有实现的后端时在括号处抛 `KeyError`。
 
 合并模块同样生成 `.pyi`: 每个 kernel 一个 `class Kernel_<name>`, 每个不同参数表一个
@@ -333,9 +335,9 @@ def integrate(x: np.ndarray, out: np.ndarray):
 
 分三组, 区别很重要:
 
-* **三个后端都有**的函数 -- `erf`、`erfc`、`tgamma`、`lgamma`、`rint`、`remainder`、
+* **所有设备后端都有**的函数 -- `erf`、`erfc`、`tgamma`、`lgamma`、`rint`、`remainder`、
   `fmin`、`fmax`、`fdim`、`copysign`、`nextafter`、`ldexp`、`fract`、`sign`, 以及
-  `native_*` 一族。它们在 OpenCL、CUDA、HIP 上都能跑。
+  `native_*` 一族。它们在 OpenCL、CUDA、HIP、Metal 上都能跑。
 * **CUDA 与 HIP 有、OpenCL 没有**的函数 -- 快速近似(`fast_exp`、`fast_log`、`fast_sin` ...)、正确舍入
   形式(`exact_recip`、`exact_divide`、`exact_sqrt` ...)、特殊函数(`erf_inverse`、
   `normal_cdf`、`reciprocal_hypot`、`sin_pi`、`cos_pi`、贝塞尔函数)以及转换
@@ -451,6 +453,86 @@ def k(a: np.ndarray, b: np.ndarray, out: np.ndarray) -> None:
 
 配合 `pygpgpu.numpy`(gnp) 数组, 连续 kernel 调用之间数据完全留在设备端, 仅在宿主访问时才同步。
 
+### 常驻设备的数组: `pygpgpu.numpy`
+
+`import pygpgpu.numpy as gnp` 给到的就是 numpy —— 同样的构造器、同样的运算、同样的 API,
+只多一个对 kernel 而言关键的区别: 数据可以留在设备上, 不必每次启动后都回到 CPU。
+
+```python
+import pygpgpu.numpy as gnp
+from pygpgpu import kernel
+
+@kernel
+def saxpy(x, y, out, alpha):
+    for i in range(out.shape[0]):
+        out[i] = x[i] * alpha + y[i]
+
+a = gnp.arange(1_000_000, dtype=gnp.float32)
+b = gnp.arange(1_000_000, dtype=gnp.float32)
+out = gnp.empty(1_000_000, dtype=gnp.float32)
+
+saxpy(a, b, out, 2.0)      # 上传 a、b、out, 每个一次
+saxpy(a, b, out, 2.0)      # 什么都不动: 它们已经在那台设备上
+print(out[0])              # ……这一句才把字节取回来
+
+a.to_device("opencl:1")    # 显式、异步地拷到另一台设备
+a.to_host()                # 异步取回; 下一次真正的读取会等它
+```
+
+在宿主这一侧 gnp 数组就是普通 numpy 数组 —— `a + 1`、`np.sum(a)`、`a[0]`、`a.T`、
+`a.tolist()` 与 `numpy.ndarray` 完全一致 —— 所以唯一改变的只是: kernel 调用不再每次付出一次往返拷贝。
+
+**`to_device` / `to_host` 是异步的。** 两者都返回一个 `Transfer`, 它同时是屏障(`.wait()`)、
+future(`.future()`、`await transfer`)和这次拷贝的描述。引擎不会 "以防万一" 地等待, 只在真正依赖结果的
+地方等:
+
+* 读取宿主字节之前, 若还有在途拷贝仍在写它们;
+* 在某个缓冲区上传还没落地时, 又要往它上面启动;
+* 每次在宿主侧真正读取数组之前 —— `out[0]`、`a + 1`、`tolist()` —— 这也正是为什么没被等待的
+  `to_host()` 依然正确。
+
+`to_device` 接受与 kernel 方括号里相同的选择器(`"cuda"`、`"opencl:1"`、`"hip:gfx1036"`,
+`(backend, device)` 对, 或 `Device` 对象), `None` 表示普通 `k(...)` 调用会用的默认设备。
+
+**跨设备一律经由宿主中转。** 两个后端的缓冲区类型不同, 即使同一后端的两个设备也可能属于不同 context,
+所以设备到设备就是一次下载加一次上传。最新的内容获胜: 每个设备副本带着它持有的那份字节的 epoch,
+宿主读取时从 "走得最远" 的那台设备取回 —— 因此在设备 A 上跑一次、再在设备 B 上跑一次, 然后读宿主,
+得到的是 B 的结果。
+
+**零拷贝**让设备直接读写数组自己的内存, 而不是它的副本:
+
+```python
+ok, why = gnp.zero_copy_support("opencl")     # (False, "...CL_MEM_USE_HOST_PTR...")
+a.to_device("cuda:0", zero_copy=True)         # cuda/hip/metal: 数组本身就是那个缓冲区
+```
+
+只有在驱动**确实**能保证时才兑现 —— CUDA/HIP 的映射锁页内存(`cuMemHostRegister` +
+`cuMemHostGetDevicePointer`)、Metal 的 `StorageModeShared` —— 其余情况下**抛异常并说明原因**。
+OpenCL 属于后者: `CL_MEM_USE_HOST_PTR` 允许运行时保留一份私有副本, kernel 写入可能永远到不了调用者的
+数组, 所以这个请求直接抛异常, 而不是过一会儿给出错误答案。
+
+**PyTorch tensor 双向互转**, 宿主侧的两种形式可以共享同一块缓冲区:
+
+```python
+array = gnp.ndarray.from_torch(tensor, zero_copy=True)   # CPU tensor: 同一块存储
+tensor = array.to_torch(zero_copy=True)
+
+gnp.ndarray.from_torch(cuda_tensor)     # 设备 tensor: 经由宿主中转
+array.to_torch()                       # tensor 自己持有的一份拷贝
+```
+
+`from_torch(zero_copy=True)` 拒绝 CUDA tensor: 那块设备存储归 torch 所有, 而 gnp 数组的字节在宿主内存,
+两者之间并不存在 "零拷贝", 于是调用直接说明这一点。`to_torch` 会先把常驻设备的数组取回宿主,
+因为它的宿主字节按设计就是过期的。
+
+有两点值得知道:
+
+* **是 `gnp` 的构造器才产生 gnp 数组。** `np.zeros(...)` 返回普通 `numpy.ndarray`(numpy 自己的函数),
+  行为正常但没有设备常驻; `gnp.zeros(...)` 才返回 gnp 数组。混用只是悄悄失去优化, 这也正是两个命名空间
+  分开的原因。
+* **视图共用同一份设备副本。** `a[1]`、`a.T`、`a.reshape(...)` 都是视图, 视图的字节属于父数组的缓冲区,
+  所以 kernel 写 `a[1]` 会把整个 `a` 标成设备上已变更, 而不是只标那一行(多标是安全的, 少标才会丢数据)。
+
 ## 与其他库的用法对比
 
 同一段计算, 用本库和另外三个 "从 Python 调用 GPU" 的项目
@@ -560,7 +642,7 @@ wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
 | 同进程多后端 | **三个都能用, 可自由混用** | 只有一个, 由 `ti.init(arch=...)` 固定 | 仅 CUDA | 仅 CUDA |
 | 启动规模 | 由循环上界推导(或 `domain="x"` / 中括号) | 由 `range` 推导 | block × thread 手算, 外加守卫 | 显式传 `dim=` |
 | 边界守卫 | 自动生成 | 自动生成 | 自己写 | 自己写 |
-| 后端 | OpenCL, CUDA, HIP | CPU, CUDA, Vulkan 等 | CPU, CUDA | CPU, CUDA |
+| 后端 | OpenCL, CUDA, HIP, Metal | CPU, CUDA, Vulkan 等 | CPU, CUDA | CPU, CUDA |
 | AMD GPU | HIP(原生 AMD 代码生成)与 OpenCL | 经 Vulkan | 不支持 | 不支持 |
 | 切换后端 | 中括号 `k["hip"]`, 源码不变 | `ti.init(arch=...)`, 源码不变 | 不适用 | 不适用 |
 | 安装体积 | 仅 Python + ctypes: 不需 LLVM, 不需 CUDA Toolkit | 自带运行时 | 需要 LLVM | 需要 CUDA Toolkit |
@@ -582,7 +664,7 @@ apply_all["cuda"](x, out)      # NVIDIA
 apply_all["hip"](x, out)       # AMD
 apply_all["opencl"](x, out)    # OpenCL 枚举到的设备
 apply_all["python"](x, out)    # 解释器, 在 CPU 上执行(不需要设备)
-apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
+apply_all(x, out)              # 不指定: 按 cuda -> hip -> metal -> opencl 探测
 ```
 
 每个 "后端 + 设备" 组合都单独单态化和缓存, 所以在它们之间来回切只是多一次字典查找——首次调用之后
@@ -594,7 +676,7 @@ apply_all(x, out)              # 不指定: 按 cuda -> hip -> opencl 探测
 - **自动微分**: Taichi、Warp 可以对 kernel 求导, 本库不支持;
 - **稀疏与不规则数据结构**: Taichi 有 sparse grid / SNode tree, 本库传的是稠密 numpy 数组(稀疏要自己处理);
 - **CPU 回退**: 三者都能跑 CPU; 本库只有显式的 `k["python"]` 解释器后端跑 CPU, 而且它是串行的, 定位是测试而非吞吐;
-- **最低解释器版本**: 本库支持 Python 3.7 及以上, 64 位与 32 位 Windows 均可; 其他几个需要更新的解释器。
+- **最低解释器版本**: 本库支持 Python 3.7 及以上, 64 位与 32 位 Windows 以及 Linux x86-64 均可; 其他几个需要更新的解释器。Linux 已在 WSL 下端到端验证(CUDA 走 `/usr/lib/wsl` 的驱动直通, OpenCL 走发行版自带的 runtime), 因此那里的驱动名与库发现路径是真实跑过的分支, 而不是未测代码。
 
 这张表依据各项目文档与上面的代码片段整理; 它们的 API 迭代很快, 依赖某一格之前请核对当前文档。
 
@@ -913,7 +995,7 @@ dev = get_device("cuda:0")   # 直接取对应后端的 Device 对象
 
 ### 选择默认设备
 
-没有中括号的调用会按 `cuda -> hip -> opencl` 使用第一个可用后端。`set_default_device()`
+没有中括号的调用会按 `cuda -> hip -> metal -> opencl` 使用第一个可用后端。`set_default_device()`
 可以替换这个顺序:
 
 ```python
@@ -938,6 +1020,7 @@ set_default_device()                         # 不传参数: 恢复内置顺序
 | OpenCL | `__clcache__/` | 解析 meta + 分设备二进制 |
 | CUDA | `__cucache__/` | 解析 meta + 分设备 cubin/ptx |
 | HIP | `__hipcache__/` | 解析 meta + 分设备代码对象 |
+| Metal | `__metalcache__/` | 生成的 MSL 源码, 首次启动时编译 |
 | Python | 无 | 不生成也不编译任何东西, 函数体直接执行 |
 
 缓存按源文件(及全部 `#include`)mtime 自动失效; `@kernel` 生成的源码按 Python 源码哈希区分。这些目录应加入 `.gitignore`。

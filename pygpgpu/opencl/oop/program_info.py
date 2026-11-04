@@ -101,7 +101,10 @@ class VarInfo:
 
     def use_buffer(self, cmd_queue:CommandQueue, data:np.ndarray)->Tuple[Buffer, Event]:
         if isinstance(data, gnp.ndarray):
-            used_buffer, event = data._to_device(cmd_queue, self.name, kernel_flags=self.kernel_flags)
+            used_buffer, event = data._to_device(cmd_queue, self.name,
+                                                 kernel_flags=self.kernel_flags,
+                                                 backend="opencl",
+                                                 device=cmd_queue.device)
         else:
             used_buffer = cmd_queue.context.get_buffer(data.nbytes)
             used_buffer.kernel_flags = self.kernel_flags
@@ -123,7 +126,11 @@ class VarInfo:
     
     def use_image(self, cmd_queue:CommandQueue, image:imagend_t)->Tuple[imagend, Event]:
         if isinstance(image.data, gnp.ndarray):
-            used_image, event = image.data._to_device(cmd_queue, self.name, image_info=image.plain, kernel_flags=self.kernel_flags)
+            used_image, event = image.data._to_device(cmd_queue, self.name,
+                                                      image_info=image.plain,
+                                                      kernel_flags=self.kernel_flags,
+                                                      backend="opencl",
+                                                      device=cmd_queue.device)
         else:
             used_image = cmd_queue.context.get_image(image.plain)
             used_image.kernel_flags = self.kernel_flags

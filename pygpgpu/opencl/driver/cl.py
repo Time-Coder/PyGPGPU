@@ -65,6 +65,12 @@ class MetaCL(type):
                 "/usr/lib64/libOpenCL.so",
                 "/usr/lib/libOpenCL.so",
                 "/opt/ocl/lib/libOpenCL.so",
+                # The unversioned name comes from the ocl-icd-dev package; the
+                # versioned one is what the runtime package always installs.
+                "libOpenCL.so.1",
+                "/usr/lib/x86_64-linux-gnu/libOpenCL.so.1",
+                "/usr/lib64/libOpenCL.so.1",
+                "/usr/lib/libOpenCL.so.1",
             ]
             for path in possible_paths:
                 if os.path.exists(path):

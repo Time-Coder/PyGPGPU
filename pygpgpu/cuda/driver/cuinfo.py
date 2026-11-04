@@ -594,6 +594,49 @@ class CUInfo:
             "restype": c_int
         },
 
+        # CUresult cuMemHostRegister_v2(void* p, size_t bytesize, unsigned int Flags)
+        #
+        # Pins a host range and, with CU_MEMHOSTREGISTER_DEVICEMAP, makes the GPU able to
+        # address it directly: that is the zero-copy path (the array's own bytes are what
+        # the kernel reads and writes).
+        "cuMemHostRegister_v2": {
+            "args": {
+                "p": c_void_p,
+                "bytesize": c_size_t,
+                "Flags": c_uint
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemHostGetDevicePointer_v2(CUdeviceptr* pdptr, void* p, unsigned int Flags)
+        #
+        # The device-space address of a registered host range. The value carries the same
+        # offset into the range that `p` has, which is why a registered page range can
+        # back an array that starts in the middle of it.
+        "cuMemHostGetDevicePointer_v2": {
+            "args": {
+                "pdptr": ptr_CUdeviceptr,
+                "p": c_void_p,
+                "Flags": c_uint
+            },
+            "restype": c_int
+        },
+
+        # CUresult cuMemHostUnregister(void* p)
+        "cuMemHostUnregister": {
+            "args": {"p": c_void_p},
+            "restype": c_int
+        },
+
+        # CUresult cuEventQuery(CUevent hEvent)
+        #
+        # Non-blocking: CUDA_SUCCESS means the event has been recorded *and* completed,
+        # CUDA_ERROR_NOT_READY means it is still pending. Used to avoid a redundant wait.
+        "cuEventQuery": {
+            "args": {"hEvent": CUevent},
+            "restype": c_int
+        },
+
         # CUresult cuLaunchKernel(
         #     CUfunction f,
         #     unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ,

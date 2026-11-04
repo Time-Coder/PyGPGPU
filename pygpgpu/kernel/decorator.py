@@ -87,12 +87,13 @@ _BACKEND_ALIASES:Dict[str, str] = {
     "opencl": "opencl", "ocl": "opencl", "cl": "opencl",
     "cuda": "cuda", "cu": "cuda",
     "hip": "hip", "rocm": "hip", "amd": "hip",
+    "metal": "metal", "mtl": "metal",
     # The pure-python backend: no translation, no device, serial execution on the host.
     "python": "python", "py": "python", "host": "python",
 }
 
 # Probe order when no backend is specified: take the first backend that enumerates at least one device
-DEFAULT_BACKEND_ORDER:Tuple[str, ...] = ("cuda", "hip", "opencl")
+DEFAULT_BACKEND_ORDER:Tuple[str, ...] = ("cuda", "hip", "metal", "opencl")
 
 _probed_backend:Optional[str] = None
 
@@ -206,6 +207,9 @@ def _backend_devices(backend:str)->List[object]:
         return [d for platform in Platforms for d in platform.devices]
     if backend == "hip":
         from ..hip.oop.devices import Devices
+        return list(Devices)
+    if backend == "metal":
+        from ..metal.oop.devices import Devices
         return list(Devices)
     if backend == "cuda":
         from ..cuda.oop.devices import Devices
@@ -1130,6 +1134,11 @@ class PyKernel(_KernelBase[_P]):
         elif backend == "hip":
             from ..hip.driver import HIP
             HIP.hipDeviceSynchronize()
+        elif backend == "metal":
+            # Metal's launch waits on its own command buffer, so every launch that
+            # returned has already completed; the queue is serial, which makes that
+            # wait cover the launches before it too.
+            device_obj.default_context.sync()
 
     def _run_host_region(self, statements:List[ast.stmt],
                          args:Tuple[Any, ...], instance:Any,
@@ -2324,6 +2333,13 @@ class PyKernel(_KernelBase[_P]):
         # all of them in one file. The header comes first because C needs a type before the
         # function that names it, and a callee before its caller.
         own_header:List[str] = []
+        if backend == "metal":
+            # Metal's prelude: the `#include <metal_stdlib>` and the macros that give the
+            # shared body its OpenCL index spellings (see kernel/metal_codegen.py). It
+            # precedes the typedefs because the macros are the first thing the kernel body
+            # needs -- and it must be first in the *file*, before any declaration.
+            from .metal_codegen import prelude
+            own_header.append(prelude())
         if typedefs:
             own_header.append(typedefs)
         if include_lines:
@@ -2550,6 +2566,11 @@ class PyKernel(_KernelBase[_P]):
             program:Any = HIPProgram(source_path, compiler=compiler)
             return program.kernels[c_name]
 
+        if backend == "metal":
+            from ..metal.oop.program import Program as MetalProgram
+            program:Any = MetalProgram(source_path, device=device_obj)
+            return program.kernels[c_name]
+
         from ..cuda.oop.program import Program as CUProgram
 
         device_obj.default_context.make_current()
@@ -2577,13 +2598,21 @@ class PyKernel(_KernelBase[_P]):
 
 def _cuda_toolkit() -> Optional[pathlib.Path]:
     """The CUDA Toolkit directory, or None when nvcc cannot be found."""
+    import shutil
+
     for variable in ("CUDA_PATH", "CUDA_HOME"):
         value:str = os.environ.get(variable, "")
         if value:
-            candidate:pathlib.Path = pathlib.Path(value) / "bin" / "nvcc.exe"
+            candidate:pathlib.Path = pathlib.Path(value) / "bin" / (
+                "nvcc.exe" if os.name == "nt" else "nvcc")
             if candidate.exists():
                 return candidate
-    import shutil
+    # Linux installs ship /usr/local/cuda as a symlink to the versioned toolkit;
+    # checking it keeps a toolkit without nvcc on PATH discoverable.
+    if os.name != "nt":
+        candidate:pathlib.Path = pathlib.Path("/usr/local/cuda/bin/nvcc")
+        if candidate.exists():
+            return candidate
 
     found:Optional[str] = shutil.which("nvcc")
     return pathlib.Path(found) if found else None
@@ -2591,12 +2620,14 @@ def _cuda_toolkit() -> Optional[pathlib.Path]:
 
 def _cuda_tool(nvcc:pathlib.Path, tool:str) -> Optional[pathlib.Path]:
     """Another executable shipped beside nvcc, or None when it is not installed."""
-    candidate:pathlib.Path = nvcc.parent / tool
-    if candidate.exists():
-        return candidate
     import shutil
 
-    found:Optional[str] = shutil.which(pathlib.Path(tool).stem)
+    tool_name:str = tool if os.name == "nt" else pathlib.Path(tool).stem
+    candidate:pathlib.Path = nvcc.parent / tool_name
+    if candidate.exists():
+        return candidate
+
+    found:Optional[str] = shutil.which(tool_name)
     return pathlib.Path(found) if found else None
 
 
@@ -2664,7 +2695,8 @@ def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->Any:
     linked_source.write_text(
         text.replace("__global__ void ", 'extern "C" __global__ void ')
         + "\n\nint main() { return 0; }\n", encoding="utf-8")
-    executable:pathlib.Path = image_path.with_suffix(".linked.exe")
+    executable:pathlib.Path = image_path.with_suffix(
+        ".linked.exe" if os.name == "nt" else ".linked")
     command:List[str] = [
         str(nvcc), "-rdc=true", f"-arch={arch}", "-x", "cu",
         "-o", str(executable), str(linked_source),
@@ -2680,7 +2712,7 @@ def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->Any:
     extractor:Optional[pathlib.Path] = _cuda_tool(nvcc, "cuobjdump.exe")
     if extractor is None:
         raise CompileError(
-            "cuobjdump.exe was not found beside nvcc; it is needed to take the linked device "
+            "cuobjdump was not found beside nvcc; it is needed to take the linked device "
             "image out of an nvcc build")
     extract_dir:pathlib.Path = image_path.with_suffix(".linked")
     extract_dir.mkdir(exist_ok=True)

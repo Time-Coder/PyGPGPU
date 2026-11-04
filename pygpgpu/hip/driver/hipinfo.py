@@ -100,6 +100,15 @@ func_signatures = {
     "hipMemcpyHtoDAsync": {"args": {"dst": CUdeviceptr, "src": c_void_p, "size": c_size_t, "stream": CUstream}, "restype": c_int},
     "hipMemcpyDtoHAsync": {"args": {"dst": c_void_p, "src": CUdeviceptr, "size": c_size_t, "stream": CUstream}, "restype": c_int},
 
+    # hipError_t hipHostRegister(void* p, size_t size, unsigned int flags)
+    #
+    # Pins a host range and, with hipHostRegisterMapped, makes the GPU able to address it
+    # directly: that is the zero-copy path (the array's own bytes are what the kernel
+    # reads and writes).
+    "hipHostRegister": {"args": {"p": c_void_p, "size": c_size_t, "flags": c_uint}, "restype": c_int},
+    "hipHostGetDevicePointer": {"args": {"devPtr": ptr_CUdeviceptr, "hstPtr": c_void_p, "flags": c_uint}, "restype": c_int},
+    "hipHostUnregister": {"args": {"p": c_void_p}, "restype": c_int},
+
     # hipError_t hipModuleLoadData(hipModule_t* module, const void* image)
     "hipModuleLoadData": {"args": {"module": ptr_CUmodule, "image": c_void_p}, "restype": c_int},
     "hipModuleUnload": {"args": {"module": CUmodule}, "restype": c_int},

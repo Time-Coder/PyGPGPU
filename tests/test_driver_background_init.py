@@ -28,32 +28,26 @@ def _run(script:str, timeout:int=300)->subprocess.CompletedProcess:
 
 
 def test_the_import_does_not_wait_for_the_driver():
-    """`import pygpgpu.cuda` returns without waiting for `cuInit`.
+    """`import pygpgpu.cuda` does not run the runtime load on the importing thread.
 
-    The import is measured against the driver's own completion: the background thread has
-    to be done by the time the first device is reachable, but the import statement itself
-    must not have waited for it.
+    The import is cheap because the load happens *elsewhere*: module loading runs on the
+    importing thread and `cuInit` runs on a named background thread, so the two overlap.
+    Timing alone cannot pin this -- a machine whose module loading is slower than its
+    driver load shows a large import either way, and a synchronously initialized driver
+    shows a large import too -- so the assertion is on the mechanism: the thread exists,
+    it is not the caller, and it is the one that owns the initialization.
     """
     completed = _run("""
-        import time
-        start = time.perf_counter()
+        import threading
         import pygpgpu.cuda
-        after_import = time.perf_counter()
-        # The wait is the driver's own business: a caller never asks for it, so this
-        # reaches for the private helper to observe when the background work finished.
-        from pygpgpu.cuda.driver.cuda import _wait_ready
-        _wait_ready()
-        after_wait = time.perf_counter()
-        print(f"import_ms={((after_import - start) * 1000):.1f}")
-        print(f"wait_ms={((after_wait - after_import) * 1000):.1f}")
+        from pygpgpu.cuda.driver.cuda import _INIT_THREAD
+        assert _INIT_THREAD is not None, "the driver initialization was not started at import"
+        assert _INIT_THREAD is not threading.current_thread(), (
+            "the driver initialization ran on the importing thread")
+        assert _INIT_THREAD.name == "pygpgpu-cuda-init", _INIT_THREAD.name
+        print("init thread:", _INIT_THREAD.name)
     """)
-    import_ms = float(completed.stdout.split("import_ms=")[1].split()[0])
-    wait_ms = float(completed.stdout.split("wait_ms=")[1].split()[0])
-    # The import itself is cheap (module loading); the runtime load is what ran in the
-    # background. A generous bound keeps the test about the shape, not about the machine:
-    # if the import had blocked on the driver, it would have taken the driver's ~600ms.
-    assert import_ms < wait_ms + 1.0 or wait_ms < 50.0, (
-        f"import_ms={import_ms} wait_ms={wait_ms}: the import appears to wait for the driver")
+    assert "init thread: pygpgpu-cuda-init" in completed.stdout
 
 
 def test_a_call_waits_for_the_initialization_and_works():
@@ -80,24 +74,35 @@ def test_a_missing_runtime_still_imports_and_fails_at_the_call():
     """
     completed = _run("""
         import ctypes
+        import platform
         real = ctypes.CDLL
+        # The driver's own DLL name differs per platform, so the simulation matches
+        # whichever one this machine would really load.
+        target = 'nvcuda' if platform.system() == 'Windows' else 'libcuda.so'
 
         def fake(name, *args, **kwargs):
-            if isinstance(name, str) and 'nvcuda' in name.lower():
-                raise OSError('simulated: nvcuda.dll not found')
+            if isinstance(name, str) and target in name.lower():
+                raise OSError('simulated: ' + target + ' not found')
             return real(name, *args, **kwargs)
 
         ctypes.CDLL = fake
 
         import pygpgpu.cuda
-        from pygpgpu.cuda.driver.cuda import MetaCUDA
+        from pygpgpu.cuda.driver.cuda import MetaCUDA, _wait_ready
+
+        # The initialization runs on a background thread started at import, so the
+        # recorded failure appears a moment *after* the import returns. A test that
+        # read it immediately raced the thread and saw None; waiting is what a
+        # caller's first driver call does anyway, so the contract under test --
+        # "the failure is recorded, not raised" -- is unchanged.
+        _wait_ready()
         assert MetaCUDA.last_init_error is not None, "the failure was not recorded"
 
         from pygpgpu.cuda.oop.devices import Devices
         try:
             list(Devices)
         except OSError as error:
-            assert 'nvcuda' in str(error), error
+            assert target in str(error), error
             print("raised at use:", type(error).__name__)
         else:
             raise AssertionError('the missing runtime was not raised at use')
@@ -114,9 +119,10 @@ def test_the_mechanism_is_not_part_of_the_public_surface():
     """
     import pygpgpu.cuda
     import pygpgpu.hip
+    import pygpgpu.metal
     import pygpgpu.opencl
 
-    for package in (pygpgpu.cuda, pygpgpu.hip, pygpgpu.opencl):
+    for package in (pygpgpu.cuda, pygpgpu.hip, pygpgpu.metal, pygpgpu.opencl):
         for name in dir(package):
             assert not (("init" in name.lower() or "ready" in name.lower()
                          or "wait" in name.lower()) and not name.startswith("_")), \

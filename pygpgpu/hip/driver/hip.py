@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import os
+import platform
 import threading
 from ctypes import CDLL, c_int
 from typing import Callable, Dict, List, Optional
@@ -72,6 +73,30 @@ class MetaHIP(type):
 
     @staticmethod
     def rocm_roots():
+        # On Linux the standard install root is /opt/rocm (usually a symlink to the
+        # versioned folder), and ROCM_PATH points at it when the standard layout is
+        # not used. The version folder is folded into the root the same way the
+        # Windows scan folds it, so "root/bin/clang" stays the layout every caller
+        # assumes.
+        if platform.system() != "Windows":
+            roots = []
+            env = os.environ.get("ROCM_PATH") or os.environ.get("HIP_PATH")
+            if env:
+                roots.append(env)
+            roots.extend(glob.glob("/opt/rocm*"))
+            roots.append("/usr")   # distro-packaged ROCm keeps its runtime in /usr/lib
+            expanded:List[str] = []
+            for root in roots:
+                if not os.path.isdir(root):
+                    continue
+                versions = sorted(glob.glob(f"{root}/*"))
+                if versions and any(os.path.isfile(os.path.join(v, "bin", "clang"))
+                                    for v in versions):
+                    expanded.extend(versions)
+                else:
+                    expanded.append(root)
+            return expanded
+
         roots = []
         env = os.environ.get("HIP_PATH")
         if env:
@@ -97,6 +122,30 @@ class MetaHIP(type):
     def dll(cls):
         if MetaHIP.__dll is not None:
             return MetaHIP.__dll
+
+        if platform.system() != "Windows":
+            # Linux: the runtime is libamdhip64.so (a plain SONAME the loader finds
+            # through the standard library paths or ROCm's own ld.so configuration),
+            # with /usr/lib as the fallback for a distro package that ships it there.
+            candidates = ["libamdhip64.so", "libhip_hcc.so"]
+            for root in cls.rocm_roots():
+                candidates.extend(sorted(glob.glob(f"{root}/lib/libamdhip64.so*"), reverse=True))
+            dll = None
+            last_error:Optional[Exception] = None
+            for candidate in candidates:
+                try:
+                    dll = CDLL(candidate)
+                    break
+                except OSError as e:
+                    last_error = e
+            if dll is None:
+                # The loader's own error type: every other backend surfaces a
+                # missing runtime as OSError, and callers (the probe, kernel_import,
+                # the examples' backend fallback) are written against that.
+                raise OSError(f"cannot load libamdhip64.so (HIP runtime not found); "
+                              f"roots={cls.rocm_roots()}: {last_error}") from last_error
+            MetaHIP.__dll = dll
+            return dll
 
         candidates = []
         for root in cls.rocm_roots():

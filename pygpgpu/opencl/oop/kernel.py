@@ -383,6 +383,18 @@ class Kernel(CLObject):
             mem_obj:Optional[MemObject] = entry[0] if entry is not None else None
             arg_value:Any = entry[1] if entry is not None else None
 
+            # A gnp array's buffer belongs to the array, not to the context's pool: the next
+            # launch naming the same array reuses it, so it is never handed back and
+            # `use`/`unuse` must not be run for it.
+            if isinstance(arg_value, gnp.ndarray):
+                if arg_info.need_read_back:
+                    # Deferred read-back: the bytes stay on the device and to_host() pulls
+                    # them the next time the host reads the array.
+                    arg_value._mark_device_written(mem_obj)
+                    continue
+                if mem_obj is not None:
+                    continue
+
             if not arg_info.need_read_back:
                 # read-only/write-only arguments must also return their buffer to the pool after the kernel completes, otherwise each call leaks one pooled object
                 if mem_obj is not None:
@@ -398,12 +410,6 @@ class Kernel(CLObject):
             if mem_obj is None:
                 raise RuntimeError(
                     f"argument '{arg_info.name}' has no device buffer to read back")
-
-            if isinstance(arg_value, gnp.ndarray):
-                # gnp arrays use lazy read-back: data stays on the device, to_host() pulls it on host access (before writes)
-                mem_obj.dirty_on_device = True
-                mem_obj.unuse()
-                continue
 
             event:Event = mem_obj.read(cmd_queue)
             call_back = partial(on_completed, arg_value, mem_obj, arg_info)
@@ -651,14 +657,23 @@ class Kernel(CLObject):
                         used_value = value
                         content_dtype = (getattr(content_type, "dtype", None)
                                          if is_struct else None)
-                        if content_dtype is not None:
-                            if value.dtype != content_dtype:
-                                used_value = np.ascontiguousarray(value).view(content_dtype)
-                        elif value.dtype != content_type:
-                            used_value = value.astype(_element_dtype(content_type))
+                        if isinstance(value, gnp.ndarray):
+                            # A gnp array owns its device copy and its layout handling: it
+                            # uploads through `_to_device`, which stages a non-contiguous
+                            # view itself. Converting it here would hand the launch a
+                            # *plain* ndarray copy -- the device copy would be orphaned
+                            # and the kernel's writes would never reach the caller.
+                            if content_dtype is not None and value.dtype != content_dtype:
+                                used_value = value.astype(content_dtype)
+                        else:
+                            if content_dtype is not None:
+                                if value.dtype != content_dtype:
+                                    used_value = np.ascontiguousarray(value).view(content_dtype)
+                            elif value.dtype != content_type:
+                                used_value = value.astype(_element_dtype(content_type))
 
-                        if not used_value.flags['C_CONTIGUOUS']:
-                            used_value = np.ascontiguousarray(used_value)
+                            if not used_value.flags['C_CONTIGUOUS']:
+                                used_value = np.ascontiguousarray(used_value)
 
                         buffer, event = arg_info.use_buffer(cmd_queue, used_value)
                         CL.clSetKernelArg(self.id, index, sizeof(cl_mem), pointer(buffer.id))
@@ -757,3 +772,4 @@ class Kernel(CLObject):
     @staticmethod
     def _release_func():
         return CL.clReleaseKernel
+

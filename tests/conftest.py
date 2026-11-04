@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 
-DEVICE_BACKENDS: "tuple[str, ...]" = ("cuda", "hip", "opencl")
+DEVICE_BACKENDS: "tuple[str, ...]" = ("cuda", "hip", "metal", "opencl")
 
 
 def _probe() -> "list[str]":

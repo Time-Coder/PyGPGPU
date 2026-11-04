@@ -92,7 +92,12 @@ class Buffer(MemObject):
 
         events_ptr = Event.events_ptr(after_events)
         event_id = cl_event(0)
-        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, True, origin, region, host_ptr, len(after_events), events_ptr, pointer(event_id))
+        # A non-blocking read, like the write above: the caller waits on the returned
+        # event (Event.wait) or registers a completion callback. A *blocking* read would
+        # block until the queue drained, which deadlocks whenever the enqueue happens
+        # inside a driver event callback -- and that is exactly where a deferred read-back
+        # runs (see Kernel.__after_call).
+        CL.clEnqueueReadBuffer(cmd_queue.id, self.id, False, origin, region, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueReadBuffer)
 
     def _host_pointer_of(self, data:Union[bytes, bytearray, np.ndarray])->Tuple[ctypes.c_void_p, Any]:

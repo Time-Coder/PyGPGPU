@@ -243,7 +243,18 @@ def as_host_array(value: Any) -> Any:
     `prepare_structure_classes`) and `p.i` (the ctypes attribute) -- whereas converting it to
     a record would throw the attribute form away. An array of that dtype is left alone too,
     since its elements read back as records.
+
+    A `ctypes.Union` instance is the exception on some platforms: CPython there gives a
+    union subclass no mapping slot at all, so a `__getitem__` assigned to the class
+    dictionary is never reached and `p["i"]` raises "'U' object is not subscriptable"
+    (see `structs._add_subscript_access`). The instance is wrapped in a proxy that
+    answers the subscript itself and forwards everything else -- reads and writes --
+    to the real union, which keeps the attribute spelling working too.
     """
+    from . import structs
+
+    if structs.union_needs_proxy(value):
+        return structs.UnionProxy(value)
     return wrap_vector_array(value)
 
 

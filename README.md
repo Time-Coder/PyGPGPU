@@ -2,7 +2,7 @@
 
 **English** | [Chinese](README.zh-CN.md)
 
-Decorate a Python function and it runs on the GPU — one codebase, three backends (**OpenCL / CUDA / HIP**).
+Decorate a Python function and it runs on the GPU — one codebase, four backends (**OpenCL / CUDA / HIP / Metal**).
 
 ```python
 import numpy as np
@@ -16,7 +16,7 @@ def saxpy(x: np.ndarray, y: np.ndarray, out: np.ndarray, alpha: float) -> None:
 x = np.arange(1_000_000, dtype=np.float32)
 out = np.zeros_like(x)
 
-saxpy(x, x, out, 2.0)              # no backend given: probe cuda -> hip -> opencl, take the first available
+saxpy(x, x, out, 2.0)              # no backend given: probe cuda -> hip -> metal -> opencl, take the first available
 saxpy["cuda"](x, x, out, 2.0)      # bracket switches the backend
 saxpy["hip:gfx1036"](x, x, out, 2.0)   # backend:device
 saxpy["python"](x, x, out, 2.0)    # the same function, serially in the interpreter (no GPU)
@@ -28,20 +28,21 @@ No C code to write, no build system to configure; the first call translates, com
 
 - **`@kernel` decorator** — decorate a Python function directly (class methods and static methods included); at call time it is specialized per argument type, translated to backend source and compiled (monomorphization).
 - **Plain-Python helper functions** — a helper called from a kernel needs no decorator, and its annotations are optional: it is translated into a device function and monomorphized from the call site, recursively for helpers that call helpers. The same holds for helpers reached through a name: `module.func(...)`, `SomeClass.static_method(...)`, `self.static_method(...)`, and `self.other_method(...)` between methods of one class.
-- **All three backends in one process** — the bracket chooses the backend per call, so a single process (and even a single kernel object) can mix OpenCL, CUDA and HIP; each backend/device pair is specialized and cached separately.
+- **Every backend in one process** — the bracket chooses the backend per call, so a single process (and even a single kernel object) can mix OpenCL, CUDA, HIP and Metal; each backend/device pair is specialized and cached separately.
 - **Pure-Python backend** — `k["python"]` runs the same `@kernel` body in the interpreter, serially on the CPU: no GPU, no compiler, no runtime. Useful for testing, for small inputs and as a reference for what the GPU semantics mean.
-- **Handwritten kernel file import** — `.cl` / `.cu` / `.hip` files import like Python modules: kernels and struct types become module attributes, and a `.pyi` type stub is generated automatically.
+- **Handwritten kernel file import** — `.cl` / `.cu` / `.hip` / `.metal` files import like Python modules: kernels and struct types become module attributes, and a `.pyi` type stub is generated automatically.
 - **Low-level OOP API** — Device/Context/Buffer/Program/Kernel, for when you need full control.
 - **One bracket syntax** for backend/device/work size (identical to handwritten kernels, order does not matter):
   ```python
   k(args)                          # fully automatic
-  k["cuda"](args)                  # backend (opencl/cuda/hip/python, aliases ocl/cu/rocm/amd/py)
+  k["cuda"](args)                  # backend (opencl/cuda/hip/metal/python, aliases ocl/cu/rocm/amd/mtl/py)
   k["opencl:gfx1036"](args)        # backend:device
   k[(4, 256)](args)                # work size: (blocks per grid, threads per block)
   k["cuda"][(4, 256)](args)        # combined
   ```
 - **CUDA work-size brackets on every backend**: (blocks_per_grid, threads_per_block), the spelling a CUDA or HIP reader already writes. k[(4, 256)] launches 4 blocks of 256 threads (1024 work items); k[(n,)] is a bare item count with an automatic block size, and None means automatic. The same bracket works on every backend, in @kernel and in the low-level oop API, and a block count never has to divide anything: the total is locks * threads by construction.
 - **Static read/write analysis**: the kernel body is parsed to infer whether each pointer argument is read-only, write-only or read-write — write-only arguments skip the upload, read-only arguments skip the read-back, and data stays on the device across calls (zero intermediate copies for gnp arrays).
+- **`pygpgpu.numpy` — device-resident arrays**: numpy-shaped arrays (`gnp.zeros`, `gnp.arange`, ...) that keep their bytes on a device across any number of kernel calls, with asynchronous public `to_device`/`to_host` transfers, cross-device staging through the host, zero-copy where the driver guarantees it (cuda/hip/metal) and an exception naming the reason where it does not (opencl), and `torch.Tensor` interop both ways.
 - **Vector types**: 50 vector types (float4/int3/...) with `.x/.y/.z/.w` members, swizzles, construction, arithmetic (scalar broadcast), comparisons and component-wise math.
 - **Dual-sided function library** `pygpgpu.funcs` (aka `pygpgpu.vec_types.funcs`): `dot/cross/normalize/clamp/...` run as-is in host Python and are translated to device builtins inside `@kernel`.
 - **Device builtins, exported at the top level**: `get_global_id`, `barrier`, `atomic_add`, `dot`, ... are plain functions imported from `pygpgpu`. Inside a `@kernel` body the translator recognizes each one by the object it resolves to and maps it to the call of every backend, so the same kernel body runs on OpenCL, CUDA, HIP and in the interpreter.
@@ -62,10 +63,11 @@ Python ≥ 3.7. Bring your own GPU runtime (any one of them is enough):
 |---|---|---|
 | OpenCL | GPU driver (usually already installed) | Nothing extra to install; works across NVIDIA/AMD/Intel |
 | CUDA | NVIDIA driver (includes NVRTC) | The Toolkit is not required — the driver-provided nvrtc is enough |
-| HIP | AMD HIP SDK | On Windows compilation runs through the SDK's clang; if MSVC/Windows SDK headers are not on the default paths, point `PYGPGPU_HIP_INCLUDES` at the include directories (os.pathsep-separated) |
+| HIP | AMD HIP SDK | Compilation runs through the SDK's clang: on Windows that is `<ROCm>/bin/clang.exe` with the MSVC/Windows SDK headers auto-discovered (point `PYGPGPU_HIP_INCLUDES` at the include directories, os.pathsep-separated, if they are not on the default paths); on Linux it is `<ROCm>/bin/clang` (or `hipcc` on `PATH`), which finds the system headers itself |
+| Metal | macOS on Apple hardware | The Metal backend compiles through the framework's own runtime compiler, so no Xcode command-line tools are needed. It requires a real Apple GPU: a Mac virtual machine has no Metal device, so this backend is unavailable there |
 | Python | nothing | Runs the `@kernel` body serially in the interpreter; selected explicitly with `k["python"]` and never probed for |
 
-When `@kernel` has no explicit `backend`, backends are probed in **cuda -> hip -> opencl** order and the first one that enumerates a device wins.
+When `@kernel` has no explicit `backend`, backends are probed in **cuda -> hip -> metal -> opencl** order and the first one that enumerates a device wins. The order puts Metal ahead of OpenCL on macOS, where OpenCL is deprecated and only exposes CPU devices.
 
 ## Quick start
 
@@ -316,7 +318,7 @@ What makes one module out of three files:
   own signature;
 * declared with **different parameter lists** it is a set of overloads -- the stub declares one
   `@overload` per list, and the argument types pick the implementation at call time (a bare call
-  walks the same `cuda -> hip -> opencl` probe a `@kernel` uses);
+  walks the same `cuda -> hip -> metal -> opencl` probe a `@kernel` uses);
 * declared in only one file it still exists, and a bracket naming a backend without an
   implementation raises `KeyError` at the bracket.
 
@@ -338,9 +340,9 @@ def integrate(x: np.ndarray, out: np.ndarray):
 
 Three groups, and the difference matters:
 
-* the functions **all three backends have** -- `erf`, `erfc`, `tgamma`, `lgamma`, `rint`,
+* the functions **every device backend has** -- `erf`, `erfc`, `tgamma`, `lgamma`, `rint`,
   `remainder`, `fmin`, `fmax`, `fdim`, `copysign`, `nextafter`, `ldexp`, `fract`, `sign`,
-  and the `native_*` family. These run on OpenCL, CUDA and HIP alike.
+  and the `native_*` family. These run on OpenCL, CUDA, HIP and Metal alike.
 * the functions **CUDA and HIP have** and OpenCL does not -- the fast approximations
   (`fast_exp`, `fast_log`, `fast_sin`, ...), the correctly-rounded forms (`exact_recip`,
   `exact_divide`, `exact_sqrt`, ...), the special functions (`erf_inverse`, `normal_cdf`,
@@ -465,6 +467,94 @@ def k(a: np.ndarray, b: np.ndarray, out: np.ndarray) -> None:
 
 Combined with `pygpgpu.numpy` (gnp) arrays, data stays entirely on the device between consecutive kernel calls and is synchronized only when the host touches it.
 
+### Device-resident arrays: `pygpgpu.numpy`
+
+`import pygpgpu.numpy as gnp` gives you numpy — every constructor, every operation, the same
+API — with one difference that matters for kernels: the bytes may stay on a device instead of
+coming back to the CPU after every launch.
+
+```python
+import pygpgpu.numpy as gnp
+from pygpgpu import kernel
+
+@kernel
+def saxpy(x, y, out, alpha):
+    for i in range(out.shape[0]):
+        out[i] = x[i] * alpha + y[i]
+
+a = gnp.arange(1_000_000, dtype=gnp.float32)
+b = gnp.arange(1_000_000, dtype=gnp.float32)
+out = gnp.empty(1_000_000, dtype=gnp.float32)
+
+saxpy(a, b, out, 2.0)      # uploads a, b, out once
+saxpy(a, b, out, 2.0)      # nothing moves: they are already on that device
+print(out[0])              # ...and this is what brings the bytes back
+
+a.to_device("opencl:1")    # explicit, asynchronous copy to another device
+a.to_host()                # asynchronous copy back; the next read waits for it
+```
+
+A gnp array is an ordinary numpy array on the host side — `a + 1`, `np.sum(a)`, `a[0]`, `a.T`,
+`a.tolist()` all work exactly as they do for `numpy.ndarray` — so the only habit that changes
+is that a kernel call no longer costs a copy each way.
+
+**`to_device` / `to_host` are asynchronous.** Both return a `Transfer`, which is a barrier
+(`.wait()`), a future (`.future()`, `await transfer`) and a description of the copy. Nothing
+waits "just in case"; the engine waits exactly where a result is depended on:
+
+* before it reads host bytes another in-flight copy is still writing;
+* before it launches on a buffer whose upload is still queued;
+* before any host-side read of the array — `out[0]`, `a + 1`, `tolist()` — which is why an
+  un-awaited `to_host()` is still correct.
+
+`to_device` takes the same selectors the kernel bracket does (`"cuda"`, `"opencl:1"`,
+`"hip:gfx1036"`, a `(backend, device)` pair, or a `Device` object), and `None` means the default
+device a plain `k(...)` would run on.
+
+**Crossing devices always stages through the host.** Two backends' buffers are unrelated types,
+and even two devices of one backend may live in different contexts, so a copy from one device to
+another is a download followed by an upload. The newest content wins: a device copy carries the
+epoch of the bytes it holds, and a host read pulls from whichever device is furthest ahead — so a
+kernel on device A followed by a kernel on device B, then a host read, gives B's result.
+
+**Zero-copy** makes the device read and write the array's own memory instead of a copy of it:
+
+```python
+ok, why = gnp.zero_copy_support("opencl")     # (False, "...CL_MEM_USE_HOST_PTR...")
+a.to_device("cuda:0", zero_copy=True)         # cuda/hip/metal: the array *is* the buffer
+```
+
+It is honoured where the driver actually guarantees it — CUDA and HIP mapped pinned memory
+(`cuMemHostRegister` + `cuMemHostGetDevicePointer`), Metal's `StorageModeShared` — and refused
+**with an exception naming the reason** where it is not guaranteed. OpenCL is in that last group:
+`CL_MEM_USE_HOST_PTR` lets the runtime keep a private copy, so a kernel write might never reach
+the caller's array, and the request raises instead of producing a wrong answer later.
+
+**PyTorch tensors convert both ways**, and the host-side forms can share one buffer:
+
+```python
+array = gnp.ndarray.from_torch(tensor, zero_copy=True)   # CPU tensor: same storage
+tensor = array.to_torch(zero_copy=True)
+
+gnp.ndarray.from_torch(cuda_tensor)     # device tensor: staged through the host
+array.to_torch()                       # a copy the tensor owns
+```
+
+`from_torch(zero_copy=True)` refuses a CUDA tensor: torch owns that device storage and a gnp
+array's bytes are host memory, so "zero copy" between them does not exist and the call says so.
+`to_torch` pulls a device-resident array home first, because its host bytes are stale by design.
+
+Two things are worth knowing:
+
+* **`gnp`'s constructors are what make a gnp array.** `np.zeros(...)` returns a plain
+  `numpy.ndarray` (numpy's own function), which behaves normally but has no device residency;
+  `gnp.zeros(...)` returns a gnp array. Mixing them silently costs you the optimization, which is
+  why the two namespaces are separate.
+* **A view carries the same device copy.** `a[1]`, `a.T` and `a.reshape(...)` are views, and a
+  view's bytes are part of its parent's buffer, so a kernel writing `a[1]` marks the whole
+  `a` as changed on the device rather than only that row (marking too much is safe; marking too
+  little would lose data).
+
 ## How it compares
 
 The same computation, written in this library and in three other GPU-from-Python projects
@@ -575,10 +665,10 @@ wp.launch(saxpy, dim=n, inputs=[x, y, out, 2.0])
 |---|---|---|---|---|
 | Input data | numpy arrays directly | wrap in `ti.field`, explicit `from_numpy`/`to_numpy` | `cuda.to_device` + `copy_to_host` by hand | wrap in `wp.array` |
 | Helper functions | **plain Python — no decorator, annotations optional** | `@ti.func` + annotated args | `@cuda.jit(device=True)` | `@wp.func` + annotated args |
-| Backends in one process | **all three, mixed freely** | one, fixed by `ti.init(arch=...)` | CUDA only | CUDA only |
+| Backends in one process | **all of them, mixed freely** | one, fixed by `ti.init(arch=...)` | CUDA only | CUDA only |
 | Launch size | inferred from the loop bound (or `domain="x"` / a bracket) | inferred from `range` | blocks × threads by hand, plus a guard | pass `dim=` |
 | Bounds guard | emitted for you | emitted for you | you write it | you write it |
-| Backends | OpenCL, CUDA, HIP | CPU, CUDA, Vulkan and others | CPU, CUDA | CPU, CUDA |
+| Backends | OpenCL, CUDA, HIP, Metal | CPU, CUDA, Vulkan and others | CPU, CUDA | CPU, CUDA |
 | AMD GPU | HIP (native AMD codegen) and OpenCL | via Vulkan | no | no |
 | Switching backend | bracket `k["hip"]`, same source | `ti.init(arch=...)`, same source | not applicable | not applicable |
 | Install footprint | Python + ctypes only: no LLVM, no CUDA Toolkit | ships its own runtime | needs LLVM | needs the CUDA Toolkit |
@@ -601,7 +691,7 @@ apply_all["cuda"](x, out)      # NVIDIA
 apply_all["hip"](x, out)       # AMD
 apply_all["opencl"](x, out)    # whichever device OpenCL enumerates
 apply_all["python"](x, out)    # the interpreter, on the CPU (no device needed)
-apply_all(x, out)              # unqualified: probe cuda -> hip -> opencl
+apply_all(x, out)              # unqualified: probe cuda -> hip -> metal -> opencl
 ```
 
 Each backend/device pair is specialized and cached separately, so alternating between them is just
@@ -613,7 +703,7 @@ Where the others are ahead — worth knowing before you pick:
 - **Automatic differentiation**: Taichi and Warp can differentiate kernels; this library cannot.
 - **Sparse and irregular data structures**: Taichi has sparse grids and SNode trees; here you pass dense numpy arrays (or handle sparsity yourself).
 - **CPU fallback**: all three can run on the CPU; this library runs on the CPU only through the explicit `k["python"]` interpreter backend, which is serial and meant for testing rather than throughput.
-- **Minimum interpreter version**: this library runs on Python 3.7 and newer, on both 64- and 32-bit Windows builds; the others require a newer interpreter.
+- **Minimum interpreter version**: this library runs on Python 3.7 and newer, on 64- and 32-bit Windows and on Linux x86-64; the others require a newer interpreter. Linux is exercised end to end under WSL (CUDA through the `/usr/lib/wsl` driver passthrough, OpenCL through a runtime the distribution ships), so the driver-name and library-discovery paths there are the real ones rather than an untested branch.
 
 This table was written from each project's documentation and the snippets above; their APIs move
 fast, so confirm against current docs before relying on a specific cell.
@@ -974,7 +1064,7 @@ dev = get_device("cuda:0")   # the Device object of that backend, directly
 
 ### Choosing the default device
 
-A call without a bracket runs on the first usable backend in `cuda -> hip -> opencl`.
+A call without a bracket runs on the first usable backend in `cuda -> hip -> metal -> opencl`.
 `set_default_device()` replaces that order:
 
 ```python
@@ -1000,6 +1090,7 @@ is. A kernel decorated with an explicit `@kernel(backend=...)` keeps that backen
 | OpenCL | `__clcache__/` | parsed meta + per-device binaries |
 | CUDA | `__cucache__/` | parsed meta + per-device cubin/ptx |
 | HIP | `__hipcache__/` | parsed meta + per-device code objects |
+| Metal | `__metalcache__/` | generated MSL source, compiled at first launch |
 | Python | none | nothing is generated or compiled; the body runs as-is |
 
 Caches are invalidated by the mtime of the source file (and every `#include`); sources generated by `@kernel` are keyed by a hash of the Python source. These directories should be in `.gitignore`.

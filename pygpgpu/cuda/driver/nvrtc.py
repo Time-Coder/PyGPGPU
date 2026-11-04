@@ -66,7 +66,32 @@ class MetaNVRTC(type):
             
             lib_name = max(nvrtc_candidates)
         elif system == "Linux":
-            lib_name = "libnvrtc.so"
+            # The toolkit's runtime package ships a versioned SONAME
+            # (libnvrtc.so.12, libnvrtc.so.13 ...); the unversioned name needs the
+            # dev package, so the versioned ones are probed first. /usr/local/cuda
+            # is scanned explicitly because its lib folder is not always on the
+            # loader's default search path, and the pip nvidia-cuda-nvrtc-cu12
+            # package keeps its copies under site-packages/nvidia/cuda_nvrtc/lib,
+            # which no loader looks at either -- the full path is what finds them.
+            import glob as _glob
+
+            from ...utils import nvidia_package_libraries
+
+            candidates:List[str] = sorted(_glob.glob("/usr/local/cuda/lib64/libnvrtc.so*"), reverse=True)
+            candidates.extend(sorted(_glob.glob("/usr/local/cuda/lib/libnvrtc.so*"), reverse=True))
+            # A pip install is the common Linux arrangement, so its exact path is
+            # preferred over a bare name the loader may not resolve.
+            candidates = nvidia_package_libraries(["libnvrtc"]) + candidates
+            candidates.extend(["libnvrtc.so", "libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11"])
+            lib_name = candidates[-1]
+            for candidate in candidates:
+                if "/" in candidate:
+                    if os.path.isfile(candidate):
+                        lib_name = candidate
+                        break
+                else:
+                    lib_name = candidate
+                    break
         elif system == "Darwin":  # macOS
             lib_name = "libnvrtc.dylib"
         else:

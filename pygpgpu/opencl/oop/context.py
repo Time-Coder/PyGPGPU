@@ -135,6 +135,13 @@ class Context(CLObject):
         
         return CommandQueue(self, device, properties)
 
+    def make_current(self)->None:
+        """OpenCL has no per-thread context to bind; this exists for interface parity.
+
+        Every other backend's Context can be made current; the shared copy code calls it
+        unconditionally, and an OpenCL context is always usable from any thread without it.
+        """
+
     # ---------- command-queue pools ----------
 
     def _take_idle_sync_queue(self) -> Optional[CommandQueue]:

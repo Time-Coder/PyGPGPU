@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import platform
 import threading
 from typing import Dict, Callable, Optional
@@ -58,12 +59,16 @@ class MetaCUDA(type):
         if system == "Windows":
             lib_name = "nvcuda.dll"
         elif system == "Linux":
+            # The unversioned SONAME usually only exists in the driver's dev package;
+            # the versioned one is the file the loader actually keeps, so try both.
             lib_name = "libcuda.so"
+            if not os.path.isfile(lib_name):
+                lib_name = "libcuda.so.1"
         elif system == "Darwin":  # macOS
             lib_name = "libcuda.dylib"
         else:
             raise RuntimeError(f"unsupported operating system: {system}")
-        
+
         return lib_name
     
     @staticmethod

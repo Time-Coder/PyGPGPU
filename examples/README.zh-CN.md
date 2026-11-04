@@ -8,7 +8,7 @@
 
 ## 依赖
 
-- 一条 GPU 后端即可运行 `01`–`05`(未指定后端时按 `cuda -> hip -> opencl` 探测);
+- 一条 GPU 后端即可运行 `01`–`05`(未指定后端时按 `cuda -> hip -> metal -> opencl` 探测);
 - `06` 导入单个手写 `.cl` 文件(默认 OpenCL, 几乎全平台可用);
 - `07` 使用底层 OOP API, 默认 OpenCL 设备;
 - `08` 三后端对比只在机器上实际存在的后端上运行, 缺哪个跳过哪个, 总能出结果;
@@ -37,6 +37,8 @@
 | [14_heterogeneous_data.py](14_heterogeneous_data.py) | kernel 能承载的每一种数据, 且每种都在三种角色下演示(传参 / 体内创建 / 返回值): 标量, 1/2/3 维标量数组, 按值传递的向量, 1/2/3 维向量数组, 继承自 `ctypes.Structure` 的结构体(成员含标量 / 向量 / 数组 / 嵌套结构体 / 结构体数组), 以及 1/2/3 维结构体数组 |
 | [15_kernel_import.py](15_kernel_import.py) | `kernel_import`: 同名的 `.cl`/`.cu`/`.hip` 文件(见 [kernel_import/](kernel_import/))合并为一个模块; 中括号语法、重载分派、缺失实现时括号处抛出的 KeyError |
 | [16_scientific_math.py](16_scientific_math.py) | 科学计算函数库(`erf`、`tgamma`、`normal_cdf`、快速近似与正确舍入的 CUDA 内建), 以及 `device_function`: 给已有的设备端函数起个名字 -- 这里用的是 [mylib.h](mylib.h) 里的 `__device__` 函数 |
+| [17_metal_backend.py](17_metal_backend.py) | Metal 后端：用 `k["metal"]`/`k["mtl"]` 选择它、拓展一次启动编译出的 MSL，以及在没有 Apple GPU 的机器上脚本会输出什么（Metal 需要 macOS 和真实设备，因此 Mac 虚拟机也没有） |
+| [18_metal_device_check.py](18_metal_device_check.py) | 在真实 Apple GPU 上端到端验证 Metal 后端：两项只有装有 Metal.framework 的机器才能回答的检查 (MSL 编译、标量绑定、dispatch、线程组内存、原子、向量、两阶段、返回值)。成功退出 0，检查失败退出 1，本机没有 Metal 设备退出 2 |
 
 `@kernel` 函数体支持 docstring(第一行的字符串字面量会被翻译器自动忽略,
 不会进入生成的 GPU 源码), 所以可以放心在装饰函数里写说明文字。

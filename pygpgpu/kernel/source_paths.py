@@ -28,10 +28,10 @@ import site
 from typing import Dict, List, Optional, Tuple
 
 # The extension a generated source needs, per backend.
-EXTENSIONS: Dict[str, str] = {"opencl": "cl", "cuda": "cu", "hip": "hip"}
+EXTENSIONS: Dict[str, str] = {"opencl": "cl", "cuda": "cu", "hip": "hip", "metal": "metal"}
 # The cache folder a backend writes into.
 CACHE_FOLDERS: Dict[str, str] = {"opencl": "__clcache__", "cuda": "__cucache__",
-                                 "hip": "__hipcache__"}
+                                 "hip": "__hipcache__", "metal": "__metalcache__"}
 
 # The directory name for a python file from the standard library, and for one from an
 # installed package: both mirror their own path below these roots.
@@ -425,14 +425,19 @@ def _canonical_header(header: List[str]) -> List[str]:
         directives: List[str] = [line for line in lines if line.lstrip().startswith("#")]
         remainder: List[str] = [line for line in lines if line not in directives]
         if remainder:
-            # A block that mixes a directive with a declaration -- a structure wrapped in
-            # its own `#ifndef` -- is kept whole: pulling the guard out would leave the
-            # declaration bare and the guard guarding nothing.
+            # A block that mixes a directive with a declaration is kept whole: pulling the
+            # guard out of a wrapped structure would leave the declaration bare, and
+            # splitting a prelude (Metal's `#include`, `using namespace metal;` and its
+            # macros) would leave the `using` line in a piece that `_split_source`
+            # classifies as a function definition -- it was dropped on the second write
+            # that way. Kept whole, the exact same text is written again and skipped by
+            # the membership test below, which is the idempotence this relies on.
             block: str = piece.strip("\n")
             if block and block not in seen_declarations:
                 seen_declarations.add(block)
                 declarations.append(block)
             continue
+
         for line in directives:
             stripped: str = line.strip()
             if stripped.startswith("#include"):
@@ -495,18 +500,24 @@ def append_source(path: str, header: List[str], definitions: List[str],
             existing = None
 
     if existing is not None:
-        try:
-            target_is_newer: bool = (
-                os.path.isfile(source_python)
-                and os.path.getmtime(path) > os.path.getmtime(source_python))
-        except OSError:
-            target_is_newer = False
-        # The clock is not the whole answer: `git checkout` and `git stash pop` restore a
-        # file *and* set its mtime back, so a file written from newer text kept looking
-        # fresh. The digest recorded beside it is what actually decides, and a mismatch
-        # invalidates whichever way the timestamps point.
-        if target_is_newer and source_digest:
-            target_is_newer = _stored_digest(path) == source_digest
+        # The digest sidecar is the authority when it exists: it describes the python
+        # text that wrote this file, so a matching digest means nothing changed even
+        # when the timestamps say the source is newer (`git checkout` sets the mtime
+        # back, and two files written inside one clock tick compare equal). The clock
+        # is only consulted when no digest was ever recorded -- a file from before the
+        # sidecar existed, or one written without a digest -- and even then it only
+        # decides the ambiguous direction: an equal timestamp is not evidence that the
+        # source changed, so the file is kept.
+        stored: str = _stored_digest(path)
+        if source_digest and stored:
+            target_is_newer = stored == source_digest
+        else:
+            try:
+                target_is_newer = (
+                    os.path.isfile(source_python)
+                    and os.path.getmtime(path) >= os.path.getmtime(source_python))
+            except OSError:
+                target_is_newer = False
         if not target_is_newer:
             # The file describes python text that has since changed: start it over.
             existing = None

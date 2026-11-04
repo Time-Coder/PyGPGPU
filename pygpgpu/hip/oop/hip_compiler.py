@@ -1,13 +1,16 @@
-"""HIP source compiler: hipRTC is broken on this machine (errors with an empty log), so we spawn ROCm's own clang instead.
+"""HIP source compiler: hipRTC is broken on the tested ROCm 7.2 Windows machine (errors with an empty log), so we spawn ROCm's own clang instead.
 
 Compiling needs C++ standard library headers (hip's clang wrapper force-includes cstdlib etc.),
-so we auto-discover the MSVC / Windows SDK include paths (any drive letter),
+so on Windows we auto-discover the MSVC / Windows SDK include paths (any drive letter),
 overridable with the PYGPGPU_HIP_INCLUDES environment variable (os.pathsep-separated).
+On Linux ROCm's clang finds the system headers (libstdc++, glibc) on its own; the
+PYGPGPU_HIP_INCLUDES override still applies when extra include directories are needed.
 """
 from __future__ import annotations
 
 import glob
 import os
+import platform
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -45,6 +48,12 @@ class HipCompiler:
             cls._include_dirs = [p for p in env.split(os.pathsep) if p]
             return cls._include_dirs
 
+        # On Linux ROCm's clang locates libstdc++/glibc through its own GCC
+        # toolchain detection; no MSVC/Windows SDK discovery is needed.
+        if platform.system() != "Windows":
+            cls._include_dirs = []
+            return cls._include_dirs
+
         drives = [f"{d}:" for d in "CDEFG" if os.path.isdir(f"{d}:/")]
         dirs:List[str] = []
         msvc_dirs:Dict[str, str] = {}
@@ -79,6 +88,20 @@ class HipCompiler:
     @staticmethod
     def clang_path()->str:
         from ..driver.hip import MetaHIP
+        if platform.system() != "Windows":
+            # Linux: ROCm ships the compiler as "clang" (a wrapper that adds the HIP
+            # headers and defaults), under "<rocm root>/bin", or on PATH as "hipcc"/"clang".
+            for root in MetaHIP.rocm_roots():
+                candidate = os.path.join(root, "bin", "clang")
+                if os.path.isfile(candidate):
+                    return candidate
+                candidate = os.path.join(root, "bin", "hipcc")
+                if os.path.isfile(candidate):
+                    return candidate
+            import shutil
+            found = shutil.which("hipcc") or shutil.which("clang")
+            return found if found else "hipcc"
+
         for root in MetaHIP.rocm_roots():
             candidate = os.path.join(root, "bin", "clang.exe")
             if os.path.isfile(candidate):

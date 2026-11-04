@@ -143,9 +143,80 @@ def emit_atomic(name:str, array_code:str, index_code:str, value_code:str,
     if backend == "opencl":
         space:str = "__local" if is_local else "__global"
         return f"{opencl_name}((volatile {space} {elem_type} *)({pointer}), {arguments})"
+    if backend == "metal":
+        # Metal has no `atomicAdd` family. Its atomics are the C++11
+        # `atomic_fetch_*_explicit` functions, taking a `device atomic_*` (or
+        # `threadgroup atomic_*`) reference and a memory order. The cast selects the
+        # address space, which MSL requires: a `threadgroup` buffer and a `device`
+        # buffer are different atomics, exactly as OpenCL's two address spaces are.
+        return _emit_atomic_metal(name, pointer, value_code, compare_code, elem_type,
+                                  is_local)
     if elem_type in ("long", "ulong"):
         return _emit_atomic_cuda_64(name, pointer, value_code, compare_code, elem_type)
     return f"{cuda_name}({pointer}, {arguments})"
+
+
+# MSL's atomic function for each operation. `atomic_fetch_*_explicit` returns the old
+# value and takes the memory order as its last argument; every one here is a
+# read-modify-write on one location, so `memory_order_relaxed` is what a work item
+# needs -- it says "this update is atomic, but nothing else about it is ordered", and
+# a `barrier()` is what orders the group.
+_METAL_ATOMICS:Dict[str, str] = {
+    "atomic_add": "atomic_fetch_add_explicit",
+    "atomic_sub": "atomic_fetch_sub_explicit",
+    "atomic_min": "atomic_fetch_min_explicit",
+    "atomic_max": "atomic_fetch_max_explicit",
+    "atomic_and": "atomic_fetch_and_explicit",
+    "atomic_or": "atomic_fetch_or_explicit",
+    "atomic_xor": "atomic_fetch_xor_explicit",
+    "atomic_xchg": "atomic_exchange_explicit",
+}
+
+# MSL's atomic type name for an element type. `atomic_uint` is the one MSL declares
+# unconditionally; the others exist for the sized integer types.
+_METAL_ATOMIC_TYPES:Dict[str, str] = {
+    "int": "atomic_int",
+    "uint": "atomic_uint",
+    "char": "atomic_char",
+    "uchar": "atomic_uchar",
+    "short": "atomic_short",
+    "ushort": "atomic_ushort",
+    "long": "atomic_long",
+    "ulong": "atomic_ulong",
+}
+
+
+def _emit_atomic_metal(name:str, pointer:str, value_code:str,
+                       compare_code:Optional[str], elem_type:str,
+                       is_local:bool)->str:
+    """One atomic operation, in Metal Shading Language.
+
+    Two things are MSL's own. (1) **The address space is part of the type**: the
+    atomics are overloaded on `device atomic_T&` and `threadgroup atomic_T&`, so a
+    `zeros_per_group` buffer must be cast to `threadgroup` and an array argument to
+    `device` -- the same distinction OpenCL draws with `__local`/`__global`, and for
+    the same reason: one address space cannot be cast to the other. (2) **Compare-
+    and-swap is `atomic_compare_exchange_weak_explicit`**, which takes *two*
+    expected-value pointers and answers a `bool`, so its shape differs from the
+    fetch family: the expected value is held in a local, tried, and the caller
+    checks the answer.
+    """
+    atomic_type:str = _METAL_ATOMIC_TYPES.get(elem_type, f"atomic_{elem_type}")
+    space:str = "threadgroup" if is_local else "device"
+    target:str = f"({space} {atomic_type}*)({pointer})"
+    if name == "atomic_cas":
+        # `atomic_compare_exchange_weak_explicit(ptr, &expected, desired, order, fail_order)`.
+        # The expected value is an input here, so it lives in a local the call can
+        # take the address of; that is also why the call cannot be an expression
+        # returning a value the way the fetch family can.
+        return (f"({{\n"
+                f"    {elem_type} _cas_expected = ({compare_code});\n"
+                f"    (void)atomic_compare_exchange_weak_explicit("
+                f"{target}, &_cas_expected, ({value_code}), "
+                f"memory_order_relaxed, memory_order_relaxed);\n"
+                f"}})")
+    return (f"{_METAL_ATOMICS[name]}({target}, ({value_code}), "
+            f"memory_order_relaxed)")
 
 # Math/vector builtins: (gpu name, opencl name, cuda name or None meaning special codegen is needed)
 GENERIC_BUILTINS:Dict[str, Tuple[str, str]] = {
@@ -230,31 +301,34 @@ GENERIC_BUILTINS.update(MATH_BUILTINS)
 # a code template instead of a name; and HIP has the `f`-suffixed forms of the same set,
 # with the `native_*` family under CUDA's double-underscore spellings.
 SHARED_MATH_BUILTINS:Dict[str, Dict[str, str]] = {
-    "erf": {"opencl": "erf", "cuda": "erff", "hip": "erff"},
-    "erfc": {"opencl": "erfc", "cuda": "erfcf", "hip": "erfcf"},
-    "tgamma": {"opencl": "tgamma", "cuda": "tgammaf", "hip": "tgammaf"},
-    "lgamma": {"opencl": "lgamma", "cuda": "lgammaf", "hip": "lgammaf"},
-    "rint": {"opencl": "rint", "cuda": "rintf", "hip": "rintf"},
-    "remainder": {"opencl": "remainder", "cuda": "remainderf", "hip": "remainderf"},
-    "fmin": {"opencl": "fmin", "cuda": "fminf", "hip": "fminf"},
-    "fmax": {"opencl": "fmax", "cuda": "fmaxf", "hip": "fmaxf"},
-    "fdim": {"opencl": "fdim", "cuda": "fdimf", "hip": "fdimf"},
-    "copysign": {"opencl": "copysign", "cuda": "copysignf", "hip": "copysignf"},
-    "nextafter": {"opencl": "nextafter", "cuda": "nextafterf", "hip": "nextafterf"},
-    "ldexp": {"opencl": "ldexp", "cuda": "ldexpf", "hip": "ldexpf"},
-    "native_recip": {"opencl": "native_recip", "cuda": "__frcp_rn", "hip": "__frcp_rn"},
-    "native_divide": {"opencl": "native_divide", "cuda": "__fdiv_rn", "hip": "__fdiv_rn"},
-    "native_sqrt": {"opencl": "native_sqrt", "cuda": "__fsqrt_rn", "hip": "__fsqrt_rn"},
-    "native_rsqrt": {"opencl": "native_rsqrt", "cuda": "__frsqrt_rn", "hip": "__frsqrt_rn"},
-    "native_exp": {"opencl": "native_exp", "cuda": "__expf", "hip": "__expf"},
-    "native_log": {"opencl": "native_log", "cuda": "__logf", "hip": "__logf"},
-    "native_sin": {"opencl": "native_sin", "cuda": "__sinf", "hip": "__sinf"},
-    "native_cos": {"opencl": "native_cos", "cuda": "__cosf", "hip": "__cosf"},
-    "native_tan": {"opencl": "native_tan", "cuda": "__tanf", "hip": "__tanf"},
-    "native_exp2": {"opencl": "native_exp2", "cuda": "__exp2f", "hip": "exp2f"},
-    "native_log2": {"opencl": "native_log2", "cuda": "__log2f", "hip": "__log2f"},
-    "native_exp10": {"opencl": "native_exp10", "cuda": "__exp10f", "hip": "__exp10f"},
-    "native_powr": {"opencl": "native_powr", "cuda": "__powf", "hip": "__powf"},
+    "erf": {"opencl": "erf", "cuda": "erff", "hip": "erff", "metal": "erf"},
+    "erfc": {"opencl": "erfc", "cuda": "erfcf", "hip": "erfcf", "metal": "erfc"},
+    "tgamma": {"opencl": "tgamma", "cuda": "tgammaf", "hip": "tgammaf", "metal": "tgamma"},
+    "lgamma": {"opencl": "lgamma", "cuda": "lgammaf", "hip": "lgammaf", "metal": "lgamma"},
+    "rint": {"opencl": "rint", "cuda": "rintf", "hip": "rintf", "metal": "rint"},
+    "remainder": {"opencl": "remainder", "cuda": "remainderf", "hip": "remainderf", "metal": "remainder"},
+    "fmin": {"opencl": "fmin", "cuda": "fminf", "hip": "fminf", "metal": "fmin"},
+    "fmax": {"opencl": "fmax", "cuda": "fmaxf", "hip": "fmaxf", "metal": "fmax"},
+    "fdim": {"opencl": "fdim", "cuda": "fdimf", "hip": "fdimf", "metal": "fdim"},
+    "copysign": {"opencl": "copysign", "cuda": "copysignf", "hip": "copysignf", "metal": "copysign"},
+    "nextafter": {"opencl": "nextafter", "cuda": "nextafterf", "hip": "nextafterf", "metal": "nextafter"},
+    "ldexp": {"opencl": "ldexp", "cuda": "ldexpf", "hip": "ldexpf", "metal": "ldexp"},
+    # `native_recip` is deliberately absent: it has no Metal spelling as a callee
+    # (MSL's reciprocal is the division `1.0f / x`, a template -- see the table
+    # below), and putting an expression in a table of function names would make
+    # `_shared_math_call` emit `1.0f / (x)(...)`.
+    "native_divide": {"opencl": "native_divide", "cuda": "__fdiv_rn", "hip": "__fdiv_rn", "metal": "fast::divide"},
+    "native_sqrt": {"opencl": "native_sqrt", "cuda": "__fsqrt_rn", "hip": "__fsqrt_rn", "metal": "fast::sqrt"},
+    "native_rsqrt": {"opencl": "native_rsqrt", "cuda": "__frsqrt_rn", "hip": "__frsqrt_rn", "metal": "fast::rsqrt"},
+    "native_exp": {"opencl": "native_exp", "cuda": "__expf", "hip": "__expf", "metal": "fast::exp"},
+    "native_log": {"opencl": "native_log", "cuda": "__logf", "hip": "__logf", "metal": "fast::log"},
+    "native_sin": {"opencl": "native_sin", "cuda": "__sinf", "hip": "__sinf", "metal": "fast::sin"},
+    "native_cos": {"opencl": "native_cos", "cuda": "__cosf", "hip": "__cosf", "metal": "fast::cos"},
+    "native_tan": {"opencl": "native_tan", "cuda": "__tanf", "hip": "__tanf", "metal": "fast::tan"},
+    "native_exp2": {"opencl": "native_exp2", "cuda": "__exp2f", "hip": "exp2f", "metal": "fast::exp2"},
+    "native_log2": {"opencl": "native_log2", "cuda": "__log2f", "hip": "__log2f", "metal": "fast::log2"},
+    "native_exp10": {"opencl": "native_exp10", "cuda": "__exp10f", "hip": "__exp10f", "metal": "fast::exp10"},
+    "native_powr": {"opencl": "native_powr", "cuda": "__powf", "hip": "__powf", "metal": "fast::powr"},
 }
 
 
@@ -269,11 +343,23 @@ SHARED_MATH_TEMPLATES:Dict[str, Dict[str, str]] = {
         "opencl": "(({code}) - floor(({code})))",
         "cuda": "(({code}) - floorf(({code})))",
         "hip": "(({code}) - floorf(({code})))",
+        "metal": "(({code}) - floor(({code})))",
     },
     "sign": {
         "opencl": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
         "cuda": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
         "hip": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
+        "metal": "((({code}) > 0.0f) ? 1.0f : (({code}) < 0.0f) ? -1.0f : 0.0f)",
+    },
+    # `native_recip` is a function call on all three other backends and a division
+    # on Metal: MSL has no reciprocal intrinsic, so the operation is written as
+    # what it is. A template is the honest place for that -- the function tables
+    # hold callee names, and an expression there would be emitted as `1.0f / (x)(…)`.
+    "native_recip": {
+        "opencl": "native_recip({code})",
+        "cuda": "__frcp_rn({code})",
+        "hip": "__frcp_rn({code})",
+        "metal": "(1.0f / ({code}))",
     },
 }
 
@@ -440,7 +526,10 @@ def dim_component(dim:int)->str:
 def emit_index(name:str, dim:int, backend:str)->str:
     opencl_name, cuda_template = INDEX_BUILTINS[name]
     component:str = dim_component(dim)
-    if backend == "opencl":
+    if backend in ("opencl", "metal"):
+        # Metal shares OpenCL's spelling: its generated prelude defines these as macros
+        # over the attribute-decorated kernel parameters (see kernel/metal_codegen.py),
+        # so the body keeps one spelling and the prologue is what differs.
         return f"{opencl_name}({dim})"
     return cuda_template.format(c=component)
 
@@ -455,4 +544,12 @@ def emit_barrier(backend:str)->str:
     """
     if backend == "opencl":
         return "barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE)"
+    if backend == "metal":
+        # MSL has no `__syncthreads()`: the work-group barrier there is
+        # `threadgroup_barrier`, and its flags name which memory the barrier orders.
+        # This spelling lives in `metal_codegen.barrier()` (next to the rest of Metal's
+        # prologue) rather than inline here, so the two facts -- the call and its flags
+        # -- stay in one place.
+        from .metal_codegen import barrier as metal_barrier
+        return metal_barrier()
     return "__syncthreads()"

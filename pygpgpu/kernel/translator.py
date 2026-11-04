@@ -1524,6 +1524,16 @@ class FunctionTranslator:
         # backend is "cuda" for a hip kernel; decisions that depend on the runtime rather than
         # on the generated syntax (for example whether device printf is safe) must use this.
         self.launch_backend:str = (launch_backend or backend)
+        # The code-generation shape, as opposed to the runtime: "opencl" and "metal" share
+        # the C-family emission (kernels, pointers into buffers, atomics, the same vector
+        # types), so every site that asks "is this the OpenCL-looking syntax" tests this
+        # rather than the backend name -- and a site that needs Metal's own spelling tests
+        # `metal_syntax`. Two properties rather than a name comparison keep the two
+        # questions apart: "does this backend spell a kernel `__kernel void`" is not the
+        # same question as "is this backend Metal's attributes".
+        self._opencl_syntax:bool = backend in ("opencl", "metal")
+        self._metal_syntax:bool = backend == "metal"
+        self._c_syntax:bool = backend in ("cuda", "hip")
         self.resolve_global:Callable[[str], Any] = resolve_global
         self.device_cache:Dict[Any, Any] = device_cache
         self.is_kernel:bool = is_kernel
@@ -1543,6 +1553,11 @@ class FunctionTranslator:
         # HIP has no intrinsic for) contributes one of these; C requires the definition
         # before the kernel that calls it.
         self.device_helpers:List[str] = []
+        # Set when this function's body reads a work-item index (`get_global_id`, or a
+        # `blockIdx`/`threadIdx` name that resolves to one). Metal needs it to decide
+        # whether a helper has to receive the six prologue parameters; every other
+        # backend ignores the flag (see `_needs_prologue_parameters`).
+        self._uses_index_builtins:bool = False
         # One entry per magic loop when a body has several; each becomes its own kernel.
         self.phases:List[List[ast.stmt]] = []
         # Locals initialized above the magic loop and written inside it: one location for the
@@ -2242,7 +2257,7 @@ class FunctionTranslator:
         self.work_item_indices = [index_name]
         self._define(index_name, "int", None)
         gid_bound:str = self._shape_var(param, 0)
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             self._emit(f"const int {index_name} = get_global_id(0);")
         else:
             self._emit(f"const int {index_name} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
@@ -2408,7 +2423,12 @@ class FunctionTranslator:
 
     def _launch_id_code(self, axis:int)->str:
         """The work-item id along one launch axis."""
-        if self.backend == "opencl":
+        # Recorded so a device helper can tell whether it needs Metal's prologue
+        # parameters passed down to it (see `_needs_prologue_parameters`).
+        self._uses_index_builtins = True
+        if self._opencl_syntax:
+            # Metal shares this spelling: its prelude defines `get_global_id(dim)` as a
+            # macro over the attribute-decorated kernel parameters (see metal_codegen).
             return f"get_global_id({axis})"
         component:str = (".x" if axis == 0 else ".y" if axis == 1 else ".z")
         return f"(int)(blockIdx{component} * blockDim{component} + threadIdx{component})"
@@ -2473,7 +2493,7 @@ class FunctionTranslator:
         Axis 0 is the fastest one, which is the order `_nd_flat_index` flattens the loop's own
         names in reverse -- so the loop's last name lands on gid 0.
         """
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             sizes:List[str] = [f"get_global_size({d})" for d in range(3)]
             ids:List[str] = [f"get_global_id({d})" for d in range(3)]
         else:
@@ -2733,7 +2753,7 @@ class FunctionTranslator:
         # multi-dimensional head does.
         self.work_item_indices = [target]
         self._define(target, "int", loop.target)
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             self._emit(f"const int {target} = get_global_id(0);")
         else:
             self._emit(f"const int {target} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
@@ -3392,9 +3412,21 @@ class FunctionTranslator:
         # leave the function decides the result, so a bare return must be able to win
         # with None just as a value site wins with its tuple.
         claim:str = f"{self.RETURN_CLAIM}[0]"
-        guard:str = (f"atomic_cmpxchg((volatile __global int*)(&{claim}), 0, 1) == 0"
-                     if self.backend == "opencl"
-                     else f"atomicCAS(&{claim}, 0, 1) == 0")
+        if self._metal_syntax:
+            # MSL's compare-and-swap takes the expected value by pointer and answers a
+            # bool rather than the old value. So the claim is tried with a zeroed
+            # expected local and then read back: the word is 1 only for the work item
+            # whose exchange actually happened, which is what `claimed == 1` tests.
+            self._emit("int _claim_expected = 0;")
+            self._emit(f"atomic_compare_exchange_weak_explicit("
+                       f"(device atomic_int*)(&{claim}), &_claim_expected, 1, "
+                       f"memory_order_relaxed, memory_order_relaxed);")
+            self._emit(f"const bool _claimed = ({claim} == 1);")
+            guard = "_claimed"
+        elif self._opencl_syntax:
+            guard = f"atomic_cmpxchg((volatile __global int*)(&{claim}), 0, 1) == 0"
+        else:
+            guard = f"atomicCAS(&{claim}, 0, 1) == 0"
         self._emit(f"if ({guard})")
         self._emit("{")
         # The winning site records what it returned, so the host rebuilds that site's
@@ -3493,12 +3525,25 @@ class FunctionTranslator:
         """
         if not self.has_returns:
             return []
-        qualifier:str = ("__global " if self.backend == "opencl" else "")
+        qualifier:str = self._buffer_qualifier()
         params:List[str] = [f"{qualifier}{entry['ctype']}* {self._return_slot(index)}"
                             for index, entry in enumerate(self.return_layout)]
         params.append(f"{qualifier}int* {self.RETURN_CLAIM}")
         params.append(f"{qualifier}int* {self.RETURN_SITE}")
         return params
+
+    def _buffer_qualifier(self)->str:
+        """The address-space qualifier a buffer parameter carries, with its trailing space.
+
+        One place decides it, because the three questions it answers are different:
+        Metal spells the space `device`, OpenCL spells it `__global`, and CUDA/HIP
+        spell nothing at all (a plain pointer is already in the global space).
+        """
+        if self._metal_syntax:
+            return "device "
+        if self._opencl_syntax:
+            return "__global "
+        return ""
 
     def return_site_layout(self)->List[ReturnSiteLayout]:
         """What the host needs to rebuild the result of each return site.
@@ -4133,6 +4178,19 @@ class FunctionTranslator:
                 "generated printf call sites makes the driver drop the device on this "
                 "runtime. Run the kernel with the opencl or cuda backend to see its output, "
                 "or write results into an array and inspect them on the host", call)
+        if self._metal_syntax:
+            # The emitted call sites are OpenCL's: `printf` writes into a per-call-site
+            # output buffer that the host drains after the launch. MSL has no such
+            # buffer -- `printf` in Metal goes to a shared log that the command buffer
+            # owns and no host code reads -- so the generated code would compile and
+            # silently lose the output. Refuse rather than pretend, the same way the
+            # HIP path above does.
+            self._error(
+                "print() is not supported on the metal backend: the generated call sites "
+                "write into a per-call-site output buffer that only the OpenCL runtime "
+                "drains, while Metal's printf goes to a log no host code here reads. Run "
+                "the kernel with the opencl or cuda backend to see its output, or write "
+                "results into an array and inspect them on the host", call)
         # sep/end are fixed text, so both can be folded into the format string. file and
         # flush are not translated: there is only one device output stream.
         separator, terminator = self._print_sep_end(call)
@@ -5016,7 +5074,7 @@ class FunctionTranslator:
         # resolves to the vector the backend builds from its own launch terms.
         if node.id in INDEX_VECTOR_BUILTINS:
             table:Dict[str, Tuple[str, str]] = (
-                INDEX_VECTOR_OPENCL if self.backend == "opencl" else INDEX_VECTOR_BUILTINS)
+                INDEX_VECTOR_OPENCL if self._opencl_syntax else INDEX_VECTOR_BUILTINS)
             vector_type, code = table[node.id]
             return code, vector_type
         value:Any = self.resolve_global(node.id)
@@ -5046,7 +5104,7 @@ class FunctionTranslator:
         if is_vec(lt) and is_vec(rt):
             if lt != rt:
                 return None      # the caller reports the mismatched types
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"{target_code} = ({left} {symbol} {right});"
             # The right operand can be a call with side effects (`pixel_color +=
             # scene.ray_color(...)`), and the per-component form names it once per
@@ -5057,7 +5115,7 @@ class FunctionTranslator:
         vector_type:Any = lt if is_vec(lt) else rt
         vector_operand:str = left if is_vec(lt) else right
         scalar_operand:str = right if is_vec(lt) else left
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             return f"{target_code} = ({left} {symbol} {right});"
         expanded:str = self._vec_componentwise(symbol, vector_operand, vector_type,
                                                scalar=scalar_operand)
@@ -5454,7 +5512,7 @@ class FunctionTranslator:
             if is_vec(lt) and is_vec(rt):
                 if lt != rt:
                     self._error(f"vector operands must have the same type, got {lt} and {rt}", node)
-                if self.backend == "opencl":
+                if self._opencl_syntax:
                     result_t:Any = (lt if name in ("Add", "Sub", "Mult", "Div") else self._get_int_vec_type(lt))
                     return f"({left} {symbol} {right})", result_t
                 if name in ("Add", "Sub", "Mult", "Div"):
@@ -5463,7 +5521,7 @@ class FunctionTranslator:
 
             # vector with scalar: broadcast per component
             vec, vec_side_left = (lt, True) if is_vec(lt) else (rt, False)
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 code:str = f"({left} {symbol} {right})" if vec_side_left else f"({right} {symbol} {left})"
                 return code, vec
             if vec_side_left:
@@ -5811,6 +5869,29 @@ class FunctionTranslator:
             return f"({base_code})->{field}", members[field]
         return f"({base_code}).{field}", members[field]
 
+    def _reject_metal_image(self, node:ast.expr, writing:bool)->None:
+        """Refuse an image on the Metal backend with the reason, not a compile error.
+
+        MSL *does* have texture objects (`texture2d<float, access::sample>` and
+        `access::write`), but the whole image path is Metal's own and is not
+        implemented: the parameter type, the sampling call with its sampler state,
+        the store call, and the host-side `MTLTexture` binding all differ from the
+        OpenCL formulation this backend reuses. Without them the generated source
+        carries `__read_only image2d_t`, which MSL has no notion of, so the compiler
+        would fail on an undeclared type. The translator is the right place to say
+        so, because the message can name the backends that do work.
+        """
+        if not self._metal_syntax:
+            return
+        action = "write" if writing else "read"
+        self._error(
+            "the metal backend does not support images (%s) yet: the MSL texture "
+            "formulation (texture2d<float, access::sample|write>, the sampling call "
+            "with its sampler state, and the host-side MTLTexture binding) is not "
+            "implemented, so the generated source would name an image2d_t that MSL "
+            "does not have. Use the cuda, opencl or python backend for image kernels."
+            % action, node)
+
     def _reject_hip_image(self, node:ast.expr, writing:bool)->None:
         """Refuse an image on the HIP backend with the reason, not a compile error.
 
@@ -5840,6 +5921,7 @@ class FunctionTranslator:
         coordinate, OpenCL needs int2 for the former and float2 for the latter, so
         the coordinate type decides which form is emitted.
         """
+        self._reject_metal_image(node, writing=False)
         self._reject_hip_image(node, writing=False)
         channels:int = image_channels(image_t)
         scalar:str = image_scalar(image_t)
@@ -5850,7 +5932,7 @@ class FunctionTranslator:
                 "sampling an image of %d channels is not supported: use 1 or 4"
                 % channels, node)
 
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             # OpenCL takes a float coordinate for interpolation, and an integer
             # coordinate means the texel boundary rather than its centre -- which a
             # linear sampler blends across, unlike CUDA where an integer subscript
@@ -5885,10 +5967,10 @@ class FunctionTranslator:
                     "can be sampled" % scalar, node)
 
         if channels == 4:
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return "(%s).xyzw" % call, self._image_vec_type(scalar, 4)
             return call, self._image_vec_type(scalar, 4)
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             # read_imagef returns a vector; single-channel takes .x
             return "(%s).x" % call, scalar
         return call, scalar
@@ -5915,7 +5997,7 @@ class FunctionTranslator:
         the parameter's type follows how the kernel uses it. OpenCL uses one image
         type for both directions, with a qualifier saying which.
         """
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             written:bool = name in self.required_image_surfaces
             qualifier:str = "__write_only" if written else "__read_only"
             return f"{qualifier} image2d_t"
@@ -5932,6 +6014,7 @@ class FunctionTranslator:
         fractional subscript is rejected rather than silently rounded, because there
         is no filtering rule for a store.
         """
+        self._reject_metal_image(target, writing=True)
         self._reject_hip_image(target, writing=True)
         channels:int = image_channels(image_t)
         scalar:str = image_scalar(image_t)
@@ -5947,7 +6030,7 @@ class FunctionTranslator:
                     "an image store needs integer coordinates: a fractional "
                     "coordinate has no texel to write", target)
 
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             coord_code = "((int%d)(%s))" % (len(indices),
                                             ", ".join(c for c, _ in indices))
             if channels == 1:
@@ -6011,7 +6094,7 @@ class FunctionTranslator:
         if axis < 0:
             return None
         table:Dict[str, Tuple[str, str, str]] = (
-            INDEX_VECTOR_AXES_OPENCL if self.backend == "opencl" else INDEX_VECTOR_AXES_CUDA)
+            INDEX_VECTOR_AXES_OPENCL if self._opencl_syntax else INDEX_VECTOR_AXES_CUDA)
         return table[base.id][axis]
 
     def _visit_attribute(self, node:ast.Attribute)->Translated:
@@ -6911,7 +6994,7 @@ class FunctionTranslator:
         # (see _device_type), and writing the translator's internal name here made a
         # clipped uint8 element fail to compile.
         element:str = self._device_type(result_t) if not is_vec(result_t) else result_t
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             # clamp(v, lo, hi) needs both bounds; with one bound the other side is the
             # type's own extreme, which min/max expresses directly and without a literal.
             if lo is not None and hi is not None:
@@ -6977,7 +7060,7 @@ class FunctionTranslator:
                     f"{attr}(v.x))", node)
             if len(args) != 1:
                 self._error(f"{module_name}.{attr}() on vectors takes exactly 1 vector argument", node)
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"{attr}({args[0][0]})", vec_arg
             return self._vec_componentwise(_math_device_name(attr, "cuda"), args[0][0], vec_arg), vec_arg
 
@@ -6985,7 +7068,7 @@ class FunctionTranslator:
             # No CUDA intrinsic for either; the conversion factor is the definition.
             factor:str = ("57.29577951308232f" if attr == "degrees"
                           else "0.017453292519943295f")
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"{attr}({args[0][0]})", ret
             return f"(({args[0][0]}) * {factor})", ret
 
@@ -7197,7 +7280,7 @@ class FunctionTranslator:
             parts.append(f".{member} = {converted}")
             positional_parts.append(converted)
 
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             # OpenCL C is C99, so a designated initialiser names the members it sets.
             return f"(({name}){{{', '.join(parts)}}})", name
         # CUDA and HIP compile as C++, where designated initialisers arrived only in C++20
@@ -7286,7 +7369,7 @@ class FunctionTranslator:
             self._error(
                 f"{name}() takes no arguments, one scalar to broadcast, or {expected} "
                 f"component the vector has; {len(args)} given", node)
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             return f"({name})({', '.join(codes)})", name
         return f"make_{name}({', '.join(codes)})", name
 
@@ -7303,6 +7386,9 @@ class FunctionTranslator:
         if name == "barrier":
             if args:
                 self._error("gpu.barrier() takes no arguments", node)
+            if self._metal_syntax:
+                from .metal_codegen import barrier
+                return barrier(), "void"
             return emit_barrier(self.backend), "void"
 
         if name in ATOMIC_BUILTINS:
@@ -7377,8 +7463,22 @@ class FunctionTranslator:
                 f"gpu.{name}() is a CUDA device intrinsic that the OpenCL backend has no "
                 f"counterpart for: the OpenCL kernel language has no such function, so "
                 f"this kernel cannot run there. Either specialize the kernel for CUDA or "
-                f"HIP, or use the function all three backends have (see the ones listed in "
-                f"pygpgpu.kernel.builtins)", node)
+                f"HIP, or use one of the functions the shared vocabulary lists "
+                f"(see pygpgpu.kernel.builtins)", node)
+
+        # A backend whose tables carry no spelling for this name has no counterpart
+        # for it -- Metal's vocabulary is its own, and it has neither the `__expf`
+        # family nor the `fast::` names under these spellings. Refusing by name, and
+        # naming the backends that do have it, is the whole point of the tables: the
+        # device's own "undeclared identifier" would not say where to go instead.
+        table:Optional[Dict[str, str]] = (CUDA_ONLY_CONVERSIONS.get(name)
+                                          or CUDA_ONLY_BUILTINS.get(name))
+        if table is not None and self.launch_backend not in table:
+            self._error(
+                f"gpu.{name}() is a CUDA device intrinsic that the "
+                f"{self.launch_backend} backend has no counterpart for; run this kernel "
+                f"on one of {', '.join(sorted(table))}, or compute it from the "
+                f"functions all backends have (see pygpgpu.kernel.builtins)", node)
 
         if name in CUDA_ONLY_CONVERSIONS:
             # A conversion answers an int, so the result type is the int one.
@@ -7476,12 +7576,24 @@ class FunctionTranslator:
                     (f"({self._component(code, t, component)})"
                      if is_vec(t) else code)
                     for code, t in args]
-                terms.append(self._shared_math_call(name, piece_args))
+                terms.append(self._shared_math_call(name, piece_args, node))
             return self._vec_maker(vec_t, ", ".join(terms)), vec_t
-        return self._shared_math_call(name, arg_codes), result_t
+        return self._shared_math_call(name, arg_codes, node), result_t
 
-    def _shared_math_call(self, name:str, arg_codes:List[str])->str:
+    def _shared_math_call(self, name:str, arg_codes:List[str],
+                          node:ast.Call)->str:
         """One call to a shared math function, in the spelling this backend uses."""
+        table:Dict[str, str] = (SHARED_MATH_TEMPLATES[name] if name in SHARED_MATH_TEMPLATES
+                                else SHARED_MATH_BUILTINS[name])
+        if self.launch_backend not in table:
+            # The tables are keyed by backend precisely so a missing spelling cannot
+            # be guessed: each one names the callee or the expression that backend
+            # actually has. Say which backend and which function, instead of letting
+            # a bare KeyError escape from inside the translation.
+            self._error(
+                f"{name}() has no spelling for the {self.launch_backend} backend; "
+                f"run this kernel on one of {', '.join(sorted(table))}, "
+                f"or compute it from arithmetic in the body", node)
         if name in SHARED_MATH_TEMPLATES:
             # The backends spell this one differently, so the template says which
             # spelling this backend uses.
@@ -7506,7 +7618,7 @@ class FunctionTranslator:
                 self._error(f"gpu.{name}() takes exactly 1 argument", node)
             code, t = args[0]
             if is_vec(t):
-                if self.backend == "opencl":
+                if self._opencl_syntax:
                     return f"{name}({code})", t
                 return self._vec_componentwise(name, code, t), t
             code = f"{GENERIC_BUILTINS[name][1]}({code})" if self.backend == "cuda" else f"{name}({code})"
@@ -7520,7 +7632,7 @@ class FunctionTranslator:
                 self._error(f"gpu.{name}() takes 1 or 2 arguments", node)
             cuda_name:str = MATH_BUILTINS[name][1]
             result_t:Any = vec_t or args[0][1]
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"{name}({', '.join(arg_codes)})", result_t
             if vec_t is not None:
                 if len(args) == 1:
@@ -7543,10 +7655,10 @@ class FunctionTranslator:
             if len(args) != 3:
                 self._error("gpu.clamp(a, lo, hi) takes exactly 3 arguments", node)
             if vec_t is not None:
-                if self.backend == "opencl":
+                if self._opencl_syntax:
                     return f"clamp({', '.join(arg_codes)})", vec_t
                 return self._emit_vec_clamp(arg_codes, arg_types, vec_t), vec_t
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"clamp({', '.join(arg_codes)})", args[0][1]
             return f"fminf(fmaxf({arg_codes[0]}, {arg_codes[1]}), {arg_codes[2]})", args[0][1]
 
@@ -7554,7 +7666,7 @@ class FunctionTranslator:
             if len(args) != 3:
                 self._error("gpu.mix(a, b, t) takes exactly 3 arguments", node)
             if vec_t is not None:
-                if self.backend == "opencl":
+                if self._opencl_syntax:
                     return f"mix({', '.join(arg_codes)})", vec_t
                 return self._emit_vec_mix(arg_codes, arg_types, vec_t), vec_t
             a, b, t = arg_codes
@@ -7564,7 +7676,7 @@ class FunctionTranslator:
             if len(args) != 3:
                 self._error("gpu.mad(a, b, c) takes exactly 3 arguments", node)
             if vec_t is not None:
-                if self.backend == "opencl":
+                if self._opencl_syntax:
                     return f"mad({', '.join(arg_codes)})", vec_t
                 return self._emit_vec_mad(arg_codes, arg_types, vec_t), vec_t
             a, b, c = arg_codes
@@ -7575,10 +7687,10 @@ class FunctionTranslator:
                 self._error("gpu.saturate(x) takes exactly 1 argument", node)
             code, t = args[0]
             if vec_t is not None:
-                if self.backend == "opencl":
+                if self._opencl_syntax:
                     return f"clamp({code}, 0.0f, 1.0f)", vec_t
                 return self._emit_vec_clamp([code], [t], vec_t), vec_t
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"clamp({code}, 0.0f, 1.0f)", t
             return f"fminf(fmaxf({code}, 0.0f), 1.0f)", t
 
@@ -7614,7 +7726,7 @@ class FunctionTranslator:
                     "things per backend", node)
             if lt != rt:
                 self._error(f"gpu.dot() operands must have the same type, got {lt} and {rt}", node)
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"dot({lcode}, {rcode})", "float"
             return self._emit_vec_dot(lcode, rcode, lt), "float"
 
@@ -7633,11 +7745,11 @@ class FunctionTranslator:
                 # opencl's native select treats int conditions implementation-defined (NVIDIA uses the MSB):
                 # (cond == 0) yields a 0/-1 mask (MSB unambiguous), select(b, a, mask) means
                 # cond nonzero -> b, cond == 0 -> a
-                if self.backend == "opencl":
+                if self._opencl_syntax:
                     int_vec:str = self._get_int_vec_type(a_t)
                     return f"select({b_code}, {a_code}, ({c_code} == ({int_vec})(0)))", a_t
                 return self._emit_vec_select(a_code, b_code, c_code, a_t), a_t
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"select({b_code}, {a_code}, ({c_code} == 0))", a_t
             return f"(({c_code}) ? ({b_code}) : ({a_code}))", a_t
 
@@ -7648,11 +7760,11 @@ class FunctionTranslator:
             if is_vec(lt) or is_vec(rt):
                 if not (is_vec(lt) and is_vec(rt)) or lt != rt:
                     self._error(f"gpu.{name}() vector operands must have the same type", node)
-                if self.backend == "opencl":
+                if self._opencl_syntax:
                     # opencl vector relation functions use -1 (all-1 bits) for true; & 1 normalizes it to 1
                     return f"({name}({lcode}, {rcode}) & 1)", self._get_int_vec_type(lt)
                 return self._emit_vec_relation(name, lcode, rcode, lt), self._get_int_vec_type(lt)
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"{name}({lcode}, {rcode})", "int"
             return self._emit_scalar_relation(name, lcode, rcode), "int"
 
@@ -7660,7 +7772,7 @@ class FunctionTranslator:
             if len(args) != 1 or not is_vec(args[0][1]):
                 self._error(f"gpu.{name}(cond_vec) takes exactly 1 vector argument", node)
             code, t = args[0]
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"{name}({code})", "int"
             cls:Any = _vec_registry()[t]
             components:List[str] = _vec_field_names(cls)
@@ -7690,7 +7802,7 @@ class FunctionTranslator:
             if not all(is_int(t) for _, t in args):
                 self._error(f"gpu.{name}() requires integer arguments", node)
             codes:List[str] = arg_codes
-            if self.backend == "opencl":
+            if self._opencl_syntax:
                 return f"{name}({', '.join(codes)})", args[0][1]
             if name == "abs_diff":
                 return f"abs(({codes[0]}) - ({codes[1]}))", args[0][1]
@@ -7750,7 +7862,7 @@ class FunctionTranslator:
             else:
                 self._error(f"no vector type '{candidate}' for swizzle '.{swizzle}'", node)
 
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             return f"({code}.{swizzle})", result_vec
         maker:str = f"make_{result_vec}"
         inner:str = ", ".join(f"({code}.{c})" for c in swizzle)
@@ -7771,7 +7883,7 @@ class FunctionTranslator:
         int_vec:str = self._get_int_vec_type(vec)
         terms:List[str] = [f"(({left}.{c} {op} {right}.{c}) ? 1 : 0)" for c in components]
         inner:str = ", ".join(terms)
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             return f"({int_vec})({inner})"
         return f"make_{int_vec}({inner})"
 
@@ -7818,7 +7930,7 @@ class FunctionTranslator:
 
     def _vec_maker(self, vec:str, inner:str)->str:
         """Assemble the vector per backend: opencl (vec)(...) / cuda make_vec(...)."""
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             return f"({vec})({inner})"
         return f"make_{vec}({inner})"
 
@@ -7862,7 +7974,7 @@ class FunctionTranslator:
         if any(t != vec for t in vec_types):
             self._error(f"gpu.{name}() operands must have the same vector type", node)
 
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             return f"{opencl_name}({', '.join(c for c, _ in args)})", vec
 
         codes:List[str] = [c for c, _ in args]
@@ -7967,6 +8079,11 @@ class FunctionTranslator:
                 self._error(f"recursive call detected: '{name}'", node)
             argument_codes:List[str] = (call_codes + list(entry.get("shape_codes") or [])
                                         + list(entry.get("outer_codes") or []))
+            if entry.get("needs_prologue"):
+                # The callee reads a work-item index, so it declared the six prologue
+                # parameters; the caller passes its own (it has them, being a kernel or
+                # another helper that received them the same way).
+                argument_codes.extend(self._prologue_parameter_arguments())
             return (f"{entry['c_name']}({', '.join(argument_codes)})",
                     entry["return_type"])
 
@@ -8005,6 +8122,7 @@ class FunctionTranslator:
                 "status": "done",
                 "c_name": c_name,
                 "return_type": callee.return_type,
+                "needs_prologue": callee._needs_prologue_parameters(),
                 "code": callee.render_device(c_name, shape_params),
                 "shape_codes": shape_codes,
                 "outer_codes": outer_codes,
@@ -8034,6 +8152,11 @@ class FunctionTranslator:
 
         argument_codes:List[str] = (call_codes + list(entry.get("shape_codes") or [])
                                     + list(entry.get("outer_codes") or []))
+        if entry.get("needs_prologue"):
+            # The callee declared Metal's six prologue parameters because its body reads
+            # a work-item index; the caller has them (it is a kernel, or a helper that
+            # received them the same way) and forwards them here.
+            argument_codes.extend(self._prologue_parameter_arguments())
         return (f"{entry['c_name']}({', '.join(argument_codes)})", entry["return_type"])
 
     def _require_outer_parameter(self, name:str, outer:Dict[str, Any], node:ast.AST)->None:
@@ -8103,6 +8226,33 @@ class FunctionTranslator:
         """The storage qualifier a device function needs on this backend."""
         return "__device__ " if self.backend == "cuda" else ""
 
+    def _needs_prologue_parameters(self)->bool:
+        """Whether this device function must receive Metal's work-item parameters.
+
+        On OpenCL and CUDA the index builtins are *device intrinsics* -- `get_global_id`
+        and `threadIdx` are symbols the runtime provides to every function. Metal has no
+        such intrinsic: the prelude defines those names as macros over attribute-decorated
+        **kernel parameters**, which exist only in the entry point's own scope.
+
+        A helper that calls one therefore expands to a reference to a parameter it does
+        not have. The generated MSL compiles into `'_mtl_thread_position' was not
+        declared in this scope`, which names a name the user never wrote. Passing the six
+        parameters down is what makes the helper legal, and it is only needed on Metal.
+        """
+        # `uses_global_id` is the translator's existing record of "the body names a
+        # work-item index"; it is set where the index builtins are emitted.
+        return self._metal_syntax and bool(self.uses_global_id)
+
+    def _prologue_parameter_declarations(self)->List[str]:
+        """`uint3 _mtl_thread_position [[thread_position_in_grid]]`, one per axis."""
+        from .metal_codegen import prologue_parameters
+        return prologue_parameters()
+
+    def _prologue_parameter_arguments(self)->List[str]:
+        """The names a call site forwards for the six prologue parameters."""
+        from .metal_codegen import PROLOGUE_PARAMETERS
+        return [name for _t, name, _a in PROLOGUE_PARAMETERS]
+
     def render_device(self, c_name:str,
                       shape_params:Optional[List[Tuple[str, int]]]=None)->str:
         """Render a device function.
@@ -8132,6 +8282,27 @@ class FunctionTranslator:
                 # a pointer too: one spelling for every structure.
                 const = ("const " if name not in self.member_writes else "")
                 params.append(f"{const}{self._device_type(t)}* {name}")
+            elif isinstance(t, tuple) and t and t[0] == SHARED_SLICE:
+                # A `zeros_per_group` slice handed to a helper. It is a *pointer* into
+                # the group's own storage, in the space that storage lives in -- Metal
+                # spells that `threadgroup`, OpenCL `__local`, and CUDA/HIP need no
+                # qualifier. Rendering the tuple itself would print the internal type
+                # marker into the C source (`(('shared_slice', ...)) buf`), which no
+                # compiler accepts.
+                space:str = ""
+                if self._metal_syntax:
+                    space = "threadgroup "
+                elif self._opencl_syntax:
+                    space = "__local "
+                element:str = self._device_type(t[1])
+                params.append(f"{space}{element}* {name}")
+            elif isinstance(t, tuple) and len(t) == 3 and t[0] == IMAGE:
+                # An image parameter reaching a helper. It is the backend's own image
+                # type -- `__read_only image2d_t` on OpenCL, a texture/surface object on
+                # CUDA -- so the same spelling the kernel signature uses applies here.
+                # Falling through would print the internal marker (`('image', 4,
+                # 'float')`) into the C source, which no compiler accepts.
+                params.append(f"{self._image_param_type(name, t)} {name}")
             else:
                 params.append(f"{self._device_type(t)} {name}")
         # A structure in the signature needs its typedef emitted too, and this helper's own
@@ -8151,6 +8322,10 @@ class FunctionTranslator:
         # Outer-scope parameters come last, matching the call site (see _emit_device_call),
         # which forwards them after the helper's own arguments and shape extents.
         params.extend(self._outer_param_declarations(device=True))
+        if self._needs_prologue_parameters():
+            # Metal's work-item numbers are parameters, so a helper that reads one has to
+            # receive them from its caller (see _needs_prologue_parameters).
+            params.extend(self._prologue_parameter_declarations())
         ret:str = (self.return_type or "void")
         header:str = f"{self._device_qualifier()}{self._device_type(ret)} {c_name}({', '.join(params)})"
         body:str = self._render_body()
@@ -8169,14 +8344,12 @@ class FunctionTranslator:
         declarations:List[str] = []
         for name, outer in self.outer_vars.items():
             if is_ptr(outer["type"]):
-                qualifier:str = ("" if device else
-                                 ("__global " if self.backend == "opencl" else ""))
+                qualifier:str = "" if device else self._buffer_qualifier()
                 declarations.append(f"{qualifier}{self._device_type(outer['type'][1])}* {name}")
             elif outer["writable"]:
                 element:str = (self._return_param_type(outer["type"]) if device
                                else self._kernel_scalar_type(outer["type"]))
-                qualifier = ("" if device else
-                             ("__global " if self.backend == "opencl" else ""))
+                qualifier = "" if device else self._buffer_qualifier()
                 declarations.append(f"{qualifier}{element}* {name}")
             else:
                 declarations.append(f"{self._kernel_scalar_type(outer['type'])} {name}")
@@ -8188,8 +8361,7 @@ class FunctionTranslator:
         """The parameter declaration for one host-created object."""
         t:Any = entry["type"]
         if is_ptr(t):
-            qualifier:str = ("" if device else
-                             ("__global " if self.backend == "opencl" else ""))
+            qualifier:str = "" if device else self._buffer_qualifier()
             return f"{qualifier}{self._device_type(t[1])}* {name}"
         return f"{self._kernel_scalar_type(t)} {name}"
 
@@ -8200,7 +8372,7 @@ class FunctionTranslator:
         C does not define those four, so the CUDA path -- which HIP shares -- writes the
         full C form instead.
         """
-        if self.backend == "opencl":
+        if self._opencl_syntax:
             return t
         return _CUDA_TYPE_NAMES.get(t, t)
 
@@ -8243,7 +8415,7 @@ class FunctionTranslator:
                                   if isinstance(t[1], str) else False)
                 const:str = ("const " if is_struct and name not in self.member_writes
                              else "")
-                qualifier:str = ("__global " if self.backend == "opencl" else "")
+                qualifier = self._buffer_qualifier()
                 params.append(
                     f"{qualifier}{const}{self._kernel_scalar_type(t[1])}* {name}")
             elif is_image(t):
@@ -8254,12 +8426,18 @@ class FunctionTranslator:
             params.append(f"const int {self._shape_var(array_name, dim)}")
         # OpenCL sampling takes the sampler as a kernel argument; one per sampled
         # image, right after that image. The host binds a matching sampler per image,
-        # so the Python-visible signature stays (image) only.
+        # so the Python-visible signature stays (image) only. Metal has no sampler
+        # argument at all -- a texture carries its sampler state -- so this stays
+        # OpenCL's alone rather than following `_opencl_syntax`.
         if self.backend == "opencl":
             for image_name in sorted(self.required_image_samplers):
                 params.append(f"const sampler_t {self._sampler_name(image_name)}")
         for lc_name, lc_type, _ in self.local_buffers:
-            if self.backend == "opencl":
+            if self._metal_syntax:
+                # MSL spells the work-group address space `threadgroup`, and a
+                # `threadgroup` buffer is a kernel parameter there too.
+                params.append(f"threadgroup {self._device_type(lc_type)}* {lc_name}")
+            elif self._opencl_syntax:
                 params.append(f"__local {self._device_type(lc_type)}* {lc_name}")
 
         # Outer-scope parameters after everything the launch derives the work size from,
@@ -8269,6 +8447,15 @@ class FunctionTranslator:
         # Return slots come last, after every parameter the work size and samplers derive
         # from, so appending them at launch time cannot disturb those positions.
         params.extend(self.render_return_params())
+
+        # Metal's work-item numbers arrive as attribute-decorated parameters, not as
+        # `get_global_id()` calls (see kernel/metal_codegen.py). They are declared after
+        # every parameter the host binds, because the host never binds them: the dispatch
+        # fills the attributes in. The names are the ones the prelude's macros expand
+        # onto, so a body keeps its OpenCL spelling.
+        if self._metal_syntax:
+            from .metal_codegen import prologue_parameters
+            params.extend(prologue_parameters())
         return params
 
     def signature_digest(self)->str:
@@ -8283,8 +8470,15 @@ class FunctionTranslator:
     def render_kernel(self, c_name:str)->str:
         params:List[str] = self.parameter_declarations()
 
-        prefix:str = ("__kernel " if self.backend == "opencl" else "__global__ ")
-        header:str = f"{prefix}void {c_name}({', '.join(params)})"
+        if self._metal_syntax:
+            from .metal_codegen import kernel_prefix
+            prefix:str = kernel_prefix() + " "   # "kernel void ", the return type included
+        else:
+            prefix = "__kernel " if self._opencl_syntax else "__global__ "
+        # Metal's prefix carries the return type (`kernel void`); every other backend
+        # spells the qualifier alone, so the `void` is appended only for them.
+        return_type:str = "" if self._metal_syntax else "void "
+        header:str = f"{prefix}{return_type}{c_name}({', '.join(params)})"
         body_lines:List[str] = []
         if self.backend == "cuda":
             for lc_name, lc_type, lc_count in self.local_buffers:

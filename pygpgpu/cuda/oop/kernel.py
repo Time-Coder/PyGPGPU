@@ -372,6 +372,21 @@ class Kernel(CUObject):
             mem_obj:Optional[MemObject] = entry[0] if entry is not None else None
             arg_value:Any = entry[1] if entry is not None else None
 
+            # A gnp array's buffer belongs to the array, not to the context's pool: it is
+            # reused by the next launch that names the same array, so it is never handed
+            # back, and `use`/`unuse` (which exist to police one pool claim per launch)
+            # must not be run for it.
+            if isinstance(arg_value, gnp.ndarray):
+                if arg_info.need_read_back and not self._is_vec3_arg(arg_info):
+                    # Deferred read-back: the bytes stay on the device and to_host() pulls
+                    # them the next time the host reads the array. 3-component vectors are
+                    # the exception -- the device layout is compact, so their bytes have to
+                    # be unpacked immediately below.
+                    arg_value._mark_device_written(mem_obj)
+                    continue
+                if mem_obj is not None and not arg_info.need_read_back:
+                    continue
+
             if not arg_info.need_read_back:
                 # Read-only/write-only arguments must also return their buffer to the pool once the kernel finishes, otherwise each call leaks one pooled object
                 if mem_obj is not None:
@@ -385,13 +400,6 @@ class Kernel(CUObject):
             if mem_obj is None:
                 raise RuntimeError(
                     f"argument '{arg_info.name}' has no device buffer to read back")
-
-            if isinstance(arg_value, gnp.ndarray) and not self._is_vec3_arg(arg_info):
-                # gnp arrays use deferred read-back: data stays on the device and to_host() pulls it before host access (writes).
-                # 3-component vectors are the exception: the device layout is compact, which deferred read-back cannot unpack directly, so read back immediately
-                mem_obj.dirty_on_device = True
-                mem_obj.unuse()
-                continue
 
             mem_obj.read(stream)
             callback = partial(on_completed, arg_info, arg_value, mem_obj)
@@ -607,17 +615,22 @@ class Kernel(CUObject):
                     used_value:Any = self._pack_vec3(value, content_type)
                 elif isinstance(value, np.ndarray):
                     used_value = value
-                    if value.dtype != content_type:
+                    if not isinstance(value, gnp.ndarray) and value.dtype != content_type:
                         used_value = value.astype(content_type)
                 else:
                     ProgramParser._apply_structure_pointers(value, stream)
                     used_value = np.array(value, dtype=content_type)
 
-                if not used_value.flags['C_CONTIGUOUS']:
+                # A gnp array owns its device copy and its layout handling: it uploads
+                # through `_to_device`, which stages a non-contiguous view itself.
+                # Converting it to a plain ndarray here would orphan that device copy,
+                # and the kernel's writes would never reach the caller.
+                if not isinstance(used_value, gnp.ndarray) and \
+                        not used_value.flags['C_CONTIGUOUS']:
                     used_value = np.ascontiguousarray(used_value)
 
                 if isinstance(used_value, gnp.ndarray) and seen_arrays is not None:
-                    root_key = id(used_value._root)
+                    root_key = id(used_value._root())
                     if root_key in seen_arrays:
                         # The same array travels under two names (`k(b, b)`): one buffer backs
                         # both, so the body reads and writes the one location it names.
@@ -680,9 +693,16 @@ class Kernel(CUObject):
         return texture
 
     def _is_vec3_arg(self, arg_info:ArgInfo)->bool:
+        """Whether this argument's element type is a 3-component vector.
+
+        The driver table also maps the scalar spellings (`float`, `int`, ...), so the
+        `_fields_` test has to be defensive: a scalar type has none, and asking for it
+        turns every scalar pointer argument into an AttributeError.
+        """
         base:str = arg_info.base_type_str
         cls:Any = CUInfo.vec_types.get(base)
-        return (cls is not None and len(cls._fields_) == 3)
+        fields:Any = getattr(cls, "_fields_", None)
+        return (fields is not None and len(fields) == 3)
 
     @staticmethod
     def _pack_vec3(value:Any, content_type:Any)->Any:
@@ -772,3 +792,4 @@ class Kernel(CUObject):
     @staticmethod
     def _release_func():
         return None
+

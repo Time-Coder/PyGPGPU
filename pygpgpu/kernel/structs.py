@@ -431,22 +431,111 @@ def _add_subscript_access(cls:Any) -> None:
     The check walks the whole MRO: `quatf` defines no `__getitem__` itself, but `genType`
     does, and installing ours on the subclass replaced positional indexing with a
     member-name one, so `conjugate(q)` failed inside pygf.
+
+    A `ctypes.Union` subclass is deliberately **not** patched this way. On CPython/Linux
+    that type starts with no mapping slot (``tp_as_mapping`` is NULL, unlike
+    ``ctypes.Structure``), so a `__getitem__` put on the class dictionary afterwards is
+    visible to ``hasattr`` while ``u["i"]`` still raises "'U' object is not
+    subscriptable" -- the C-level slot was never filled and cannot be filled from
+    Python for a class that already exists (`PyType_Modified` only makes it intermittent,
+    and putting the method on `ctypes.Union` itself leaks a global behaviour change into
+    every union in the process, including ones this package never saw). The union case
+    is therefore handled where it belongs: at the point the value is handed to a body,
+    by `UnionProxy` (see `union_needs_proxy`).
     """
     if any("__getitem__" in base.__dict__ for base in getattr(cls, "__mro__", ())):
         return
 
     def __getitem__(self:Any, key:Any)->Any:
         if isinstance(key, str):
-            return getattr(self, key)
+            member:Any = getattr(self, key)
+            # A structure member can be a union (`s["value"]["i"]`), and on the
+            # platforms where a union needs the proxy the bare value would fail the
+            # second subscript. See `union_needs_proxy`.
+            if union_needs_proxy(member):
+                return UnionProxy(member)
+            return member
         raise TypeError(
             f"{type(self).__name__} is indexed by member name, not by position: "
-            f"use s['{list(np.dtype(cls).names or ())[0]}']")
+            f"use s['{list(np.dtype(type(self)).names or ())[0]}']")
 
     # Marked, because this subscript is the translation's own member spelling (`s["i"]`),
     # not a method the caller wrote: a device translation must not turn `s[i]` into a call
     # to it the way a caller's own `__getitem__` becomes one.
     __getitem__.__pygpgpu_member_subscript__ = True
+    try:
+        import ctypes
+
+        if issubclass(cls, ctypes.Union):
+            # See the docstring: the class-level subscript cannot be installed on a
+            # union that already exists, so it is not attempted.
+            return
+    except Exception:
+        pass
     cls.__getitem__ = __getitem__
+
+
+def union_needs_proxy(value:Any)->bool:
+    """Whether a value handed to the interpreter must be wrapped to answer `p["i"]`.
+
+    True for a `ctypes.Union` instance whose class has no working member subscript --
+    which is every union on CPython/Linux and none on Windows, where the class-level
+    assignment works. The test is on the instance, not on the platform, so a build
+    that fixes the slot behaviour needs no special case here.
+    """
+    try:
+        import ctypes
+    except Exception:
+        return False
+    if not isinstance(value, ctypes.Union):
+        return False
+    try:
+        value["__pygpgpu_probe__"]
+    except TypeError:
+        return True
+    except KeyError:
+        return False
+    return False
+
+
+class UnionProxy:
+    """A `ctypes.Union` instance plus the member subscript, for the interpreter backend.
+
+    Every read and write is forwarded to the wrapped union, so the attribute spelling a
+    body may use (`p.i`) and a store through it (`p.f = 1.5`) land in the caller's object
+    exactly as they do without the proxy; only the subscript is answered here.
+    """
+
+    __slots__ = ("_wrapped",)
+
+    def __init__(self, wrapped:Any)->None:
+        object.__setattr__(self, "_wrapped", wrapped)
+
+    def __getitem__(self:Any, key:Any)->Any:
+        if isinstance(key, str):
+            member:Any = getattr(self._wrapped, key)
+            # A structure member may itself be a union (`s["value"]["i"]`), and that
+            # nested value is the bare ctypes object, so it needs the same wrapping
+            # or the second subscript fails on the platforms this proxy exists for.
+            if union_needs_proxy(member):
+                return UnionProxy(member)
+            return member
+        return self._wrapped[key]
+
+    def __setitem__(self:Any, key:Any, value:Any)->None:
+        if isinstance(key, str):
+            setattr(self._wrapped, key, value)
+            return
+        self._wrapped[key] = value
+
+    def __getattr__(self:Any, name:str)->Any:
+        return getattr(self._wrapped, name)
+
+    def __setattr__(self:Any, name:str, value:Any)->None:
+        setattr(self._wrapped, name, value)
+
+    def __repr__(self:Any)->str:
+        return repr(self._wrapped)
 
 
 def is_declared_structure(dtype:DTypeLike) -> bool:

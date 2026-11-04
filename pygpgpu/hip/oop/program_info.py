@@ -101,7 +101,10 @@ class VarInfo:
     
     def use_buffer(self, stream:Stream, data:np.ndarray)->Tuple[Buffer, Optional[Event]]:
         if isinstance(data, gnp.ndarray):
-            used_buffer, event = data._to_device(stream, self.name, kernel_flags=self.kernel_flags)
+            used_buffer, event = data._to_device(stream, self.name,
+                                                 kernel_flags=self.kernel_flags,
+                                                 backend="hip",
+                                                 device=stream.context.device)
         else:
             used_buffer:Buffer = stream.context.get_buffer(data.nbytes)
             used_buffer.kernel_flags = self.kernel_flags

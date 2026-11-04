@@ -107,7 +107,11 @@ def main():
     items = 4 * GROUP_ITEMS  # 4 groups
     x = np.arange(1, items + 1, dtype=np.int32)
     total = np.zeros(1, dtype=np.int32)
-    group_reduce[(items, 256)](x, total)
+    # The bracket is (blocks_per_grid, threads_per_block), so the grid is one block per
+    # GROUP_ITEMS and each block reads its own 1024 elements: `items` here would be
+    # 4096 blocks of 256 threads, four times the domain, and the extra blocks would
+    # index past the end of `x`.
+    group_reduce[(items // GROUP_ITEMS, 256)](x, total)
     assert total[0] == np.arange(1, items + 1).sum(), (total[0], x.sum())
     print("Local-memory reduction OK: sum =", total.tolist())
 

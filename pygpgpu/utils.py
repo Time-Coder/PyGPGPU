@@ -407,6 +407,64 @@ _PRINT_INFO_MODULES:Tuple[str, ...] = (
 )
 
 
+def nvidia_package_libraries(names: List[str]) -> List[str]:
+    """Libraries shipped by the pip ``nvidia-*-cu12`` packages, newest first.
+
+    On Linux the CUDA runtime is commonly installed with pip (``nvidia-cuda-runtime-
+    cu12``, ``nvidia-cuda-nvrtc-cu12``) instead of a system toolkit. Those wheels
+    drop their ``lib*.so.<N>`` files under ``site-packages/nvidia/<component>/lib``,
+    which is not on the loader's search path, so a library the driver loads by bare
+    SONAME is not found. This returns the matching files so a caller can load one by
+    its full path.
+
+    ``names`` are the SONAME stems ("libnvrtc", "libcudart"); nothing is returned on
+    a platform where pip does not install CUDA this way.
+    """
+    try:
+        import site
+    except Exception:
+        return []
+    try:
+        directories: List[str] = []
+        try:
+            directories.extend(site.getsitepackages())
+        except AttributeError:                  # a virtualenv without that helper
+            directories.append(os.path.dirname(os.path.dirname(os.__file__)))
+        user_site = getattr(site, "getusersitepackages", None)
+        if user_site is not None:
+            directories.append(user_site())
+    except Exception:
+        return []
+
+    found: List[str] = []
+    seen: set = set()
+    for directory in directories:
+        component_dir: str = os.path.join(directory, "nvidia")
+        if not os.path.isdir(component_dir):
+            continue
+        try:
+            components = sorted(os.listdir(component_dir))
+        except OSError:
+            continue
+        for component in components:
+            binary_dir: str = os.path.join(component_dir, component, "lib")
+            if not os.path.isdir(binary_dir):
+                continue
+            try:
+                file_names = sorted(os.listdir(binary_dir), reverse=True)
+            except OSError:
+                continue
+            for file_name in file_names:
+                for name in names:
+                    if file_name == name + ".so" or file_name.startswith(name + ".so."):
+                        candidate: str = os.path.join(binary_dir, file_name)
+                        if candidate not in seen:
+                            seen.add(candidate)
+                            found.append(candidate)
+                        break
+    return found
+
+
 def get_print_info() -> bool:
     """Whether progress logging is currently on for any already-imported backend.
 
