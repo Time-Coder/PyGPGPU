@@ -1064,6 +1064,75 @@ def promote(left:type, right:type)->Optional[type]:
     return _PROMOTIONS.get((left, right)) or _PROMOTIONS.get((right, left))
 
 
+def _is_number(value:Any)->bool:
+    """True for a value that becomes a scalar structure member."""
+    return isinstance(value, (bool, np.bool_, int, np.integer, float, np.floating))
+
+
+def numeric_list_as_array(value:Any)->Any:
+    """A python list/tuple of numbers as the ndarray a kernel argument can carry.
+
+    Anything else is returned unchanged, so this is safe to run over every argument. A nested
+    list of numbers also converts (`[[1, 2], [3, 4]]` is a 2-D array), which is the shape a
+    2-D python list should have. A list that holds objects is left alone on purpose: it is an
+    object collection, and `objects.py` gives it a structure element type instead.
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return value
+    try:
+        array:np.ndarray = np.asarray(value)
+    except ValueError:
+        return value
+    if array.dtype.kind not in "biufc":
+        return value                 # object/str/void: not a numeric buffer
+    return array
+
+def numeric_list_type(value:Sequence[Any], attr:str)->Optional[type]:
+    """The fixed-size array type a list of numbers becomes, or None if it is not one.
+
+    A list member used to be refused outright ("cannot become a structure member yet"), which
+    left `bag.values[0]` -- a list of numbers inside an object -- with no spelling at all. It
+    is a **fixed-size array** member (`T * N`), and numpy already records that as a sub-array
+    field (`dtype.subdtype`), so the C side needs no new machinery: `structs` puts the extent
+    on the member name (`float items[4]`).
+
+    Two limits are load-bearing and both are the caller's own values, not a policy:
+
+    * **the length is fixed by the value the caller passed**, because a structure's C layout is
+      decided once, per dtype -- a length read at launch time cannot declare a field;
+    * **every element must become the same scalar type**, or the field has no one element
+      type. An int and a float mix promotes (that is what `Interval(0, 3)` does for two
+      members), but a list that mixes them is promoted the same way rather than refused.
+
+    An empty list is refused: it describes no element type, and a zero-length array member is
+    not a shape C can declare.
+    """
+    if not isinstance(value, (list, tuple)):
+        return None
+    items:List[Any] = list(value)
+    if not items:
+        raise SyntaxError(
+            f"'{attr}' is an empty list, so the structure member it becomes has no element "
+            f"type. Give it at least one number, or leave the member out") from None
+    element:Optional[type] = None
+    for item in items:
+        if isinstance(item, (list, tuple)):
+            raise SyntaxError(
+                f"'{attr}' is a list of lists, and only a list of numbers can become an "
+                f"array member (a nested list would need a nested array field)") from None
+        if not _is_number(item):
+            raise SyntaxError(
+                f"'{attr}' is a list of {type(item).__name__} values, and only a list of "
+                f"numbers can become an array member") from None
+        item_type:type = member_type(item, attr)
+        element = item_type if element is None else promote(element, item_type)
+        if element is None:
+            raise SyntaxError(
+                f"'{attr}' mixes member types that have no common width "
+                f"({item_type.__name__} among them)") from None
+    return element * len(items)
+
+
 def member_type(value:Any, attr:str)->type:
     """The ctypes type for one member, decided from the value the caller passed.
 
@@ -1077,6 +1146,12 @@ def member_type(value:Any, attr:str)->type:
         return ctypes.c_int32
     if isinstance(value, (float, np.floating)):
         return ctypes.c_float
+    if isinstance(value, (list, tuple)):
+        # A list of numbers is a fixed-size array member (`T * N`); numpy records it as a
+        # sub-array field, so the C declaration carries the extent on the member name.
+        numeric:Optional[type] = numeric_list_type(value, attr)
+        if numeric is not None:
+            return numeric
     if isinstance(value, np.ndarray):
         raise SyntaxError(
             f"'{attr}' is an array, and an array member of a structure is not supported yet. "
@@ -1255,6 +1330,16 @@ def convert_object_arguments(func:Any, args:Sequence[Any],
     *is* -- so the receiver joins the scan as a source of types, never as an argument.
     """
     hits:List[int] = [index for index, value in enumerate(args) if looks_like_object(value)]
+    # A python list of numbers is a kernel ARRAY argument, not a collection of objects: the
+    # device has one element type per buffer, and `for x in items: total += x` over a numeric
+    # list is a serial loop over that buffer. Converting it here -- before anything looks for
+    # object members -- is what makes a bare `list[int]`/`list[float]` argument reach the
+    # translator as the ndarray it is. `np.asarray` already picks numpy's own dtype
+    # (`int64`, `float64`, `complex128`), which is the same width rule every other array
+    # argument follows.
+    converted_args:List[Any] = [numeric_list_as_array(value) for value in args]
+    args = tuple(converted_args)
+    hits = [index for index, value in enumerate(args) if looks_like_object(value)]
     # A body that builds its own value still needs the scan, even with no object argument:
     # what that value carries is what the scan discovers.
     if not hits and not _constructs_a_class(func, resolve):

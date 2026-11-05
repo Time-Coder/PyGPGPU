@@ -44,6 +44,7 @@ from .translator import (
     scan_self_attrs,
     short_hash,
     type_sig,
+    validate_type_map,
 )
 from .objects import ObjectBinding, convert_object_arguments
 from . import source_paths
@@ -101,6 +102,65 @@ _probed_backend:Optional[str] = None
 # "use DEFAULT_BACKEND_ORDER". Each entry is (backend, device-or-None).
 _default_devices:Optional[List[Tuple[Optional[str], Optional[str]]]] = None
 _default_device_lock = threading.Lock()
+
+# The process-wide `int`/`float` mapping `set_type_map()` installs, or None. Read **once**,
+# when a kernel is decorated: a mapping is part of what that kernel means, so changing it
+# afterwards cannot change a kernel that already exists (its `type_map` is a snapshot, and it
+# is in its cache key). That is also what keeps `set_type_map()` honest across a warm cache.
+_type_map_default:Optional[Dict[str, str]] = None
+_type_map_lock = threading.Lock()
+
+
+def set_type_map(int:Any=None, float:Any=None)->None:
+    """Set the default device width a python ``int`` / ``float`` travels as.
+
+    Called with no arguments it restores the built-in widths (``int`` = 32-bit ``int``,
+    ``float`` = 32-bit ``float``)::
+
+        set_type_map(float=np.float64)     # every kernel decorated from now on is 64-bit
+
+        @kernel
+        def accurate(scale, out): ...       # `scale` is a `double`
+
+    The values are the same type objects `@kernel(float=...)` takes -- a numpy dtype or
+    scalar type, a ctypes scalar class, or a device type name. A decorator's own `int=`/
+    `float=` wins over this, and a numpy scalar keeps its own width either way.
+
+    **It applies at decoration time, not at call time.** A kernel that already exists keeps
+    the mapping it was declared with, including across a warm cache and across processes:
+    the mapping is in the generated source's digest and in the C name, so a later setting
+    cannot be served the binary an earlier one compiled. Call it before decorating.
+    """
+    global _type_map_default
+    if int is None and float is None:
+        with _type_map_lock:
+            _type_map_default = None
+        return
+    declared:Dict[str, Any] = {}
+    if int is not None:
+        declared["int"] = int
+    if float is not None:
+        declared["float"] = float
+    resolved:Dict[str, str] = validate_type_map(declared)
+    with _type_map_lock:
+        _type_map_default = resolved
+
+
+def get_type_map()->Dict[str, str]:
+    """The process-wide mapping `set_type_map()` installed, as device type names."""
+    with _type_map_lock:
+        current:Optional[Dict[str, str]] = _type_map_default
+    return dict(current) if current else {}
+
+
+def _effective_type_map(type_map:Optional[Dict[str, Any]])->Dict[str, str]:
+    """The mapping a kernel is declared with: its own, over the process-wide default."""
+    base:Dict[str, str] = get_type_map()
+    if not type_map:
+        return base
+    resolved:Dict[str, str] = validate_type_map(type_map)
+    base.update(resolved)
+    return base
 
 
 def set_default_device(*selectors:str)->None:
@@ -999,7 +1059,8 @@ class PyKernel(_KernelBase[_P]):
     """
 
     def __init__(self, func:Callable[..., Any], backend:str, explicit_backend:bool=False,
-                 domain:Optional[str]=None):
+                 domain:Optional[str]=None,
+                 type_map:Optional[Dict[str, Any]]=None):
         if isinstance(func, classmethod):
             raise SyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)") from None
         if isinstance(func, staticmethod):
@@ -1015,6 +1076,12 @@ class PyKernel(_KernelBase[_P]):
         # of the signature rather than as a statement inside the body that the device never
         # sees.
         self._domain:Optional[str] = domain
+        # The device width a python `int`/`float` travels as, resolved to device type names
+        # when the decorator ran and **not** read again later: this decorator's mapping is
+        # part of what this kernel *is*, so a later set_type_map() must not change kernels
+        # that were already declared. Only the two builtins are here; a numpy scalar names
+        # its own width and keeps it (see translator.infer_ctype).
+        self._type_map:Dict[str, str] = _effective_type_map(type_map)
         self.is_pykernel:bool = True
         self.__name__:str = func.__name__
         self.__doc__:str = func.__doc__ or ""
@@ -1109,6 +1176,15 @@ class PyKernel(_KernelBase[_P]):
             # frame for the re-raise itself, which is why the exception carries the caller's
             # line rather than this one: the syntax rendering uses the fields on the
             # exception, not the chain.
+            caller = _caller_traceback(caught.__traceback__)
+            raise caught.with_traceback(caller) from None
+        except ValueError as caught:
+            # A refusal about the *arguments* -- an integer too wide for the mapping, an
+            # unpacking count that does not match -- belongs to the caller, so it is trimmed
+            # to their frame the way a SyntaxError is. Falling through to the body handler
+            # below would dress it up as a failure inside the function, which it never was.
+            if not str(caught):
+                raise
             caller = _caller_traceback(caught.__traceback__)
             raise caught.with_traceback(caller) from None
         except Exception as caught:
@@ -1334,7 +1410,8 @@ class PyKernel(_KernelBase[_P]):
                     setattr(holder, name, getattr(instance, name))
                 self_attrs = array_attrs
                 self_types = [self_struct_type] + [
-                    infer_ctype(getattr(instance, name)) for name in array_attrs]
+                    infer_ctype(getattr(instance, name), self._type_map)
+                    for name in array_attrs]
                 self_values = [holder] + [
                     getattr(instance, name) for name in array_attrs]
 
@@ -1349,17 +1426,25 @@ class PyKernel(_KernelBase[_P]):
         args = convert_object_arguments(self.raw_func, args, self._resolve_global,
                                         self._self_param, object_binding,
                                         self_value=instance)
-        arg_types:List[DeviceType] = [infer_ctype(a) for a in args]
+        arg_types:List[DeviceType] = [infer_ctype(a, self._type_map) for a in args]
         if not self_struct_members:
             self_types = []
             for name, value in zip(self_attrs, self_values):
                 try:
-                    self_types.append(infer_ctype(value))
-                except SyntaxError as e:
-                    raise SyntaxError(f"self.{name}: {e}") from None
+                    self_types.append(infer_ctype(value, self._type_map))
+                except (SyntaxError, ValueError) as e:
+                    # `ValueError` is the width refusal (a python int too wide for the
+                    # mapping); both lose their own context here, so each is re-raised with
+                    # the attribute that carries it.
+                    raise type(e)(f"self.{name}: {e}") from None
 
         sig:str = type_sig(arg_types + self_types)
-        cache_key:str = f"{backend}|{device_key}|{sig}"
+        # The mapping is part of the cache key, not only part of the type signature: two
+        # kernels over the same argument values under different mappings produce `int` and
+        # `long` parameters, and only one `_cache` entry may answer for a launch. The types
+        # already differ (`sig` carries them), so this is belt-and-braces for the case where
+        # a mapping is changed to a width whose type name another entry already used.
+        cache_key:str = f"{backend}|{device_key}|{sig}|{self._type_map_key()}"
         entry = self._cache.get(cache_key)
         if entry is None:
             # Create the device objects for any Image before compiling. On the driver
@@ -2046,6 +2131,13 @@ class PyKernel(_KernelBase[_P]):
 
     # ---------- source generation ----------
 
+    def _type_map_key(self)->str:
+        """A stable spelling of this kernel's `int=`/`float=` mapping, for cache keys."""
+        if not self._type_map:
+            return ""
+        return ",".join(f"{key}={self._type_map[key]}"
+                        for key in sorted(self._type_map))
+
     def _source_signature(self)->str:
         """Python source signature: source changes -> regenerate (recompile when cached content differs).
 
@@ -2056,12 +2148,18 @@ class PyKernel(_KernelBase[_P]):
         and each instance keeps its own `_cache` entry so neither reuses the other's launch.
         If the domain ever starts to shape the device code, it has to be added here -- otherwise
         the two would share a source they no longer agree on.
+
+        The `int=`/`float=` mapping **is** in this hash, because it does shape the device
+        code: it decides which C type a python `int`/`float` parameter is declared as, so two
+        mappings are two different translation units. Without it here, a kernel declaring
+        `int=` would share the cache file (and the C name) of the default one, and the second
+        launch would compile against a signature the caller did not ask for.
         """
         try:
             source:str = inspect.getsource(self.raw_func)
         except OSError:
             source = ""
-        return short_hash(f"{source}\nbackend={self.backend}")
+        return short_hash(f"{source}\nbackend={self.backend}\ntypes={self._type_map_key()}")
 
     def _resolve_global(self, name:str)->Any:
         """Resolve a name the kernel body reads from outside the function.
@@ -2220,7 +2318,8 @@ class PyKernel(_KernelBase[_P]):
             self_struct_members=self_struct_members,
             self_struct_type=self_struct_type,
             struct_arg_classes=struct_arg_classes,
-            host_creation_values=creation_values)
+            host_creation_values=creation_values,
+            type_map=self._type_map)
         # `@kernel(domain="x")` names the parameter whose shape declares the iteration
         # domain. It is applied before `translate()` so the declaration is in place while the
         # magic loop is scanned -- a body cannot carry one of its own any more.
@@ -3293,12 +3392,14 @@ def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:
 
 @overload
 def kernel(func:Callable[_P, Any], *, backend:Optional[str]=None,
-           domain:Optional[str]=None)->PyKernel[_P]: ...
+           domain:Optional[str]=None,
+           int:Any=None, float:Any=None)->PyKernel[_P]: ...
 @overload
 def kernel(func:None=None, *, backend:Optional[str]=None,
-           domain:Optional[str]=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
+           domain:Optional[str]=None,
+           int:Any=None, float:Any=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
 def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None,
-           domain:Optional[str]=None):
+           domain:Optional[str]=None, int:Any=None, float:Any=None):
     """The `@kernel` decorator.
 
     When backend is not specified, probe in DEFAULT_BACKEND_ORDER (cuda -> hip -> opencl)
@@ -3328,13 +3429,42 @@ def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None
     parameters: ``@kernel`` and ``@kernel(backend=...)`` return one and the same
     ``PyKernel[...]``, and a checker reports a call's missing or extra argument against the
     author's ``def`` rather than against a ``*args``-only decorator.
+
+    `int=` / `float=` choose the device width a python ``int`` / ``float`` travels as, because
+    neither has a width of its own::
+
+        @kernel(float=np.float64)          # python floats and python complex values are 64-bit
+        def accurate(scale, out):
+            ...
+
+        @kernel(int=np.int64)              # a python int is a 64-bit counter here
+        def count(step, out):
+            ...
+
+    The value is a type object -- a numpy dtype/scalar type (``np.int64``), a ctypes scalar
+    class (``ctypes.c_int64``) -- or a device type name (``"long"``). Only the two python
+    builtins are mapped: a numpy scalar or array already names its own width and keeps it
+    (``np.uint32(x)`` is still ``uint``). A python ``complex`` has no width either, so it
+    follows ``float=``. The choice is fixed when the decorator runs and is part of the
+    kernel's identity, so ``set_type_map()`` does not change a kernel that is already
+    declared.
     """
+    type_map:Optional[Dict[str, Any]] = None
+    if int is not None or float is not None:
+        type_map = {}
+        if int is not None:
+            type_map["int"] = int
+        if float is not None:
+            type_map["float"] = float
+
     def decorator(f:Callable[..., Any])->PyKernel[Any]:
         if backend is not None:
-            return PyKernel(f, backend, explicit_backend=True, domain=domain)
+            return PyKernel(f, backend, explicit_backend=True, domain=domain,
+                            type_map=type_map)
         # No backend named: the call-time default decides, so this snapshot is only used
         # for reporting until set_default_device() (or a bracket) has a say.
-        return PyKernel(f, _default_backend(), explicit_backend=False, domain=domain)
+        return PyKernel(f, _default_backend(), explicit_backend=False, domain=domain,
+                        type_map=type_map)
 
     if func is not None:
         return decorator(func)

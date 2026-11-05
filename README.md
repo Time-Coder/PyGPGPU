@@ -111,7 +111,58 @@ def histogram(data: np.ndarray, counts: np.ndarray) -> None:
 
 Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/comparison/bit ops, `math.*` and `np.*` math functions, class methods (`self.xxx` attributes become arguments automatically), static methods, and calling helpers through a name — a module-level function, `module.func(...)`, `SomeClass.static_method(...)`, and `self.method(...)` for another method of the same class. Unsupported syntax raises a `SyntaxError` carrying the line number.
 
+A **python list or tuple of numbers** is accepted where an array argument is expected — `k([1, 2, 3], out)` works, and `for x in items: total += x` iterates it — because it is converted with numpy's own rules (`int64`, `float64`, `complex128`), exactly like the ndarray it stands for. A list of **objects** is a different thing and stays one: it becomes a collection whose element type is a synthesized structure, which is how a scene of shapes is passed to a kernel. A **numeric list as an object member** (`bag.values[0]`) becomes a fixed-size array field (`T * N`), with the length taken from the list the caller passed.
+
 `break` and `continue` work where they have a loop to act on: inside a nested serial `for`/`while` (or `for x in arr`) they mean exactly what they mean in Python. Directly in the magic loop's body there is no loop to continue — each iteration is a separate work item — so `continue` becomes "this work item stops here" (the next iteration is another thread, which does its own work anyway), and `break` is a `SyntaxError`: stopping the magic loop would mean stopping every other work item too, which the device cannot express. Guard the rest of the body with `if` instead.
+
+`//` and `%` on integers follow Python's floor semantics, including for negative operands: `-7 // 2` is `-4` and `-7 % 2` is `1`, where C would answer `-3` and `-1`. The translator emits the one-step correction as a small device helper, so a kernel and the same function run in the interpreter agree; an unsigned width needs none and keeps the plain C operator.
+
+### Choosing a width for `int` and `float`
+
+A Python `int` is arbitrary precision and a Python `float` is a 64-bit double, but a kernel
+parameter needs one fixed width, so the translator picks 32 bits for each. An argument that
+does not fit is refused with a `ValueError` naming the spelling that would carry it — it is
+never silently narrowed:
+
+```python
+@kernel
+def f(step, out): ...          # `step` is an `int`; f(2 ** 31, out) raises ValueError
+
+f(np.int64(2 ** 31), out)      # a numpy scalar names its own width, so this works
+```
+
+When you want a different default for the Python builtins, name one at the decorator or
+process-wide:
+
+```python
+@kernel(float=np.float64, int=np.int64)   # python floats/complex -> double, python ints -> long
+def accurate(scale, step, out): ...
+
+set_type_map(float=np.float64)            # every kernel decorated from now on
+```
+
+The value is a type object — a numpy dtype or scalar type (`np.int64`, `np.dtype("uint32")`),
+a ctypes scalar class (`ctypes.c_double`) — or a device type name (`"long"`). The choice is a
+closed set, and it differs per key:
+
+| key | allowed | published as |
+|---|---|---|
+| `int` | `np.int8`, `np.int16`, `np.int32`, `np.int64`, `np.uint8`, `np.uint16`, `np.uint32`, `np.uint64` | `char`, `short`, `int`, `long`, `uchar`, `ushort`, `uint`, `ulong` |
+| `float` | `np.float32`, `np.float64` | `float`, `double` |
+
+Anything else raises a `ValueError` — a `bool` is not an integer width, `half` is out of scope
+on CUDA/HIP, and a string is a *device* type name (`np.int8` is accepted while `"int8"` is not).
+A numeric value that the mapped type cannot hold is refused the same way: a negative argument
+mapped to an unsigned width raises, and so does any value outside the width's range, rather
+than wrapping.
+
+Only `int` and `float` can be mapped, because a numpy scalar already carries its own width and
+keeps it (`np.uint32(x)` stays `uint`). A Python `complex` has no width of its own either, so it
+follows `float=`; a `np.complex64`/`np.complex128` keeps its own.
+
+The choice is fixed when the decorator runs — `set_type_map()` does not change a kernel that
+already exists — and it is part of the kernel's identity, so two mappings never share a
+compiled binary.
 
 ### `+=` into an array element
 

@@ -29,10 +29,12 @@ from .kernel import (
     PyKernel,
     available_devices,
     get_default_device,
+    get_type_map,
     list_devices,
     get_device,
     kernel,
     set_default_device,
+    set_type_map,
 )
 # The dual-sided device builtins are plain functions, so they are exported here directly:
 # `from pygpgpu import get_global_id, atomic_add`. Inside a @kernel body the translator
@@ -172,6 +174,7 @@ __all__ = [
     "kernel", "PyKernel", "DEFAULT_BACKEND_ORDER",
     "list_devices", "get_device", "available_devices",
     "set_default_device", "get_default_device",
+    "set_type_map", "get_type_map",
     # device builtins (dual-sided functions; see pygpgpu/kernel/builtins.py)
     *_builtin_names,
     # the device-side library function registry

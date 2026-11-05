@@ -112,7 +112,44 @@ def histogram(data: np.ndarray, counts: np.ndarray) -> None:
 
 支持的能力: 标量/数组/向量参数, if/while/for-range, 算术/比较/位运算, `math.*` 与 `np.*` 数学函数, 类方法(`self.xxx` 属性自动转为参数), 静态方法, 以及按名字调用辅助函数 —— 模块级函数、`module.func(...)`、`SomeClass.static_method(...)`, 以及同一个类里 `self.method(...)` 这种实例方法互调。不支持的语法抛出带行号的 `SyntaxError`。
 
+凡是需要数组参数的地方, 都接受 **Python 的数值 list 或 tuple** —— `k([1, 2, 3], out)` 可用, 且 `for x in items: total += x` 能遍历它 —— 因为它是按 numpy 自己的规则转换的(`int64`、`float64`、`complex128`), 与它代表的 ndarray 完全一致。**对象** list 则是另一回事: 它是一组元素, 元素类型由合成的结构体描述, 场景里的多个物体就是这样传给 kernel 的。作为对象成员的**数值 list**(`bag.values[0]`)会变成定长数组字段(`T * N`), 长度取自调用者传入的那个 list。
+
 `break` 与 `continue` 只在真正有循环可作用的地方成立: 写在嵌套的串行 `for`/`while`(或 `for x in arr`)里时, 含义与 Python 完全一致。直接写在魔法循环体内则没有"可继续的循环"可言 —— 每次迭代是一个独立的 work item —— 所以 `continue` 变成"本 work item 到此为止"(下一次迭代是另一个线程, 它本来就会做自己的活), 而 `break` 会抛 `SyntaxError`: 停掉魔法循环等于同时停掉其他所有 work item, 设备无法表达。需要提前结束当前 work item 的剩余部分时, 用 `if` 包住即可。
+
+整数上的 `//` 与 `%` 遵循 Python 的向下取整语义, 负操作数也一样: `-7 // 2` 是 `-4`, `-7 % 2` 是 `1`, 而 C 会给出 `-3` 和 `-1`。翻译器把这个一步修正生成为一个小设备函数, 于是 kernel 与在解释器里跑同一个函数的结果一致; 无符号宽度不需要修正, 直接沿用 C 的运算符。
+
+### 为 `int` 和 `float` 选择宽度
+
+Python 的 `int` 是任意精度, `float` 是 64 位 double, 但 kernel 参数必须是固定宽度, 所以翻译器各取 32 位。装不下的实参会抛 `ValueError`, 并指出该用什么写法携带这个值 —— 绝不会静默截断:
+
+```python
+@kernel
+def f(step, out): ...          # `step` 是 `int`; f(2 ** 31, out) 会抛 ValueError
+
+f(np.int64(2 ** 31), out)      # numpy 标量自带宽度, 所以这样可以
+```
+
+想给 Python 内置类型换默认宽度时, 在装饰器上或进程级指定:
+
+```python
+@kernel(float=np.float64, int=np.int64)   # python float/complex -> double, python int -> long
+def accurate(scale, step, out): ...
+
+set_type_map(float=np.float64)            # 之后装饰的每个 kernel 都生效
+```
+
+值是类型对象 —— numpy dtype 或标量类型(`np.int64`、`np.dtype("uint32")`)、ctypes 标量类(`ctypes.c_double`) —— 也可以是设备类型名(`"long"`)。可选集合是封闭的, 且两个键不同:
+
+| 键 | 允许 | 对应设备类型 |
+|---|---|---|
+| `int` | `np.int8`、`np.int16`、`np.int32`、`np.int64`、`np.uint8`、`np.uint16`、`np.uint32`、`np.uint64` | `char`、`short`、`int`、`long`、`uchar`、`ushort`、`uint`、`ulong` |
+| `float` | `np.float32`、`np.float64` | `float`、`double` |
+
+其他一律抛 `ValueError` —— `bool` 不是整数宽度, `half` 在 CUDA/HIP 上不支持, 字符串是**设备**类型名(`np.int8` 可用而 `"int8"` 不可用)。数值装不进所选宽度时同样拒绝: 无符号宽度收到负数会报错, 超出该宽度范围的值也一样, 而不是回绕。
+
+只有 `int` 和 `float` 可映射, 因为 numpy 标量自带宽度并保持不变(`np.uint32(x)` 仍是 `uint`)。Python `complex` 同样没有自己的宽度, 所以跟随 `float=`; `np.complex64`/`np.complex128` 保持自己的宽度。
+
+这个选择在装饰时确定 —— `set_type_map()` 不会改变已经存在的 kernel —— 并且是 kernel 身份的一部分, 所以两种映射绝不会共用同一个已编译二进制。
 
 类型注解是可选项: 本 README 里的代码片段带上注解只为便于阅读, 设备端类型来自调用时的实参, 所以同样的代码不写注解也能跑(`self` 不是 kernel 参数, 给它加注解没有任何影响)。
 

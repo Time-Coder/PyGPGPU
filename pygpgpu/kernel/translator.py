@@ -40,6 +40,8 @@ from .device_builtins import (
     emit_atomic,
     emit_barrier,
     emit_index,
+    python_floor_name,
+    python_floor_source,
 )
 
 
@@ -583,10 +585,196 @@ DTYPE_MAP:Dict[str, str] = {
     "complex64": "c64", "complex128": "c128",
 }
 
+# The ctypes scalar classes a caller may name for a python `int`/`float`, and the device type
+# each stands for. The package already reads ctypes classes this way for a vector component
+# (`_c_scalar_name`), so this is the same mapping given a caller-facing name: `_c_scalar_name`
+# is the vector component's *name*, and this is the advice of what a scalar argument becomes.
+CTYPES_SCALAR_TYPES:Dict[Any, str] = {}
+
+# The python type a width is requested for, and the only names a `type_map` may carry. Two
+# names only, because these are the two python builtins whose width is chosen rather than
+# carried: every numpy scalar already names its own width (`np.int64`, `np.float64`), so a
+# mapping for those would be a way to override what the caller spelled, which is a different
+# (and much larger) feature.
+TYPE_MAP_KEYS:Set[str] = {"int", "float"}
+
+# What `int=` may name: the eight integer widths, signed and unsigned, 8 through 64 bits. `bool`
+# is not among them -- it is not an integer width a caller would pick for a counter -- and
+# neither is `half`, which the device has no scalar for on CUDA and HIP.
+INTEGER_MAPPING_TARGETS:Set[str] = {
+    "char", "uchar", "short", "ushort", "int", "uint", "long", "ulong",
+}
+
+# What `float=` may name: the two floating-point widths. `half` is deliberately absent
+# (`DTYPE_MAP` has an entry for it, but NVRTC on this machine cannot resolve `cuda_fp16.h`
+# and the CUDA/HIP path refuses it), so the mapping would only move the failure later.
+FLOAT_MAPPING_TARGETS:Set[str] = {"float", "double"}
+
+# The integer widths that cannot hold a negative value. A python `int` mapped to one of these
+# is refused when it is negative, instead of wrapping to a huge positive number.
+UNSIGNED_INTEGER_TYPES:Set[str] = {"uchar", "ushort", "uint", "ulong"}
+
+
+def _ctypes_scalar_types()->Dict[Any, str]:
+    """Build the ctypes class table once: the scalar classes a caller may name."""
+    global CTYPES_SCALAR_TYPES
+    if CTYPES_SCALAR_TYPES:
+        return CTYPES_SCALAR_TYPES
+    import ctypes as _ctypes
+
+    CTYPES_SCALAR_TYPES = {
+        _ctypes.c_bool: "bool",
+        _ctypes.c_int8: "char", _ctypes.c_int16: "short",
+        _ctypes.c_int32: "int", _ctypes.c_int64: "long",
+        _ctypes.c_uint8: "uchar", _ctypes.c_uint16: "ushort",
+        _ctypes.c_uint32: "uint", _ctypes.c_uint64: "ulong",
+        _ctypes.c_float: "float", _ctypes.c_double: "double",
+    }
+    return CTYPES_SCALAR_TYPES
+
+
+def resolve_device_type(value:Any, key:str)->str:
+    """The device type name a caller's type object stands for, for the given mapping key.
+
+    A `@kernel(int=..., float=...)` mapping is given with a **type object**, because that is
+    the spelling a reader of numpy already knows and it carries its width and signedness in
+    the name rather than in a string this package would have to parse:
+
+    * a numpy dtype or scalar type -- `np.int64`, `np.dtype("uint32")`, `np.dtype(np.float64)`;
+    * a ctypes scalar class -- `ctypes.c_int64`, `ctypes.c_double`;
+    * the device type name itself -- `"long"`, `"double"`.
+
+    **The choice is a closed set, and it is not the same set for each key.** `int` may be
+    any of the eight integer widths (signed and unsigned, 8 through 64 bits); `float` may be
+    `float32` or `float64` and nothing else. The alternative -- accepting whatever the device
+    happens to have -- was wrong in both directions: `bool` is not an integer width at all,
+    and `float16` (`half`) is out of scope on CUDA and HIP, so a kernel broadened to one of
+    them would fail to compile instead of failing here with a reason.
+
+    A string is accepted only when it names one of those widths, so `"int8"` is refused while
+    `"char"` is accepted: a string is the *device* type name, and the numpy spelling exists
+    because `np.int8` is the spelling a caller actually writes. Every refusal is a
+    `ValueError`: a wrong type is a wrong value for this argument, not a syntax error.
+    """
+    import ctypes as _ctypes
+
+    allowed:Dict[str, Set[str]] = INTEGER_MAPPING_TARGETS if key == "int" else FLOAT_MAPPING_TARGETS
+
+    # A numpy dtype or scalar type, given as the type (`np.int64`) or a dtype (`np.dtype("int8")`).
+    if isinstance(value, np.dtype) or (isinstance(value, type)
+                                       and issubclass(value, np.generic)):
+        dtype:np.dtype = np.dtype(value)
+        # A numpy scalar names a width; map it to the device spelling and then to the boards
+        # of the closed set, so `np.int8` is accepted only when `char` is (it is).
+        device_name:Optional[str] = DTYPE_MAP.get(dtype.name)
+        if device_name is None or device_name not in allowed:
+            raise ValueError(_mapping_refusal(key, value)) from None
+        return device_name
+
+    # A ctypes scalar class.
+    if isinstance(value, type) and issubclass(value, _ctypes._SimpleCData):
+        device_name = _ctypes_scalar_types().get(value)
+        if device_name is not None and device_name in allowed:
+            return device_name
+        raise ValueError(_mapping_refusal(key, value)) from None
+
+    # A device type name, spelled the way a signature spells it.
+    if isinstance(value, str):
+        if value in allowed:
+            return value
+        raise ValueError(_mapping_refusal(key, value)) from None
+
+    raise ValueError(_mapping_refusal(key, value)) from None
+
+
+def _mapping_refusal(key:str, value:Any)->str:
+    """The message for a type the mapping key does not accept."""
+    if key == "int":
+        np_names:str = ("np.int8, np.int16, np.int32, np.int64, "
+                        "np.uint8, np.uint16, np.uint32, np.uint64")
+        others:str = "A bool, a float and a complex value are not integer widths."
+        widths:str = ("char (int8), short (int16), int (int32), long (int64), "
+                      "uchar (uint8), ushort (uint16), uint (uint32), ulong (uint64)")
+    else:
+        np_names = "np.float32, np.float64"
+        others = "An integer is not a floating-point width, and `half` is out of scope."
+        widths = "float (float32), double (float64)"
+    return (f"`{key}=` cannot be {value!r}: a python {key} travels as one of "
+            f"{widths} -- written as {np_names}, or as the matching ctypes type. {others}")
+
+
+def validate_type_map(type_map:Optional[Dict[str, Any]])->Dict[str, str]:
+    """Normalize a caller's `int=`/`float=` mapping to device type names.
+
+    The keys are the two python builtins whose width is otherwise chosen here, and every
+    entry is resolved through `resolve_device_type`, so the decorator and the global setter
+    accept exactly the same spellings and reject exactly the same mistakes. Every refusal
+    here is a `ValueError`, because a mapping is a value the caller supplied.
+    """
+    if not type_map:
+        return {}
+    resolved:Dict[str, str] = {}
+    for key, value in type_map.items():
+        if key not in TYPE_MAP_KEYS:
+            raise ValueError(
+                f"unknown type-mapping key: {key!r}; only 'int' and 'float' can be mapped "
+                f"(a numpy scalar already names its own width)") from None
+        resolved[key] = resolve_device_type(value, key)
+    return resolved
+
+
 # The device type names that are complex values rather than structures. Unlike a structure
 # they travel by value, their arithmetic is generated (not refused), and their two members
 # are read with the header's own accessors.
 COMPLEX_TYPE_NAMES:Set[str] = {"c64", "c128"}
+
+# A python `complex` has no width of its own, so its width follows the `float` mapping: a
+# kernel that asks for 64-bit reals asks for 64-bit complex values beside them. The two
+# widths are the only ones a complex value has, so anything that is not a double real is the
+# single-precision pair.
+_COMPLEX_WIDTH_PER_REAL:Dict[str, str] = {"double": "c128"}
+
+# The range of every integer the device can hold, as (minimum, maximum). A python `int` is
+# arbitrary precision, so a value outside the width it is about to travel as used to wrap
+# silently: `k(2 ** 31 + 5, out)` reached the device as -2147483648, and the kernel then
+# computed with a number the caller never wrote. Refusing it is the only honest answer, and
+# the message names the spelling that carries the width the caller actually needs.
+_INTEGER_RANGES:Dict[str, Tuple[int, int]] = {
+    "char": (-(2 ** 7), 2 ** 7 - 1),
+    "uchar": (0, 2 ** 8 - 1),
+    "short": (-(2 ** 15), 2 ** 15 - 1),
+    "ushort": (0, 2 ** 16 - 1),
+    "int": (-(2 ** 31), 2 ** 31 - 1),
+    "uint": (0, 2 ** 32 - 1),
+    "long": (-(2 ** 63), 2 ** 63 - 1),
+    "ulong": (0, 2 ** 64 - 1),
+}
+
+
+def _check_integer_fits(value:int, device_type:str)->None:
+    """Refuse a python `int` the device type it travels as cannot represent."""
+    bounds:Optional[Tuple[int, int]] = _INTEGER_RANGES.get(device_type)
+    if bounds is None:
+        return                      # `bool`: python bools are not ints for this rule
+    low, high = bounds
+    if low <= value <= high:
+        return
+    # The suggestion is the numpy spelling that holds this value, and only when one does: an
+    # integer beyond 64 bits has no device type at all, so pointing at `np.int64` there would
+    # be pointing at a second failure.
+    if 0 <= value <= 2 ** 64 - 1 and value > 2 ** 63 - 1:
+        suggestion = f" Pass it as `np.uint64({value})` to keep that width."
+    elif -(2 ** 63) <= value <= 2 ** 63 - 1:
+        suggestion = (f" Pass it as `np.int64({value})` to keep that width."
+                      if value < 0 else
+                      f" Pass it as `np.int64({value})` or `np.uint64({value})` "
+                      f"to keep that width.")
+    else:
+        suggestion = " The device has no integer type that wide."
+    raise ValueError(
+        f"the integer {value} does not fit the device type '{device_type}' "
+        f"({low}..{high}); a python int has no width of its own, so it travels as the "
+        f"width this kernel chose for `int`.{suggestion}") from None
 
 # The numpy scalars whose device type is the *narrow* one, as it always was: an 8- or
 # 16-bit value is an `int` on the device, and a float64 is a `float`. A caller who wants
@@ -1114,12 +1302,22 @@ def promote(t1:DeviceType, t2:DeviceType)->DeviceType:
         return t1 if rank.index(t1) >= rank.index(t2) else t2
     return "int"
 
-def infer_ctype(value:object)->DeviceType:
-    """Actual call argument -> C type."""
+def infer_ctype(value:object, type_map:Optional[Dict[str, str]]=None)->DeviceType:
+    """Actual call argument -> C type.
+
+    `type_map` is the caller's `int=`/`float=` override (already normalized to device type
+    names by `validate_type_map`): a python `int`/`float` has no width of its own, so the
+    decorator chooses one here. It applies to **nothing else** -- a numpy scalar names its own
+    width and keeps it, which is what makes the mapping an override of the two builtins
+    rather than a second, competing type system.
+    """
     from ..vec_types.layout import _vector_dtype_name
     from . import structs
 
     registry:Dict[str, Any] = _vec_registry()
+    mapping:Dict[str, str] = type_map or {}
+    int_type:str = mapping.get("int", "int")
+    float_type:str = mapping.get("float", "float")
 
     # A backend-neutral Image is opaque storage: the kernel only samples or stores
     # through it, so the parameter carries its channel count and scalar type.
@@ -1222,28 +1420,32 @@ def infer_ctype(value:object)->DeviceType:
             return NARROWED_SCALARS[dtype_name]
         if dtype_name in DTYPE_MAP:
             return DTYPE_MAP[dtype_name]
-        return "int"
+        return int_type
     if isinstance(value, int):
-        return "int"
+        _check_integer_fits(value, int_type)
+        return int_type
     if isinstance(value, np.floating):
         dtype_name = np.dtype(type(value)).name
         if dtype_name in NARROWED_SCALARS:
             return NARROWED_SCALARS[dtype_name]
         if dtype_name in DTYPE_MAP:
             return DTYPE_MAP[dtype_name]
-        return "float"
+        return float_type
     if isinstance(value, float):
-        return "float"
+        return float_type
     # A complex scalar. `np.complex64` and `np.complex128` are numpy scalars (they are
     # `np.complexfloating`, not `np.floating`), and a python `complex` has no width of its own
-    # -- the same rule a python `float` follows, which is why it is 64-bit. A python complex
-    # is never one of the numpy scalars, so `isinstance(complex(1, 2), complex)` is checked
-    # on its own and would answer `complex128` either way.
+    # -- the same rule a python `float` follows, and the reason its width follows the `float`
+    # entry of the mapping rather than staying fixed: a kernel that maps `float` to a double
+    # is asking for 64-bit real arithmetic, and a python complex beside it should not be the
+    # single value in the body that silently lost half its precision. A python complex is
+    # never one of the numpy scalars, so `isinstance(complex(1, 2), complex)` is checked on
+    # its own and would answer the double width either way.
     if isinstance(value, np.complexfloating):
         dtype_name = np.dtype(type(value)).name
         return DTYPE_MAP.get(dtype_name, "c128")
     if isinstance(value, complex):
-        return "c128"
+        return _COMPLEX_WIDTH_PER_REAL.get(float_type, "c128")
     if _is_device_handle(value):
         # A texture or surface reaches the device as an opaque 64-bit handle, which
         # the kernel reads through tex2D or writes through surf2Dwrite.
@@ -1663,7 +1865,8 @@ class FunctionTranslator:
                  self_struct_members:Optional[Dict[str, str]]=None,
                  self_struct_type:Any=None,
                  struct_arg_classes:Optional[Dict[str, type]]=None,
-                 receiver_as_argument:bool=False):
+                 receiver_as_argument:bool=False,
+                 type_map:Optional[Dict[str, str]]=None):
         self.func:Callable = func
         self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
         self.backend:str = backend
@@ -1752,6 +1955,11 @@ class FunctionTranslator:
         # Objects the host already built for statements above the magic loop, keyed by the
         # name the body assigns them to (see _host_created_assignment).
         self.host_creation_values:Dict[str, Any] = dict(host_creation_values or {})
+        # The width a python `int`/`float` travels as (device type names, already resolved).
+        # Every type query the translator makes on a *host* value -- a creation above the
+        # loop, a constant it lifts -- goes through it, so a kernel and the objects it builds
+        # agree on the width.
+        self.type_map:Dict[str, str] = dict(type_map or {})
 
         try:
             # The dedented copy starts at the decorator line, so remember where that was in
@@ -2363,13 +2571,13 @@ class FunctionTranslator:
             return None
         writable:bool = name in declared
         try:
-            device_type:DeviceType = infer_ctype(value)
-        except SyntaxError as error:
+            device_type:DeviceType = infer_ctype(value, self.type_map)
+        except (SyntaxError, ValueError) as error:
             if not writable:
                 # Not a name this feature handles; the normal "unknown name" path will
                 # explain it with the right position if the body really reads it.
                 return None
-            raise SyntaxError(f"outer variable '{name}' cannot be written back: {error}") from None
+            raise type(error)(f"outer variable '{name}' cannot be written back: {error}") from None
         if writable and is_ptr(device_type):
             raise SyntaxError(
                 f"cannot rebind the outer array '{name}': the array object itself is "
@@ -2998,7 +3206,7 @@ class FunctionTranslator:
                     f"data, but it could not be evaluated on the host; build it from values "
                     f"that exist at call time (a shape, a constant, another array)",
                     value)
-            device_type:DeviceType = infer_ctype(produced)
+            device_type:DeviceType = infer_ctype(produced, self.type_map)
             self.host_values[name] = {"expr": value, "type": device_type}
             # The object travels as a parameter, appended after the outer-scope values
             # (see render_kernel and PyKernel._invoke_inner for the launch order).
@@ -5071,7 +5279,11 @@ class FunctionTranslator:
             self._emit(f"{target_code} /= {value_code};")
         elif name == "FloorDiv":
             if is_int(target_t) and is_int(value_t):
-                self._emit(f"{target_code} /= {value_code};")
+                # `a //= b` must floor like python, not truncate like C (see _emit_floored).
+                code, _ = self._emit_floored(("floor_div", "floor_mod"), "floor_div",
+                                             target_code, target_t, value_code,
+                                             value_t, node)
+                self._emit(f"{target_code} = {code};")
             else:
                 self._emit(f"{target_code} = floor(({target_t})({target_code}) / ({target_t})({value_code}));")
         elif name == "Pow":
@@ -5082,10 +5294,20 @@ class FunctionTranslator:
                 self._error("integer **= changes type (use float operands or pow())", node)
             self._emit(f"{target_code} = ({target_t})pow(({target_t})({target_code}), "
                        f"({target_t})({value_code}));")
-        elif name in ("LShift", "RShift", "BitOr", "BitAnd", "BitXor", "Add", "Sub", "Mult", "Mod"):
+        elif name in ("LShift", "RShift", "BitOr", "BitAnd", "BitXor", "Add", "Sub", "Mult"):
             symbol:str = {"LShift": "<<", "RShift": ">>", "BitOr": "|", "BitAnd": "&", "BitXor": "^",
-                          "Add": "+", "Sub": "-", "Mult": "*", "Mod": "%"}[name]
+                          "Add": "+", "Sub": "-", "Mult": "*"}[name]
             self._emit(f"{target_code} {symbol}= {value_code};")
+        elif name == "Mod":
+            if is_int(target_t) and is_int(value_t):
+                # `a %= b` must carry the divisor's sign like python's `%` (see _emit_floored).
+                code, _ = self._emit_floored(("floor_div", "floor_mod"), "floor_mod",
+                                             target_code, target_t, value_code,
+                                             value_t, node)
+                self._emit(f"{target_code} = {code};")
+            else:
+                symbol = "%"
+                self._emit(f"{target_code} {symbol}= {value_code};")
         else:
             self._error(f"unsupported operator: {name}", node)
 
@@ -6193,7 +6415,12 @@ class FunctionTranslator:
 
         if name == "FloorDiv":
             if is_int(lt) and is_int(rt):
-                return f"({left} / {right})", promote(lt, rt)
+                # C's `/` truncates and python's `//` floors, so the two disagree for a
+                # negative pair. The helper applies the correction (see
+                # device_builtins.PYTHON_FLOOR_SOURCES); for an unsigned width it is
+                # empty and the plain operator already agrees.
+                return self._emit_floored(("floor_div", "floor_mod"), "floor_div",
+                                          left, promote(lt, rt), right, rt, node)
             t:Any = promote(lt, rt)
             return f"(({t})floor(({t})({left}) / ({t})({right})))", t
 
@@ -6214,7 +6441,10 @@ class FunctionTranslator:
         if name == "Mod":
             t:Any = promote(lt, rt)
             if is_int(t):
-                return f"({left} % {right})", t
+                # Same discrepancy as `//`: C's `%` takes the dividend's sign and python's
+                # takes the divisor's.
+                return self._emit_floored(("floor_div", "floor_mod"), "floor_mod",
+                                          left, t, right, rt, node)
             return f"fmod(({t})({left}), ({t})({right}))", t
 
         symbol:str = {"Add": "+", "Sub": "-", "Mult": "*"}.get(name)
@@ -9072,6 +9302,35 @@ class FunctionTranslator:
     def _device_qualifier(self)->str:
         """The storage qualifier a device function needs on this backend."""
         return "__device__ " if self.backend == "cuda" else ""
+
+    def _emit_floored(self, operations:Tuple[str, str], operation:str,
+                      left:str, ctype:str, right:str, right_t:Any,
+                      node:ast.AST)->Translated:
+        """`left // right` or `left % right` with python's floor semantics, for integers.
+
+        C's `/` truncates toward zero and its `%` takes the dividend's sign; python floors
+        and takes the divisor's sign. They agree only when the remainder is zero or the
+        operands have the same sign, so the generated code calls a small device function
+        that applies the one-step correction (see `python_floor_source`).
+
+        An **unsigned** width needs no correction -- its remainder is never negative -- and
+        `(r < 0)` on it is always false anyway, which some compilers warn about, so the
+        plain C operator is emitted there and the helper is not declared.
+
+        The helper is declared once per (operation, width): a file that uses both `//` and
+        `%` on `int` carries two functions, and a second kernel using `//` on `int` finds
+        the definition already recorded.
+        """
+        device_ctype:str = self._device_type(ctype)
+        helper_name:str = python_floor_name(operation, device_ctype)
+        source:str = python_floor_source(operation, device_ctype, self.backend)
+        if not source:
+            # An unsigned width: the C operator already matches python.
+            symbol:str = "/" if operation == "floor_div" else "%"
+            return f"({left} {symbol} {right})", ctype
+        if source not in self.device_helpers:
+            self.device_helpers.append(source)
+        return f"{helper_name}({left}, {right})", ctype
 
     def _needs_prologue_parameters(self)->bool:
         """Whether this device function must receive Metal's work-item parameters.
