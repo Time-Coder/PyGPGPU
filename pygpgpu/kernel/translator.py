@@ -5766,6 +5766,69 @@ class FunctionTranslator:
                         "c128" if mixed_scalar else kind)
         return None
 
+    def _emit_complex_constructor(self,
+                                  node:ast.Call)->Translated:
+        """`complex(re, im)` -- python's own constructor for a complex value.
+
+        Python offers three spellings and they all mean the same value, so all three are
+        accepted: `complex(re, im)`, `complex(z)` (a copy, or a real widened), and
+        `complex("1+2j")` is refused because a string has no device value -- the text would
+        have to be parsed on the host, and a caller who knows the value can write it as a
+        literal.
+
+        The result is the **double** width: a python `complex` has no width of its own, which
+        is the same rule `1 + 2j` and a python `float` already follow. A caller who wants the
+        narrow value writes `np.complex64(complex(re, im))`, and that cast narrows it.
+        """
+        argv:List[ast.expr] = list(node.args)
+        if len(argv) not in (1, 2):
+            self._error(
+                f"complex() takes 1 or 2 arguments (complex(re, im) or complex(z)), got"
+                f" {len(argv)}", node)
+        for argument in argv:
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                # `complex("3+4j")` parses the text on the host. A device has no parser, so the
+                # text would have to be translated into the value it spells -- and a caller who
+                # knows the value can write it as a literal or as `complex(re, im)`.
+                self._error(
+                    f'complex("{argument.value}") is a string parse, which device code cannot'
+                    f" do: write the value it spells instead (e.g. 3 + 4j), or pass the real"
+                    f" and imaginary parts as scalars", argument)
+        args:List[Translated] = [self._visit_expression(argument) for argument in argv]
+        for code, t in args:
+            if is_ptr(t) or is_image(t) or is_vec(t):
+                self._error(
+                    f"complex() components must be scalars, got {t}", node)
+        if len(args) == 1:
+            code, t = args[0]
+            complex_dtype:Optional[np.dtype] = self._complex_dtype_of(t)
+            if complex_dtype is not None:
+                # `complex(z)` is z: python answers the same value upcast to its own
+                # (double) type, so a complex64 operand is widened.
+                kind:str = self._complex_side(t, complex_dtype)
+                if kind == "c128":
+                    self._require_complex(np.dtype(np.complex128))
+                    return code, "c128"
+                self._require_complex(np.dtype(np.complex128))
+                self.complex_needs.update(complex_support.mixed_needs())
+                return f"c64_widen_c128({code})", "c128"
+            if not is_float(t) and not is_int(t):
+                self._error(
+                    f"complex({t}) has no device meaning: pass a real or a complex value,"
+                    f" or use complex(re, im)", node)
+            # A real value, widened: the imaginary part is zero.
+            self._require_complex(np.dtype(np.complex128))
+            element:str = "double"
+            return f"c128_from_real(({element})({code}))", "c128"
+
+        (real_code, real_t), (imag_code, imag_t) = args
+        for code, t in args:
+            if not is_float(t) and not is_int(t):
+                self._error(
+                    f"complex(re, im) needs real components, got {t}", node)
+        self._require_complex(np.dtype(np.complex128))
+        return (f"c128_make((double)({real_code}), (double)({imag_code}))", "c128")
+
     def _emit_complex_compare(self, operator:str, left:str, lt:Any, right:str,
                               rt:Any) -> Optional[Translated]:
         """`z == w` / `z != w` as the header's equality test.
@@ -7023,6 +7086,11 @@ class FunctionTranslator:
 
         if isinstance(func, ast.Name):
             name:str = func.id
+            if name == "complex":
+                # Handled before the arguments are visited: `complex("3+4j")` names a string
+                # that has no device value at all, and visiting it first would report
+                # "unsupported constant" instead of the reason a caller can act on.
+                return self._emit_complex_constructor(node)
             args = [self._visit_expression(a) for a in node.args]
             arg_codes:List[str] = [c for c, _ in args]
             # `v(args)` on a structure value is `v.__call__(args)`: the callee is a value,

@@ -811,3 +811,83 @@ def test_an_outer_complex_scalar_can_be_rebound(runner, dtype):
     # The `nonlocal` slot is copied back into the scope after the launch, so the closure
     # holds the value the kernel put there -- for a complex value just as for an int.
     assert complex(peek()) == pytest.approx(5 + 6j)
+
+# ---------------------------------------------------------------------------
+# `complex(re, im)`, python's own constructor
+# -----------------------------------------------------------------------------------------------------------------------------------------
+
+
+@kernel
+def constructed_from_args(re: np.float32, im: np.float32, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = complex(re, im)
+
+
+@kernel
+def constructed_from_constants(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = complex(3, 4)
+
+
+@kernel
+def constructed_from_complex(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = complex(a[i])
+
+
+@kernel
+def constructed_from_real(value: np.float32, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = complex(value)
+
+
+@kernel
+def constructed_then_narrowed(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = np.complex64(complex(3, 4))
+
+
+@kernel
+def constructed_from_string(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = complex("3+4j")
+
+
+def test_complex_of_two_arguments(runner):
+    """`complex(re, im)` is python's own spelling, and the result is the double width."""
+    out = np.zeros(2, dtype=np.complex128)
+    runner(constructed_from_args, np.float32(3.0), np.float32(4.0), out)
+    np.testing.assert_allclose(out, np.array([3 + 4j, 3 + 4j], dtype=np.complex128))
+
+
+def test_complex_of_two_constants(runner):
+    out = np.zeros(2, dtype=np.complex128)
+    runner(constructed_from_constants, out)
+    np.testing.assert_allclose(out, np.array([3 + 4j, 3 + 4j], dtype=np.complex128))
+
+
+def test_complex_of_a_complex_value_is_a_copy_at_the_double_width(runner):
+    """`complex(z)` of a complex64 widens, which is what python answers."""
+    out = np.zeros(2, dtype=np.complex128)
+    runner(constructed_from_complex, np.array([1 + 2j, 1 + 2j], np.complex64), out)
+    np.testing.assert_allclose(out, np.array([1 + 2j, 1 + 2j], dtype=np.complex128))
+
+
+def test_complex_of_a_real_has_a_zero_imaginary_part(runner):
+    out = np.zeros(2, dtype=np.complex128)
+    runner(constructed_from_real, np.float32(5.0), out)
+    np.testing.assert_allclose(out, np.array([5 + 0j, 5 + 0j], dtype=np.complex128))
+
+
+def test_a_constructed_value_narrows_through_numpy_cast(runner):
+    out = np.zeros(2, dtype=np.complex64)
+    runner(constructed_then_narrowed, out)
+    np.testing.assert_allclose(out, np.array([3 + 4j, 3 + 4j], dtype=np.complex64))
+
+
+def test_complex_of_a_string_is_refused(gpu_backend, runner):
+    """A string has no device value, and python would parse it on the host."""
+    out = np.zeros(2, dtype=np.complex128)
+    with pytest.raises(SyntaxError) as caught:
+        runner(constructed_from_string, out)
+    assert "complex(" in str(caught.value)
