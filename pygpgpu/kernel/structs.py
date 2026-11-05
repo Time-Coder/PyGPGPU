@@ -301,7 +301,7 @@ def register(dtype:DTypeLike) -> str:
     return name
 
 
-def is_ctypes_record(value:Any)->bool:
+def is_ctypes_record(value:object)->bool:
     """True when a value is a `ctypes` structure **or union** subclass/instance.
 
     A caller can declare a layout in four spellings: `ctypes.Structure`,
@@ -317,11 +317,11 @@ def is_ctypes_record(value:Any)->bool:
     """
     import ctypes
 
-    kind:Any = value if isinstance(value, type) else type(value)
+    kind:type = value if isinstance(value, type) else type(value)
     return isinstance(kind, type) and issubclass(kind, (ctypes.Structure, ctypes.Union))
 
 
-def register_class(cls:Any) -> Optional[np.dtype]:
+def register_class(cls:type) -> Optional[np.dtype]:
     """Record the dtype a `ctypes` structure or union class declares, and return it.
 
     The class is kept as evidence: a dtype whose layout matches a vector type is still a
@@ -475,7 +475,7 @@ def _add_subscript_access(cls:Any) -> None:
     cls.__getitem__ = __getitem__
 
 
-def union_needs_proxy(value:Any)->bool:
+def union_needs_proxy(value:object)->bool:
     """Whether a value handed to the interpreter must be wrapped to answer `p["i"]`.
 
     True for a `ctypes.Union` instance whose class has no working member subscript --
@@ -562,7 +562,7 @@ def is_declared_structure(dtype:DTypeLike) -> bool:
     return bool(dtype.isalignedstruct) or is_union_dtype(dtype)
 
 
-def structure_dtype_of(value:Any) -> Optional[np.dtype]:
+def structure_dtype_of(value:object) -> Optional[np.dtype]:
     """The structure dtype a value denotes, or None, respecting how it was built.
 
     A vector type is a `ctypes.Structure` as well, and its dtype carries the same alignment,
@@ -635,7 +635,7 @@ def member_types(dtype:np.dtype, backend:str) -> Dict[str, Any]:
     return members
 
 
-def dtype_of(value:Any)->Optional[np.dtype]:
+def dtype_of(value:object)->Optional[np.dtype]:
     """The record dtype a value carries, when it is a structure or an array of them."""
     if isinstance(value, np.void):
         return value.dtype if is_record(value.dtype) else None
