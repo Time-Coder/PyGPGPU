@@ -78,9 +78,50 @@ if TYPE_CHECKING:
 else:
     class _KernelBase:
         """Runtime stand-in: subscripting returns this class, so ``PyKernel[_P]`` imports."""
-        def __class_getitem__(cls, item:Any)->type:
+        def __class_getitem__(cls, item:object)->type:
             return cls
 
+
+if TYPE_CHECKING:
+    # `TypedDict` is 3.8+ in typing; this package supports 3.7, so it comes from
+    # the backport the rest of the package already uses (see ts_parser.py).
+    from typing_extensions import TypedDict
+
+    from .translator import ReturnSiteLayout
+
+    # ---------- launch records ----------
+
+    # What `_bind_outer_values` hands the launch: the arguments carrying this call's outer-scope
+    # values, the declared outer scalars whose final value is written back, and the full
+    # argument list those values prefix.
+    class WritableOuter(TypedDict):
+        name: str
+        kind: str
+        buffer: "np.ndarray[Any, Any]"
+        type: DeviceType
+
+
+    class OuterState(TypedDict):
+        args: List[object]
+        writable: List[WritableOuter]
+        full: List[object]
+
+
+    # The device-side slots a body's returns need: one buffer per value slot, plus the shared
+    # claim word (which work item won) and the site word (which `return` it was).
+    class ReturnState(TypedDict):
+        buffers: List["np.ndarray[Any, Any]"]
+        claim: "np.ndarray[Any, Any]"
+        site: "np.ndarray[Any, Any]"
+
+
+    # What the translator records about the returns themselves: the dtype of each value slot,
+    # and the per-site layout that says how to rebuild the result.
+    class ReturnSlots(TypedDict):
+        slot_types: List["np.dtype[Any]"]
+        slot_kinds: List[str]
+        arg_indices: Dict[str, int]
+        sites: List[ReturnSiteLayout]
 
 # ---------- bracket selector parsing ----------
 
@@ -111,7 +152,7 @@ _type_map_default:Optional[Dict[str, str]] = None
 _type_map_lock = threading.Lock()
 
 
-def set_type_map(int:Any=None, float:Any=None)->None:
+def set_type_map(int:object=None, float:object=None)->None:
     """Set the default device width a python ``int`` / ``float`` travels as.
 
     Called with no arguments it restores the built-in widths (``int`` = 32-bit ``int``,
@@ -136,7 +177,7 @@ def set_type_map(int:Any=None, float:Any=None)->None:
         with _type_map_lock:
             _type_map_default = None
         return
-    declared:Dict[str, Any] = {}
+    declared:Dict[str, object] = {}
     if int is not None:
         declared["int"] = int
     if float is not None:
@@ -153,7 +194,7 @@ def get_type_map()->Dict[str, str]:
     return dict(current) if current else {}
 
 
-def _effective_type_map(type_map:Optional[Dict[str, Any]])->Dict[str, str]:
+def _effective_type_map(type_map:Optional[Dict[str, object]])->Dict[str, str]:
     """The mapping a kernel is declared with: its own, over the process-wide default."""
     base:Dict[str, str] = get_type_map()
     if not type_map:
@@ -318,7 +359,7 @@ def _parse_selector(sel:str)->Tuple[Optional[str], Optional[str]]:
     return None, sel
 
 
-def _parse_work_item(item:Any)->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[int, ...]]]:
+def _parse_work_item(item:object)->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[int, ...]]]:
     """Parse a work-size bracket, in CUDA's own terms: ``(blocks, threads)``.
 
     The bracket states a launch the way a CUDA or HIP programmer states one -- how many
@@ -339,7 +380,7 @@ def _parse_work_item(item:Any)->Tuple[Optional[Tuple[int, ...]], Optional[Tuple[
     ``None`` still means "automatic". A one-element bracket is a bare item count, so it is
     the same number under either spelling and needs no conversion.
     """
-    def norm(v:Any)->Optional[Tuple[int, ...]]:
+    def norm(v:object)->Optional[Tuple[int, ...]]:
         if v is None:
             return None
         if isinstance(v, int):
@@ -389,7 +430,7 @@ _VENDOR_ALIASES:Dict[str, str] = {
 }
 
 
-def _device_match_keys(sel:str, device:Any)->bool:
+def _device_match_keys(sel:str, device:object)->bool:
     """Does this device answer to the selector?
 
     A selector matches by substring against the device's name, vendor and arch, plus a
@@ -462,7 +503,7 @@ def list_devices()->List[str]:
 available_devices = list_devices
 
 
-def get_device(selector:str)->Any:
+def get_device(selector:str)->object:
     """Return the Device object for a "backend:device" selector string (the backend's own Device class).
 
     The backend part supports aliases (opencl/ocl/cl, cuda/cu, hip/rocm/amd); the device part is an
@@ -477,9 +518,9 @@ def get_device(selector:str)->Any:
     return _resolve_device(backend, device_sel)[0]
 
 
-def _bind_arguments(func:Callable, args:Tuple[Any, ...],
+def _bind_arguments(func:Callable, args:Tuple[object, ...],
                     kwargs:Dict[str, object],
-                    skip_first:bool=False)->Tuple[Any, ...]:
+                    skip_first:bool=False)->Tuple[object, ...]:
     """Turn a call into the positional tuple the launch path expects.
 
     A kernel is launched positionally: the argument order decides the device parameter
@@ -539,9 +580,9 @@ def _bind_arguments(func:Callable, args:Tuple[Any, ...],
     return tuple(ordered)
 
 
-def _bound_arguments_for_call(func:Callable, args:Tuple[Any, ...],
+def _bound_arguments_for_call(func:Callable, args:Tuple[object, ...],
                               kwargs:Dict[str, object],
-                              skip_first:bool=False)->Tuple[Any, ...]:
+                              skip_first:bool=False)->Tuple[object, ...]:
     """``_bind_arguments`` as the entry points call it (see _native_argument_errors)."""
     return _bind_arguments(func, args, kwargs, skip_first)
 
@@ -591,9 +632,9 @@ def _body_only(error:BaseException)->Optional[TracebackType]:
     error that carries no such stand-in -- a failure raised before the body ran -- so that
     one keeps its own diagnostic.
     """
-    traceback:Any = error.__traceback__
-    keep:Any = None
-    cursor:Any = traceback
+    traceback:object = error.__traceback__
+    keep:object = None
+    cursor:object = traceback
     while cursor is not None:
         if _is_body_stand_in(cursor.tb_frame.f_code):
             keep = cursor
@@ -628,7 +669,7 @@ class ArgumentTypeError(TypeError):
 
 # Stands in for a method's receiver when CPython is asked to word an argument error.
 # Never reaches the kernel: it exists so the error counts the receiver like native python.
-_RECEIVER_PLACEHOLDER:Any = object()
+_RECEIVER_PLACEHOLDER:object = object()
 
 
 def _signature_stub(signature:inspect.Signature, func:Callable)->Callable:
@@ -688,8 +729,8 @@ def _annotation_kind(func:Callable, name:str)->str:
     the launch has to honour. Name matching is by text because resolving a forward
     reference would import a module just to reject a call.
     """
-    annotations:Any = getattr(func, "__annotations__", None) or {}
-    annotation:Any = annotations.get(name, None)
+    annotations:object = getattr(func, "__annotations__", None) or {}
+    annotation:object = annotations.get(name, None)
     if annotation is None:
         return ""
     if isinstance(annotation, type):
@@ -706,7 +747,7 @@ def _annotation_kind(func:Callable, name:str)->str:
     return ""
 
 
-def _check_annotated_argument(func:Callable, name:str, value:Any, qualname:str) -> None:
+def _check_annotated_argument(func:Callable, name:str, value:object, qualname:str) -> None:
     """Reject an argument whose type contradicts the parameter's annotation.
 
     This is the argument check a reader expects from the signature they wrote: passing a
@@ -727,7 +768,7 @@ def _check_annotated_argument(func:Callable, name:str, value:Any, qualname:str) 
 
 
 def _bind_and_reject(func:Callable, signature:inspect.Signature,
-                     stub:Callable, args:Tuple[Any, ...],
+                     stub:Callable, args:Tuple[object, ...],
                      kwargs:Dict[str, object], skip_first:bool)->inspect.BoundArguments:
     """Let CPython bind the call, re-raising its TypeError from the caller's own frame.
 
@@ -754,7 +795,7 @@ def _caller_traceback(traceback:Optional[TracebackType])->Optional[TracebackType
         return None
     package_dir:str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     prefix:str = package_dir + os.sep
-    cursor:Any = traceback
+    cursor:object = traceback
     while cursor is not None:
         filename:str = cursor.tb_frame.f_code.co_filename
         # `-c`, stdin and exec'd code use a pseudo-filename that abspath() would resolve
@@ -780,8 +821,8 @@ def _user_frame_syntax_error(error:SyntaxError)->SyntaxError:
     package_root:str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     package_prefix:str = package_root + os.sep
 
-    keep:Any = None
-    cursor:Any = traceback
+    keep:object = None
+    cursor:object = traceback
     while cursor is not None:
         filename:str = cursor.tb_frame.f_code.co_filename
         # `-c`, stdin and exec'd code report a pseudo-filename that abspath() would resolve
@@ -803,7 +844,7 @@ def _user_frame_syntax_error(error:SyntaxError)->SyntaxError:
 _FRAME_MARKER = "__pygpgpu_body_frame__"
 
 
-def _is_body_stand_in(code:Any)->bool:
+def _is_body_stand_in(code:object)->bool:
     """True for the code object :func:`_body_frame` compiles.
 
     The stand-in is the only function this library creates inside the user's own file, so
@@ -840,7 +881,7 @@ def _body_frame(func:Callable, error:BaseException)->Optional[TracebackType]:
     # translator records the position on the exception instead (see _unpacking_error).
     lineno:int = int(getattr(error, "lineno", 0) or 0)
     if not lineno:
-        cursor:Any = error.__traceback__
+        cursor:object = error.__traceback__
         while cursor is not None:
             if os.path.abspath(cursor.tb_frame.f_code.co_filename) == os.path.abspath(filename):
                 lineno = cursor.tb_lineno
@@ -869,7 +910,7 @@ def _body_frame(func:Callable, error:BaseException)->Optional[TracebackType]:
     namespace:Dict[str, object] = {"_PYGPGPU_FRAME_EXCEPTION": error}
     try:
         exec(compile(source, filename, "exec"), namespace)  # noqa: S102 - a frame stand-in
-        frame_func:Any = namespace[func_name]
+        frame_func:object = namespace[func_name]
     except (SyntaxError, ValueError):
         return None
     try:
@@ -911,7 +952,7 @@ def _user_traceback(error:BaseException, func:Callable)->Optional[TracebackType]
         raise error.with_traceback(body)
     except BaseException as raised:
         # `raised.__traceback__` is this function's own frame followed by the stand-in.
-        head:Any = raised.__traceback__
+        head:object = raised.__traceback__
         return head.tb_next if head is not None and head.tb_next is not None else body
 
 
@@ -923,17 +964,17 @@ class _KernelCall(_KernelBase[_P]):
     which is what lets ``k["cuda"](a, out)`` suggest ``a``/``out`` just as ``k(a, out)`` does.
     """
 
-    def __init__(self, kernel:"PyKernel[_P]", instance:Any,
+    def __init__(self, kernel:"PyKernel[_P]", instance:object,
                  backend:Optional[str]=None, device:Optional[str]=None,
                  global_size:Optional[Tuple[int, ...]]=None, local_size:Optional[Tuple[int, ...]]=None):
         self._kernel:"PyKernel[_P]" = kernel
-        self._instance:Any = instance
+        self._instance:object = instance
         self._backend:Optional[str] = backend
         self._device:Optional[str] = device
         self._global_size:Optional[Tuple[int, ...]] = global_size
         self._local_size:Optional[Tuple[int, ...]] = local_size
 
-    def __getitem__(self, item:Any)->"_KernelCall[_P]":
+    def __getitem__(self, item:object)->"_KernelCall[_P]":
         if isinstance(item, str):
             backend, device = _parse_selector(item)
             return _KernelCall(
@@ -948,9 +989,13 @@ class _KernelCall(_KernelBase[_P]):
             (local_size if local_size is not None else self._local_size))
 
     @_native_argument_errors
+    # The result is the kernel body's value, produced on the device. `_R` is the
+    # decorated function's result type but is not bound on this class, so the
+    # honest annotation is the untyped one -- `object` would forbid unpacking a
+    # tuple return at the call site.
     def __call__(self, *args:_P.args, **kwargs:_P.kwargs)->Any:
-        instance:Any = self._instance
-        instance_arg:Optional[Any] = None
+        instance:object = self._instance
+        instance_arg:Optional[object] = None
         if self._kernel._is_method and instance is None:
             # class form: Klass.method["cuda"](instance, args...)
             if not args:
@@ -960,15 +1005,15 @@ class _KernelCall(_KernelBase[_P]):
             instance_arg = args[0]
             args = args[1:]
             instance = instance_arg
-        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+        call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
                                                     skip_first=self._kernel._is_method)
         return self._kernel._invoke(
             instance, call_args, self._backend, self._device, self._global_size, self._local_size)
 
-    def _launch(self, launch:str, args:Tuple[Any, ...],
-                kwargs:Optional[Dict[str, object]]=None)->Any:
+    def _launch(self, launch:str, args:Tuple[object, ...],
+                kwargs:Optional[Dict[str, object]]=None)->object:
         """Shared body of the three launch styles, honouring the bracket selectors."""
-        instance:Any = self._instance
+        instance:object = self._instance
         if self._kernel._is_method and instance is None:
             if not args:
                 raise TypeError(
@@ -976,7 +1021,7 @@ class _KernelCall(_KernelBase[_P]):
                     f"as the first argument")
             instance = args[0]
             args = args[1:]
-        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args,
+        call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args,
                                                     kwargs or {},
                                                     skip_first=self._kernel._is_method)
         return self._kernel._invoke(
@@ -984,12 +1029,12 @@ class _KernelCall(_KernelBase[_P]):
             self._global_size, self._local_size, launch=launch)
 
     @_native_argument_errors
-    def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
+    def submit(self, *args:object, **kwargs:object)->concurrent.futures.Future:
         """Non-blocking launch of the bracketed form, e.g. ``k["cuda"].submit(...)``."""
         return self._launch("submit", args, kwargs)
 
     @_native_argument_errors
-    def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
+    def async_call(self, *args:object, **kwargs:object)->asyncio.Future:
         """Non-blocking asyncio launch of the bracketed form, e.g. ``k["cuda"].async_call(...)``."""
         return self._launch("async", args, kwargs)
 
@@ -1006,31 +1051,35 @@ class _BoundKernelMethod(_KernelBase[_P]):
     ``PyKernel`` itself.
     """
 
-    def __init__(self, kernel:"PyKernel[_P]", instance:Any):
+    def __init__(self, kernel:"PyKernel[_P]", instance:object):
         self._kernel:"PyKernel[_P]" = kernel
-        self._instance:Any = instance
+        self._instance:object = instance
 
-    def __getitem__(self, item:Any)->Any:
+    def __getitem__(self, item:object)->object:
         return _KernelCall(self._kernel, self._instance)[item]
 
     @_native_argument_errors
-    def __call__(self, *args:Any, **kwargs:Any)->Any:
-        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+    # The result is the kernel body's value, produced on the device. `_R` is the
+    # decorated function's result type but is not bound on this class, so the
+    # honest annotation is the untyped one -- `object` would forbid unpacking a
+    # tuple return at the call site.
+    def __call__(self, *args:object, **kwargs:object)->Any:
+        call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
                                                     skip_first=True)
         return self._kernel._invoke(self._instance, call_args, None, None, None, None)
 
     @_native_argument_errors
-    def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
+    def submit(self, *args:object, **kwargs:object)->concurrent.futures.Future:
         """Non-blocking launch: ``instance.kernel_method.submit(...)``."""
-        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+        call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
                                                     skip_first=True)
         return self._kernel._invoke(self._instance, call_args, None, None, None, None,
                                     launch="submit")
 
     @_native_argument_errors
-    def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
+    def async_call(self, *args:object, **kwargs:object)->asyncio.Future:
         """Non-blocking asyncio launch: ``instance.kernel_method.async_call(...)``."""
-        call_args:Tuple[Any, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+        call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
                                                     skip_first=True)
         return self._kernel._invoke(self._instance, call_args, None, None, None, None,
                                     launch="async")
@@ -1060,7 +1109,7 @@ class PyKernel(_KernelBase[_P]):
 
     def __init__(self, func:Callable[..., Any], backend:str, explicit_backend:bool=False,
                  domain:Optional[str]=None,
-                 type_map:Optional[Dict[str, Any]]=None):
+                 type_map:Optional[Dict[str, object]]=None):
         if isinstance(func, classmethod):
             raise SyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)") from None
         if isinstance(func, staticmethod):
@@ -1094,39 +1143,43 @@ class PyKernel(_KernelBase[_P]):
         # at call time rather than now. The attribute set is therefore collected in
         # _invoke; the decoration-time body scan this used to cache is gone.
 
-        self._cache:Dict[str, Tuple[Any, List[Tuple[int, int]], List[Tuple[int, int]], List[int]]] = {}
+        self._cache:Dict[str, Tuple[object, List[Tuple[int, int]], List[Tuple[int, int]], List[int]]] = {}
         # The python backend executes the body as-is, so there is nothing to specialize or
         # cache: one runner per kernel object serves every call.
-        self._python_runner:Any = None
+        self._python_runner:object = None
         self._source_sig:str = self._source_signature()
 
     @overload
     def __get__(self, obj:None, objtype:Optional[type]=None)->"PyKernel[_P]": ...
     @overload
     def __get__(self, obj:object, objtype:Optional[type]=None)->_BoundKernelMethod[_P]: ...
-    def __get__(self, obj:Any, objtype:Optional[type]=None)->Any:
+    def __get__(self, obj:object, objtype:Optional[type]=None)->object:
         # descriptor protocol: instance access returns the bound form, class access/static methods return self
         if obj is None or not self._is_method:
             return self
         return _BoundKernelMethod(self, obj)
 
-    def __getitem__(self, item:Any)->_KernelCall[_P]:
+    def __getitem__(self, item:object)->_KernelCall[_P]:
         return _KernelCall(self, None)[item]
 
     @_native_argument_errors
-    def __call__(self, *args:Any, **kwargs:Any)->Any:
+    # The result is the kernel body's value, produced on the device. `_R` is the
+    # decorated function's result type but is not bound on this class, so the
+    # honest annotation is the untyped one -- `object` would forbid unpacking a
+    # tuple return at the call site.
+    def __call__(self, *args:object, **kwargs:object)->Any:
         if self._is_method:
             if not args:
                 raise TypeError(
                     f"{self.__name__}() is an instance method; call it on an instance "
                     f"or pass the instance as the first argument")
-            call_args:Tuple[Any, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
+            call_args:Tuple[object, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
             return self._invoke(args[0], call_args, None, None, None, None)
         call_args = _bind_arguments(self.raw_func, args, kwargs)
         return self._invoke(None, call_args, None, None, None, None)
 
     @_native_argument_errors
-    def submit(self, *args:Any, **kwargs:Any)->concurrent.futures.Future:
+    def submit(self, *args:object, **kwargs:object)->concurrent.futures.Future:
         """Launch without waiting, returning a ``concurrent.futures.Future``.
 
         Same arguments and same backend/work-size selection as calling the kernel
@@ -1141,13 +1194,13 @@ class PyKernel(_KernelBase[_P]):
                 raise TypeError(
                     f"{self.__name__}() is an instance method; call it on an instance "
                     f"or pass the instance as the first argument")
-            call_args:Tuple[Any, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
+            call_args:Tuple[object, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
             return self._invoke(args[0], call_args, None, None, None, None, launch="submit")
         call_args = _bind_arguments(self.raw_func, args, kwargs)
         return self._invoke(None, call_args, None, None, None, None, launch="submit")
 
     @_native_argument_errors
-    def async_call(self, *args:Any, **kwargs:Any)->asyncio.Future:
+    def async_call(self, *args:object, **kwargs:object)->asyncio.Future:
         """Launch without waiting, returning an ``asyncio.Future``.
 
         The asyncio counterpart of ``submit``; use ``await`` on the result. The
@@ -1159,15 +1212,15 @@ class PyKernel(_KernelBase[_P]):
                 raise TypeError(
                     f"{self.__name__}() is an instance method; call it on an instance "
                     f"or pass the instance as the first argument")
-            call_args:Tuple[Any, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
+            call_args:Tuple[object, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
             return self._invoke(args[0], call_args, None, None, None, None, launch="async")
         call_args = _bind_arguments(self.raw_func, args, kwargs)
         return self._invoke(None, call_args, None, None, None, None, launch="async")
 
-    def _invoke(self, instance:Any, args:Tuple[Any, ...],
+    def _invoke(self, instance:object, args:Tuple[object, ...],
                 backend_sel:Optional[str], device_sel:Optional[str],
                 global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
-                launch:str = "call")->Any:
+                launch:str = "call")->object:
         try:
             return self._invoke_inner(instance, args, backend_sel, device_sel,
                                       global_size, local_size, launch)
@@ -1197,7 +1250,7 @@ class PyKernel(_KernelBase[_P]):
             caught.__traceback__ = _user_traceback(caught, self.raw_func)
             raise caught from None
 
-    def _sync_device(self, backend:str, device_obj:Any)->None:
+    def _sync_device(self, backend:str, device_obj:object)->None:
         """Wait until every launch this backend has queued has finished, callbacks included.
 
         The statements between two passes read shared slots on the host; the copies that
@@ -1217,13 +1270,13 @@ class PyKernel(_KernelBase[_P]):
             device_obj.default_context.sync()
 
     def _run_host_region(self, statements:List[ast.stmt],
-                         args:Tuple[Any, ...], instance:Any,
-                         carried_slots:Dict[str, Any], gap_slots:Dict[str, Any],
-                         globalns:Optional[Dict[str, Any]]=None,
-                         localns:Optional[Dict[str, Any]]=None,
-                         created_objects:Optional[Dict[str, Any]]=None,
-                         outer_state:Optional[Dict[str, Any]]=None,
-                         writable_outer:Optional[Dict[str, np.ndarray]]=None)->Any:
+                         args:Tuple[object, ...], instance:object,
+                         carried_slots:Dict[str, object], gap_slots:Dict[str, object],
+                         globalns:Optional[Dict[str, object]]=None,
+                         localns:Optional[Dict[str, object]]=None,
+                         created_objects:Optional[Dict[str, object]]=None,
+                         outer_state:Optional[OuterState]=None,
+                         writable_outer:Optional[Dict[str, np.ndarray]]=None)->object:
         """Run one region of python statements on the host, and return a tail `return`.
 
         A region is the statements between two passes, or after the last one. A statement
@@ -1255,7 +1308,7 @@ class PyKernel(_KernelBase[_P]):
                 localns.setdefault(name, cell.cell_contents)
             except ValueError:
                 continue                  # an empty cell: python would raise too
-        for slot in (outer_state or {}).get("writable", []):
+        for slot in (outer_state["writable"] if outer_state else []):
             localns[slot["name"]] = slot["buffer"][0]
         for name, buffer in (writable_outer or {}).items():
             localns[name] = buffer[0]
@@ -1273,7 +1326,7 @@ class PyKernel(_KernelBase[_P]):
         for statement in statements:
             for node in ast.walk(statement):
                 if isinstance(node, ast.Name) and node.id in localns:
-                    value:Any = localns[node.id]
+                    value:object = localns[node.id]
                     if isinstance(value, gnp):
                         value.to_host()
                         if value not in touched:
@@ -1294,7 +1347,7 @@ class PyKernel(_KernelBase[_P]):
             module:ast.Module = ast.Module(body=[statement], type_ignores=[])
             exec(compile(module, "<kernel gap>", "exec"), globalns, localns)  # noqa: S102 - the kernel source itself
             if target is not None and target in localns:
-                value:Any = localns[target]
+                value:object = localns[target]
                 if isinstance(value, gnp) and value not in touched:
                     touched.append(value)
                 elif isinstance(value, np.ndarray) and value.ndim > 0:
@@ -1323,10 +1376,10 @@ class PyKernel(_KernelBase[_P]):
                     globalns, localns)
         return None
 
-    def _invoke_inner(self, instance:Any, args:Tuple[Any, ...],
+    def _invoke_inner(self, instance:object, args:Tuple[object, ...],
                       backend_sel:Optional[str], device_sel:Optional[str],
                       global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
-                      launch:str = "call")->Any:
+                      launch:str = "call")->object:
         if backend_sel is not None:
             backend:str = backend_sel
         elif getattr(self, "_explicit_backend", False):
@@ -1343,7 +1396,7 @@ class PyKernel(_KernelBase[_P]):
         self.backend = backend
         if backend == "python":
             return self._invoke_python(instance, args, device_sel, global_size, local_size, launch)
-        device_obj:Any
+        device_obj:object
         device_key:str
         device_obj, device_key = _resolve_device(backend, device_sel)
         device_max_group, device_max_items = device_limits(device_obj)
@@ -1352,7 +1405,7 @@ class PyKernel(_KernelBase[_P]):
         self_attrs:List[str] = []
         owner:Optional[type] = None
         self_struct_members:Dict[str, str] = {}
-        self_struct_type:Any = None
+        self_struct_type:object = None
         if self._is_method:
             if instance is None:
                 raise TypeError(f"{self.__name__}() requires an instance")
@@ -1367,7 +1420,7 @@ class PyKernel(_KernelBase[_P]):
                     raise SyntaxError(
                         f"instance of {owner.__name__} has no attribute '{name}' "
                         f"required by kernel {self.__name__}") from None
-                value:Any = getattr(instance, name)
+                value:object = getattr(instance, name)
                 if callable(value) and not isinstance(value, np.ndarray):
                     raise SyntaxError(
                         f"self.{name} is a function, not a value: a function cannot be passed "
@@ -1405,7 +1458,7 @@ class PyKernel(_KernelBase[_P]):
                 # numpy record view uses a sub-array form that would misread the bytes).
                 # A body that assigns `self.<attr> = ...` writes through the device buffer,
                 # and the host copies the members home afterwards.
-                holder:Any = self_struct()
+                holder:object = self_struct()
                 for name in struct_attrs:
                     setattr(holder, name, getattr(instance, name))
                 self_attrs = array_attrs
@@ -1425,7 +1478,8 @@ class PyKernel(_KernelBase[_P]):
         object_binding:ObjectBinding = ObjectBinding()
         args = convert_object_arguments(self.raw_func, args, self._resolve_global,
                                         self._self_param, object_binding,
-                                        self_value=instance)
+                                        self_value=instance,
+                                        type_map=self._type_map)
         arg_types:List[DeviceType] = [infer_ctype(a, self._type_map) for a in args]
         if not self_struct_members:
             self_types = []
@@ -1477,8 +1531,8 @@ class PyKernel(_KernelBase[_P]):
         # kernel is the main translator's own).
         phase_claims:List[bool] = list(launch_meta.get("phase_claims") or [])
 
-        outer_writable:List[Dict[str, Any]] = []
-        carried_slots:Dict[str, Any] = {}
+        outer_writable:List[Dict[str, object]] = []
+        carried_slots:Dict[str, object] = {}
         # The names `full` holds, in order: the caller's arguments, then the carried slots.
         # `build_phase_args` aligns each phase's signature against these names.
         # The `_self_<attr>` parameters sit in `full` right after the caller's arguments,
@@ -1516,12 +1570,12 @@ class PyKernel(_KernelBase[_P]):
         # Outer-scope values are read before the launch arguments are built: a shape
         # source can name an outer array, and `full` is indexed by the device parameter
         # order (see _build_launch_args), so the outer values have to be part of it.
-        outer_state:Dict[str, Any] = self._bind_outer_values(outer_vars, backend)
+        outer_state:OuterState = self._bind_outer_values(outer_vars, backend)
         # Objects the kernel body creates are built here, on every call, exactly as the
         # interpreter would at that point in the body. They travel as trailing parameters.
         # A method's creation may read `self` (`np.zeros((self.height, ...))`), so the
         # instance is bound too.
-        created:Dict[str, Any] = _host_created_values(
+        created:Dict[str, object] = _host_created_values(
             self.raw_func, tuple(args), instance,
             required_created=list(launch_meta.get("kernel_created_all") or []))[0]
         # A statement between two magic loops runs on the host, so its value is computed here
@@ -1530,7 +1584,7 @@ class PyKernel(_KernelBase[_P]):
         # itself, exactly like any other created array.
         # One shared namespace per gap region: a later region reads what an earlier one
         # assigned, the way consecutive statements of a function body do.
-        gap_namespaces:List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        gap_namespaces:List[Tuple[Dict[str, object], Dict[str, object]]] = []
         for _ in (launch_meta.get("phase_gaps") or []):
             region_globals:Dict[str, object] = dict(self.raw_func.__globals__)
             region_locals:Dict[str, object] = {}
@@ -1542,7 +1596,7 @@ class PyKernel(_KernelBase[_P]):
             gap_namespaces.append((region_globals, region_locals))
         gap_names:List[str] = list(launch_meta.get("gap_names") or [])
         created_all:List[str] = list(launch_meta.get("kernel_created_all") or [])
-        gap_slots:Dict[str, Any] = {}
+        gap_slots:Dict[str, object] = {}
         for name, value in _host_scalar_values(
                 self.raw_func, [n for n in gap_names if n not in created_all],
                 tuple(args), instance).items():
@@ -1551,12 +1605,12 @@ class PyKernel(_KernelBase[_P]):
             gap_slots[name] = slot
         # The created objects the device signature declares: the aligned prefix picks the
         # real array from here rather than a scalar slot.
-        created_objects:Dict[str, Any] = {name: created[name] for name in created_all
+        created_objects:Dict[str, object] = {name: created[name] for name in created_all
                                           if name in created}
 
         outer_writable = list(outer_state["writable"])
         runtime_values:List[object] = list(outer_state["full"]) + _created_arguments(created)
-        return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
+        return_state:Dict[str, object] = (self._alloc_return_slots(returns)
                                       if returns else {})
         # Whether this launch's first kernel declares the return claim/site words. A
         # single-phase body has one kernel -- the main translator's -- and this is its own
@@ -1591,7 +1645,7 @@ class PyKernel(_KernelBase[_P]):
             # value only one pass reads, or a carried scalar this pass writes). Align the
             # values to the signature rather than assuming the prefix matches it.
             prefix_values:List[object] = list(full[:own_count])
-            by_name:Dict[str, Any] = dict(zip(prefix_names, prefix_values))
+            by_name:Dict[str, object] = dict(zip(prefix_names, prefix_values))
             # Only the names declared *before* the shape extents participate in the aligned
             # prefix: outer-scope values and host-created objects are declared after them and
             # the blocks below append those, so including them here would shift the extents.
@@ -1884,9 +1938,9 @@ class PyKernel(_KernelBase[_P]):
         # The statements after the last loop are python: they run once, on the host, now that
         # every work item has finished -- the same moment python would run them.
         tail_writable:Dict[str, np.ndarray] = {
-            entry["name"]: entry["buffer"] for entry in outer_state.get("writable", [])} \
+            entry["name"]: entry["buffer"] for entry in outer_state["writable"]} \
             if outer_state else {}
-        tail_result:Any = self._run_host_region(
+        tail_result:object = self._run_host_region(
             list(launch_meta.get("body_tail") or launch_meta.get("phase_tail") or []),
             args, instance,
             carried_slots, gap_slots, created_objects=created_objects,
@@ -1895,11 +1949,11 @@ class PyKernel(_KernelBase[_P]):
             unpack(packed_value)
         if return_state and int(return_state["claim"][0]):
             # A work item reached an in-loop return first: python's "first return wins".
-            result:Any = self._finish_returns(return_state, returns, full, created)
+            result:object = self._finish_returns(return_state, returns, full, created)
         elif tail_result is not None:
-            result:Any = tail_result
+            result:object = tail_result
         else:
-            result:Any = (self._finish_returns(return_state, returns, full, created)
+            result:object = (self._finish_returns(return_state, returns, full, created)
                           if return_state else None)
         self._write_back_outer(outer_state)
         if object_binding.written:
@@ -1908,7 +1962,8 @@ class PyKernel(_KernelBase[_P]):
 
     # ---------- outer-scope variables ----------
 
-    def _bind_outer_values(self, outer_vars:Dict[str, Any], backend:str)->Dict[str, Any]:
+    def _bind_outer_values(self, outer_vars:Dict[str, object],
+                           backend:str)->OuterState:
         """The launch arguments carrying this call's outer-scope values.
 
         A read-only outer variable is passed by value, refreshed on every call, so a
@@ -1921,10 +1976,10 @@ class PyKernel(_KernelBase[_P]):
         """
         args:List[object] = []
         full:List[object] = []
-        writable:List[Dict[str, Any]] = []
+        writable:List[Dict[str, object]] = []
         for name, outer in outer_vars.items():
             kind:str = outer["kind"]
-            value:Any = self._read_outer(name, kind, outer.get("scope"))
+            value:object = self._read_outer(name, kind, outer.get("scope"))
             if is_ptr(outer["type"]):
                 if value is None:
                     raise ValueError(
@@ -1933,7 +1988,7 @@ class PyKernel(_KernelBase[_P]):
                 full.append(value)
                 continue
             if not outer["writable"]:
-                converted:Any = _kernel_scalar_argument(value, outer["type"])
+                converted:object = _kernel_scalar_argument(value, outer["type"])
                 args.append(converted)
                 full.append(converted)
                 continue
@@ -1946,7 +2001,7 @@ class PyKernel(_KernelBase[_P]):
         return {"args": args, "writable": writable, "full": full}
 
     def _read_outer(self, name:str, kind:str,
-                    scope:Optional[Dict[str, Any]] = None)->Any:
+                    scope:Optional[Dict[str, object]] = None)->object:
         """The current value of an outer name, read the way python would resolve it.
 
         ``scope`` is the namespace the translator resolved the name in, which is the
@@ -1955,7 +2010,7 @@ class PyKernel(_KernelBase[_P]):
         call, which is why the namespace is carried rather than the value.
         """
         if kind == "closure":
-            cells:Dict[str, Any] = {}
+            cells:Dict[str, object] = {}
             for cell_name, cell in zip(self.raw_func.__code__.co_freevars,
                                        self.raw_func.__closure__ or ()):
                 cells[cell_name] = cell
@@ -1967,13 +2022,13 @@ class PyKernel(_KernelBase[_P]):
             return scope.get(name, None)
         return self.raw_func.__globals__.get(name, None)
 
-    def _write_back_outer(self, outer_state:Dict[str, Any])->None:
+    def _write_back_outer(self, outer_state:OuterState)->None:
         """Copy a declared outer scalar's final value back into its scope."""
-        for entry in outer_state.get("writable", ()):
-            value:Any = _outer_scope_value(entry["buffer"][0], entry["type"])
+        for entry in outer_state["writable"]:
+            value:object = _outer_scope_value(entry["buffer"][0], entry["type"])
             self._store_outer(entry["name"], entry["kind"], value)
 
-    def _store_outer(self, name:str, kind:str, value:Any)->None:
+    def _store_outer(self, name:str, kind:str, value:object)->None:
         """Assign an outer name, through its closure cell or the module globals."""
         if kind == "closure":
             for cell_name, cell in zip(self.raw_func.__code__.co_freevars,
@@ -1984,7 +2039,7 @@ class PyKernel(_KernelBase[_P]):
             raise ValueError(f"outer variable '{name}' is not in the kernel's closure")
         self.raw_func.__globals__[name] = value
 
-    def _alloc_return_slots(self, returns:Dict[str, Any])->Dict[str, Any]:
+    def _alloc_return_slots(self, returns:ReturnSlots)->ReturnState:
         """One device buffer per value slot, plus the shared claim and site words.
 
         Every buffer is zero-initialised: the claim word then starts unclaimed, so a
@@ -1995,9 +2050,9 @@ class PyKernel(_KernelBase[_P]):
                 "claim": np.zeros(1, dtype=np.int32),
                 "site": np.zeros(1, dtype=np.int32)}
 
-    def _finish_returns(self, return_state:Dict[str, Any],
-                        returns:Dict[str, Any], full:List[object],
-                        created:Optional[Dict[str, Any]]=None)->Any:
+    def _finish_returns(self, return_state:ReturnState,
+                        returns:ReturnSlots, full:List[object],
+                        created:Optional[Dict[str, object]]=None)->object:
         """Rebuild the python result of a finished launch.
 
         The winning return site decides the shape: `return a, b` gives a tuple,
@@ -2012,7 +2067,7 @@ class PyKernel(_KernelBase[_P]):
         if not int(return_state["claim"][0]):
             return None
         site:int = int(return_state["site"][0]) - 1
-        layout:Dict[str, Any] = returns["sites"][site]
+        layout:ReturnSiteLayout = returns["sites"][site]
         if not layout["positions"]:
             # The winning site was a bare `return` (or `return None`).
             return None
@@ -2031,7 +2086,7 @@ class PyKernel(_KernelBase[_P]):
                 # what the caller passed -- and what the body may have updated. A numpy
                 # record (`np.void`) is a parameter too, but indexing a record reads its
                 # first *field*, so only a real 0-d/1-element array is unwrapped.
-                shared_slot:Any = full[returns["arg_indices"][entry["reused"]]]
+                shared_slot:object = full[returns["arg_indices"][entry["reused"]]]
                 if isinstance(shared_slot, np.void):
                     values.append(shared_slot)
                 else:
@@ -2040,17 +2095,17 @@ class PyKernel(_KernelBase[_P]):
                     except (IndexError, TypeError):
                         values.append(shared_slot)
             else:
-                dtype:Any = returns["slot_types"][entry["slot"]]
+                dtype:object = returns["slot_types"][entry["slot"]]
                 kind:str = returns["slot_kinds"][entry["slot"]]
                 values.append(_return_value(return_state["buffers"][entry["slot"]][0], dtype, kind))
         return tuple(values) if layout["is_tuple"] else values[0]
 
-    def _with_returns(self, future:Any,
-                      return_state:Dict[str, Any],
-                      returns:Optional[Dict[str, Any]],
+    def _with_returns(self, future:object,
+                      return_state:Dict[str, object],
+                      returns:Optional[Dict[str, object]],
                       full:List[object],
-                      outer_state:Optional[Dict[str, Any]]=None,
-                      created:Optional[Dict[str, Any]]=None)->Any:
+                      outer_state:Optional[Dict[str, object]]=None,
+                      created:Optional[Dict[str, object]]=None)->object:
         """Wrap an asynchronous launch so its future resolves to the returned value.
 
         The backend future resolves once every read-back has completed (see the kernel
@@ -2061,15 +2116,15 @@ class PyKernel(_KernelBase[_P]):
         otherwise completed in place on whatever loop the backend future uses.
         """
         is_asyncio:bool = isinstance(future, asyncio.Future)
-        deliver:Any = concurrent.futures.Future()
+        deliver:object = concurrent.futures.Future()
         try:
-            caller_loop:Any = asyncio.get_running_loop()
+            caller_loop:object = asyncio.get_running_loop()
         except RuntimeError:
             caller_loop = None
         if is_asyncio:
             deliver = caller_loop.create_future() if caller_loop is not None else future
 
-        def settle(*_args:Any)->None:
+        def settle(*_args:object)->None:
             error:Optional[BaseException] = None
             try:
                 error = future.exception()
@@ -2104,10 +2159,10 @@ class PyKernel(_KernelBase[_P]):
             future.add_done_callback(settle)
         return deliver
 
-    def _invoke_python(self, instance:Any, args:Tuple[Any, ...],
+    def _invoke_python(self, instance:object, args:Tuple[object, ...],
                        device_sel:Optional[str],
                        global_size:Optional[Tuple[int, ...]], local_size:Optional[Tuple[int, ...]],
-                       launch:str)->Any:
+                       launch:str)->object:
         """Run the body in the Python interpreter (no translation, no device).
 
         The backend is device-free, so a device selector in the bracket is rejected
@@ -2122,7 +2177,7 @@ class PyKernel(_KernelBase[_P]):
                 f"has no meaning; use {self.__name__}[\"python\"]")
         if self._is_method and instance is None:
             raise TypeError(f"{self.__name__}() requires an instance")
-        runner:Any = self._python_runner
+        runner:object = self._python_runner
         if runner is None:
             runner = PythonKernel(self.raw_func, self._is_method, self._self_param,
                                   domain=self._domain or "")
@@ -2161,7 +2216,7 @@ class PyKernel(_KernelBase[_P]):
             source = ""
         return short_hash(f"{source}\nbackend={self.backend}\ntypes={self._type_map_key()}")
 
-    def _resolve_global(self, name:str)->Any:
+    def _resolve_global(self, name:str)->object:
         """Resolve a name the kernel body reads from outside the function.
 
         A closure cell takes precedence over a module global, exactly as python resolves
@@ -2210,7 +2265,7 @@ class PyKernel(_KernelBase[_P]):
             payload += "|" + declaration
         return f"{base}_{short_hash(payload)}"
 
-    def _bind_images(self, full_values:Any, backend:str)->None:
+    def _bind_images(self, full_values:List[object], backend:str)->None:
         """Create the device objects for every Image argument, before compilation.
 
         Each backend decides what an image becomes (a texture for reading, a surface
@@ -2230,7 +2285,7 @@ class PyKernel(_KernelBase[_P]):
                 value.bind_cuda()
             # opencl binds at launch time; nothing to do here
 
-    def _apply_declared_domain(self, translator:Any)->None:
+    def _apply_declared_domain(self, translator:object)->None:
         """Record the array `@kernel(domain=...)` named as the iteration domain.
 
         The parameter has to exist and be an array: only a pointer carries the shape
@@ -2269,9 +2324,9 @@ class PyKernel(_KernelBase[_P]):
 
     def _compile(self, args:List[object], arg_types:List[object], self_types:List[object],
                  self_attrs:List[str], owner:Optional[type], sig:str,
-                 backend:str, device_obj:Any, instance:Any=None,
+                 backend:str, device_obj:object, instance:object=None,
                  self_struct_members:Optional[Dict[str, str]]=None,
-                 self_struct_type:Any=None)->Tuple[Any, List[str]]:
+                 self_struct_type:object=None)->Tuple[object, List[str]]:
         if backend in ("cuda", "hip"):
             for t in list(arg_types) + list(self_types):
                 base:str = (t[1] if isinstance(t, tuple) else t)
@@ -2281,10 +2336,10 @@ class PyKernel(_KernelBase[_P]):
                         "NVRTC on this machine cannot resolve cuda_fp16.h; use np.float32 instead") from None
 
         c_name:str = self._c_kernel_name(sig, backend)
-        device_cache:Dict[Any, Any] = {}
+        device_cache:Dict[object, object] = {}
         # self_types leads with the receiver struct when the receiver travels as one, so
         # the attribute map pairs the array attributes with the types after it.
-        self_attr_types:Dict[str, Any] = dict(zip(
+        self_attr_types:Dict[str, object] = dict(zip(
             self_attrs, self_types[1:] if self_struct_members else self_types))
 
         # hip accepts CUDA syntax (threadIdx/atomicAdd/make_float4 etc.), so codegen goes through cuda
@@ -2351,7 +2406,7 @@ class PyKernel(_KernelBase[_P]):
         # the old stamp), so the digest is what actually decides.
         source_digest:str = source_paths.python_source_digest(kernel_source_file)
 
-        def module_of(entry:Dict[str, Any])->str:
+        def module_of(entry:Dict[str, object])->str:
             """The python file a device function came from, spelled as a cache path."""
             return source_paths.source_path(kernel_source_file, entry.get("source_file", ""),
                                             backend)
@@ -2359,11 +2414,11 @@ class PyKernel(_KernelBase[_P]):
         # Device helper functions are emitted in dependency order: C requires a callee to be
         # declared before its caller, and the cache is filled depth-first (a nested helper
         # is finished *after* the helper that calls it). Emit leaves first.
-        ordered_entries:List[Dict[str, Any]] = _dependency_order(device_cache)
-        own_entries:List[Dict[str, Any]] = [
+        ordered_entries:List[Dict[str, object]] = _dependency_order(device_cache)
+        own_entries:List[Dict[str, object]] = [
             entry for entry in ordered_entries
             if module_of(entry) == module_of({"source_file": kernel_source_file})]
-        foreign_entries:Dict[str, List[Dict[str, Any]]] = {}
+        foreign_entries:Dict[str, List[Dict[str, object]]] = {}
         for entry in ordered_entries:
             path:str = module_of(entry)
             if path == module_of({"source_file": kernel_source_file}):
@@ -2574,7 +2629,7 @@ class PyKernel(_KernelBase[_P]):
                 phase_param_names.append(list(dict(translator.params)))
                 phase_claims.append(bool(translator._claims_on_device))
 
-        kernel:Any = kernels[0]
+        kernel:object = kernels[0]
 
         # Atomic targets: static analysis cannot recognize pointer-cast writes, so force them to writable
         from ..constants import KernelFlags
@@ -2590,14 +2645,14 @@ class PyKernel(_KernelBase[_P]):
         # write-only argument is still uploaded, applied to a slot the library owns rather
         # than to the caller's data.
         for slot_name in (translator.RETURN_CLAIM, translator.RETURN_SITE):
-            slot_info:Any = kernel._args.get(slot_name)
+            slot_info:object = kernel._args.get(slot_name)
             if slot_info is not None:
                 slot_info.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed)
 
         param_index:Dict[str, int] = {name: i for i, (name, _) in enumerate(translator.params)}
         # A multi-phase body is translated per phase, so the main translator indexes nothing;
         # the first phase's shapes are the ones this launch derives its work size from.
-        shapes_owner:Any = (translator.phase_translators[0]
+        shapes_owner:object = (translator.phase_translators[0]
                             if translator.phase_translators else translator)
         shape_index:Dict[str, int] = {
             name: position for position, (name, _) in enumerate(shapes_owner.params)}
@@ -2631,7 +2686,7 @@ class PyKernel(_KernelBase[_P]):
         # Return slots: one per distinct value type any return site writes, plus the
         # claim/site words. `arg_indices` maps an array a return site names to its
         # position in the launch arguments, so the result can hand back that same object.
-        returns:Dict[str, Any] = {
+        returns:Dict[str, object] = {
             "slot_types": [translator.return_slot_dtype(index)
                            for index in range(len(translator.return_layout))],
             "slot_kinds": [entry["type"] for entry in translator.return_layout],
@@ -2717,11 +2772,11 @@ class PyKernel(_KernelBase[_P]):
         source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
         return source_paths.cache_root(source_file, backend)
 
-    def _backend_compile(self, source_path:str, c_name:str, backend:str, device_obj:Any,
+    def _backend_compile(self, source_path:str, c_name:str, backend:str, device_obj:object,
                          linked:bool=False):
         if backend == "opencl":
             from ..opencl.oop.program import Program
-            program:Any = Program(device_obj.platform.default_context, file_name=source_path)
+            program:object = Program(device_obj.platform.default_context, file_name=source_path)
             return program.kernels[c_name]
 
         if backend == "hip":
@@ -2729,12 +2784,12 @@ class PyKernel(_KernelBase[_P]):
             from ..hip.oop.hip_compiler import HipCompiler
             device_obj.default_context.make_current()
             compiler = HipCompiler(source_path)
-            program:Any = HIPProgram(source_path, compiler=compiler)
+            program:object = HIPProgram(source_path, compiler=compiler)
             return program.kernels[c_name]
 
         if backend == "metal":
             from ..metal.oop.program import Program as MetalProgram
-            program:Any = MetalProgram(source_path, device=device_obj)
+            program:object = MetalProgram(source_path, device=device_obj)
             return program.kernels[c_name]
 
         from ..cuda.oop.program import Program as CUProgram
@@ -2747,7 +2802,7 @@ class PyKernel(_KernelBase[_P]):
             # a source pays for it; everything else stays on NVRTC.
             return _compile_linked_cuda(source_path, c_name, device_obj)
 
-        program:Any = CUProgram(source_path)
+        program:object = CUProgram(source_path)
         return program.kernels[c_name]
 
     # ---------- launch ----------
@@ -2806,18 +2861,18 @@ class _LinkedImage:
     which is parsed from the source the same way NVRTC's parser would.
     """
 
-    def __init__(self, module:Any, kernel_infos:Dict[str, Any],
-                 context:Any, device:Any)->None:
+    def __init__(self, module:object, kernel_infos:Dict[str, object],
+                 context:object, device:object)->None:
         self.id = module
-        self.kernel_infos:Dict[str, Any] = kernel_infos
+        self.kernel_infos:Dict[str, object] = kernel_infos
         # `Kernel` reaches back into its program for these during a launch, so a linked
         # build has to answer them like an NVRTC one does.
-        self.context:Any = context
-        self.device:Any = device
+        self.context:object = context
+        self.device:object = device
         self.prefix:str = "nvcc"
 
 
-def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->Any:
+def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->object:
     """Compile a source that launches a kernel from device code, through nvcc.
 
     NVRTC cannot produce a loadable image for such a source: the child kernel is resolved
@@ -2905,9 +2960,9 @@ def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->Any:
     # binds parameters identically; only the image itself is nvcc's.
     parser:ProgramParser = ProgramParser()
     parser.parse(source_path, None, None, None)
-    kernel_infos:Dict[str, Any] = dict(parser.kernel_infos)
-    program:Any = _LinkedImage(module, kernel_infos, device_obj.default_context, device_obj)
-    kernel:Any = Kernel(program, c_name)
+    kernel_infos:Dict[str, object] = dict(parser.kernel_infos)
+    program:object = _LinkedImage(module, kernel_infos, device_obj.default_context, device_obj)
+    kernel:object = Kernel(program, c_name)
     # `Kernel` starts with an empty argument layout and a `Program` fills it while fetching
     # its kernels; a linked build has no such program, so the parsed layout is handed over.
     kernel.args = kernel_infos[c_name].args
@@ -2915,7 +2970,7 @@ def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->Any:
     return kernel
 
 
-def _check_image_address(image:Any, backend:str)->None:
+def _check_image_address(image:object, backend:str)->None:
     """Refuse an address mode this backend cannot honour.
 
     Only CLAMP is portable. WRAP and MIRROR are defined and implemented in the host
@@ -2969,7 +3024,7 @@ def _image_sampler(image:"Image")->object:
                      filter_mode=filter_mode)
 
 
-def _outer_slot_dtype(t:DeviceType)->np.dtype[Any]:
+def _outer_slot_dtype(t:DeviceType)->"np.dtype[Any]":
     """The numpy dtype of a one-element buffer carrying a declared outer scalar."""
     return np.dtype(_SCALAR_SLOT_DTYPES[t])
 
@@ -2994,7 +3049,7 @@ def _outer_scope_value(raw:object, t:DeviceType)->object:
     return float(raw)
 
 
-_SCALAR_SLOT_DTYPES:Dict[str, Any] = {
+_SCALAR_SLOT_DTYPES:Dict[str, object] = {
     "bool": np.uint8,
     "char": np.int8,
     "uchar": np.uint8,
@@ -3016,7 +3071,7 @@ _SCALAR_SLOT_DTYPES:Dict[str, Any] = {
 def _check_shape_indices(kernel_name:str, full:List[object],
                          shape_sources:List[Tuple[int, int]],
                          work_size_dims:List[Tuple[Optional[int], int]],
-                         launch_meta:Dict[str, Any])->None:
+                         launch_meta:Dict[str, object])->None:
     """Refuse a dimension the array does not have, in the caller's own terms.
 
     Two different mistakes reach this function, and they have to stay apart because python
@@ -3044,7 +3099,7 @@ def _check_shape_indices(kernel_name:str, full:List[object],
     def shape_of(param_index:Optional[int])->Optional[Tuple[int, ...]]:
         if param_index is None:
             return None
-        shape:Any = getattr(full[param_index], "shape", None)
+        shape:Optional[Tuple[int, ...]] = getattr(full[param_index], "shape", None)
         return None if shape is None else tuple(int(s) for s in shape)
 
     # The loop's own iteration domain, and only that: every axis it names has to exist.
@@ -3121,12 +3176,12 @@ def _kernel_scalar_argument(value:object, t:DeviceType)->object:
     return value
 
 
-def _host_regions(func:Any)->List[object]:
+def _host_regions(func:object)->List[object]:
     """The statements a kernel body runs on the host, before and between its magic loops."""
     from .translator import _parse_kernel_source, _outside_loops, get_dedented_source
 
     try:
-        tree:Any = _parse_kernel_source(get_dedented_source(func))
+        tree:object = _parse_kernel_source(get_dedented_source(func))
     except SyntaxError:
         return []
     if not (tree.body and isinstance(tree.body[0], ast.ImportFrom)):
@@ -3135,8 +3190,8 @@ def _host_regions(func:Any)->List[object]:
     return list(_outside_loops(body))
 
 
-def _host_scalar_values(func:Any, names:List[str], args:Optional[Tuple[Any, ...]]=None,
-                        instance:Any=None)->Dict[str, Any]:
+def _host_scalar_values(func:object, names:List[str], args:Optional[Tuple[object, ...]]=None,
+                        instance:object=None)->Dict[str, object]:
     """Evaluate the initializers a carried scalar needs, on the host.
 
     A carried scalar (`total = 0` above the magic loop, `total = total + x[i]` inside it) is
@@ -3147,11 +3202,11 @@ def _host_scalar_values(func:Any, names:List[str], args:Optional[Tuple[Any, ...]
     """
     from .translator import _assigned_name_of
 
-    values:Dict[str, Any] = {}
+    values:Dict[str, object] = {}
     if not names:
         return values
-    globalns:Dict[str, Any] = dict(func.__globals__)
-    localns:Dict[str, Any] = {}
+    globalns:Dict[str, object] = dict(func.__globals__)
+    localns:Dict[str, object] = {}
     from .decorator import _positional_argument_names
     for arg_name, value in zip(_positional_argument_names(func), args or ()):
         localns[arg_name] = value
@@ -3184,16 +3239,16 @@ def _host_scalar_values(func:Any, names:List[str], args:Optional[Tuple[Any, ...]
     return values
 
 
-def _reads_name(node:Any, name:str)->bool:
+def _reads_name(node:object, name:str)->bool:
     """Whether an expression reads the given plain name."""
     return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
 
 
-def _host_created_values(func:Any,
-                         args:Optional[Tuple[Any, ...]]=None,
-                         instance:Any=None,
+def _host_created_values(func:object,
+                         args:Optional[Tuple[object, ...]]=None,
+                         instance:object=None,
                          required_created:Optional[List[str]]=None
-                         )->Tuple[Dict[str, Any], List[str]]:
+                         )->Tuple[Dict[str, object], List[str]]:
     """Build the objects a kernel creates above its magic loop.
 
     The statements are ordinary python and are run as such, in the function's own
@@ -3207,7 +3262,7 @@ def _host_created_values(func:Any,
     from .translator import (_assigned_name_of, _creation_assignments,
                             _creation_target_of, _is_creation_expression)
 
-    values:Dict[str, Any] = {}
+    values:Dict[str, object] = {}
     names:List[str] = []
     try:
         assignments:List[object] = _creation_assignments(func)
@@ -3216,8 +3271,8 @@ def _host_created_values(func:Any,
     if not assignments:
         return values, names
 
-    globalns:Dict[str, Any] = dict(func.__globals__)
-    localns:Dict[str, Any] = {}
+    globalns:Dict[str, object] = dict(func.__globals__)
+    localns:Dict[str, object] = {}
     for arg_name, value in zip(_positional_argument_names(func), args or ()):
         localns[arg_name] = value
     receiver:str = _receiver_name(func)
@@ -3240,7 +3295,7 @@ def _host_created_values(func:Any,
                     _reads_name(other.value, target) for other in assignments)):
                 continue
         try:
-            value:Any = eval(  # noqa: S307 - the kernel source itself
+            value:object = eval(  # noqa: S307 - the kernel source itself
                 compile(ast.Expression(body=assignment.value), "<kernel creation>", "eval"),
                 globalns, localns)
         except Exception:
@@ -3264,9 +3319,9 @@ def _host_created_values(func:Any,
     return values, names
 
 
-def _receiver_name(func:Any)->str:
+def _receiver_name(func:object)->str:
     """The name of a method's receiver parameter (`self` / `cls`), or "" for a function."""
-    code:Any = getattr(func, "__code__", None)
+    code:object = getattr(func, "__code__", None)
     if code is None or not code.co_varnames:
         return ""
     first:str = code.co_varnames[0]
@@ -3282,9 +3337,9 @@ def _declares_a_magic_loop(func:Callable)->bool:
     return analyse(func, _receiver_name(func)).magic_form is not None
 
 
-def _positional_argument_names(func:Any)->List[str]:
+def _positional_argument_names(func:object)->List[str]:
     """The python parameter names of a kernel, skipping the `self` parameter if present."""
-    code:Any = getattr(func, "__code__", None)
+    code:object = getattr(func, "__code__", None)
     if code is None:
         return []
     names:List[str] = list(code.co_varnames[:code.co_argcount])
@@ -3293,12 +3348,12 @@ def _positional_argument_names(func:Any)->List[str]:
     return names
 
 
-def _created_arguments(created:Dict[str, Any])->List[object]:
+def _created_arguments(created:Dict[str, object])->List[object]:
     """The launch arguments for the objects a kernel body created, in declaration order."""
     return [_kernel_scalar_argument(value, infer_ctype(value)) for value in created.values()]
 
 
-def _return_value(raw:Any, dtype:Any, kind:str)->Any:
+def _return_value(raw:object, dtype:object, kind:str)->object:
     """One value slot's stored element as the python value it represents.
 
     ``kind`` is the translator's type name for the returned position, which is how a
@@ -3312,10 +3367,10 @@ def _return_value(raw:Any, dtype:Any, kind:str)->Any:
 
         for name, cls in _host_classes().items():
             _VEC_RETURN_TYPES.setdefault(str(np.dtype(cls.numpy_dtype())), cls)
-    vector:Any = _VEC_RETURN_TYPES.get(str(np.dtype(dtype)))
+    vector:object = _VEC_RETURN_TYPES.get(str(np.dtype(dtype)))
     if vector is not None:
         return vector.from_buffer_copy(np.asarray(raw).tobytes())
-    value:Any = np.asarray(raw).reshape(())[()]
+    value:object = np.asarray(raw).reshape(())[()]
     if isinstance(dtype, np.dtype) and dtype.fields is not None:
         # A structure slot holds a record: the caller gets the record itself, and reads its
         # members exactly as the kernel body did (`result["i"]`).
@@ -3330,10 +3385,10 @@ def _return_value(raw:Any, dtype:Any, kind:str)->Any:
     return float(value)
 
 
-_VEC_RETURN_TYPES:Dict[str, Any] = {}
+_VEC_RETURN_TYPES:Dict[str, object] = {}
 
 
-def _called_modules(path:str, foreign_entries:Dict[str, List[Dict[str, Any]]]) -> set:
+def _called_modules(path:str, foreign_entries:Dict[str, List[Dict[str, object]]]) -> set:
     """The other generated files one module's definitions call functions from.
 
     A module's own file holds its definitions; a definition that names another module's
@@ -3355,7 +3410,7 @@ def _called_modules(path:str, foreign_entries:Dict[str, List[Dict[str, Any]]]) -
     return called
 
 
-def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:
+def _dependency_order(device_cache:Dict[object, object])->List[Dict[str, object]]:
     """Order cached device functions so each callee precedes its callers.
 
     The cache is populated depth-first, so a nested helper (e.g. `clamp01` called by
@@ -3363,17 +3418,17 @@ def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:
     would then reference a function C has not seen yet. Names are matched textually
     against each entry's generated code.
     """
-    entries:List[Dict[str, Any]] = [e for e in device_cache.values() if e.get("status") == "done"]
+    entries:List[Dict[str, object]] = [e for e in device_cache.values() if e.get("status") == "done"]
     if len(entries) <= 1:
         return entries
 
     # name -> entry, for the callee lookup
-    by_name:Dict[str, Dict[str, Any]] = {e["c_name"]: e for e in entries}
-    ordered:List[Dict[str, Any]] = []
+    by_name:Dict[str, Dict[str, object]] = {e["c_name"]: e for e in entries}
+    ordered:List[Dict[str, object]] = []
     visiting:set = set()
     done:set = set()
 
-    def visit(entry:Dict[str, Any]) -> None:
+    def visit(entry:Dict[str, object]) -> None:
         name:str = entry["c_name"]
         if name in done or name in visiting:
             # `visiting` breaks cycles: mutual recursion is rejected elsewhere anyway.
@@ -3393,13 +3448,13 @@ def _dependency_order(device_cache:Dict[Any, Any])->List[Dict[str, Any]]:
 @overload
 def kernel(func:Callable[_P, Any], *, backend:Optional[str]=None,
            domain:Optional[str]=None,
-           int:Any=None, float:Any=None)->PyKernel[_P]: ...
+           int:object=None, float:object=None)->PyKernel[_P]: ...
 @overload
 def kernel(func:None=None, *, backend:Optional[str]=None,
            domain:Optional[str]=None,
-           int:Any=None, float:Any=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
+           int:object=None, float:object=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
 def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None,
-           domain:Optional[str]=None, int:Any=None, float:Any=None):
+           domain:Optional[str]=None, int:object=None, float:object=None):
     """The `@kernel` decorator.
 
     When backend is not specified, probe in DEFAULT_BACKEND_ORDER (cuda -> hip -> opencl)
@@ -3449,7 +3504,7 @@ def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None
     kernel's identity, so ``set_type_map()`` does not change a kernel that is already
     declared.
     """
-    type_map:Optional[Dict[str, Any]] = None
+    type_map:Optional[Dict[str, object]] = None
     if int is not None or float is not None:
         type_map = {}
         if int is not None:
@@ -3457,7 +3512,7 @@ def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None
         if float is not None:
             type_map["float"] = float
 
-    def decorator(f:Callable[..., Any])->PyKernel[Any]:
+    def decorator(f:Callable[..., Any])->PyKernel[object]:
         if backend is not None:
             return PyKernel(f, backend, explicit_backend=True, domain=domain,
                             type_map=type_map)

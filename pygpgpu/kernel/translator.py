@@ -10,7 +10,8 @@ import os
 import re
 import textwrap
 import types
-from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple, Union
+from typing import (Any, Callable, Dict, List, NoReturn, Optional, Sequence,
+                    Set, Tuple, Union)
 
 # TypedDict is 3.8+ in typing; this package supports 3.7, so it comes from the
 # backport the rest of the package already uses (see cparser/ts_parser.py).
@@ -79,12 +80,12 @@ def _source_first_line(func:Callable)->int:
     return int(first_decorator) + offset
 
 
-def _get_attr(obj:Any, name:str, default:Any=None)->Any:
+def _get_attr(obj:object, name:str, default:object=None)->object:
     """Attribute read that falls back to a default instead of raising."""
     return getattr(obj, name, default)
 
 
-def _copy_ast(node:ast.AST, cls:type, fields:Dict[str, Any])->ast.AST:
+def _copy_ast(node:ast.AST, cls:type, fields:Dict[str, object])->ast.AST:
     """Build a node of ``cls`` from a field dict shared with a 3.7-era node."""
     obj:ast.AST = cls()
     for _f in getattr(cls, "_fields", ()):
@@ -194,7 +195,7 @@ def _parse_kernel_source(source:str)->ast.Module:
     return _normalize_ast_legacy_nodes(ast.parse(source, mode="exec"))
 
 
-def _class_attr(owner:Optional[type], name:str)->Any:
+def _class_attr(owner:Optional[type], name:str)->object:
     """The raw class-dictionary entry for ``owner.name``, or ``_MISSING`` when absent.
 
     Static methods never appear in an instance dictionary, so the raw entry is the only
@@ -208,7 +209,7 @@ def _class_attr(owner:Optional[type], name:str)->Any:
     return _MISSING
 
 
-_MISSING:Any = object()
+_MISSING:object = object()
 
 
 def _helper_globals(func:Callable, fallback:Callable[[str], Any])->Callable[[str], Any]:
@@ -224,9 +225,9 @@ def _helper_globals(func:Callable, fallback:Callable[[str], Any])->Callable[[str
     helpers lived beside the kernel; a method defined in the structure's own module is the
     first case where they do not.
     """
-    own:Dict[str, Any] = getattr(func, "__globals__", None) or {}
+    own:Dict[str, object] = getattr(func, "__globals__", None) or {}
 
-    def resolve(name:str)->Any:
+    def resolve(name:str)->object:
         if name in own:
             return own[name]
         return fallback(name)
@@ -257,9 +258,9 @@ def self_attr_kind(owner:Optional[type], name:str)->Translated:
     """
     if owner is None:
         return "data", None
-    raw:Any = _class_attr(owner, name)
+    raw:object = _class_attr(owner, name)
     if isinstance(raw, staticmethod):
-        func:Any = raw.__func__
+        func:object = raw.__func__
         return ("kernel" if getattr(func, "is_pykernel", False) else "staticmethod"), func
     if isinstance(raw, classmethod):
         return "classmethod", raw.__func__
@@ -270,18 +271,19 @@ def self_attr_kind(owner:Optional[type], name:str)->Translated:
     return "data", (None if raw is _MISSING else raw)
 
 
-def _property_of(cls:type, name:str)->Optional[Any]:
+def _property_of(cls:type, name:str)->Optional[object]:
     """The `property` descriptor a class defines for `name`, or None.
 
     A property is a member the class computes: `box.doubled` is a call to its getter, not a
     field read. Only a descriptor written in the class body counts, for the same reason a
     magic method is read from `__dict__` -- an inherited one belongs to another class.
     """
-    own:Any = getattr(cls, "__dict__", {}).get(name)
+    own:object = getattr(cls, "__dict__", {}).get(name)
     return own if isinstance(own, property) else None
 
 
-def _property_carrier(classes:Any, name:str)->Optional[Any]:
+def _property_carrier(classes:Optional[Sequence[type]],
+                     name:str)->Optional[object]:
     """The descriptor for `name` from the first of `classes` that defines one.
 
     One dtype can stand for several classes -- two classes with one layout share it -- so
@@ -289,8 +291,8 @@ def _property_carrier(classes:Any, name:str)->Optional[Any]:
     registered first. Without this, the second class's `box.total` compiled the first
     class's getter and answered its value.
     """
-    for cls in classes or ():
-        descriptor:Optional[Any] = _property_of(cls, name)
+    for cls in classes or []:
+        descriptor:Optional[object] = _property_of(cls, name)
         if descriptor is not None:
             return descriptor
     return None
@@ -298,17 +300,17 @@ def _property_carrier(classes:Any, name:str)->Optional[Any]:
 
 def _property_accessor(descriptor:property, writer:bool)->Optional[Callable]:
     """The getter (or setter) of a property, or None when it defines no such half."""
-    accessor:Any = descriptor.fset if writer else descriptor.fget
+    accessor:object = descriptor.fset if writer else descriptor.fget
     return accessor if callable(accessor) else None
 
 
-def _receiver_param_of(method:Any)->str:
+def _receiver_param_of(method:object)->str:
     """The parameter name a method binds its receiver to."""
     return (method.__code__.co_varnames[0]
             if getattr(method, "__code__", None) else "self")
 
 
-def _enum_member_value(value:Any)->Optional[Tuple[Any, Any]]:
+def _enum_member_value(value:object)->Optional[Tuple[Any, Any]]:
     """The constant an `enum.Enum`/`enum.IntEnum` member stands for, or None.
 
     An enum is a *named constant* in python, not a type a device can hold: `Kind.B` in a
@@ -324,8 +326,8 @@ def _enum_member_value(value:Any)->Optional[Tuple[Any, Any]]:
     """
     if not isinstance(value, enum.Enum):
         return None
-    member:Any = value
-    payload:Any = member.value
+    member:object = value
+    payload:object = member.value
     if isinstance(payload, enum.Enum):
         # An alias chain (`A = B` in the class body) resolves to the member that holds the
         # actual value; python's own `_.value` stops at the first level.
@@ -349,12 +351,12 @@ def _magic_method_of(cls:type, name:str)->Optional[Callable]:
     meaning and would silently turn `a == b` into a pointer compare, so the lookup walks the
     class's own `__dict__` rather than its `__mro__`.
     """
-    own:Any = getattr(cls, "__dict__", {}).get(name)
+    own:object = getattr(cls, "__dict__", {}).get(name)
     if own is None:
         return None
     if isinstance(own, (staticmethod, classmethod)):
         return None
-    function:Any = getattr(own, "__func__", own)
+    function:object = getattr(own, "__func__", own)
     # The member-name subscript a structure gets (`s["i"]`) is the translation's own
     # spelling, not a method the caller wrote: `s[i]` must stay an array index.
     if getattr(function, "__pygpgpu_member_subscript__", False):
@@ -371,19 +373,19 @@ def _self_member_call_kind(owner:Optional[type], name:str)->Translated:
     calls.
     """
     kind:str
-    target:Any
+    target:object
     kind, target = self_attr_kind(owner, name)
     if kind == "data" and owner is not None:
-        attribute:Any = inspect.getattr_static(owner, name, _MISSING)
+        attribute:object = inspect.getattr_static(owner, name, _MISSING)
         if isinstance(attribute, staticmethod):
-            func:Any = attribute.__func__
+            func:object = attribute.__func__
             return ("kernel" if getattr(func, "is_pykernel", False) else "staticmethod"), func
         if inspect.isfunction(attribute):
             return "method", attribute
     return kind, target
 
 
-def structs_name(dtype:Any)->str:
+def structs_name(dtype:object)->str:
     """The device type name of a structure dtype, registered on the way."""
     from .structs import register  # noqa: PLC0415
 
@@ -439,7 +441,7 @@ def scan_self_attrs(func:Callable, self_param:str, owner:Optional[type]=None)->L
 
 
 def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
-                        attrs:List[str], visited:Set[Any])->None:
+                        attrs:List[str], visited:Set[object])->None:
     """Walk one method body, recursing into the self-methods it calls."""
     if func in visited:
         return
@@ -454,7 +456,7 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
                 and node.value.id == self_param):
             continue
         kind:str
-        target:Any
+        target:object
         kind, target = _self_member_call_kind(owner, node.attr)
         if node.attr in called:
             # A member that is called is not data, so it needs no kernel argument. An
@@ -516,7 +518,7 @@ def _syntax_error(message:str, node:Optional[ast.AST]=None,
         if 0 < lineno <= len(lines):
             text = lines[lineno - 1]
 
-    details:Tuple[Any, ...] = (
+    details:Tuple[object, ...] = (
         filename if filename else "<kernel>",
         file_lineno,
         (column + 1) if text is not None else None,
@@ -589,7 +591,7 @@ DTYPE_MAP:Dict[str, str] = {
 # each stands for. The package already reads ctypes classes this way for a vector component
 # (`_c_scalar_name`), so this is the same mapping given a caller-facing name: `_c_scalar_name`
 # is the vector component's *name*, and this is the advice of what a scalar argument becomes.
-CTYPES_SCALAR_TYPES:Dict[Any, str] = {}
+CTYPES_SCALAR_TYPES:Dict[object, str] = {}
 
 # The python type a width is requested for, and the only names a `type_map` may carry. Two
 # names only, because these are the two python builtins whose width is chosen rather than
@@ -615,7 +617,7 @@ FLOAT_MAPPING_TARGETS:Set[str] = {"float", "double"}
 UNSIGNED_INTEGER_TYPES:Set[str] = {"uchar", "ushort", "uint", "ulong"}
 
 
-def _ctypes_scalar_types()->Dict[Any, str]:
+def _ctypes_scalar_types()->Dict[object, str]:
     """Build the ctypes class table once: the scalar classes a caller may name."""
     global CTYPES_SCALAR_TYPES
     if CTYPES_SCALAR_TYPES:
@@ -633,7 +635,7 @@ def _ctypes_scalar_types()->Dict[Any, str]:
     return CTYPES_SCALAR_TYPES
 
 
-def resolve_device_type(value:Any, key:str)->str:
+def resolve_device_type(value:object, key:str)->str:
     """The device type name a caller's type object stands for, for the given mapping key.
 
     A `@kernel(int=..., float=...)` mapping is given with a **type object**, because that is
@@ -687,7 +689,7 @@ def resolve_device_type(value:Any, key:str)->str:
     raise ValueError(_mapping_refusal(key, value)) from None
 
 
-def _mapping_refusal(key:str, value:Any)->str:
+def _mapping_refusal(key:str, value:object)->str:
     """The message for a type the mapping key does not accept."""
     if key == "int":
         np_names:str = ("np.int8, np.int16, np.int32, np.int64, "
@@ -703,7 +705,7 @@ def _mapping_refusal(key:str, value:Any)->str:
             f"{widths} -- written as {np_names}, or as the matching ctypes type. {others}")
 
 
-def validate_type_map(type_map:Optional[Dict[str, Any]])->Dict[str, str]:
+def validate_type_map(type_map:Optional[Dict[str, object]])->Dict[str, str]:
     """Normalize a caller's `int=`/`float=` mapping to device type names.
 
     The keys are the two python builtins whose width is otherwise chosen here, and every
@@ -862,7 +864,7 @@ IMAGE = "image"
 # `is_ptr` / `is_vec` / `is_image` / `is_int` decide which, so the union says exactly what
 # those predicates accept. It used to be spelled `Any` at every one of these sites, which
 # threw away the one piece of type information the translator carries around most.
-DeviceType = Union[str, Tuple[Any, ...]]
+DeviceType = Union[str, Tuple[object, ...]]
 
 # A translated expression is its C text plus the type above -- the pair every `_visit_*`
 # returns and every emitter consumes.
@@ -890,7 +892,7 @@ class ReturnPosition(TypedDict, total=False):
 # One entry of `return_site_layout`: the positions a site hands back, in return order, and
 # whether it returned a tuple (which the host unpacks rather than passes through).
 class ReturnSiteLayout(TypedDict):
-    positions: List[ReturnPosition]
+    positions: List[ReturnSitePosition]
     is_tuple: bool
 
 # One host-facing rebuild entry: a `value` names the slot it reads (or, when the value
@@ -971,13 +973,13 @@ MAGIC_COMPARE_REFLECTED:Dict[str, str] = {
     "Eq": "__eq__", "NotEq": "__ne__",
 }
 
-_C_FIELD_TYPES:Dict[Any, str] = {}
+_C_FIELD_TYPES:Dict[object, str] = {}
 
 # Declared here (and filled on first use) because importing the driver tables eagerly would
 # load a GPU runtime at `import pygpgpu` time.
-_VEC_REGISTRY:Dict[str, Any]
+_VEC_REGISTRY:Dict[str, object]
 
-def _vec_registry()->Dict[str, Any]:
+def _vec_registry()->Dict[str, object]:
     """vec type name -> ctypes class (e.g. float4), built lazily."""
     global _VEC_REGISTRY
     try:
@@ -1000,7 +1002,7 @@ def _vec_registry()->Dict[str, Any]:
             pass
     return _VEC_REGISTRY
 
-def _c_scalar_name(ctypes_type:Any)->str:
+def _c_scalar_name(ctypes_type:object)->str:
     import ctypes as _ctypes
     sizes = {_ctypes.c_float: "float", _ctypes.c_double: "double",
              _ctypes.c_int8: "char", _ctypes.c_int16: "short", _ctypes.c_int32: "int",
@@ -1008,7 +1010,7 @@ def _c_scalar_name(ctypes_type:Any)->str:
              _ctypes.c_uint32: "uint", _ctypes.c_uint64: "ulong"}
     return sizes.get(ctypes_type, "float")
 
-def is_vec(t:Any)->bool:
+def is_vec(t:object)->bool:
     return isinstance(t, str) and t in _vec_registry()
 
 # A 3-component vector is padded to 16 bytes for the device ABI, so its ctypes struct carries
@@ -1018,13 +1020,13 @@ def _vec_components(vec:str)->List[Translated]:
     """The real (field name, ctypes type) components of a vector type, in order."""
     return [field for field in _vec_registry()[vec]._fields_ if field[0] != "_"]
 
-def _vec_field_names(cls_or_name:Any)->List[str]:
+def _vec_field_names(cls_or_name:object)->List[str]:
     """The component names of a vector type, given the class or its name.
 
     Everything that expands a vector into per-component code goes through this, so the
     padding field of a 3-component vector never becomes a member the device does not have.
     """
-    fields:Any = (cls_or_name._fields_
+    fields:Tuple[Tuple[str, type], ...] = (cls_or_name._fields_
                   if isinstance(cls_or_name, type)
                   else _vec_registry()[cls_or_name]._fields_)
     return [name for name, _ in fields if name != "_"]
@@ -1247,13 +1249,13 @@ PRINT_REAL_SPECIAL_COUNT:int = 5
 PRINT_MAX_LINES:int = 512
 
 
-def is_int(t:Any)->bool:
+def is_int(t:object)->bool:
     return isinstance(t, str) and t in INT_TYPES
 
-def is_float(t:Any)->bool:
+def is_float(t:object)->bool:
     return isinstance(t, str) and t in FLOAT_TYPES
 
-def is_complex(t:Any)->bool:
+def is_complex(t:object)->bool:
     """True for a device type that is a complex value (`c64` / `c128`).
 
     A complex value is a *value* like a scalar -- it is passed by value, returned in a slot,
@@ -1264,7 +1266,7 @@ def is_complex(t:Any)->bool:
     """
     return isinstance(t, str) and t in COMPLEX_TYPE_NAMES
 
-def is_aggregate(t:Any)->bool:
+def is_aggregate(t:object)->bool:
     """True for a value the device carries as a *structure* (`c64`/`c128` included).
 
     The difference from `structs_dtype_for` is that this answers from the type name alone,
@@ -1274,17 +1276,17 @@ def is_aggregate(t:Any)->bool:
     return isinstance(t, str) and (t in COMPLEX_TYPE_NAMES
                                    or structs_dtype_for(t) is not None)
 
-def is_ptr(t:Any)->bool:
+def is_ptr(t:object)->bool:
     return isinstance(t, tuple) and len(t) == 2 and t[0] == PTR
 
-def is_image(t:Any)->bool:
+def is_image(t:object)->bool:
     """True for the marker a backend-neutral Image argument gets."""
     return isinstance(t, tuple) and len(t) == 3 and t[0] == IMAGE
 
-def image_channels(t:Any)->int:
+def image_channels(t:object)->int:
     return int(t[1])
 
-def image_scalar(t:Any)->str:
+def image_scalar(t:object)->str:
     """The C scalar type of one image channel."""
     return t[2]
 
@@ -1314,7 +1316,7 @@ def infer_ctype(value:object, type_map:Optional[Dict[str, str]]=None)->DeviceTyp
     from ..vec_types.layout import _vector_dtype_name
     from . import structs
 
-    registry:Dict[str, Any] = _vec_registry()
+    registry:Dict[str, object] = _vec_registry()
     mapping:Dict[str, str] = type_map or {}
     int_type:str = mapping.get("int", "int")
     float_type:str = mapping.get("float", "float")
@@ -1457,12 +1459,12 @@ TEXTURE_HANDLE_TYPES = ("TextureObject", "cudaTextureObject_t")
 SURFACE_HANDLE_TYPES = ("SurfaceObject", "cudaSurfaceObject_t")
 
 
-def _is_device_handle(value:Any)->bool:
+def _is_device_handle(value:object)->bool:
     """True for the objects a kernel receives as an opaque texture or surface handle."""
     return type(value).__name__ in TEXTURE_HANDLE_TYPES + SURFACE_HANDLE_TYPES
 
 
-def _handle_device_type(value:Any)->str:
+def _handle_device_type(value:object)->str:
     """The device-side type name a handle argument takes in a kernel signature."""
     if type(value).__name__ in SURFACE_HANDLE_TYPES:
         return "cudaSurfaceObject_t"
@@ -1592,7 +1594,7 @@ def _creation_assignments(func:Callable)->List[ast.stmt]:
 
     import builtins as _builtins
 
-    globalns:Dict[str, Any] = getattr(func, "__globals__", {})
+    globalns:Dict[str, object] = getattr(func, "__globals__", {})
 
     def is_numpy(node:ast.expr)->bool:
         return (isinstance(node, ast.Name) and globalns.get(node.id) is np)
@@ -1713,7 +1715,7 @@ def _is_creation_expression(node:ast.expr, func:Callable)->bool:
     The launcher needs this to tell a creation from a plain assignment it lifted for a
     creation's sake: only the creation travels to the device as a parameter.
     """
-    globalns:Dict[str, Any] = getattr(func, "__globals__", {})
+    globalns:Dict[str, object] = getattr(func, "__globals__", {})
     return _is_creation_shape(
         node, lambda candidate: isinstance(candidate, ast.Name)
         and globalns.get(candidate.id) is np)
@@ -1805,7 +1807,7 @@ def _is_magic_loop_stmt(stmt:ast.stmt)->bool:
     return False
 
 
-_UNRESOLVED:Any = object()
+_UNRESOLVED:object = object()
 
 # Python builtins are never kernel parameters: they resolve through the translator's own
 # dispatch (print, len, range, ...) or are rejected with a message of their own.
@@ -1829,7 +1831,7 @@ def _declared_scope_names(tree:ast.AST)->Set[str]:
     return names
 
 
-def type_sig(types:List[Any])->str:
+def type_sig(types:List[object])->str:
     parts:List[str] = []
     for t in types:
         parts.append((t[1] + "[]") if is_ptr(t) else str(t))
@@ -1856,14 +1858,14 @@ class FunctionTranslator:
     # is rejected rather than silently miscompiled.
     ATOMIC_ELEMENT_TYPES:Set[str] = {"int", "uint", "long", "ulong"}
 
-    def __init__(self, func:Callable, param_types:List[Any], backend:str,
-                 resolve_global:Callable[[str], Any], device_cache:Dict[Any, Any],
+    def __init__(self, func:Callable, param_types:List[object], backend:str,
+                 resolve_global:Callable[[str], Any], device_cache:Dict[object, object],
                  is_kernel:bool=False, self_param:str="",
-                 self_attr_types:Optional[Dict[str, Any]]=None,
+                 self_attr_types:Optional[Dict[str, object]]=None,
                  self_owner:Optional[type]=None, launch_backend:Optional[str]=None,
-                 host_creation_values:Optional[Dict[str, Any]]=None,
+                 host_creation_values:Optional[Dict[str, object]]=None,
                  self_struct_members:Optional[Dict[str, str]]=None,
-                 self_struct_type:Any=None,
+                 self_struct_type:object=None,
                  struct_arg_classes:Optional[Dict[str, type]]=None,
                  receiver_as_argument:bool=False,
                  type_map:Optional[Dict[str, str]]=None):
@@ -1885,11 +1887,11 @@ class FunctionTranslator:
         self._metal_syntax:bool = backend == "metal"
         self._c_syntax:bool = backend in ("cuda", "hip")
         self.resolve_global:Callable[[str], Any] = resolve_global
-        self.device_cache:Dict[Any, Any] = device_cache
+        self.device_cache:Dict[object, object] = device_cache
         self.is_kernel:bool = is_kernel
         # The argument types the kernel was specialized for; kept so a phase translator can
         # be built with the same signature (see _translate_phase_kernels).
-        self.param_types:List[Any] = list(param_types)
+        self.param_types:List[object] = list(param_types)
         # Kernels launched from this kernel's device code (`inner[(n,)](args)`). Each entry is
         # one rendered `__global__` function, emitted ahead of the outer kernel because C
         # requires a callee before its caller.
@@ -1932,7 +1934,7 @@ class FunctionTranslator:
         self.promoted_returns:Set[str] = set()
         self.phase_translators:List["FunctionTranslator"] = []
         self.self_param:str = self_param
-        self.self_attr_types:Dict[str, Any] = dict(self_attr_types or {})
+        self.self_attr_types:Dict[str, object] = dict(self_attr_types or {})
         # The class the translated method belongs to, for deciding whether `self.name`
         # is a data attribute, an instance method, or a staticmethod. None for the
         # decoration-time body scan, where the class does not exist yet.
@@ -1947,14 +1949,14 @@ class FunctionTranslator:
         # an ndarray attribute stays a separate `_self_<attr>` argument (the read/write
         # analysis and the shape plumbing need it apart).
         self.self_struct_members:Dict[str, str] = dict(self_struct_members or {})
-        self.self_struct_type:Any = self_struct_type
+        self.self_struct_type:object = self_struct_type
         # True when this function's receiver is its own first positional parameter
         # (`def at(self, t)` called as `ray.at(t)`), rather than a field-carrying struct
         # the caller packs separately (see _emit_device_call).
         self.receiver_as_argument:bool = receiver_as_argument
         # Objects the host already built for statements above the magic loop, keyed by the
         # name the body assigns them to (see _host_created_assignment).
-        self.host_creation_values:Dict[str, Any] = dict(host_creation_values or {})
+        self.host_creation_values:Dict[str, object] = dict(host_creation_values or {})
         # The width a python `int`/`float` travels as (device type names, already resolved).
         # Every type query the translator makes on a *host* value -- a creation above the
         # loop, a constant it lifts -- goes through it, so a kernel and the objects it builds
@@ -2001,7 +2003,7 @@ class FunctionTranslator:
         self.work_item_indices:List[str] = []
         # Structure dtypes a private array created in the body mentions: their typedefs
         # have to be emitted even though they are not parameters.
-        self.private_structs:List[Any] = []
+        self.private_structs:List[object] = []
         # Dtypes synthesized from a plain class the body constructs (`ray = Ray(...)` on a
         # class that is not a ctypes.Structure). Their members are what the body reads, so a
         # construction may hand over more than that and the unread arguments are dropped --
@@ -2051,7 +2053,7 @@ class FunctionTranslator:
         self.atomic_targets:Set[str] = set()
         self._tmp_counter:int = 0
         self.local_buffers:List[Tuple[str, str, int]] = []
-        self.return_type:Optional[Any] = None
+        self.return_type:Optional[object] = None
         # Kernel return values. A kernel runs once per work item, so it cannot have a C
         # return value; every returned position becomes a device parameter instead (a
         # one-element buffer for a value, the array parameter's own name for an array) and
@@ -2105,7 +2107,7 @@ class FunctionTranslator:
         # interpreter, not translated, and the object travels as a parameter (see
         # _host_created_assignment).
         self.host_values:Dict[str, HostValueEntry] = {}
-        self.return_type:Optional[Any] = None
+        self.return_type:Optional[object] = None
         self.lines:List[str] = []
         self._indent:int = 1
         self.scopes:List[Dict[str, DeviceType]] = []
@@ -2116,7 +2118,7 @@ class FunctionTranslator:
         # Default values are accepted: a kernel argument is always supplied by the
         # caller, so a default is a convenience for reading the signature rather than
         # something the device code has to represent.
-        receiver_type:Any = None
+        receiver_type:object = None
         if self_param and args and args[0].arg == self_param:
             if self.receiver_as_argument:
                 # The receiver travels as this function's own first argument: take its
@@ -2139,7 +2141,7 @@ class FunctionTranslator:
         # the type is taken from there and the two lists keep their own orders.
         scope:Dict[str, DeviceType] = {}
         if self.self_struct_members:
-            struct_type:Any = (param_types[len(args)] if len(param_types) > len(args)
+            struct_type:object = (param_types[len(args)] if len(param_types) > len(args)
                                else self.self_struct_type)
             if self.self_struct_type is None:
                 self.self_struct_type = struct_type
@@ -2241,7 +2243,7 @@ class FunctionTranslator:
             return host["type"]
         for scope in reversed(self.scopes):
             if name in scope:
-                declared:Any = scope[name]
+                declared:object = scope[name]
                 if isinstance(declared, tuple) and len(declared) == 2 and declared[0] == "carried":
                     return declared
                 break
@@ -2513,7 +2515,7 @@ class FunctionTranslator:
         parameter -- inlining the current value would make the kernel stale, which is the
         whole reason this exists.
         """
-        code:Any = getattr(self.func, "__code__", None)
+        code:object = getattr(self.func, "__code__", None)
         if code is None:
             return
         cell_names:Set[str] = set(code.co_freevars)
@@ -2538,7 +2540,7 @@ class FunctionTranslator:
                 continue
             candidates.append(name)
         for name in candidates:
-            value:Any = self.resolve_global(name)
+            value:object = self.resolve_global(name)
             if value is _UNRESOLVED:
                 continue
             entry:Optional[OuterVarEntry] = self._outer_var_entry(name, value, code, declared)
@@ -2554,7 +2556,7 @@ class FunctionTranslator:
             else:
                 self.params.append((name, entry["type"]))
 
-    def _outer_var_entry(self, name:str, value:Any, code:Any,
+    def _outer_var_entry(self, name:str, value:object, code:object,
                          declared:Set[str])->Optional[OuterVarEntry]:
         """The device parameter for one outer name, or None when it is not a value.
 
@@ -2691,7 +2693,7 @@ class FunctionTranslator:
         if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Attribute)
                 and isinstance(iter_node.func.value, ast.Name) and not iter_node.keywords):
             return None
-        module:Any = self.resolve_global(iter_node.func.value.id)
+        module:object = self.resolve_global(iter_node.func.value.id)
         if module is not np:
             return None
         form:str = iter_node.func.attr
@@ -2779,7 +2781,7 @@ class FunctionTranslator:
             # A host-side integer attribute is a constant for this launch, like a literal:
             # `np.ndindex(self.image_height, self.image_width)`. The extent is read from the
             # argument carrying the attribute (see the -2 marker in PyKernel._invoke_inner).
-            attribute_type:Any = self.self_attr_types.get(node.attr)
+            attribute_type:object = self.self_attr_types.get(node.attr)
             if attribute_type is not None and is_int(attribute_type):
                 return f"_self_{node.attr}", -2
             if node.attr in self.self_struct_members:
@@ -2791,7 +2793,7 @@ class FunctionTranslator:
 
                 struct_dtype:Optional[np.dtype] = _structs_module.dtype_for(
                     self.self_struct_type[1])
-                member_type:Any = _structs_module.member_types(
+                member_type:object = _structs_module.member_types(
                     struct_dtype, self.backend).get(member)
                 if member_type is not None and is_int(member_type):
                     self.work_size_members.append(node.attr)
@@ -3050,7 +3052,7 @@ class FunctionTranslator:
             self.gid_param = param
             self._emit_work_item_head(index_name, param)
             # x is an element-value snapshot (matches python semantics: rebinding x does not write back to the array)
-            elem_t:Any = arr_t[1]
+            elem_t:object = arr_t[1]
             self._define(value_name, elem_t, target.elts[1])
             self._emit(f"{elem_t} {value_name} = {param}[{index_name}];")
 
@@ -3119,7 +3121,7 @@ class FunctionTranslator:
             self._emit_nd_head(names, param)
             if form == "ndenumerate":
                 arr_t:DeviceType = self._lookup(param)
-                elem_t:Any = arr_t[1]
+                elem_t:object = arr_t[1]
                 self._define(value_name, elem_t, None)
                 self._emit(f"{elem_t} {value_name} = {param}[{self._nd_flat_index(names, param)}];")
 
@@ -3199,7 +3201,7 @@ class FunctionTranslator:
                 continue
             if not self._is_creation_expression(value):
                 continue
-            produced:Any = self.host_creation_values.get(name, _UNRESOLVED)
+            produced:object = self.host_creation_values.get(name, _UNRESOLVED)
             if produced is _UNRESOLVED:
                 self._error(
                     f"'{name}' cannot be created here: the expression only builds "
@@ -3489,7 +3491,7 @@ class FunctionTranslator:
             # An initializer for a carried scalar already ran on the host, and the slot that
             # travels is the buffer it filled: re-emitting 	otal = 0 would overwrite the
             # parameter's type and reset the shared location for every work item.
-            target:Any = node.targets[0] if len(node.targets) == 1 else None
+            target:object = node.targets[0] if len(node.targets) == 1 else None
             if (isinstance(target, ast.Name) and target.id in self.carried_scalars
                     and not self.creation_below_loop):
                 return
@@ -3685,14 +3687,14 @@ class FunctionTranslator:
             self._error(
                 "iterating a value directly needs an array; this is a scalar. Use an array "
                 "argument, or a range() loop", node.iter)
-        element_t:Any = t[1]
+        element_t:object = t[1]
         holder:ast.expr = node.iter
         # The extent: a parameter's own shape variable, or a structure member's fixed length.
         if isinstance(holder, ast.Name):
             stop:str = self._shape_var(holder.id, 0)
         elif isinstance(holder, ast.Attribute) and isinstance(holder.value, ast.Name):
             base_t:DeviceType = self._lookup(holder.value.id)
-            base_element:Any = base_t[1] if is_ptr(base_t) else base_t
+            base_element:object = base_t[1] if is_ptr(base_t) else base_t
             dtype:Optional[np.dtype] = (structs_dtype_for(base_element)
                                         if isinstance(base_element, str) else None)
             if dtype is None or holder.attr not in (dtype.names or ()):
@@ -3999,7 +4001,7 @@ class FunctionTranslator:
             pairs.append((slot, positions[ordinal]))
         return pairs
 
-    def _return_param_type(self, t:Any)->str:
+    def _return_param_type(self, t:object)->str:
         """The C element type of a value slot."""
         from . import structs
 
@@ -4014,7 +4016,7 @@ class FunctionTranslator:
             self._error(f"cannot return a value of type {t}")
         return self._device_type(slot[0])
 
-    def return_slot_dtype(self, index:int)->np.dtype[Any]:
+    def return_slot_dtype(self, index:int)->np.dtype:
         """The numpy dtype the host uses for one value slot.
 
         A vector slot uses the *host* layout (a 3-component vector has three components);
@@ -4027,7 +4029,7 @@ class FunctionTranslator:
         entry:ReturnLayoutEntry = (self.return_layout or [])[index]
         if is_vec(entry["type"]):
             return _host_classes()[entry["type"]].numpy_dtype()
-        structure:Any = structs.dtype_for(entry["type"]) if isinstance(entry["type"], str) else None
+        structure:object = structs.dtype_for(entry["type"]) if isinstance(entry["type"], str) else None
         if structure is not None:
             return structure
         return self.RETURN_SLOT_TYPES[entry["type"]][1]
@@ -4113,7 +4115,7 @@ class FunctionTranslator:
         if self.return_type is None:
             self.return_type = t
         elif self.return_type != t:
-            unified:Any = promote(self.return_type, t)
+            unified:object = promote(self.return_type, t)
             if unified != self.return_type:
                 # The cast has to be spelled in this backend's own type names: CUDA C has
                 # no `uchar`/`ushort`/`uint`/`ulong`, so a bare translator name here made
@@ -4122,7 +4124,7 @@ class FunctionTranslator:
             self.return_type = unified
         self._emit(f"return {code};")
 
-    def _eval_constant(self, node:Optional[ast.expr])->Any:
+    def _eval_constant(self, node:Optional[ast.expr])->object:
         """Evaluate a compile-time expression: a shape, a dtype, a fill value.
 
         Only the forms a creation statement uses are supported (constants, names resolved in
@@ -4138,16 +4140,16 @@ class FunctionTranslator:
         if isinstance(node, ast.Attribute):
             return getattr(self._eval_constant(node.value), node.attr)
         if isinstance(node, ast.Call):
-            function:Any = self._eval_constant(node.func)
-            arguments:List[Any] = [self._eval_constant(argument) for argument in node.args]
-            keywords:Dict[str, Any] = {keyword.arg: self._eval_constant(keyword.value)
+            function:object = self._eval_constant(node.func)
+            arguments:List[object] = [self._eval_constant(argument) for argument in node.args]
+            keywords:Dict[str, object] = {keyword.arg: self._eval_constant(keyword.value)
                                        for keyword in node.keywords if keyword.arg}
             return function(*arguments, **keywords)
         if isinstance(node, (ast.Tuple, ast.List)):
             return tuple(self._eval_constant(element) for element in node.elts)
         raise SyntaxError("not a compile-time constant expression")
 
-    def _private_element_type(self, dtype_value:Any)->Optional[Translated]:
+    def _private_element_type(self, dtype_value:object)->Optional[Translated]:
         """(C element type, translator type) for a private array's element, or None."""
         from . import structs
 
@@ -4192,11 +4194,11 @@ class FunctionTranslator:
         # np.zeros(4, ...) / np.zeros((2, 3), ...) -- one positional shape argument.
         positional:List[ast.expr] = list(call.args)
         try:
-            shape_value:Any = self._eval_constant(positional[0]) if positional else None
+            shape_value:object = self._eval_constant(positional[0]) if positional else None
             dtype_node:Optional[ast.expr] = next(
                 (keyword.value for keyword in call.keywords if keyword.arg == "dtype"), None)
-            dtype_value:Any = self._eval_constant(dtype_node)
-            fill_value:Any = None
+            dtype_value:object = self._eval_constant(dtype_node)
+            fill_value:object = None
             if constructor == "full" and len(positional) > 1:
                 fill_value = self._eval_constant(positional[1])
         except SyntaxError:
@@ -4230,7 +4232,7 @@ class FunctionTranslator:
         self._define(name, ("bodyarr", total, shape, element_t), node)
         return True
 
-    def _private_initialiser(self, constructor:str, total:int, fill_value:Any,
+    def _private_initialiser(self, constructor:str, total:int, fill_value:object,
                              scalar_element:bool)->Optional[str]:
         """The C initialiser for a private array, matching the numpy constructor.
 
@@ -4244,7 +4246,7 @@ class FunctionTranslator:
             return ""
         if constructor == "zeros":
             return empty
-        value:Any = 1 if constructor == "ones" else fill_value
+        value:object = 1 if constructor == "ones" else fill_value
         if value is None:
             return empty
         if not scalar_element:
@@ -4378,7 +4380,7 @@ class FunctionTranslator:
             self._error("cannot assign an array to a variable", node)
 
         if isinstance(target, ast.Name):
-            outer:Optional[Dict[str, Any]] = self._named_outer_target(target, node)
+            outer:Optional[Dict[str, object]] = self._named_outer_target(target, node)
             if outer is not None:
                 self._emit(f"{device_name(target.id)}[0] = {code};")
                 return
@@ -4394,7 +4396,7 @@ class FunctionTranslator:
             # A local holding the block id stays marked as one, so `buf[blk]` later still
             # reads as a group selection rather than an ordinary index (see
             # _is_block_id_expression).
-            stored:Any = t
+            stored:object = t
             if self._is_block_id_expression(node.value):
                 stored = "blockid"
             self._define(target.id, stored, node)
@@ -4470,7 +4472,7 @@ class FunctionTranslator:
         else:
             self._error(f"unsupported assignment target: {target.__class__.__name__}", node)
 
-    def _named_outer_target(self, target:ast.Name, node:ast.AST)->Optional[Dict[str, Any]]:
+    def _named_outer_target(self, target:ast.Name, node:ast.AST)->Optional[Dict[str, object]]:
         """Resolve a plain-name assignment to an outer variable, refusing what cannot work.
 
         A `nonlocal`/`global`-declared variable is written through its pointer, so
@@ -4487,7 +4489,7 @@ class FunctionTranslator:
         also fine. What is not fine is an unguarded `counter = counter + x[i]`, which
         compiles and then answers one work item's partial value.
         """
-        outer:Optional[Dict[str, Any]] = self.outer_vars.get(target.id)
+        outer:Optional[Dict[str, object]] = self.outer_vars.get(target.id)
         if outer is None:
             return None
         if not outer["writable"]:
@@ -4539,7 +4541,7 @@ class FunctionTranslator:
         dtype_node:ast.expr = call.args[1]
         dtype_name:str = ""
         if isinstance(dtype_node, ast.Attribute) and isinstance(dtype_node.value, ast.Name):
-            module:Any = self.resolve_global(dtype_node.value.id)
+            module:object = self.resolve_global(dtype_node.value.id)
             if module is np:
                 dtype_name = dtype_node.attr
             else:
@@ -4616,7 +4618,7 @@ class FunctionTranslator:
             return None
         callee:ast.expr = node.func
         if isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
-            owner:Any = self.resolve_global(callee.value.id)
+            owner:object = self.resolve_global(callee.value.id)
             if owner is None:
                 return None
             return builtin_name_of(getattr(owner, callee.attr, None))
@@ -4636,7 +4638,7 @@ class FunctionTranslator:
             return None
         callee:ast.expr = node.func
         if isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
-            owner:Any = self.resolve_global(callee.value.id)
+            owner:object = self.resolve_global(callee.value.id)
             if owner is None:
                 return None
             return library_function_name(getattr(owner, callee.attr, None))
@@ -4651,7 +4653,7 @@ class FunctionTranslator:
         The device gets the symbol the registry names for this backend; the headers the
         registry asks for are recorded, so the compilation includes them.
         """
-        entry:Any = library_functions().get(name)
+        entry:object = library_functions().get(name)
         symbol:Optional[str] = (entry.symbols.get(self.backend) if entry is not None else None)
         if symbol is None:
             available:str = (", ".join(sorted(entry.symbols)) if entry is not None else "")
@@ -4672,7 +4674,7 @@ class FunctionTranslator:
                     f"as it is declared, and CUDA has no vector overload for it", node)
         # The result type: the first argument's type, unless the function is registered
         # with a different one. A function that takes nothing answers nothing.
-        result_t:Any = args[0][1] if args else "float"
+        result_t:object = args[0][1] if args else "float"
         if not arg_codes:
             result_t = "void"
         return f"{symbol}({', '.join(arg_codes)})", result_t
@@ -4691,7 +4693,7 @@ class FunctionTranslator:
 
     def _print_is_builtin(self)->bool:
         """True while translating a function whose global scope does not shadow print."""
-        namespace:Any = getattr(self.func, "__globals__", None)
+        namespace:object = getattr(self.func, "__globals__", None)
         if namespace is None:
             return True
         return namespace.get("print", print) is print
@@ -5125,7 +5127,7 @@ class FunctionTranslator:
         """
         if pointer_code is not None:
             name:str = node.target.id  # type: ignore[union-attr]
-            outer:Dict[str, Any] = self.outer_vars[name]
+            outer:Dict[str, object] = self.outer_vars[name]
             self._emit_atomic_update(node, op_name, atomic_name, outer["type"],
                                      array_code=name, index_code="0",
                                      pointer_code=pointer_code)
@@ -5139,7 +5141,7 @@ class FunctionTranslator:
             pending:str = slice_t[3] if len(slice_t) > 3 else ""
             index_code, _ = self._visit_shared_index("", slice_t, target)
             base_code:str = slice_code
-            element_t:Any = slice_t[1]
+            element_t:object = slice_t[1]
             flat:int = index_code.find("[")
             inner:str = index_code[flat + 1:-1] if flat >= 0 else "0"
             if pending:
@@ -5160,7 +5162,7 @@ class FunctionTranslator:
                                  is_local=self._is_local_buffer(target.value))
 
     def _emit_atomic_update(self, node:ast.AugAssign, op_name:str, atomic_name:str,
-                            element_t:Any, array_code:str, index_code:str,
+                            element_t:object, array_code:str, index_code:str,
                             pointer_code:Optional[str]=None,
                             is_local:bool=False)->None:
         """The shared tail of an atomic `op=` on an array element or an outer scalar."""
@@ -5198,7 +5200,7 @@ class FunctionTranslator:
         # An outer scalar named `nonlocal`/`global` is one device location shared by every
         # work item, so an in-place update there is racy in exactly the same way a
         # data-driven array index is -- python accumulates every contribution.
-        outer:Optional[Dict[str, Any]] = (
+        outer:Optional[Dict[str, object]] = (
             self.outer_vars.get(node.target.id)
             if isinstance(node.target, ast.Name) else None)
         carried:bool = (isinstance(node.target, ast.Name)
@@ -5355,17 +5357,17 @@ class FunctionTranslator:
             # object argument travels as a one-element record array, so the store goes
             # through the element (`p[0].x = ...`), which is what makes it reach the host.
             code:str
-            t:Any
+            t:object
             code, t = self._visit_expression(target.value)
             if isinstance(t, tuple) and is_ptr(t):
-                dtype:Any = structs_dtype_for(t[1])
+                dtype:object = structs_dtype_for(t[1])
                 if dtype is None:
                     self._error(
                         f"cannot assign to '{ast.unparse(target)}': {t[1]} is not a "
                         f"structure the translator knows", target)
                 # `box.total = v` is a call to the property's setter, next to the getter
                 # the read side already answers.
-                member_types:Dict[str, Any] = structs_member_types(dtype, self.backend)
+                member_types:Dict[str, object] = structs_member_types(dtype, self.backend)
                 if target.attr not in member_types:
                     self._error(
                         f"structure value has no member '{target.attr}' "
@@ -5382,7 +5384,7 @@ class FunctionTranslator:
                 self._error(
                     f"cannot assign to '{ast.unparse(target)}': member stores need a "
                     f"structure value, and {t} is not one", target)
-            member_types:Dict[str, Any] = structs_member_types(structs_dtype_for(t), self.backend)
+            member_types:Dict[str, object] = structs_member_types(structs_dtype_for(t), self.backend)
             if target.attr not in member_types:
                 self._error(
                     f"structure value has no member '{target.attr}' "
@@ -5390,7 +5392,7 @@ class FunctionTranslator:
             return f"({code}).{target.attr}", member_types[target.attr]
         self._error(f"unsupported assignment target: {target.__class__.__name__}", target)
 
-    def _target_is_bool_member(self, target:ast.expr, target_t:Any, value_t:Any)->bool:
+    def _target_is_bool_member(self, target:ast.expr, target_t:object, value_t:object)->bool:
         """Whether a member store lands in a bool-typed field while holding a wider type."""
         from . import structs  # noqa: PLC0415
 
@@ -5399,8 +5401,8 @@ class FunctionTranslator:
         if value_t == "bool":
             return False
         base_t:DeviceType = self._lookup(target.value.id)
-        struct_t:Any = base_t[1] if is_ptr(base_t) else base_t
-        dtype:Any = structs.dtype_for(struct_t) if isinstance(struct_t, str) else None
+        struct_t:object = base_t[1] if is_ptr(base_t) else base_t
+        dtype:object = structs.dtype_for(struct_t) if isinstance(struct_t, str) else None
         if dtype is None or target.attr not in (dtype.names or ()):
             return False
         return np.dtype(dtype.fields[target.attr][0]).name == "bool"
@@ -5547,7 +5549,7 @@ class FunctionTranslator:
             then_code, tt = self._visit_expression(node.body)
             else_code, et = self._visit_expression(node.orelse)
             if tt != et:
-                unified:Any = promote(tt, et)
+                unified:object = promote(tt, et)
                 return f"({cond} ? ({unified})({then_code}) : ({unified})({else_code}))", unified
             return f"({cond} ? {then_code} : {else_code})", tt
         if isinstance(node, ast.Call):
@@ -5565,8 +5567,8 @@ class FunctionTranslator:
         numeric ones have a device meaning, so a member whose value is not a number is
         refused with the value's type named -- there is nothing to emit for it.
         """
-        payload:Any = entry[0]
-        member:Any = entry[1]
+        payload:object = entry[0]
+        member:object = entry[1]
         name:str = f"{type(member).__name__}.{getattr(member, 'name', '?')}"
         if isinstance(payload, enum.Enum):
             payload = payload.value
@@ -5585,7 +5587,7 @@ class FunctionTranslator:
             f"read the value on the host and pass it as a scalar argument", node)
 
     def _visit_constant(self, node:ast.Constant)->Translated:
-        value:Any = node.value
+        value:object = node.value
         if isinstance(value, bool):
             return ("true" if value else "false"), "bool"
         if isinstance(value, int):
@@ -5605,7 +5607,7 @@ class FunctionTranslator:
             return self._emit_complex_literal(value.imag, value.real), "c128"
         self._error(f"unsupported constant: {value!r}", node)
 
-    def _complex_store(self, target_t:Any, value_t:Any, code:str)->str:
+    def _complex_store(self, target_t:object, value_t:object, code:str)->str:
         """`code` as a value the target type can hold, for a complex assignment.
 
         C has no complex conversion operator, so a store between two different widths --
@@ -5661,7 +5663,7 @@ class FunctionTranslator:
             # The host created this object; on the device it is just the parameter that
             # carries it (see _host_created_assignment).
             return device_name(node.id), host["type"]
-        outer:Optional[Dict[str, Any]] = self.outer_vars.get(node.id)
+        outer:Optional[Dict[str, object]] = self.outer_vars.get(node.id)
         if outer is not None:
             # A writable outer variable travels as `T*`, so every use is a dereference; a
             # read-only one travels as `T` and is simply the parameter itself.
@@ -5693,7 +5695,7 @@ class FunctionTranslator:
                 INDEX_VECTOR_OPENCL if self._opencl_syntax else INDEX_VECTOR_BUILTINS)
             vector_type, code = table[node.id]
             return code, vector_type
-        value:Any = self.resolve_global(node.id)
+        value:object = self.resolve_global(node.id)
         enum_value:Optional[Tuple[Any, Any]] = _enum_member_value(value)
         if enum_value is not None:
             # An enum member is a named constant, so the device reads its value. Python has
@@ -5707,7 +5709,7 @@ class FunctionTranslator:
         self._error(f"unknown name '{node.id}' (only parameters, local variables and int/float/bool global constants are supported)", node)
 
     def _emit_vector_inplace(self, target_code:str, op_name:str,
-                             left:str, lt:Any, right:str, rt:Any)->Optional[str]:
+                             left:str, lt:object, right:str, rt:object)->Optional[str]:
         """`v += w` on a vector as `v = v + w`, or None when that form does not apply.
 
         A vector has no C in-place operator: CUDA rejects `v += w` outright. The ordinary
@@ -5728,7 +5730,7 @@ class FunctionTranslator:
             # into a temporary first, which the caller emits to get a name back.
             return f"{target_code} = {self._vec_componentwise(symbol, left, lt, right=right)};"
         # A vector with a scalar broadcast: the vector side decides which is which.
-        vector_type:Any = lt if is_vec(lt) else rt
+        vector_type:object = lt if is_vec(lt) else rt
         vector_operand:str = left if is_vec(lt) else right
         scalar_operand:str = right if is_vec(lt) else left
         if self._opencl_syntax:
@@ -5744,7 +5746,7 @@ class FunctionTranslator:
         function name (sqrt etc.) generate `op(l.c, r.c)`.
         right is a vector operand, scalar is a broadcast scalar operand.
         """
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         infix:bool = (op in ("+", "-", "*", "/"))
         terms:List[str] = []
@@ -5757,7 +5759,7 @@ class FunctionTranslator:
                 terms.append(f"({op}{left}.{c})" if infix else f"{op}({left}.{c})")
         return self._vec_maker(vec, ", ".join(terms))
 
-    def _emit_quaternion_binop(self, operator:str, left:str, lt:Any, right:str, rt:Any,
+    def _emit_quaternion_binop(self, operator:str, left:str, lt:object, right:str, rt:object,
                                node:ast.BinOp)->Optional[Translated]:
         """A quaternion operation, as a call to one of the header's functions.
 
@@ -5785,7 +5787,7 @@ class FunctionTranslator:
         if operator not in ("Add", "Sub", "Mult", "Div"):
             return None
 
-        def call(name:str, dtype:np.dtype, args:str, result:Any,
+        def call(name:str, dtype:np.dtype, args:str, result:object,
                  mixed:bool = False) -> Translated:
             # The types and their arithmetic both come from the fixed header; all this records
             # is which widths are in use, so the compile step can enable their blocks. A mixed
@@ -5813,7 +5815,7 @@ class FunctionTranslator:
                 name:str = widen(left_quat, right_quat, "mul")
                 # A mixed pair answers the double form, which is a real structure the header
                 # declares, so it is registered under its fixed name like any other.
-                result:Any = (lt if structs_name(left_quat) == structs_name(right_quat)
+                result:object = (lt if structs_name(left_quat) == structs_name(right_quat)
                               else structs_name(quaternion.double_dtype()))
                 return call(name, quaternion.wider(left_quat, right_quat),
                             f"{left}, {right}", result,
@@ -5825,7 +5827,7 @@ class FunctionTranslator:
                 same:bool = quaternion.matches_vector(left_quat, rt)
                 name = (f"{structs_name(left_quat)}_rotate" if same
                         else f"{structs_name(left_quat)}_rotate_{rt}")
-                result_vec:Any = rt if same else (
+                result_vec:object = rt if same else (
                     "double3" if rt.startswith("float") else rt)
                 # A widened rotation needs the double block too, since it answers a double3.
                 return call(name, left_quat, f"{left}, {right}", result_vec, mixed=not same)
@@ -5857,35 +5859,35 @@ class FunctionTranslator:
 
     # ---------- complex values ----------
 
-    def _require_complex(self, dtype:Any)->None:
+    def _require_complex(self, dtype:object)->None:
         """Record that this source uses a complex width, and enable its block."""
         need:Optional[str] = complex_support.needs(dtype)
         self.uses_complex = True
         if need is not None:
             self.complex_needs.add(need)
 
-    def _complex_dtype_of(self, t:Any)->Optional[np.dtype]:
+    def _complex_dtype_of(self, t:object)->Optional[np.dtype]:
         """The complex dtype behind a translated type name, or None."""
-        base:Any = t[1] if isinstance(t, tuple) and is_ptr(t) else t
+        base:object = t[1] if isinstance(t, tuple) and is_ptr(t) else t
         if not isinstance(base, str):
             return None
         return complex_support.dtype_for_type_name(base)
 
-    def _complex_operand(self, code:str, t:Any)->Tuple[str, Optional[np.dtype]]:
+    def _complex_operand(self, code:str, t:object)->Tuple[str, Optional[np.dtype]]:
         """A complex operand as a value: a pointer is dereferenced first."""
         dtype:Optional[np.dtype] = self._complex_dtype_of(t)
         if dtype is not None and isinstance(t, tuple) and is_ptr(t):
             return f"(*{code})", dtype
         return code, dtype
 
-    def _complex_side(self, t:Any, dtype:Optional[np.dtype])->str:
+    def _complex_side(self, t:object, dtype:Optional[np.dtype])->str:
         """One operand's width, in the header's spelling: ``c64``/``c128``/``float``/``double``."""
         if dtype is not None:
             return complex_support.complex_type_name(dtype) or "c64"
-        base:Any = t[1] if isinstance(t, tuple) and is_ptr(t) else t
+        base:object = t[1] if isinstance(t, tuple) and is_ptr(t) else t
         return "double" if base == "double" else "float"
 
-    def _emit_complex_binop(self, operator:str, left:str, lt:Any, right:str, rt:Any,
+    def _emit_complex_binop(self, operator:str, left:str, lt:object, right:str, rt:object,
                             node:ast.BinOp)->Optional[Translated]:
         """A complex operation, as a call to one of the header's functions.
 
@@ -6051,8 +6053,8 @@ class FunctionTranslator:
         self._require_complex(np.dtype(np.complex128))
         return (f"c128_make((double)({real_code}), (double)({imag_code}))", "c128")
 
-    def _emit_complex_compare(self, operator:str, left:str, lt:Any, right:str,
-                              rt:Any) -> Optional[Translated]:
+    def _emit_complex_compare(self, operator:str, left:str, lt:object, right:str,
+                              rt:object) -> Optional[Translated]:
         """`z == w` / `z != w` as the header's equality test.
 
         numpy compares the two parts, so an equality is a real comparison of both. A real
@@ -6095,7 +6097,7 @@ class FunctionTranslator:
             return f"(!{comparison})", "bool"
         return f"({comparison})", "bool"
 
-    def _emit_complex_method(self, attr:str, base_code:str, base_t:Any,
+    def _emit_complex_method(self, attr:str, base_code:str, base_t:object,
                              dtype:np.dtype, node:ast.Call)->Optional[Translated]:
         """One of a complex value's own methods, as the header's function.
 
@@ -6119,8 +6121,8 @@ class FunctionTranslator:
         """
         return t
 
-    def _property_descriptor(self, classes:Any, name:str,
-                             code:str)->Optional[Any]:
+    def _property_descriptor(self, classes:object, name:str,
+                             code:str)->Optional[object]:
         """The property descriptor for `name`, from the class that actually owns it.
 
         The launch knows the exact class of a structure argument (see `_class_of`), and
@@ -6130,7 +6132,7 @@ class FunctionTranslator:
         """
         exact:Optional[type] = self._class_of(code, None)
         if exact is not None:
-            descriptor:Optional[Any] = _property_of(exact, name)
+            descriptor:Optional[object] = _property_of(exact, name)
             if descriptor is not None:
                 return descriptor
         return _property_carrier(classes, name)
@@ -6143,7 +6145,7 @@ class FunctionTranslator:
         call statement of its own. False when the class defines no such property, which
         leaves the field store to answer.
         """
-        descriptor:Optional[Any] = self._property_descriptor(cls, name, base[0])
+        descriptor:Optional[object] = self._property_descriptor(cls, name, base[0])
         if descriptor is None:
             return False
         setter:Optional[Callable] = _property_accessor(descriptor, writer=True)
@@ -6175,7 +6177,7 @@ class FunctionTranslator:
         receiver as its argument -- the same shape a plain method call takes. None when the
         class defines no such property, which leaves the field lookup to answer.
         """
-        descriptor:Optional[Any] = self._property_descriptor(cls, name, base[0])
+        descriptor:Optional[object] = self._property_descriptor(cls, name, base[0])
         if descriptor is None:
             return None
         getter:Optional[Callable] = _property_accessor(descriptor, writer=False)
@@ -6185,7 +6187,7 @@ class FunctionTranslator:
             name, getter, [base], node,
             self_param=_receiver_param_of(getter), receiver_as_argument=True)
 
-    def _emit_magic_conversion(self, magic:str, code:str, t:Any,
+    def _emit_magic_conversion(self, magic:str, code:str, t:object,
                                node:ast.AST)->Optional[Translated]:
         """`int(box)` / `abs(box)` and friends as a device call to the class's method.
 
@@ -6201,7 +6203,7 @@ class FunctionTranslator:
             magic, method, [(code, t)], node,
             self_param=_receiver_param_of(method), receiver_as_argument=True)
 
-    def _emit_magic_binop(self, magic:str, left:str, lt:Any, right:str, rt:Any,
+    def _emit_magic_binop(self, magic:str, left:str, lt:object, right:str, rt:object,
                           node:ast.BinOp)->Optional[Translated]:
         """`a op b` as a device call to the class's magic method, or None.
 
@@ -6229,7 +6231,7 @@ class FunctionTranslator:
                     self_param=_receiver_param_of(method), receiver_as_argument=True)
         return None
 
-    def _emit_magic_compare(self, magic:str, left:str, lt:Any, right:str, rt:Any,
+    def _emit_magic_compare(self, magic:str, left:str, lt:object, right:str, rt:object,
                             op:ast.cmpop)->Optional[Translated]:
         """`a == b` as a device call to the class's comparison, or None."""
         # A containment test asks the RIGHT operand: `x in box` is `box.__contains__(x)`.
@@ -6265,7 +6267,7 @@ class FunctionTranslator:
                     self_param=_receiver_param_of(method), receiver_as_argument=True)
         return None
 
-    def _class_of(self, code:str, t:Any)->Optional[type]:
+    def _class_of(self, code:str, t:object)->Optional[type]:
         """The class a value was built from, when this launch knows it exactly.
 
         One dtype can stand for several classes -- two classes with one layout share it --
@@ -6278,7 +6280,7 @@ class FunctionTranslator:
         exact:Optional[type] = self.struct_arg_classes.get(name)
         return exact
 
-    def _magic_owner(self, t:Any, magic:str,
+    def _magic_owner(self, t:object, magic:str,
                      code:str = "")->Optional[Tuple[type, Any]]:
         """The class whose magic method an operand's operator should call, and that method.
 
@@ -6293,7 +6295,7 @@ class FunctionTranslator:
         base:str = t[1] if isinstance(t, tuple) and is_ptr(t) else t
         if not isinstance(base, str):
             return None
-        dtype:Any = _structs_module.dtype_for(base)
+        dtype:object = _structs_module.dtype_for(base)
         if dtype is None:
             return None
         # The launch may know the exact class of this value (see `_class_of`); that answer
@@ -6301,18 +6303,18 @@ class FunctionTranslator:
         # answered by whichever registered first.
         exact:Optional[type] = self._class_of(code, t) if code else None
         if exact is not None:
-            method:Any = _magic_method_of(exact, magic)
+            method:object = _magic_method_of(exact, magic)
             if method is not None:
                 return exact, method
         # Otherwise ask every class the layout carries -- a shared layout means the first
         # registered one is not necessarily the class whose method this is.
         for cls in _structs_module.declared_classes(dtype):
-            method:Any = _magic_method_of(cls, magic)
+            method:object = _magic_method_of(cls, magic)
             if method is not None:
                 return cls, method
         return None
 
-    def _is_structure_operand(self, t:Any)->bool:
+    def _is_structure_operand(self, t:object)->bool:
         """Whether a translated type is a structure value (a quaternion is one too).
 
         A structure argument travels as a pointer, so the pointer type names one as well.
@@ -6323,13 +6325,13 @@ class FunctionTranslator:
             return False
         return structs_dtype_for(t) is not None
 
-    def _structure_operator_message(self, operator:str, lt:Any, rt:Any,
+    def _structure_operator_message(self, operator:str, lt:object, rt:object,
                                     node:ast.AST)->str:
         """Why a structure cannot take part in an operator, and what to write instead."""
         from . import structs  # noqa: PLC0415
 
-        operand:Any = lt if self._is_structure_operand(lt) else rt
-        dtype:Any = structs.dtype_for(operand)
+        operand:object = lt if self._is_structure_operand(lt) else rt
+        dtype:object = structs.dtype_for(operand)
         members:str = ", ".join(dtype.names or ()) if dtype is not None else "?"
         symbol:str = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/", "Mod": "%",
                       "Pow": "**", "FloorDiv": "//", "Lt": "<", "LtE": "<=", "Gt": ">",
@@ -6392,7 +6394,7 @@ class FunctionTranslator:
                 if lt != rt:
                     self._error(f"vector operands must have the same type, got {lt} and {rt}", node)
                 if self._opencl_syntax:
-                    result_t:Any = (lt if name in ("Add", "Sub", "Mult", "Div") else self._get_int_vec_type(lt))
+                    result_t:object = (lt if name in ("Add", "Sub", "Mult", "Div") else self._get_int_vec_type(lt))
                     return f"({left} {symbol} {right})", result_t
                 if name in ("Add", "Sub", "Mult", "Div"):
                     return self._vec_componentwise(symbol, left, lt, right=right), lt
@@ -6408,7 +6410,7 @@ class FunctionTranslator:
             return self._vec_componentwise(symbol, right, vec, scalar=left), vec
 
         if name == "Div":
-            t:Any = promote(lt, rt) if not (is_int(lt) and is_int(rt)) else "float"
+            t:object = promote(lt, rt) if not (is_int(lt) and is_int(rt)) else "float"
             if is_int(lt) and is_int(rt):
                 return f"((({t})({left})) / (({t})({right})))", t
             return f"({left} / {right})", t
@@ -6421,13 +6423,13 @@ class FunctionTranslator:
                 # empty and the plain operator already agrees.
                 return self._emit_floored(("floor_div", "floor_mod"), "floor_div",
                                           left, promote(lt, rt), right, rt, node)
-            t:Any = promote(lt, rt)
+            t:object = promote(lt, rt)
             return f"(({t})floor(({t})({left}) / ({t})({right})))", t
 
         if name == "Pow":
             if isinstance(node.right, ast.Constant) and isinstance(node.right.value, int) and node.right.value == 2:
                 return f"({left} * {left})", lt
-            t:Any = promote(lt, rt)
+            t:object = promote(lt, rt)
             if is_int(t):
                 t = "float"
             return f"(({t})pow(({t})({left}), ({t})({right})))", t
@@ -6439,7 +6441,7 @@ class FunctionTranslator:
             return f"({left} {symbol} {right})", promote(lt, rt)
 
         if name == "Mod":
-            t:Any = promote(lt, rt)
+            t:object = promote(lt, rt)
             if is_int(t):
                 # Same discrepancy as `//`: C's `%` takes the dividend's sign and python's
                 # takes the divisor's.
@@ -6628,14 +6630,14 @@ class FunctionTranslator:
         index_code, _ = self._visit_subscript_index(node)
         return f"{base_code}[{index_code}]", base_t
 
-    def _visit_shared_index(self, code:str, t:Any, node:ast.Subscript)->Translated:
+    def _visit_shared_index(self, code:str, t:object, node:ast.Subscript)->Translated:
         """Index a shared slice: `buf[blockIdx][i]`, `[i, j]`, and `[i][j]` all flatten.
 
         A tuple subscript consumes several axes at once; a single subscript consumes one and
         hands back a slice with the remaining axes, so a nested spelling reaches the same
         element (`buf[blockIdx][row][col]` is `buf[row * 4 + col]`).
         """
-        ctype:Any = t[1]
+        ctype:object = t[1]
         shape:Tuple[int, ...] = tuple(t[2])
         offset_base:int = t[3] if len(t) > 3 else 0
         index:ast.expr = node.slice
@@ -6671,7 +6673,7 @@ class FunctionTranslator:
         combined:str = f"({offset_base}) + ({flat})" if offset_base else flat
         return f"{code}", (SHARED_SLICE, ctype, remaining, combined)
 
-    def _scalar_position(self, code:str, t:Any, node:ast.AST)->Translated:
+    def _scalar_position(self, code:str, t:object, node:ast.AST)->Translated:
         """A shared slice's element, refusing a partly indexed one.
 
         `buf[blockIdx]` with `(2, 2)` axes and one index is a slice of a row; it has no
@@ -6761,12 +6763,12 @@ class FunctionTranslator:
                     f"(available: {''.join(_vec_field_names(base_t))})", node)
             return f"({base_code}).{component}", _C_FIELD_TYPES[(base_t, component)]
 
-        dtype:Optional[Any] = structs.dtype_for(base_t) if isinstance(base_t, str) else None
+        dtype:Optional[object] = structs.dtype_for(base_t) if isinstance(base_t, str) else None
         if dtype is None and (isinstance(base_t, tuple) and is_ptr(base_t)):
             dtype = structs.dtype_for(base_t[1])
         if dtype is None:
             return None
-        members:Dict[str, Any] = structs.member_types(dtype, self.backend)
+        members:Dict[str, object] = structs.member_types(dtype, self.backend)
         if field not in members:
             self._error(
                 f"structure value has no member '{field}' "
@@ -6824,7 +6826,7 @@ class FunctionTranslator:
             "support. Use the cuda, opencl or python backend for image kernels."
             % action, node)
 
-    def _emit_image_read(self, image_code:str, image_t:Any, node:ast.Subscript)->Translated:
+    def _emit_image_read(self, image_code:str, image_t:object, node:ast.Subscript)->Translated:
         """Translate ``img[x, y]`` into the sampling call of the current backend.
 
         Coordinates are texel space, as :mod:`pygpgpu.image` documents: an integer
@@ -6902,7 +6904,7 @@ class FunctionTranslator:
     def _image_vec_type(self, scalar:str, channels:int)->str:
         return "%s%d" % (scalar, channels)
 
-    def _image_param_type(self, name:str, image_t:Any)->str:
+    def _image_param_type(self, name:str, image_t:object)->str:
         """The declaration type of an image parameter on the current backend.
 
         CUDA reads through a texture object and writes through a surface object, so
@@ -6918,7 +6920,7 @@ class FunctionTranslator:
             return "cudaSurfaceObject_t"
         return "cudaTextureObject_t"
 
-    def _emit_image_write(self, image_code:str, image_t:Any,
+    def _emit_image_write(self, image_code:str, image_t:object,
                           target:ast.Subscript, value_code:str)->None:
         """Translate ``img[x, y] = v`` into the store call of the current backend.
 
@@ -7025,7 +7027,7 @@ class FunctionTranslator:
                     pointer_dtype:Optional[np.dtype] = _structs_module.dtype_for(
                         pointer_t[1])
                     if pointer_dtype is not None:
-                        pointer_members:Dict[str, Any] = _structs_module.member_types(
+                        pointer_members:Dict[str, object] = _structs_module.member_types(
                             pointer_dtype, self.backend)
                         if node.attr in pointer_members:
                             return (f"({self.self_param})->{node.attr}",
@@ -7036,7 +7038,7 @@ class FunctionTranslator:
                 member:str = self.self_struct_members[node.attr]
                 struct_dtype:Optional[np.dtype] = _structs_module.dtype_for(
                     self.self_struct_type[1])
-                members:Dict[str, Any] = _structs_module.member_types(
+                members:Dict[str, object] = _structs_module.member_types(
                     struct_dtype, self.backend)
                 if node.attr not in members:
                     self._error(
@@ -7057,13 +7059,13 @@ class FunctionTranslator:
 
                     dtype:Optional[np.dtype] = _structs_module.dtype_for(receiver_t[1])
                     if dtype is not None:
-                        members:Dict[str, Any] = _structs_module.member_types(
+                        members:Dict[str, object] = _structs_module.member_types(
                             dtype, self.backend)
                         if node.attr in members:
                             return (f"({self.self_param})->{node.attr}" ,
                                     members[node.attr])
                 kind:str
-                _target:Any
+                _target:object
                 kind, _target = _self_member_call_kind(self.self_owner, node.attr)
                 if kind in ("method", "staticmethod"):
                     # A helper of the kernel's own class: call it instead of reading it,
@@ -7077,7 +7079,7 @@ class FunctionTranslator:
             return f"_self_{node.attr}", self.self_attr_types[node.attr]
 
         if isinstance(node.value, ast.Name):
-            module:Any = self.resolve_global(node.value.id)
+            module:object = self.resolve_global(node.value.id)
             # `Kind.B`: reading a member off an enum *class* is that member's value, exactly
             # as reading the bare name `B` would be. The class itself has no device
             # representation, so this has to be answered before it reaches the generic
@@ -7160,7 +7162,7 @@ class FunctionTranslator:
                     structs.declared_classes(dtype), node.attr, (base_code, base_t), node)
                 if property_read is not None:
                     return property_read
-                members:Dict[str, Any] = structs.member_types(dtype, self.backend)
+                members:Dict[str, object] = structs.member_types(dtype, self.backend)
                 if node.attr not in members:
                     self._error(
                         f"structure {base_t[1]} has no member '.{node.attr}' "
@@ -7177,7 +7179,7 @@ class FunctionTranslator:
         if isinstance(base_t, str):
             dtype:Optional[np.dtype] = structs.dtype_for(base_t)
             if dtype is not None:
-                members:Dict[str, Any] = structs.member_types(dtype, self.backend)
+                members:Dict[str, object] = structs.member_types(dtype, self.backend)
                 if node.attr not in members:
                     self._error(
                         f"structure {base_t} has no member '.{node.attr}' "
@@ -7220,9 +7222,9 @@ class FunctionTranslator:
         if called_name(node.func) != "conjugate" or len(node.args) != 1:
             return None
         if isinstance(node.func, ast.Name):
-            callee:Any = self.resolve_global(node.func.id)
+            callee:object = self.resolve_global(node.func.id)
         elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-            owner:Any = self.resolve_global(node.func.value.id)
+            owner:object = self.resolve_global(node.func.value.id)
             callee = getattr(owner, node.func.attr, None)
         else:
             return None
@@ -7233,7 +7235,7 @@ class FunctionTranslator:
         argument:Translated = self._visit_expression(node.args[0])
         # The argument may travel as a pointer: unwrap the type, dereference the value.
         arg_code:str = argument[0]
-        arg_type:Any = argument[1]
+        arg_type:object = argument[1]
         if isinstance(arg_type, tuple) and is_ptr(arg_type):
             arg_type, arg_code = arg_type[1], f"(*{arg_code})"
         dtype:Optional[np.dtype] = quaternion.is_quaternion(arg_type)
@@ -7259,7 +7261,7 @@ class FunctionTranslator:
             # how python's ctypes spelling addresses members -- so it is translated before
             # the positional reordering below, which only knows about plain functions.
             if isinstance(func, ast.Name):
-                candidate:Any = self.resolve_global(func.id)
+                candidate:object = self.resolve_global(func.id)
                 if isinstance(candidate, type) and self._is_structure_class(candidate):
                     return self._visit_structure_constructor_call(node, candidate)
                 # A plain class the scan synthesized into a structure is a constructor too --
@@ -7367,7 +7369,7 @@ class FunctionTranslator:
             if reason is not None:
                 self._error(reason, node)
 
-            target:Any = self.resolve_global(name)
+            target:object = self.resolve_global(name)
             if isinstance(target, type):
                 # A `ctypes.Structure` subclass is not an object in the python sense: it is a
                 # layout, and a device type is generated from it, so `Ray(origin, direction)`
@@ -7417,7 +7419,7 @@ class FunctionTranslator:
                         receiver_owner = _structs_module.declared_class(dtype)
                 call_owner:Optional[type] = receiver_owner or self.self_owner
                 kind:str
-                target:Any
+                target:object
                 kind, target = _self_member_call_kind(call_owner, func.attr)
                 if kind in ("method", "staticmethod") and receiver_owner is not None \
                         and call_owner is not self.self_owner:
@@ -7434,7 +7436,7 @@ class FunctionTranslator:
                 self._error(
                     f"calling self.{func.attr}() from device code is not supported: "
                     f"self.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
-            module:Any = (self.resolve_global(receiver_name)
+            module:object = (self.resolve_global(receiver_name)
                           if receiver_name is not None else None)
             if module is math or module is np:
                 if module is np and func.attr in ("clip", "where"):
@@ -7491,13 +7493,13 @@ class FunctionTranslator:
             callee = callee.value
         if not isinstance(callee, ast.Name):
             return False
-        target:Any = self.resolve_global(callee.id)
+        target:object = self.resolve_global(callee.id)
         if not getattr(target, "is_pykernel", False):
             return False
         self._render_nested_launch(callee.id, target, func.slice, node)
         return True
 
-    def _render_nested_launch(self, name:str, target:Any, work:ast.expr,
+    def _render_nested_launch(self, name:str, target:object, work:ast.expr,
                               node:ast.Call)->None:
         """Emit the device-side launch statement for one nested call."""
         if self.launch_backend != "cuda":
@@ -7541,13 +7543,13 @@ class FunctionTranslator:
         grid:str = f"(({global_code}) / ({block}))"
         self._emit(f"{c_name}<<<{grid}, {block}>>>({call_args});")
 
-    def _translate_nested_kernel(self, name:str, target:Any, node:ast.Call)->str:
+    def _translate_nested_kernel(self, name:str, target:object, node:ast.Call)->str:
         """Render the launched kernel as another `__global__` function of this source."""
         raw_func:Callable = target.raw_func
         known:Optional[str] = self.nested_seen.get(raw_func)
         if known is not None:
             return known
-        param_types:List[Any] = [self._visit_expression(a)[1] for a in node.args]
+        param_types:List[object] = [self._visit_expression(a)[1] for a in node.args]
         from .decorator import _positional_argument_names
 
         expected:int = len(_positional_argument_names(raw_func))
@@ -7626,7 +7628,7 @@ class FunctionTranslator:
                 f"ctypes.Structure subclass or a vector type carries one", node)
 
         kind:str
-        target:Any
+        target:object
         kind, target = self_attr_kind(owner, func.attr)
         if kind == "method":
             args = [self._visit_expression(a) for a in node.args]
@@ -7668,7 +7670,7 @@ class FunctionTranslator:
             if len(args) != 2:
                 self._error("pow() takes exactly 2 arguments", node)
             (lcode, lt), (rcode, rt) = args
-            t:Any = promote(lt, rt)
+            t:object = promote(lt, rt)
             c_func:str = _math_device_name("pow", self.backend) if is_float(t) else "pow"
             return f"{c_func}(({t})({lcode}), ({t})({rcode}))", t
 
@@ -7693,7 +7695,7 @@ class FunctionTranslator:
             if len(args) != 2:
                 self._error(f"{name}() takes exactly 2 arguments", node)
             (lcode, lt), (rcode, rt) = args
-            t:Any = promote(lt, rt)
+            t:object = promote(lt, rt)
             if is_float(t):
                 return f"{'fmin' if name == 'min' else 'fmax'}(({t})({lcode}), ({t})({rcode}))", t
             return f"{'min' if name == 'min' else 'max'}(({t})({lcode}), ({t})({rcode}))", t
@@ -7747,7 +7749,7 @@ class FunctionTranslator:
             # length is the same compile-time shape variable, keyed on the base's name.
             if isinstance(holder, ast.Attribute) and isinstance(holder.value, ast.Name):
                 base_t:DeviceType = self._lookup(holder.value.id)
-                element_t:Any = base_t[1] if is_ptr(base_t) else base_t
+                element_t:object = base_t[1] if is_ptr(base_t) else base_t
                 dtype:Optional[np.dtype] = (structs_dtype_for(element_t)
                                             if isinstance(element_t, str) else None)
                 if dtype is not None and holder.attr in (dtype.names or ()):
@@ -7766,14 +7768,14 @@ class FunctionTranslator:
         call, so the device function always receives one value per parameter.
         """
         func:ast.expr = node.func
-        target:Any = None
+        target:object = None
         if isinstance(func, ast.Name):
             target = self.resolve_global(func.id)
             if not callable(target) or getattr(target, "is_pykernel", False):
                 return node
         elif (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
               and not (self.self_param and func.value.id == self.self_param)):
-            module:Any = self.resolve_global(func.value.id)
+            module:object = self.resolve_global(func.value.id)
             target = getattr(module, func.attr, None)
             if not callable(target):
                 return node
@@ -7845,7 +7847,7 @@ class FunctionTranslator:
             hi:Optional[str] = bounds[1] if len(bounds) > 1 else None
             # np.clip keeps an integer input an integer, so the element type is not forced
             # to float: `np.clip(300, 0, 255)` is 255, not a float.
-            result_t:Any = value_t if is_int(value_t) else "float"
+            result_t:object = value_t if is_int(value_t) else "float"
             return self._emit_clip(value_code, result_t, lo, hi), result_t
         if attr == "where":
             if len(node.args) == 1:
@@ -7950,7 +7952,7 @@ class FunctionTranslator:
             if len(args) != 2:
                 self._error(f"np.{attr}() takes exactly 2 arguments", node)
             (lcode, lt), (rcode, rt) = args
-            t:Any = promote(lt, rt)
+            t:object = promote(lt, rt)
             pick:str = "min" if attr == "minimum" else "max"
             if is_float(t):
                 # `fmin`/`fmax` exist on both backends (`fminf` is the C spelling OpenCL
@@ -7977,11 +7979,11 @@ class FunctionTranslator:
         if not is_int(cond_t) and cond_t != "bool":
             self._error(
                 f"np.where() needs a boolean or integer condition, got {cond_t}", node)
-        unified:Any = promote(then_t, else_t)
+        unified:object = promote(then_t, else_t)
         return (f"(({cond_code}) ? ({unified})({then_code}) : "
                 f"({unified})({else_code}))"), unified
 
-    def _emit_clip(self, value_code:str, result_t:Any,
+    def _emit_clip(self, value_code:str, result_t:object,
                    lo:Optional[str], hi:Optional[str])->str:
         """`np.clip` for one element, in the form the current backend provides.
 
@@ -8086,7 +8088,7 @@ class FunctionTranslator:
             self._error(f"{module_name}.{attr} is not supported", node)
         ret_override:Optional[str] = _MATH_FUNCS[attr]
         arg_codes:List[str] = []
-        ret:Any = (ret_override or "float")
+        ret:object = (ret_override or "float")
         vec_arg:Optional[str] = None
         for i, (code, t) in enumerate(args):
             if is_ptr(t):
@@ -8153,7 +8155,7 @@ class FunctionTranslator:
         code, source_t = args[0]
         if is_ptr(source_t) or is_vec(source_t) or is_image(source_t):
             self._error(f"np.{name}() cannot convert a {source_t}", node)
-        target_t:Any = DTYPE_MAP.get(name)
+        target_t:object = DTYPE_MAP.get(name)
         if target_t is None:
             self._error(f"np.{name}() has no device equivalent", node)
         # A complex cast is not a C cast: the target and the source are structures, so the
@@ -8180,7 +8182,7 @@ class FunctionTranslator:
             return f"{target_t}_from_real(({element})({code}))", target_t
         return f"(({self._device_type(target_t)})({code}))", target_t
 
-    def _unsupported_vec_reason(self, target:Any)->Optional[str]:
+    def _unsupported_vec_reason(self, target:object)->Optional[str]:
         """Why a `pygf` class has no device vector type, or None when it has one.
 
         The alias classes with a device counterpart resolve through `_vec_type_name`. The
@@ -8212,7 +8214,7 @@ class FunctionTranslator:
         """
         if name in _vec_registry():
             return name
-        target:Any = self.resolve_global(name)
+        target:object = self.resolve_global(name)
         if not isinstance(target, type):
             return None
         for base in target.__mro__:
@@ -8235,14 +8237,14 @@ class FunctionTranslator:
             return None
         return dtype
 
-    def _is_structure_class(self, candidate:Any)->bool:
+    def _is_structure_class(self, candidate:object)->bool:
         """Whether a global name is a `ctypes.Structure` subclass with a device layout."""
         from . import structs  # noqa: PLC0415
 
         return structs.structure_dtype_of(candidate) is not None
 
     def _visit_structure_constructor_call(self, node:ast.Call,
-                                          candidate:Any)->Translated:
+                                          candidate:object)->Translated:
         """A structure constructor called with keywords: `Ray(origin=p, direction=d)`.
 
         A member name is a keyword, exactly as python's ctypes spelling addresses one, and
@@ -8312,7 +8314,7 @@ class FunctionTranslator:
             # The typedef has to be emitted even when the structure never appears in the
             # signature: a body that builds one locally still needs the type declared.
             self.private_structs.append(dtype)
-        members:Dict[str, Any] = structs.member_types(dtype, self.backend)
+        members:Dict[str, object] = structs.member_types(dtype, self.backend)
         order:List[str] = list(dtype.names or ())
         if supplied is None:
             supplied = {}
@@ -8362,7 +8364,7 @@ class FunctionTranslator:
         # (NVRTC is older); a braced aggregate takes its members in declaration order.
         return f"({name}{{{', '.join(positional_parts)}}})", name
 
-    def _zero_value(self, member_type:Any)->str:
+    def _zero_value(self, member_type:object)->str:
         """The zero of a member's device type, for an omitted constructor argument."""
         from . import structs
 
@@ -8372,14 +8374,14 @@ class FunctionTranslator:
             return self._vec_maker(member_type,
                                    ", ".join("0" for _ in _vec_field_names(member_type)))
         if isinstance(member_type, str) and structs.dtype_for(member_type) is not None:
-            dtype:Any = structs.dtype_for(member_type)
+            dtype:object = structs.dtype_for(member_type)
             inner:str = ", ".join(self._zero_value(structs.member_types(dtype, self.backend)[m])
                                   for m in dtype.names or ())
             return f"({member_type}{{{inner}}})"
         return f"(({self._device_type(member_type)})(0))"
 
-    def _structure_member_value(self, struct_name:str, member:str, member_type:Any,
-                                code:str, t:Any, node:ast.expr)->str:
+    def _structure_member_value(self, struct_name:str, member:str, member_type:object,
+                                code:str, t:object, node:ast.expr)->str:
         """Coerce one constructor argument to the member's own device type."""
         from . import structs
 
@@ -8411,13 +8413,13 @@ class FunctionTranslator:
         """Whether a structure member's layout type is a bool."""
         from . import structs  # noqa: PLC0415
 
-        dtype:Any = structs.dtype_for(struct_name)
+        dtype:object = structs.dtype_for(struct_name)
         if dtype is None or member not in (dtype.names or ()):
             return False
         return np.dtype(dtype.fields[member][0]).name == "bool"
 
     def _emit_vec_constructor(self, name:str, args:List[Translated], node:ast.Call)->Translated:
-        cls:Any = _vec_registry()[name]
+        cls:object = _vec_registry()[name]
         # A 3-component vector is padded to 16 bytes for the device ABI, so its ctypes struct
         # carries a trailing `_` field that is not a component: `float3(a, b, c)` takes
         # three arguments, not four. Count the real components, not the storage fields.
@@ -8487,7 +8489,7 @@ class FunctionTranslator:
             val_code, val_t = args[-1]
             compare_code:Optional[str] = (args[2][0] if name == "atomic_cas" else None)
             if not is_ptr(arr_t):
-                shared:Optional[Dict[str, Any]] = (
+                shared:Optional[Dict[str, object]] = (
                     self.outer_vars.get(node.args[0].id)
                     if isinstance(node.args[0], ast.Name) else None)
                 if shared is not None and shared["writable"]:
@@ -8629,7 +8631,7 @@ class FunctionTranslator:
         if len(args) not in (1, 2, 3):
             self._error(f"gpu.{name}() takes 1 to 3 arguments", node)
         arg_codes:List[str] = [code for code, _ in args]
-        vec_t:Any = next((t for t, _ in args if is_vec(t)), None)
+        vec_t:object = next((t for t, _ in args if is_vec(t)), None)
         # The functions that are component-wise: they take a vector and answer one.
         component_wise:bool = name in ("fract", "sign", "fmin", "fmax", "ldexp")
         for code, t in args:
@@ -8637,7 +8639,7 @@ class FunctionTranslator:
                 self._error(
                     f"gpu.{name}() takes a scalar: the device has no vector overload for "
                     f"it, so apply it per component", node)
-        result_t:Any = args[0][1]
+        result_t:object = args[0][1]
         # The functions that answer a different type than they take: the rounding
         # functions answer an int, and the conversions answer one too.
         if name in ("rint", "round", "trunc", "floor", "ceil"):
@@ -8679,8 +8681,8 @@ class FunctionTranslator:
 
     def _emit_generic_builtin(self, name:str, args:List[Translated], node:ast.Call)->Translated:
         arg_codes:List[str] = [c for c, _ in args]
-        arg_types:List[Any] = [t for _, t in args]
-        vec_t:Any = next((t for t in arg_types if is_vec(t)), None)
+        arg_types:List[object] = [t for _, t in args]
+        vec_t:object = next((t for t in arg_types if is_vec(t)), None)
 
         if name in CUDA_ONLY_BUILTINS or name in CUDA_ONLY_CONVERSIONS:
             return self._emit_cuda_only_builtin(name, args, node)
@@ -8706,7 +8708,7 @@ class FunctionTranslator:
             if len(args) not in (1, 2):
                 self._error(f"gpu.{name}() takes 1 or 2 arguments", node)
             cuda_name:str = MATH_BUILTINS[name][1]
-            result_t:Any = vec_t or args[0][1]
+            result_t:object = vec_t or args[0][1]
             if self._opencl_syntax:
                 return f"{name}({', '.join(arg_codes)})", result_t
             if vec_t is not None:
@@ -8776,7 +8778,7 @@ class FunctionTranslator:
             if vec_t is not None and self.backend == "opencl":
                 return f"step({edge_code}, {x_code})", vec_t
             if vec_t is not None:
-                cls:Any = _vec_registry()[vec_t]
+                cls:object = _vec_registry()[vec_t]
                 components:List[str] = _vec_field_names(cls)
                 maker:str = f"make_{vec_t}"
                 inner:str = ", ".join(
@@ -8849,7 +8851,7 @@ class FunctionTranslator:
             code, t = args[0]
             if self._opencl_syntax:
                 return f"{name}({code})", "int"
-            cls:Any = _vec_registry()[t]
+            cls:object = _vec_registry()[t]
             components:List[str] = _vec_field_names(cls)
             joiner:str = ("|" if name == "any" else "&")
             expr:str = f"({joiner.join(f'({code}.{c})' for c in components)})"
@@ -8894,14 +8896,14 @@ class FunctionTranslator:
 
         self._error(f"unknown gpu builtin: gpu.{name}", node)
 
-    def _is_scalar(self, t:Any)->bool:
+    def _is_scalar(self, t:object)->bool:
         return isinstance(t, str) and not is_vec(t)
 
-    def _component(self, code:str, t:Any, c:str)->str:
+    def _component(self, code:str, t:object, c:str)->str:
         return f"{code}.{c}" if is_vec(t) else code
 
-    def _emit_vec_clamp(self, codes:List[str], types:List[Any], vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+    def _emit_vec_clamp(self, codes:List[str], types:List[object], vec:str)->str:
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
@@ -8909,8 +8911,8 @@ class FunctionTranslator:
             for c in components)
         return f"{maker}({inner})"
 
-    def _emit_vec_mix(self, codes:List[str], types:List[Any], vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+    def _emit_vec_mix(self, codes:List[str], types:List[object], vec:str)->str:
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
@@ -8953,7 +8955,7 @@ class FunctionTranslator:
     def _vec_componentwise_compare(self, op:str, left:str, vec:str, right:str)->str:
         """Vector comparison: normalize the result to per-component 0/1 (device comparisons use -1,
         all-1 bits, for true, unlike genVec._compare_op's int(True)=1; here it is unified to 0/1)."""
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         int_vec:str = self._get_int_vec_type(vec)
         terms:List[str] = [f"(({left}.{c} {op} {right}.{c}) ? 1 : 0)" for c in components]
@@ -8962,8 +8964,8 @@ class FunctionTranslator:
             return f"({int_vec})({inner})"
         return f"make_{int_vec}({inner})"
 
-    def _emit_vec_mad(self, codes:List[str], types:List[Any], vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+    def _emit_vec_mad(self, codes:List[str], types:List[object], vec:str)->str:
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
@@ -8972,7 +8974,7 @@ class FunctionTranslator:
         return f"{maker}({inner})"
 
     def _emit_vec_select(self, a_code:str, b_code:str, c_code:str, vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         inner:str = ", ".join(
@@ -8982,7 +8984,7 @@ class FunctionTranslator:
     def _emit_vec_relation(self, name:str, lcode:str, rcode:str, vec:str)->str:
         op:str = {"isequal": "==", "isnotequal": "!=", "isgreater": ">",
                   "isgreaterequal": ">=", "isless": "<", "islessequal": "<="}[name]
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         int_vec:str = self._get_int_vec_type(vec)
         maker:str = f"make_{int_vec}"
@@ -9010,27 +9012,27 @@ class FunctionTranslator:
         return f"make_{vec}({inner})"
 
     def _emit_vec_absdiff(self, lcode:str, rcode:str, vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         inner:str = ", ".join(f"abs(({lcode}.{c}) - ({rcode}.{c}))" for c in components)
         return self._vec_maker(vec, inner)
 
     def _emit_vec_hadd(self, lcode:str, rcode:str, vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         inner:str = ", ".join(
             f"((({lcode}.{c}) & ({rcode}.{c})) + ((({lcode}.{c}) ^ ({rcode}.{c})) >> 1))" for c in components)
         return self._vec_maker(vec, inner)
 
     def _emit_vec_rhadd(self, lcode:str, rcode:str, vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         inner:str = ", ".join(
             f"((({lcode}.{c}) | ({rcode}.{c})) - ((({lcode}.{c}) ^ ({rcode}.{c})) >> 1))" for c in components)
         return self._vec_maker(vec, inner)
 
     def _emit_vec_dot(self, lcode:str, rcode:str, vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         terms:str = " + ".join(f"(({lcode}.{c}) * ({rcode}.{c}))" for c in components)
         return f"({terms})"
@@ -9041,7 +9043,7 @@ class FunctionTranslator:
         if len(args) != expected_args:
             self._error(f"gpu.{name}() takes exactly {expected_args} arguments", node)
 
-        vec_types:List[Any] = [t for _, t in args if is_vec(t)]
+        vec_types:List[object] = [t for _, t in args if is_vec(t)]
         if not vec_types:
             self._error(f"gpu.{name}() requires vector arguments "
                         f"(python has no such functions; use fabs/abs for scalars)", node)
@@ -9065,7 +9067,7 @@ class FunctionTranslator:
         self._error(f"gpu.{name} is not supported", node)
 
     def _emit_vec_normalize(self, code:str, vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         dot_expr:str = self._emit_vec_dot(code, code, vec)
@@ -9073,7 +9075,7 @@ class FunctionTranslator:
         return f"{maker}({inner})"
 
     def _emit_vec_cross(self, lcode:str, rcode:str, vec:str)->str:
-        cls:Any = _vec_registry()[vec]
+        cls:object = _vec_registry()[vec]
         components:List[str] = _vec_field_names(cls)
         maker:str = f"make_{vec}"
         x, y, z = components[0], components[1], components[2]
@@ -9086,7 +9088,7 @@ class FunctionTranslator:
             self._error(f"gpu.cross() requires a 3 or 4 component vector, got {vec}")
         return f"{maker}({inner})"
 
-    def _emit_device_call(self, name:str, target:Any, args:List[Translated], node:ast.Call,
+    def _emit_device_call(self, name:str, target:object, args:List[Translated], node:ast.Call,
                           self_param:str="",
                           receiver_as_argument:bool=False)->Translated:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
@@ -9113,7 +9115,7 @@ class FunctionTranslator:
         # A *value* method (`ray.at(t)`) is different: the receiver is already the call's
         # first argument, so it binds as the callee's own first positional parameter
         # (`def at(self, t)` is `(Ray* self, float t)`) and declares no `_self_` slot.
-        self_types:Dict[str, Any] = ({} if receiver_as_argument
+        self_types:Dict[str, object] = ({} if receiver_as_argument
                                      else self.self_attr_types if self_param else {})
         # A structure argument always travels as a pointer, so a local value is passed by
         # its address: the callee reads the members through `->` and a store lands in the
@@ -9141,14 +9143,14 @@ class FunctionTranslator:
         # The caller's own arguments come first, then the receiver struct, then the array
         # attributes -- the same order the callee binds them in, and the same order the
         # call codes below follow.
-        param_types:List[Any] = ([t for _, t in args]
+        param_types:List[object] = ([t for _, t in args]
                                  + ([self.self_struct_type]
                                     if self_param and self.self_struct_members
                                     and not receiver_as_argument else [])
                                  + list(self_types.values()))
 
-        sig_key:Tuple[Callable, Tuple[Any, ...]] = (raw_func, tuple(param_types))
-        entry:Optional[Dict[str, Any]] = self.device_cache.get(sig_key)
+        sig_key:Tuple[Callable, Tuple[object, ...]] = (raw_func, tuple(param_types))
+        entry:Optional[Dict[str, object]] = self.device_cache.get(sig_key)
         if entry is not None:
             if entry["status"] == "in_progress":
                 self._error(f"recursive call detected: '{name}'", node)
@@ -9236,7 +9238,7 @@ class FunctionTranslator:
             argument_codes.extend(self._prologue_parameter_arguments())
         return (f"{entry['c_name']}({', '.join(argument_codes)})", entry["return_type"])
 
-    def _require_outer_parameter(self, name:str, outer:Dict[str, Any], node:ast.AST)->None:
+    def _require_outer_parameter(self, name:str, outer:Dict[str, object], node:ast.AST)->None:
         """Make sure the kernel carrying a helper's outer variable receives it too.
 
         The kernel's own scan only sees names its body mentions; a helper reached from it
@@ -9244,7 +9246,7 @@ class FunctionTranslator:
         the launch supplies it from the same scope (see PyKernel._compile).
         """
         if name in self.outer_vars:
-            existing:Dict[str, Any] = self.outer_vars[name]
+            existing:Dict[str, object] = self.outer_vars[name]
             if existing["writable"] != outer["writable"] or existing["type"] != outer["type"]:
                 self._error(
                     f"outer variable '{name}' is used with conflicting types by a helper: "
@@ -9256,11 +9258,11 @@ class FunctionTranslator:
         else:
             self.params.append((name, outer["type"]))
 
-    def _outer_argument(self, name:str, outer:Dict[str, Any])->str:
+    def _outer_argument(self, name:str, outer:Dict[str, object])->str:
         """The call-site expression that forwards an outer variable to a helper."""
         return f"&{name}" if outer["writable"] else name
 
-    def _emit_self_method_call(self, kind:str, target:Any, attr:str,
+    def _emit_self_method_call(self, kind:str, target:object, attr:str,
                                args:List[Translated], node:ast.Call)->Translated:
         """Call self.<attr>(...) where the member is a method of the kernel's own class."""
         if getattr(target, "is_pykernel", False):
@@ -9279,7 +9281,7 @@ class FunctionTranslator:
         return ("not a method or static method of the class; only those, and module-level "
                 "functions, can be called from device code")
 
-    def _device_func_name(self, func:Callable, types:List[Any])->str:
+    def _device_func_name(self, func:Callable, types:List[object])->str:
         # A method of a class reads `Class_method`; a plain function keeps its own name.
         # The hash stays in the name because a helper monomorphizes per argument type
         # (`blend` over float and over float3 are two device functions), and two modules
@@ -9304,7 +9306,7 @@ class FunctionTranslator:
         return "__device__ " if self.backend == "cuda" else ""
 
     def _emit_floored(self, operations:Tuple[str, str], operation:str,
-                      left:str, ctype:str, right:str, right_t:Any,
+                      left:str, ctype:str, right:str, right_t:object,
                       node:ast.AST)->Translated:
         """`left // right` or `left % right` with python's floor semantics, for integers.
 
@@ -9416,7 +9418,7 @@ class FunctionTranslator:
         from . import structs
 
         for candidate in [t[1] if is_ptr(t) else t for _, t in self.params]:
-            dtype:Any = structs.dtype_for(candidate) if isinstance(candidate, str) else None
+            dtype:object = structs.dtype_for(candidate) if isinstance(candidate, str) else None
             if dtype is not None and dtype not in self.private_structs:
                 self.private_structs.append(dtype)
         if isinstance(self.return_type, str):
@@ -9463,9 +9465,9 @@ class FunctionTranslator:
             declarations.append(f"{self._host_value_declaration(name, entry, device)}")
         return declarations
 
-    def _host_value_declaration(self, name:str, entry:Dict[str, Any], device:bool)->str:
+    def _host_value_declaration(self, name:str, entry:Dict[str, object], device:bool)->str:
         """The parameter declaration for one host-created object."""
-        t:Any = entry["type"]
+        t:object = entry["type"]
         if is_ptr(t):
             qualifier:str = "" if device else self._buffer_qualifier()
             return f"{qualifier}{self._device_type(t[1])}* {device_name(name)}"
@@ -9482,7 +9484,7 @@ class FunctionTranslator:
             return t
         return _CUDA_TYPE_NAMES.get(t, t)
 
-    def _kernel_scalar_type(self, t:Any)->str:
+    def _kernel_scalar_type(self, t:object)->str:
         """A kernel parameter's C type.
 
         `bool` is not portable as a kernel parameter: OpenCL C refuses a `_Bool` kernel
@@ -9621,7 +9623,7 @@ class FunctionTranslator:
             rendered.append((phase_name, phase.render_kernel(phase_name)))
         return rendered
 
-    def structure_dtypes(self)->List[Any]:
+    def structure_dtypes(self)->List[object]:
         """Every structure dtype this translation mentions, in no particular order.
 
         The caller emits one typedef block for the whole source, so the kernel and each
@@ -9629,10 +9631,10 @@ class FunctionTranslator:
         """
         from . import structs
 
-        dtypes:List[Any] = []
+        dtypes:List[object] = []
         for name, t in list(self.params):
-            candidate:Any = t[1] if is_ptr(t) else t
-            dtype:Any = structs.dtype_for(candidate) if isinstance(candidate, str) else None
+            candidate:object = t[1] if is_ptr(t) else t
+            dtype:object = structs.dtype_for(candidate) if isinstance(candidate, str) else None
             if dtype is not None and dtype not in dtypes:
                 dtypes.append(dtype)
         for dtype in self.private_structs:
@@ -9654,17 +9656,17 @@ class FunctionTranslator:
         """
         from . import structs
 
-        dtypes:List[Any] = []
+        dtypes:List[object] = []
         for name, t in list(self.params):
             for candidate in (t[1] if is_ptr(t) else t,):
-                dtype:Any = structs.dtype_for(candidate) if isinstance(candidate, str) else None
+                dtype:object = structs.dtype_for(candidate) if isinstance(candidate, str) else None
                 if dtype is not None and dtype not in dtypes:
                     dtypes.append(dtype)
         for dtype in self.private_structs:
             if dtype not in dtypes:
                 dtypes.append(dtype)
         for entry in (self.return_layout or []):
-            candidate:Any = entry["type"]
+            candidate:object = entry["type"]
             dtype = structs.dtype_for(candidate) if isinstance(candidate, str) else None
             if dtype is not None and dtype not in dtypes:
                 dtypes.append(dtype)
