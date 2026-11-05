@@ -68,6 +68,12 @@ _FILE_LOCK_TIMEOUT: float = 600.0
 _FILE_LOCK_POLL: float = 0.05
 # How many times `_ensure_directory` retries a create another writer is racing.
 _MKDIR_ATTEMPTS: int = 8
+# How long one generated-source write keeps retrying while another process holds the
+# destination. A scanner's hold is milliseconds and an indexer's is a second at most, so a
+# couple of seconds is generous; the point is that a *transient* hold never fails a launch,
+# while a genuinely stuck one still reports itself instead of hanging forever.
+_SOURCE_WRITE_TIMEOUT: float = 5.0
+_SOURCE_WRITE_POLL: float = 0.05
 
 
 
@@ -531,6 +537,55 @@ def _ensure_directory(directory:str)->None:
     ensure(directory)
 
 
+def _write_source_file(path:str, source:str)->None:
+    """Replace one generated file's contents, surviving a transient external hold.
+
+    A plain `open(path, "w")` fails with `PermissionError` when *another process* holds the
+    destination with a non-shared handle. Measured on Windows: a same-process read handle
+    does **not** block a plain write, but it does block `os.replace`; an exclusive handle
+    held by another process blocks both. Since the generated source is rewritten hundreds of
+    times while a module's kernels compile, a real-time scanner or an indexer taking the file
+    for a moment lands inside one of those windows and the whole launch fails -- which is
+    the intermittent error this code exists to remove.
+
+    So the write is tolerant rather than optimistic: it tries `os.replace` over a temp file
+    (which is what makes a reader never see a half-written file), and on `PermissionError`
+    it retries for a bounded time -- alternating the atomic form with a plain overwrite,
+    because the two fail for *different* kinds of holder. Only when the hold outlives the
+    whole budget does the error surface, and then it names the file and the holder hint.
+    """
+    temp_name:str = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    deadline:float = time.monotonic() + _SOURCE_WRITE_TIMEOUT
+    payload:bytes = source.encode("utf-8")
+    last_error:Optional[PermissionError] = None
+    while True:
+        try:
+            with open(temp_name, "wb") as temp_file:
+                temp_file.write(payload)
+            os.replace(temp_name, path)
+            return
+        except PermissionError as error:
+            last_error = error
+        try:
+            # A plain overwrite is refused by a *different* set of holders than `os.replace`
+            # is, so trying both each pass covers whichever one is in the way.
+            with open(path, "wb") as file:
+                file.write(payload)
+            return
+        except PermissionError as error:
+            last_error = error
+        finally:
+            with contextlib.suppress(OSError):
+                if os.path.isfile(temp_name):
+                    os.unlink(temp_name)
+        if time.monotonic() >= deadline:
+            raise PermissionError(
+                f"cannot write {path}: another process held it for more than"
+                f" {_SOURCE_WRITE_TIMEOUT:.0f}s (a real-time scanner or an indexer holding a"
+                f" generated file is the usual cause). Last error: {last_error}") from None
+        time.sleep(_SOURCE_WRITE_POLL)
+
+
 def _file_lock_path(path:str)->str:
     """Where the cross-process lock for one generated file lives.
 
@@ -694,8 +749,13 @@ def _append_source_locked(path: str, header: List[str], definitions: List[str],
     merged_header = _canonical_header(merged_header)
     source: str = assemble_source(merged_header, kept_definitions + added, path)
     _ensure_directory(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8", newline="\n") as file:
-        file.write(source)
+    # An unchanged file is not rewritten. Every rewrite opens a window in which a scanner
+    # or an indexer can hold the destination exclusively, and the module is re-rendered on
+    # every kernel call -- 265 rewrites of one file in a single test module, most of them
+    # byte-identical. Skipping the no-op write removes those windows entirely, and the
+    # digest is still refreshed because it is a separate, tolerant write.
+    if existing != source:
+        _write_source_file(path, source)
     _write_digest(path, source_digest)
     return path
 
@@ -778,8 +838,7 @@ def _write_source_locked(path: str, source: str, source_python: str,
         if target_is_newer:
             merged: str = merge_source(existing, source)
             if merged != existing:
-                with open(path, "w", encoding="utf-8", newline="\n") as file:
-                    file.write(merged)
+                _write_source_file(path, merged)
             return path
 
     if existing is not None and keep_definitions:
@@ -788,11 +847,9 @@ def _write_source_locked(path: str, source: str, source_python: str,
         # a module with two kernels keeps both.
         combined: str = merge_source(existing, source)
         if combined != existing:
-            with open(path, "w", encoding="utf-8", newline="\n") as file:
-                file.write(combined)
+            _write_source_file(path, combined)
         return path
 
     if existing != source or existing is None:
-        with open(path, "w", encoding="utf-8", newline="\n") as file:
-            file.write(source)
+        _write_source_file(path, source)
     return path

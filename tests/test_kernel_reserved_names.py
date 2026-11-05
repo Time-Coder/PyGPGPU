@@ -132,7 +132,12 @@ def test_the_generated_source_keeps_the_mapping():
     import pathlib
 
     cache = pathlib.Path(__file__).parent / ("__cucache__" if backend == "cuda" else "__clcache__")
-    sources = list((cache / "pykernels").glob("test_kernel_reserved_names.*"))
+    # The extension, not a bare `.*`: the module's digest sidecar
+    # (`test_kernel_reserved_names.cu.source-digest`) is written just after the source and
+    # would otherwise win the "newest file" test while holding only a hash.
+    extension = ".cu" if backend == "cuda" else ".cl"
+    sources = [p for p in (cache / "pykernels").glob(f"test_kernel_reserved_names{extension}")]
+    assert sources, f"no generated source found for {backend}"
     text = max(sources, key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8")
     # No bare reserved word survives as a parameter name; every use is prefixed.
     assert "_pyg_new" in text
