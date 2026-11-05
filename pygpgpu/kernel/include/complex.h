@@ -46,6 +46,16 @@
 #ifndef COMPLEX_QUAL
 #define COMPLEX_QUAL
 #endif
+/* Every function below is `static`, so a kernel that calls two of them leaves the rest
+ * unreferenced and NVRTC reports `warning #177-D: function ... was declared but never
+ * referenced` for each -- nineteen of them for a Mandelbrot kernel that uses four
+ * operations. The attribute is what says "unused is expected here", and it is accepted by
+ * every backend this header is compiled by: NVRTC and HIP's clang are C++, and OpenCL C
+ * and MSL both take GNU-style function attributes. Overridable so a backend that spells it
+ * differently can define its own. */
+#ifndef COMPLEX_UNUSED
+#define COMPLEX_UNUSED __attribute__((unused))
+#endif
 
 /* The two structures a kernel can use. The member names are the ones numpy's layout has,
  * which is what lets a `complex64` array be bound to a `c64*` parameter unchanged. */
@@ -60,7 +70,7 @@ typedef struct { double re; double im; } c128;
 #ifdef COMPLEX_NEED_FLOAT
 
 /* (re, im) as a value, and the two real conversions. */
-COMPLEX_QUAL static c64 c64_make(float re, float im)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_make(float re, float im)
 {
     c64 r;
     r.re = re;
@@ -68,7 +78,7 @@ COMPLEX_QUAL static c64 c64_make(float re, float im)
     return r;
 }
 
-COMPLEX_QUAL static c64 c64_from_real(float value)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_from_real(float value)
 {
     c64 r;
     r.re = value;
@@ -76,18 +86,18 @@ COMPLEX_QUAL static c64 c64_from_real(float value)
     return r;
 }
 
-COMPLEX_QUAL static float c64_real(c64 value)
+COMPLEX_QUAL static COMPLEX_UNUSED float c64_real(c64 value)
 {
     return value.re;
 }
 
-COMPLEX_QUAL static float c64_imag(c64 value)
+COMPLEX_QUAL static COMPLEX_UNUSED float c64_imag(c64 value)
 {
     return value.im;
 }
 
 /* z + w */
-COMPLEX_QUAL static c64 c64_add(c64 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_add(c64 a, c64 b)
 {
     c64 r;
     r.re = a.re + b.re;
@@ -96,7 +106,7 @@ COMPLEX_QUAL static c64 c64_add(c64 a, c64 b)
 }
 
 /* z - w */
-COMPLEX_QUAL static c64 c64_sub(c64 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sub(c64 a, c64 b)
 {
     c64 r;
     r.re = a.re - b.re;
@@ -105,7 +115,7 @@ COMPLEX_QUAL static c64 c64_sub(c64 a, c64 b)
 }
 
 /* -z */
-COMPLEX_QUAL static c64 c64_neg(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_neg(c64 a)
 {
     c64 r;
     r.re = -a.re;
@@ -114,7 +124,7 @@ COMPLEX_QUAL static c64 c64_neg(c64 a)
 }
 
 /* z * w: the full product, not a per-component scale. */
-COMPLEX_QUAL static c64 c64_mul(c64 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_mul(c64 a, c64 b)
 {
     c64 r;
     r.re = a.re * b.re - a.im * b.im;
@@ -124,7 +134,7 @@ COMPLEX_QUAL static c64 c64_mul(c64 a, c64 b)
 
 /* z / w, by the conjugate denominator. A zero divisor answers what the arithmetic gives:
  * a real division by zero, which is an infinity or a NaN rather than a raised exception. */
-COMPLEX_QUAL static c64 c64_div(c64 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_div(c64 a, c64 b)
 {
     float d = b.re * b.re + b.im * b.im;
     c64 r;
@@ -134,7 +144,7 @@ COMPLEX_QUAL static c64 c64_div(c64 a, c64 b)
 }
 
 /* z * s and z / s, with a real scalar: what numpy does for `complex * float`. */
-COMPLEX_QUAL static c64 c64_scale(c64 a, float s)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_scale(c64 a, float s)
 {
     c64 r;
     r.re = a.re * s;
@@ -142,7 +152,7 @@ COMPLEX_QUAL static c64 c64_scale(c64 a, float s)
     return r;
 }
 
-COMPLEX_QUAL static c64 c64_scale_div(c64 a, float s)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_scale_div(c64 a, float s)
 {
     c64 r;
     r.re = a.re / s;
@@ -152,12 +162,12 @@ COMPLEX_QUAL static c64 c64_scale_div(c64 a, float s)
 
 /* s / z, and s - z: the real operand widened, which the header spells out so the call site
  * does not have to build the value itself. */
-COMPLEX_QUAL static c64 c64_rdiv(float s, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_rdiv(float s, c64 b)
 {
     return c64_div(c64_from_real(s), b);
 }
 
-COMPLEX_QUAL static c64 c64_add_real(c64 a, float s)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_add_real(c64 a, float s)
 {
     c64 r;
     r.re = a.re + s;
@@ -165,7 +175,7 @@ COMPLEX_QUAL static c64 c64_add_real(c64 a, float s)
     return r;
 }
 
-COMPLEX_QUAL static c64 c64_sub_real(c64 a, float s)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sub_real(c64 a, float s)
 {
     c64 r;
     r.re = a.re - s;
@@ -173,31 +183,31 @@ COMPLEX_QUAL static c64 c64_sub_real(c64 a, float s)
     return r;
 }
 
-COMPLEX_QUAL static c64 c64_rsub(float s, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_rsub(float s, c64 b)
 {
     return c64_sub(c64_from_real(s), b);
 }
 
 /* z == w, as the number the device's bool is: numpy compares the two parts. */
-COMPLEX_QUAL static int c64_equal(c64 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED int c64_equal(c64 a, c64 b)
 {
     return (a.re == b.re) && (a.im == b.im);
 }
 
 /* The magnitude: numpy's `abs(complex)` is a real, not a complex. */
-COMPLEX_QUAL static float c64_abs(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED float c64_abs(c64 a)
 {
     return hypot(a.re, a.im);
 }
 
 /* The phase, in [-pi, pi]: numpy's `np.angle` for a complex scalar. */
-COMPLEX_QUAL static float c64_angle(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED float c64_angle(c64 a)
 {
     return atan2(a.im, a.re);
 }
 
 /* The conjugate, by value -- the same value `z.conjugate()` answers. */
-COMPLEX_QUAL static c64 c64_conjugate(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_conjugate(c64 a)
 {
     c64 r;
     r.re = a.re;
@@ -206,12 +216,12 @@ COMPLEX_QUAL static c64 c64_conjugate(c64 a)
 }
 
 /* z * z and 1 / z. */
-COMPLEX_QUAL static c64 c64_square(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_square(c64 a)
 {
     return c64_mul(a, a);
 }
 
-COMPLEX_QUAL static c64 c64_reciprocal(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_reciprocal(c64 a)
 {
     float d = a.re * a.re + a.im * a.im;
     c64 r;
@@ -226,7 +236,7 @@ COMPLEX_QUAL static c64 c64_reciprocal(c64 a)
  * root's real part is sqrt((|z| + re) / 2) and its imaginary part follows from the product,
  * and for a negative one the two swap roles with the sign of im carried through. The zero
  * case is answered directly, because both formulas divide by a zero there. */
-COMPLEX_QUAL static c64 c64_sqrt(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sqrt(c64 a)
 {
     c64 r;
     if (a.re == 0.0f && a.im == 0.0f)
@@ -250,7 +260,7 @@ COMPLEX_QUAL static c64 c64_sqrt(c64 a)
 }
 
 /* exp(z) = exp(re) * (cos(im) + i sin(im)) */
-COMPLEX_QUAL static c64 c64_exp(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_exp(c64 a)
 {
     float magnitude = exp(a.re);
     c64 r;
@@ -260,7 +270,7 @@ COMPLEX_QUAL static c64 c64_exp(c64 a)
 }
 
 /* log(z) = log|z| + i arg(z) */
-COMPLEX_QUAL static c64 c64_log(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_log(c64 a)
 {
     c64 r;
     r.re = log(hypot(a.re, a.im));
@@ -269,7 +279,7 @@ COMPLEX_QUAL static c64 c64_log(c64 a)
 }
 
 /* 2^z = exp2(re) * (cos(im ln 2) + i sin(im ln 2)) */
-COMPLEX_QUAL static c64 c64_exp2(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_exp2(c64 a)
 {
     float magnitude = exp2(a.re);
     float angle = a.im * 0.6931471805599453f;
@@ -280,7 +290,7 @@ COMPLEX_QUAL static c64 c64_exp2(c64 a)
 }
 
 /* log2(z) and log10(z): the natural logarithm rescaled, which is what numpy computes. */
-COMPLEX_QUAL static c64 c64_log2(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_log2(c64 a)
 {
     c64 natural = c64_log(a);
     c64 r;
@@ -289,7 +299,7 @@ COMPLEX_QUAL static c64 c64_log2(c64 a)
     return r;
 }
 
-COMPLEX_QUAL static c64 c64_log10(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_log10(c64 a)
 {
     c64 natural = c64_log(a);
     c64 r;
@@ -299,7 +309,7 @@ COMPLEX_QUAL static c64 c64_log10(c64 a)
 }
 
 /* sin(z) = sin(re)cosh(im) + i cos(re)sinh(im) */
-COMPLEX_QUAL static c64 c64_sin(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sin(c64 a)
 {
     c64 r;
     r.re = sin(a.re) * cosh(a.im);
@@ -308,7 +318,7 @@ COMPLEX_QUAL static c64 c64_sin(c64 a)
 }
 
 /* cos(z) = cos(re)cosh(im) - i sin(re)sinh(im) */
-COMPLEX_QUAL static c64 c64_cos(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_cos(c64 a)
 {
     c64 r;
     r.re = cos(a.re) * cosh(a.im);
@@ -317,13 +327,13 @@ COMPLEX_QUAL static c64 c64_cos(c64 a)
 }
 
 /* tan(z) = sin(z) / cos(z) */
-COMPLEX_QUAL static c64 c64_tan(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_tan(c64 a)
 {
     return c64_div(c64_sin(a), c64_cos(a));
 }
 
 /* sinh(z) = sinh(re)cos(im) + i cosh(re)sin(im) */
-COMPLEX_QUAL static c64 c64_sinh(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sinh(c64 a)
 {
     c64 r;
     r.re = sinh(a.re) * cos(a.im);
@@ -332,7 +342,7 @@ COMPLEX_QUAL static c64 c64_sinh(c64 a)
 }
 
 /* cosh(z) = cosh(re)cos(im) + i sinh(re)sin(im) */
-COMPLEX_QUAL static c64 c64_cosh(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_cosh(c64 a)
 {
     c64 r;
     r.re = cosh(a.re) * cos(a.im);
@@ -341,13 +351,13 @@ COMPLEX_QUAL static c64 c64_cosh(c64 a)
 }
 
 /* tanh(z) = sinh(z) / cosh(z) */
-COMPLEX_QUAL static c64 c64_tanh(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_tanh(c64 a)
 {
     return c64_div(c64_sinh(a), c64_cosh(a));
 }
 
 /* asin(z) = -i log(iz + sqrt(1 - z^2)) */
-COMPLEX_QUAL static c64 c64_asin(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_asin(c64 a)
 {
     c64 one;
     one.re = 1.0f;
@@ -365,7 +375,7 @@ COMPLEX_QUAL static c64 c64_asin(c64 a)
 }
 
 /* acos(z) = pi/2 - asin(z) */
-COMPLEX_QUAL static c64 c64_acos(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_acos(c64 a)
 {
     c64 arc = c64_asin(a);
     c64 r;
@@ -375,7 +385,7 @@ COMPLEX_QUAL static c64 c64_acos(c64 a)
 }
 
 /* atan(z) = (i/2) log((i + z) / (i - z)) */
-COMPLEX_QUAL static c64 c64_atan(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_atan(c64 a)
 {
     c64 i_value;
     i_value.re = 0.0f;
@@ -391,7 +401,7 @@ COMPLEX_QUAL static c64 c64_atan(c64 a)
 
 /* z^w = exp(w log z). A zero base answers 1 for a zero exponent and 0 otherwise, which is
  * what numpy's `0 ** w` answers for a complex w of positive real part. */
-COMPLEX_QUAL static c64 c64_pow(c64 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_pow(c64 a, c64 b)
 {
     if (a.re == 0.0f && a.im == 0.0f)
     {
@@ -411,7 +421,7 @@ COMPLEX_QUAL static c64 c64_pow(c64 a, c64 b)
 }
 
 /* z^s for a real exponent, which avoids building the widened value at the call site. */
-COMPLEX_QUAL static c64 c64_pow_real(c64 a, float s)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_pow_real(c64 a, float s)
 {
     c64 exponent;
     exponent.re = s;
@@ -420,7 +430,7 @@ COMPLEX_QUAL static c64 c64_pow_real(c64 a, float s)
 }
 
 /* s^z for a real base: the base widened, then the general power. */
-COMPLEX_QUAL static c64 c64_rpow(float s, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_rpow(float s, c64 b)
 {
     return c64_pow(c64_from_real(s), b);
 }
@@ -429,7 +439,7 @@ COMPLEX_QUAL static c64 c64_rpow(float s, c64 b)
 
 #ifdef COMPLEX_NEED_DOUBLE
 
-COMPLEX_QUAL static c128 c128_make(double re, double im)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_make(double re, double im)
 {
     c128 r;
     r.re = re;
@@ -437,7 +447,7 @@ COMPLEX_QUAL static c128 c128_make(double re, double im)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_from_real(double value)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_from_real(double value)
 {
     c128 r;
     r.re = value;
@@ -445,17 +455,17 @@ COMPLEX_QUAL static c128 c128_from_real(double value)
     return r;
 }
 
-COMPLEX_QUAL static double c128_real(c128 value)
+COMPLEX_QUAL static COMPLEX_UNUSED double c128_real(c128 value)
 {
     return value.re;
 }
 
-COMPLEX_QUAL static double c128_imag(c128 value)
+COMPLEX_QUAL static COMPLEX_UNUSED double c128_imag(c128 value)
 {
     return value.im;
 }
 
-COMPLEX_QUAL static c128 c128_add(c128 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_add(c128 a, c128 b)
 {
     c128 r;
     r.re = a.re + b.re;
@@ -463,7 +473,7 @@ COMPLEX_QUAL static c128 c128_add(c128 a, c128 b)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_sub(c128 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sub(c128 a, c128 b)
 {
     c128 r;
     r.re = a.re - b.re;
@@ -471,7 +481,7 @@ COMPLEX_QUAL static c128 c128_sub(c128 a, c128 b)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_neg(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_neg(c128 a)
 {
     c128 r;
     r.re = -a.re;
@@ -479,7 +489,7 @@ COMPLEX_QUAL static c128 c128_neg(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_mul(c128 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_mul(c128 a, c128 b)
 {
     c128 r;
     r.re = a.re * b.re - a.im * b.im;
@@ -487,7 +497,7 @@ COMPLEX_QUAL static c128 c128_mul(c128 a, c128 b)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_div(c128 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_div(c128 a, c128 b)
 {
     double d = b.re * b.re + b.im * b.im;
     c128 r;
@@ -496,7 +506,7 @@ COMPLEX_QUAL static c128 c128_div(c128 a, c128 b)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_scale(c128 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_scale(c128 a, double s)
 {
     c128 r;
     r.re = a.re * s;
@@ -504,7 +514,7 @@ COMPLEX_QUAL static c128 c128_scale(c128 a, double s)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_scale_div(c128 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_scale_div(c128 a, double s)
 {
     c128 r;
     r.re = a.re / s;
@@ -512,12 +522,12 @@ COMPLEX_QUAL static c128 c128_scale_div(c128 a, double s)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_rdiv(double s, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_rdiv(double s, c128 b)
 {
     return c128_div(c128_from_real(s), b);
 }
 
-COMPLEX_QUAL static c128 c128_add_real(c128 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_add_real(c128 a, double s)
 {
     c128 r;
     r.re = a.re + s;
@@ -525,7 +535,7 @@ COMPLEX_QUAL static c128 c128_add_real(c128 a, double s)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_sub_real(c128 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sub_real(c128 a, double s)
 {
     c128 r;
     r.re = a.re - s;
@@ -533,27 +543,27 @@ COMPLEX_QUAL static c128 c128_sub_real(c128 a, double s)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_rsub(double s, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_rsub(double s, c128 b)
 {
     return c128_sub(c128_from_real(s), b);
 }
 
-COMPLEX_QUAL static int c128_equal(c128 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED int c128_equal(c128 a, c128 b)
 {
     return (a.re == b.re) && (a.im == b.im);
 }
 
-COMPLEX_QUAL static double c128_abs(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED double c128_abs(c128 a)
 {
     return hypot(a.re, a.im);
 }
 
-COMPLEX_QUAL static double c128_angle(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED double c128_angle(c128 a)
 {
     return atan2(a.im, a.re);
 }
 
-COMPLEX_QUAL static c128 c128_conjugate(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_conjugate(c128 a)
 {
     c128 r;
     r.re = a.re;
@@ -561,12 +571,12 @@ COMPLEX_QUAL static c128 c128_conjugate(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_square(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_square(c128 a)
 {
     return c128_mul(a, a);
 }
 
-COMPLEX_QUAL static c128 c128_reciprocal(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_reciprocal(c128 a)
 {
     double d = a.re * a.re + a.im * a.im;
     c128 r;
@@ -575,7 +585,7 @@ COMPLEX_QUAL static c128 c128_reciprocal(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_sqrt(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sqrt(c128 a)
 {
     c128 r;
     if (a.re == 0.0 && a.im == 0.0)
@@ -598,7 +608,7 @@ COMPLEX_QUAL static c128 c128_sqrt(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_exp(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_exp(c128 a)
 {
     double magnitude = exp(a.re);
     c128 r;
@@ -607,7 +617,7 @@ COMPLEX_QUAL static c128 c128_exp(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_log(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_log(c128 a)
 {
     c128 r;
     r.re = log(hypot(a.re, a.im));
@@ -615,7 +625,7 @@ COMPLEX_QUAL static c128 c128_log(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_exp2(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_exp2(c128 a)
 {
     double magnitude = exp2(a.re);
     double angle = a.im * 0.69314718055994530942;
@@ -625,7 +635,7 @@ COMPLEX_QUAL static c128 c128_exp2(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_log2(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_log2(c128 a)
 {
     c128 natural = c128_log(a);
     c128 r;
@@ -634,7 +644,7 @@ COMPLEX_QUAL static c128 c128_log2(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_log10(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_log10(c128 a)
 {
     c128 natural = c128_log(a);
     c128 r;
@@ -643,7 +653,7 @@ COMPLEX_QUAL static c128 c128_log10(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_sin(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sin(c128 a)
 {
     c128 r;
     r.re = sin(a.re) * cosh(a.im);
@@ -651,7 +661,7 @@ COMPLEX_QUAL static c128 c128_sin(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_cos(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_cos(c128 a)
 {
     c128 r;
     r.re = cos(a.re) * cosh(a.im);
@@ -659,12 +669,12 @@ COMPLEX_QUAL static c128 c128_cos(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_tan(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_tan(c128 a)
 {
     return c128_div(c128_sin(a), c128_cos(a));
 }
 
-COMPLEX_QUAL static c128 c128_sinh(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sinh(c128 a)
 {
     c128 r;
     r.re = sinh(a.re) * cos(a.im);
@@ -672,7 +682,7 @@ COMPLEX_QUAL static c128 c128_sinh(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_cosh(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_cosh(c128 a)
 {
     c128 r;
     r.re = cosh(a.re) * cos(a.im);
@@ -680,12 +690,12 @@ COMPLEX_QUAL static c128 c128_cosh(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_tanh(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_tanh(c128 a)
 {
     return c128_div(c128_sinh(a), c128_cosh(a));
 }
 
-COMPLEX_QUAL static c128 c128_asin(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_asin(c128 a)
 {
     c128 one;
     one.re = 1.0;
@@ -702,7 +712,7 @@ COMPLEX_QUAL static c128 c128_asin(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_acos(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_acos(c128 a)
 {
     c128 arc = c128_asin(a);
     c128 r;
@@ -711,7 +721,7 @@ COMPLEX_QUAL static c128 c128_acos(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_atan(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_atan(c128 a)
 {
     c128 i_value;
     i_value.re = 0.0;
@@ -725,7 +735,7 @@ COMPLEX_QUAL static c128 c128_atan(c128 a)
     return r;
 }
 
-COMPLEX_QUAL static c128 c128_pow(c128 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_pow(c128 a, c128 b)
 {
     if (a.re == 0.0 && a.im == 0.0)
     {
@@ -744,7 +754,7 @@ COMPLEX_QUAL static c128 c128_pow(c128 a, c128 b)
     return c128_exp(c128_mul(b, c128_log(a)));
 }
 
-COMPLEX_QUAL static c128 c128_pow_real(c128 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_pow_real(c128 a, double s)
 {
     c128 exponent;
     exponent.re = s;
@@ -752,7 +762,7 @@ COMPLEX_QUAL static c128 c128_pow_real(c128 a, double s)
     return c128_pow(a, exponent);
 }
 
-COMPLEX_QUAL static c128 c128_rpow(double s, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_rpow(double s, c128 b)
 {
     return c128_pow(c128_from_real(s), b);
 }
@@ -766,7 +776,7 @@ COMPLEX_QUAL static c128 c128_rpow(double s, c128 b)
 
 #if defined(COMPLEX_NEED_FLOAT) && defined(COMPLEX_NEED_DOUBLE)
 
-COMPLEX_QUAL static c128 c64_widen_c128(c64 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_widen_c128(c64 a)
 {
     c128 r;
     r.re = a.re;
@@ -776,7 +786,7 @@ COMPLEX_QUAL static c128 c64_widen_c128(c64 a)
 
 /* Narrowing exists so `np.complex64(z)` has something to call; it is the one conversion that
  * does lose precision, and the caller asked for it by name. */
-COMPLEX_QUAL static c64 c128_narrow_c64(c128 a)
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c128_narrow_c64(c128 a)
 {
     c64 r;
     r.re = (float)a.re;
@@ -785,94 +795,94 @@ COMPLEX_QUAL static c64 c128_narrow_c64(c128 a)
 }
 
 /* float complex * double complex, either order. */
-COMPLEX_QUAL static c128 c64_mul_c128(c64 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_mul_c128(c64 a, c128 b)
 {
     return c128_mul(c64_widen_c128(a), b);
 }
 
-COMPLEX_QUAL static c128 c128_mul_c64(c128 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_mul_c64(c128 a, c64 b)
 {
     return c128_mul(a, c64_widen_c128(b));
 }
 
-COMPLEX_QUAL static c128 c64_add_c128(c64 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_add_c128(c64 a, c128 b)
 {
     return c128_add(c64_widen_c128(a), b);
 }
 
-COMPLEX_QUAL static c128 c128_add_c64(c128 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_add_c64(c128 a, c64 b)
 {
     return c128_add(a, c64_widen_c128(b));
 }
 
-COMPLEX_QUAL static c128 c64_sub_c128(c64 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_sub_c128(c64 a, c128 b)
 {
     return c128_sub(c64_widen_c128(a), b);
 }
 
-COMPLEX_QUAL static c128 c128_sub_c64(c128 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sub_c64(c128 a, c64 b)
 {
     return c128_sub(a, c64_widen_c128(b));
 }
 
-COMPLEX_QUAL static c128 c64_div_c128(c64 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_div_c128(c64 a, c128 b)
 {
     return c128_div(c64_widen_c128(a), b);
 }
 
-COMPLEX_QUAL static c128 c128_div_c64(c128 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_div_c64(c128 a, c64 b)
 {
     return c128_div(a, c64_widen_c128(b));
 }
 
-COMPLEX_QUAL static int c64_equal_c128(c64 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED int c64_equal_c128(c64 a, c128 b)
 {
     return c128_equal(c64_widen_c128(a), b);
 }
 
-COMPLEX_QUAL static int c128_equal_c64(c128 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED int c128_equal_c64(c128 a, c64 b)
 {
     return c128_equal(a, c64_widen_c128(b));
 }
 
 /* A float complex meeting a double *scalar* answers a double complex, and so does the
  * reverse; the widening is the same one the mixed pair uses. */
-COMPLEX_QUAL static c128 c64_scale_c128(c64 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_scale_c128(c64 a, double s)
 {
     return c128_scale(c64_widen_c128(a), s);
 }
 
-COMPLEX_QUAL static c128 c64_add_real_c128(c64 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_add_real_c128(c64 a, double s)
 {
     return c128_add_real(c64_widen_c128(a), s);
 }
 
-COMPLEX_QUAL static c128 c64_sub_real_c128(c64 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_sub_real_c128(c64 a, double s)
 {
     return c128_sub_real(c64_widen_c128(a), s);
 }
 
-COMPLEX_QUAL static c128 c64_scale_div_c128(c64 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_scale_div_c128(c64 a, double s)
 {
     return c128_scale_div(c64_widen_c128(a), s);
 }
 
-COMPLEX_QUAL static c128 c64_div_c128_scalar(c64 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_div_c128_scalar(c64 a, double s)
 {
     return c128_scale_div(c64_widen_c128(a), s);
 }
 
-COMPLEX_QUAL static c128 c64_pow_c128(c64 a, c128 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_pow_c128(c64 a, c128 b)
 {
     return c128_pow(c64_widen_c128(a), b);
 }
 
-COMPLEX_QUAL static c128 c128_pow_c64(c128 a, c64 b)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_pow_c64(c128 a, c64 b)
 {
     return c128_pow(a, c64_widen_c128(b));
 }
 
-COMPLEX_QUAL static c128 c64_pow_real_c128(c64 a, double s)
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c64_pow_real_c128(c64 a, double s)
 {
     return c128_pow_real(c64_widen_c128(a), s);
 }
