@@ -164,6 +164,17 @@ The choice is fixed when the decorator runs — `set_type_map()` does not change
 already exists — and it is part of the kernel's identity, so two mappings never share a
 compiled binary.
 
+The mapping reaches an **object's members** too, because a plain object becomes a structure
+whose members are that structure's fields: with `int=np.int64`, `obj.n = 2 ** 31` travels as
+64 bits, and under the default 32-bit width the same value raises `ValueError` instead of
+wrapping. A member whose type the caller *declared* (`ctypes.c_int64` in `_fields_`) keeps
+that width — the mapping never overrides what was written down.
+
+A kernel **imported from a handwritten `.cl`/`.cu`/`.hip`** has no mapping: its widths are
+whatever the source declares, and a scalar outside that width is refused with a `ValueError`
+naming the parameter, rather than reaching the device and wrapping.
+
+
 ### `+=` into an array element
 
 `arr[i] op= value` follows Python's semantics even when several work items meet at the same element: `bins[image[i, j, k]] += 1` accumulates every pixel, without writing `atomic_add` by hand. The translator emits a device atomic whenever it cannot prove the element belongs to one work item — the proof being that the subscript is built from exactly the magic loop's own index variables, so `out[i] += x[i]` stays a plain (faster) read-modify-write.

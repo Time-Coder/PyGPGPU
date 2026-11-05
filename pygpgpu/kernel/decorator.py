@@ -1440,7 +1440,7 @@ class PyKernel(_KernelBase[_P]):
                 from .objects import _structure_for, member_type  # noqa: PLC0415 (import cycle)
 
                 self_struct:type = _structure_for(
-                    [(name, member_type(getattr(instance, name), name))
+                    [(name, member_type(getattr(instance, name), name, self._type_map))
                      for name in struct_attrs], [])
                 from .structs import register_name_hint  # noqa: PLC0415 (import cycle)
 

@@ -103,6 +103,27 @@ def _scalar_type(dtype:np.dtype)->Optional[str]:
     return DTYPE_MAP.get(dtype.name)
 
 
+def _backend_type_name(scalar:str, backend:str)->str:
+    """The C spelling a structure member of this device type must use on this backend.
+
+    A structure member is declared in the generated source, so it needs the *C* spelling of
+    its device type rather than the internal name. `long` is the one that bites: it is 32-bit
+    in CUDA C on Windows (where NVRTC and HIP are used here), so a member spelled `long` was
+    four bytes while the host packed the dtype's eight -- reading back `0x1122334455` gave
+    `0x22334455`, the top byte silently gone. `translator._CUDA_TYPE_NAMES` already carries
+    that rewrite for parameters and locals; a structure field has to use the same table, or
+    the host's layout and the device's disagree.
+
+    `opencl` keeps the internal names (`uchar`, `uint`, `long`, `ulong`), which OpenCL C
+    defines as 8/32/64/64-bit.
+    """
+    from .translator import _CUDA_TYPE_NAMES
+
+    if backend in ("cuda", "hip"):
+        return _CUDA_TYPE_NAMES.get(scalar, scalar)
+    return scalar
+
+
 def field_type(field_dtype:DTypeLike, backend:str)->Tuple[str, str]:
     """(C base type, array suffix) for one field: scalar, vector, nested structure, or array."""
     from ..vec_types.layout import _vector_dtype_name
@@ -129,7 +150,7 @@ def field_type(field_dtype:DTypeLike, backend:str)->Tuple[str, str]:
         if dtype.name == "bool":
             base = "uchar" if backend == "opencl" else "unsigned char"
         else:
-            base = scalar
+            base = _backend_type_name(scalar, backend)
 
     # numpy records a sub-array member as (dtype, shape); C puts the extents on the name.
     suffix:str = ""

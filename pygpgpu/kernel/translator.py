@@ -635,6 +635,21 @@ def _ctypes_scalar_types()->Dict[object, str]:
     return CTYPES_SCALAR_TYPES
 
 
+def ctypes_device_type_name(expected:object)->Optional[str]:
+    """The device type name a backend's scalar ctypes class stands for, or None.
+
+    `kernel_import` parses a handwritten source and gets each parameter as the backend's own
+    `ctypes` class; to range-check a value against it, the class has to name the device type
+    the same way a `@kernel` argument does. Only scalar classes answer; an array, a structure
+    or an unknown class answers None, and the caller then falls back to its own test.
+    """
+    import ctypes as _ctypes
+
+    if not isinstance(expected, type) or not issubclass(expected, _ctypes._SimpleCData):
+        return None                  # noqa: SLF001 (the documented base)
+    return _ctypes_scalar_types().get(expected)
+
+
 def resolve_device_type(value:object, key:str)->str:
     """The device type name a caller's type object stands for, for the given mapping key.
 
@@ -753,7 +768,17 @@ _INTEGER_RANGES:Dict[str, Tuple[int, int]] = {
 }
 
 
-def _check_integer_fits(value:int, device_type:str)->None:
+def check_integer_range(value:int, device_type:str, where:str='')->None:
+    """Public entry point for the width check, shared by every path that chooses a type.
+
+    A scalar argument, a structure member, and an imported kernel's declared parameter all
+    have to agree on what "does not fit" means. `where` names the member when the caller has
+    one, so the message points at it rather than at the kernel as a whole.
+    """
+    _check_integer_fits(value, device_type, where)
+
+
+def _check_integer_fits(value:int, device_type:str, where:str='')->None:
     """Refuse a python `int` the device type it travels as cannot represent."""
     bounds:Optional[Tuple[int, int]] = _INTEGER_RANGES.get(device_type)
     if bounds is None:
@@ -774,7 +799,8 @@ def _check_integer_fits(value:int, device_type:str)->None:
     else:
         suggestion = " The device has no integer type that wide."
     raise ValueError(
-        f"the integer {value} does not fit the device type '{device_type}' "
+        f"{where + ': ' if where else ''}the integer {value} does not fit the device "
+        f"type '{device_type}' "
         f"({low}..{high}); a python int has no width of its own, so it travels as the "
         f"width this kernel chose for `int`.{suggestion}") from None
 

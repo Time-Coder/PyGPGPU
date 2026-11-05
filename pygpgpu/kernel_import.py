@@ -495,9 +495,27 @@ class KernelImportWrapper:
                 if expected is None:
                     uncertain = True
                     continue
+                # An integer parameter is range-checked against the width the source
+                # declares, which is the same rule a @kernel scalar follows. The old test
+                # asked numpy to *convert* the value, and numpy 2 raises `OverflowError`
+                # for an out-of-range one -- an exception neither this check nor a caller
+                # was prepared for, so a handwritten `uchar` parameter accepted `256` by
+                # accident on one numpy and raised an unhandled error on another.
+                from .kernel.translator import (  # noqa: PLC0415 (import cycle)
+                    check_integer_range,
+                    ctypes_device_type_name,
+                )
+
+                declared:Optional[str] = ctypes_device_type_name(expected)
+                if declared is not None and isinstance(value, int) and not isinstance(value, bool):
+                    try:
+                        check_integer_range(int(value), declared)
+                    except ValueError:
+                        return False
+                    continue
                 try:
                     _np.dtype(expected).type(value)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     return False
         return None if uncertain else True
 
@@ -550,8 +568,43 @@ class KernelImportWrapper:
 
     # ---------- calls ----------
 
+    def _check_scalar_widths(self, backend:str, args:Tuple[object, ...],
+                             kwargs:Dict[str, object])->None:
+        """Refuse a scalar the declaration's own width cannot hold.
+
+        `_declaration_accepts` decides which backend a bare call goes to, and a bracket names
+        the backend outright, so neither path is a gate: `k["opencl"](256, ...)` on a
+        parameter declared `uchar` reached the device and wrapped to `0`. The declared width
+        is the caller's contract with that source, so a value outside it is refused here,
+        once, before any backend launches.
+        """
+        signature:Optional[Tuple[Tuple[str, str], ...]] = self._declarations.get(backend)
+        if signature is None:
+            return
+        bound:Optional[List[object]] = self._bind_arguments(signature, args, kwargs)
+        if bound is None:
+            return
+        tables:Dict[str, Dict[str, type]] = _scalar_tables(backend)
+        scalar_types:Dict[str, type] = tables.get("basic", {})
+        from .kernel.translator import (  # noqa: PLC0415 (import cycle)
+            check_integer_range,
+            ctypes_device_type_name,
+        )
+
+        for (name, type_str), value in zip(signature, bound):
+            if type_str.strip().endswith("*"):
+                continue                 # a buffer's dtype is checked by the dispatch
+            expected:Optional[type] = scalar_types.get(type_str.strip())
+            if expected is None:
+                continue
+            declared:Optional[str] = ctypes_device_type_name(expected)
+            if declared is None or not isinstance(value, int) or isinstance(value, bool):
+                continue
+            check_integer_range(int(value), declared, name)
+
     def _ready_kernel(self, args:Tuple[object, ...], kwargs:Dict[str, object])->object:
         backend:str = self._select_backend(args, kwargs)[0]
+        self._check_scalar_widths(backend, args, kwargs)
         source:_BackendSource = self._sources[backend]
         return source.kernel(self._name, self._bracket_device, self._bracket)
 

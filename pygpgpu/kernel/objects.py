@@ -919,12 +919,31 @@ def scalar_member_type(type_map:Optional[Dict[str, str]], python_type:type)->typ
     return ctypes.c_float
 
 
-def _numeric_member_type(value:object, type_map:Optional[Dict[str, str]]) -> Optional[type]:
-    """The ctypes class a plain python number becomes, under the mapping."""
+def _ctypes_name_of(cls:type)->str:
+    """The device type name a ctypes scalar class stands for, for a range check."""
+    for name, known in _DEVICE_SCALAR_CLASSES.items():
+        if known is cls:
+            return name
+    return "int"
+
+def _numeric_member_type(value:object, type_map:Optional[Dict[str, str]],
+                         attr:str="") -> Optional[type]:
+    """The ctypes class a plain python number becomes, under the mapping.
+
+    An integer that the chosen width cannot hold is refused here rather than wrapped: a
+    structure member travels in the dtype's own bytes, so `obj.n = 2 ** 31` under the default
+    32-bit width used to reach the device as a negative number with nothing reported. The
+    check is the same one `infer_ctype` applies to a scalar argument, so a value and the same
+    value held in an object's member behave identically.
+    """
     if isinstance(value, (bool, np.bool_)):
         return ctypes.c_bool
     if isinstance(value, (int, np.integer)):
-        return scalar_member_type(type_map, int)
+        chosen:type = scalar_member_type(type_map, int)
+        from .translator import check_integer_range  # noqa: PLC0415 (import cycle)
+
+        check_integer_range(int(value), _ctypes_name_of(chosen), attr)
+        return chosen
     if isinstance(value, (float, np.floating)):
         return scalar_member_type(type_map, float)
     return None
@@ -1227,7 +1246,7 @@ def member_type(value:object, attr:str,
     mapping silently inert for object members (`obj.n = 2 ** 31` still wrapped). A declared
     `ctypes` member keeps its own class -- the caller wrote that width down.
     """
-    numeric:Optional[type] = _numeric_member_type(value, type_map)
+    numeric:Optional[type] = _numeric_member_type(value, type_map, attr)
     if numeric is not None:
         return numeric
     if isinstance(value, (list, tuple)):
