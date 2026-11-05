@@ -2023,6 +2023,10 @@ class FunctionTranslator:
         # name -> the column that subscript starts at, so the caret lands on the indexed
         # expression (`a[i, i]`), the way numpy's own IndexError points at it.
         self.subscript_columns:Dict[str, int] = {}
+        # name -> the subscript as the user wrote it (`image[i, j, 2]`). The launch hands
+        # it to the frame stand-in, which re-runs that very expression against an array of
+        # the wrong rank so CPython draws its own caret instead of a synthetic one.
+        self.subscript_texts:Dict[str, str] = {}
         # The magic loop's index variables, in unpack order. A subscript formed from
         # exactly these names addresses a different element per work item, which is what
         # makes a plain read-modify-write safe (see _augassign_is_race_free).
@@ -5465,13 +5469,16 @@ class FunctionTranslator:
             return
         count:int = len(node.slice.elts) if isinstance(node.slice, ast.Tuple) else 1
         previous:int = self.subscript_indices.get(name, 0)
-        if count >= previous:
-            # The widest subscript is the one that decides, so it is also the statement
-            # worth pointing at. Its line is in the parsed copy's numbering, which
-            # _body_frame converts back to the user's file; the column is where the
-            # subscript expression itself starts, so the caret underlines the indexing.
+        if count > previous:
+            # The widest subscript is the one that decides; among equally wide ones the
+            # FIRST is the one python would raise at, because it is the first the body
+            # reaches. Its line is in the parsed copy's numbering, which _body_frame
+            # converts back to the user's file, and the column is where the subscript
+            # expression starts, so the caret underlines the indexing rather than the
+            # whole statement.
             self.subscript_lines[name] = getattr(node, "lineno", 0) or 0
             self.subscript_columns[name] = getattr(node, "col_offset", 0) or 0
+            self.subscript_texts[name] = ast.get_source_segment(self.source_text, node) or ""
         self.subscript_indices[name] = max(previous, count)
 
     def _visit_subscript_index(self, node:ast.Subscript)->Translated:

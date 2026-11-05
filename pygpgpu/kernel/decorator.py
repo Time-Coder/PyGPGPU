@@ -627,20 +627,35 @@ def _native_argument_errors(entry:Callable[_P, _R])->Callable[_P, _R]:
 def _body_only(error:BaseException)->Optional[TracebackType]:
     """The exceptions raised by a kernel body, without this library's frames.
 
-    ``PyKernel._invoke`` puts a stand-in for the body's own line at the end of the chain;
-    everything ahead of it belongs to the launch machinery. Nothing is returned for an
-    error that carries no such stand-in -- a failure raised before the body ran -- so that
-    one keeps its own diagnostic.
+    ``PyKernel._invoke`` ends the chain with the body's own frame: a stand-in on a device
+    backend, and the *real* frame on the interpreter backend, which has column information
+    a stand-in cannot carry. Everything ahead of it belongs to the launch machinery.
+    Nothing is returned for an error that carries neither -- a failure raised before the
+    body ran -- so that one keeps its own diagnostic.
     """
     traceback:object = error.__traceback__
     keep:object = None
     cursor:object = traceback
     while cursor is not None:
-        if _is_body_stand_in(cursor.tb_frame.f_code):
+        code:object = cursor.tb_frame.f_code
+        if _is_body_stand_in(code) or _is_user_frame(code):
+            # The last such frame is the body's: the launch machinery is all inside this
+            # package, so anything after it would be a callee, and the body is the callee.
             keep = cursor
-            break
         cursor = cursor.tb_next
     return keep
+
+
+def _is_user_frame(code:object)->bool:
+    """True for a frame of code that lives outside this package."""
+    filename:str = getattr(code, "co_filename", "") or ""
+    if not filename:
+        return False
+    if filename.startswith("<") and filename.endswith(">"):
+        # `-c`, stdin and exec'd code: no library of ours is written that way.
+        return True
+    package_dir:str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return not os.path.abspath(filename).startswith(package_dir + os.sep)
 
 
 def _callable_signature(func:Callable, skip_first:bool)->Optional[inspect.Signature]:
@@ -858,6 +873,45 @@ def _is_body_stand_in(code:object)->bool:
     return False
 
 
+def _subscript_stand_in(error:BaseException, filename:str, lineno:int, column:int,
+                        func_name:str)->Optional[Tuple[str, Dict[str, object]]]:
+    """A stand-in that really performs the too-wide subscript.
+
+    CPython draws a caret from the failing *instruction*'s position, and the only way to get
+    the one python would draw -- the object under `~`, the index under `^` -- is for the
+    failing instruction to be the same subscript. So this builds a function whose last
+    statement is the user's own expression, with the array bound to one of the real rank so
+    numpy raises the identical ``IndexError``.
+
+    Returns ``(source, namespace)``, or None when the recorded expression cannot be
+    reproduced -- a target that is not a plain name (``self.items[i]``), or a slice whose
+    own names cannot be bound -- in which case the caller falls back to a plain raise.
+    """
+    target:str = str(getattr(error, "subscript_text", "") or "")
+    rank:int = int(getattr(error, "array_rank", 0) or 0)
+    if not target or rank <= 0 or "[" not in target or not target.endswith("]"):
+        return None
+    base:str = target.split("[", 1)[0]
+    if not base.isidentifier():
+        return None
+    try:
+        parsed:ast.AST = ast.parse(target, mode="eval")
+    except SyntaxError:
+        return None
+    # Every name the expression mentions stands for an axis; the array itself gets a shape
+    # of the real rank, which is what makes numpy refuse the subscript with python's own
+    # words and mark the position CPython would.
+    namespace:Dict[str, object] = {node.id: 0 for node in ast.walk(parsed)
+                                  if isinstance(node, ast.Name)}
+    namespace[base] = np.zeros((1,) * rank, dtype=np.float32)
+    padding:str = " " * max(column, 0)
+    source:str = ("\n" * max(lineno - 3, 0)
+                  + f"def {func_name}():\n"
+                  + padding + f"{_FRAME_MARKER!r}\n"
+                  + padding + target + " = 1.0\n")
+    return source, namespace
+
+
 def _body_frame(func:Callable, error:BaseException)->Optional[TracebackType]:
     """A frame standing in for ``func``'s own body at the line that failed.
 
@@ -879,9 +933,28 @@ def _body_frame(func:Callable, error:BaseException)->Optional[TracebackType]:
     # `for` statement itself, which is exactly what python blames. A *device* backend refuses
     # that shape before the body ever runs, so there is no frame to read it from -- the
     # translator records the position on the exception instead (see _unpacking_error).
+    qualname_for_frame:str = (getattr(func, "__qualname__", None)
+                              or getattr(func, "__name__", "kernel"))
+    body_name:str = qualname_for_frame.rsplit(".", 1)[-1]
+
     lineno:int = int(getattr(error, "lineno", 0) or 0)
     if not lineno:
         cursor:object = error.__traceback__
+        while cursor is not None:
+            frame_code:object = cursor.tb_frame.f_code
+            if (os.path.abspath(frame_code.co_filename) == os.path.abspath(filename)
+                    and frame_code.co_name == body_name
+                    and not _is_body_stand_in(frame_code)):
+                # The interpreter backend ran the body, so this is the user's own frame at
+                # the failing line -- with the column information only a real frame has.
+                # Nothing is gained by replacing it with a stand-in, and the caret is lost
+                # by doing so, which is what made this backend's error read differently
+                # from the undecorated one.
+                while cursor.tb_next is not None:
+                    cursor = cursor.tb_next
+                return cursor
+            cursor = cursor.tb_next
+        cursor = error.__traceback__
         while cursor is not None:
             if os.path.abspath(cursor.tb_frame.f_code.co_filename) == os.path.abspath(filename):
                 lineno = cursor.tb_lineno
@@ -907,7 +980,14 @@ def _body_frame(func:Callable, error:BaseException)->Optional[TracebackType]:
                   + f"def {func_name}():\n"
                   + padding + f"'{_FRAME_MARKER}'\n"
                   + padding + "raise _PYGPGPU_FRAME_EXCEPTION\n")
-    namespace:Dict[str, object] = {"_PYGPGPU_FRAME_EXCEPTION": error}
+    # Prefer a stand-in that performs the real subscript, because that is the only way to
+    # get CPython's own caret; the plain raise below is the fallback.
+    reproduced:Optional[Tuple[str, Dict[str, object]]] = _subscript_stand_in(
+        error, filename, lineno, column, func_name)
+    if reproduced is not None:
+        source, namespace = reproduced
+    else:
+        namespace = {"_PYGPGPU_FRAME_EXCEPTION": error}
     try:
         exec(compile(source, filename, "exec"), namespace)  # noqa: S102 - a frame stand-in
         frame_func:object = namespace[func_name]
@@ -1232,12 +1312,23 @@ class PyKernel(_KernelBase[_P]):
             caller = _caller_traceback(caught.__traceback__)
             raise caught.with_traceback(caller) from None
         except ValueError as caught:
-            # A refusal about the *arguments* -- an integer too wide for the mapping, an
-            # unpacking count that does not match -- belongs to the caller, so it is trimmed
-            # to their frame the way a SyntaxError is. Falling through to the body handler
-            # below would dress it up as a failure inside the function, which it never was.
+            # Two different things arrive as a ValueError, and python's own reading decides
+            # which treatment each takes.
+            #
+            # An *argument* refusal -- an integer too wide for the type map (`_check_integer_fits`)
+            # -- is about the call, not the body: it carries no source position, and it is
+            # trimmed to the caller's frame the way a SyntaxError is. Falling through to the
+            # body handler would dress it up as a failure inside the function.
+            #
+            # One the translator *positioned* (see `_position_error`) is a failure of the
+            # body's own line -- an unpacking count that cannot match, a subscript that is
+            # too wide -- and reads exactly as the interpreter reads it, so it gets the body
+            # treatment below: the caller's line and then the line that failed.
             if not str(caught):
                 raise
+            if getattr(caught, "lineno", None):
+                caught.__traceback__ = _user_traceback(caught, self.raw_func)
+                raise caught from None
             caller = _caller_traceback(caught.__traceback__)
             raise caught.with_traceback(caller) from None
         except Exception as caught:
@@ -2754,6 +2845,9 @@ class PyKernel(_KernelBase[_P]):
                  # not the loop, when a subscript names more indices than the rank.
                  "subscript_lines": dict(translator.subscript_lines),
                  "subscript_columns": dict(translator.subscript_columns),
+                 # name -> the subscript as the user wrote it, so the frame stand-in can
+                 # re-run that expression and let CPython draw its own caret.
+                 "subscript_texts": dict(translator.subscript_texts),
                  "source_first_line": int(getattr(translator, "first_line", 1) or 1),
                  "loop_line": int(getattr(translator, "magic_loop_line", 0) or 0),
                  # How many index names the magic loop unpacks: the launch checks it against
@@ -3141,11 +3235,18 @@ def _check_shape_indices(kernel_name:str, full:List[object],
         subscript_line:int = int(launch_meta.get("subscript_lines", {}).get(name, 0) or 0)
         first_line:int = int(launch_meta.get("source_first_line", 1) or 1)
         if count > rank:
-            # numpy's own sentence and exception type: python raises exactly this for
-            # `a[i, i]` on a 1-D array, so the device does too.
+            # numpy's own sentence and exception type, word for word: python raises
+            # exactly this for `a[i, i]` on a 1-D array, so the device does too. Nothing
+            # is appended -- the array is already named by the frame above, and an extra
+            # clause made the two readings differ.
             error:BaseException = IndexError(
                 f"too many indices for array: array is {rank}-dimensional, "
-                f"but {count} were indexed ('{name}' has shape {shape})")
+                f"but {count} were indexed")
+            # What the frame stand-in needs to reproduce python's caret: the expression
+            # that was too wide, and how wide the array really is.
+            error.subscript_text = launch_meta.get(  # type: ignore[attr-defined]
+                "subscript_texts", {}).get(name, "")
+            error.array_rank = rank  # type: ignore[attr-defined]
         else:
             # Python raises nothing here -- `out[i, j]` on a 3-D array selects a sub-array --
             # so this is a device limit, not a mirror of the interpreter's. A ValueError

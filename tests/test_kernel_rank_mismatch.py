@@ -123,3 +123,61 @@ def test_the_python_backend_reports_the_same_kind_of_error(runner):
     with pytest.raises(ValueError) as caught:
         merge_rgb_images["python"](moon, moon, 1.0, -1.0)
     assert "not enough values to unpack" in str(caught.value)
+
+
+@kernel
+def over_indexed(a: np.ndarray, out: np.ndarray):
+    """`a[i, i]` on a 1-D array: python raises from the subscript, not from the loop."""
+    for i in range(out.shape[0]):
+        out[i] = a[i, i] + 1.0
+
+
+def test_a_too_wide_subscript_reads_exactly_like_python(runner):
+    """The message is numpy's own sentence, with nothing appended.
+
+    An extra clause naming the array and its shape used to be added here. It made the
+    decorated and undecorated readings differ, and the caller's own line already names the
+    array -- `a` is visible in `out[i] = a[i, i] + 1.0`.
+    """
+    a = np.arange(9, dtype=np.float32)
+    out = np.zeros(9, dtype=np.float32)
+    with pytest.raises(IndexError) as caught:
+        runner(over_indexed, a, out)
+    assert str(caught.value) == ("too many indices for array: array is 1-dimensional, "
+                                 "but 2 were indexed")
+
+
+def test_the_failing_subscript_is_the_one_python_would_blame(runner):
+    """Two frames -- the caller and the failing line -- and the FIRST offending subscript.
+
+    The body reaches `a[i, i]` before anything else, so that is where python raises; blaming
+    the last subscript of the body (what recording "the widest one" used to do when several
+    tie) pointed a reader at a statement that had not run yet.
+    """
+    import linecache
+    import traceback
+
+    a = np.arange(9, dtype=np.float32)
+    out = np.zeros(9, dtype=np.float32)
+    with pytest.raises(IndexError) as caught:
+        runner(over_indexed, a, out)
+
+    frames = []
+    cursor = caught.value.__traceback__
+    while cursor is not None:
+        frames.append(cursor)
+        cursor = cursor.tb_next
+    # The kernel's own line is the last frame, and no frame of this library is anywhere in
+    # the chain -- the caller's frames (the test, the fixture) come first, as they do for an
+    # undecorated call.
+    assert frames[-1].tb_frame.f_code.co_name == "over_indexed"
+    for node in frames:
+        assert "pygpgpu" not in node.tb_frame.f_code.co_filename.replace("\\", "/").split("/"), \
+            node.tb_frame.f_code.co_filename
+    body = frames[-1]
+    assert body.tb_frame.f_code.co_filename == __file__
+    assert "a[i, i]" in linecache.getline(__file__, body.tb_lineno)
+
+    # ...and CPython draws its caret under that subscript, as it does without the decorator.
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert "^" in rendered.splitlines()[-1] or "^" in rendered.splitlines()[-2], rendered
