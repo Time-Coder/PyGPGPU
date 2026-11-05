@@ -776,10 +776,24 @@ def digest_sidecar(path:str)->str:
 
 
 def _write_digest(path:str, digest:str)->None:
+    """Record the digest beside a generated file, but only when it actually changed.
+
+    An unconditional rewrite moves the sidecar's mtime on every kernel call, including the
+    calls that changed nothing: measured across repeated launches of one module, the sidecar
+    advanced while the generated source it describes stayed byte-identical. The sidecar is
+    not in a parser's `related_files` list, so this does not invalidate a cache by itself --
+    but it is file churn inside the critical section that also writes the source, and a
+    freshness test that compares mtimes is decided by such small gaps. Writing only on a
+    change keeps the sidecar's timestamp honest: it moves exactly when the digest it holds
+    moves.
+    """
     if not digest:
         return
+    sidecar:str = digest_sidecar(path)
+    if _stored_digest(path) == digest:
+        return
     try:
-        with open(digest_sidecar(path), "w", encoding="utf-8", newline="\n") as file:
+        with open(sidecar, "w", encoding="utf-8", newline="\n") as file:
             file.write(digest + "\n")
     except OSError:
         pass
