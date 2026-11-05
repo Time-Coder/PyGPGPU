@@ -44,6 +44,44 @@ if TYPE_CHECKING:
     from .device import Device
 
 
+def complex_of_dtype(dtype: Any) -> Any:
+    """The complex dtype behind a numpy record layout of two reals, or None.
+
+    A complex array's bytes *are* the record's bytes: `complex64` is a `float` pair and
+    `complex128` a `double` pair, in that order. So an argument declared against one of the
+    package's fixed complex structures can bind a complex array unchanged, and everything the
+    copy path does with it -- the upload, the read-back -- has to speak the *complex* dtype
+    rather than the record's, or the element-wise copies refuse to assign.
+    """
+    if not isinstance(dtype, np.dtype) or dtype.fields is None:
+        return None
+    names:Tuple[str, ...] = tuple(dtype.names or ())
+    if names != ("re", "im"):
+        return None
+    first:np.dtype = np.dtype(dtype.fields["re"][0])
+    second:np.dtype = np.dtype(dtype.fields["im"][0])
+    if first != second:
+        return None
+    if first.name == "float32":
+        return np.dtype(np.complex64)
+    if first.name == "float64":
+        return np.dtype(np.complex128)
+    return None
+
+
+def _host_dtype_for(content_type: Any) -> Any:
+    """The dtype a host array must have to bind this device element type.
+
+    A complex structure binds a *complex* array, not an array of records: the two layouts are
+    identical, and numpy will not assign a record into a complex array (nor the reverse) under
+    the casting rule a read-back uses. Answering the complex dtype here is what keeps the
+    upload and the read-back working for a `c64*` parameter.
+    """
+    if isinstance(content_type, type) and hasattr(content_type, "dtype"):
+        return complex_of_dtype(content_type.dtype) or content_type.dtype
+    return content_type
+
+
 def _element_dtype(content_type: Any) -> Any:
     """The numpy dtype an array argument's elements should be cast to.
 
@@ -159,6 +197,9 @@ class Kernel(CLObject):
         # compiled Kernel instance is shared by every thread using the kernel; as
         # plain attributes one thread's bracket would leak into another's launch.
         self._call_state = threading.local()
+        # `clSetKernelArg` binds the arguments onto the shared kernel handle, so the
+        # bind-and-enqueue step is serialized (see _call).
+        self._arg_lock = threading.Lock()
 
     def _take_call_state(self):
         """Read and clear the pending bracket state for the current thread."""
@@ -305,14 +346,24 @@ class Kernel(CLObject):
             context.release_sync_queue(queue)
 
     def _call(self, args, kwargs, cmd_queue:Optional[CommandQueue]=None)->List[Event]:
-        cmd_queue, global_work_size, local_work_size, bound = self.__before_call(args, kwargs, cmd_queue)
-        work_dim = len(global_work_size)
+        # `clSetKernelArg` writes the argument values *onto the kernel handle itself*, and
+        # this handle is shared by every thread that launches this kernel -- the bracket
+        # state is per thread (`_call_state`), but the handle is not. Two threads that set
+        # their arguments at the same time therefore overwrite each other's, and the launch
+        # that ends up enqueued reads the other thread's buffers: the kernel then writes into
+        # a buffer nobody reads back, and the caller's own array stays at its initial value
+        # (an all-zero result on a correct launch). Binding the arguments and enqueuing are
+        # one critical section, so a thread's arguments are the ones its launch runs with.
+        # The queue itself is already per thread, so the wait for the event stays outside.
+        with self._arg_lock:
+            cmd_queue, global_work_size, local_work_size, bound = self.__before_call(args, kwargs, cmd_queue)
+            work_dim = len(global_work_size)
 
-        event_id = cl_event(0)
-        CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, pointer(event_id))
-        launch_event = Event(self.context, event_id, CL.clEnqueueNDRangeKernel)
-        if CL.print_info:
-            print(f"launch OpenCL {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
+            event_id = cl_event(0)
+            CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, pointer(event_id))
+            launch_event = Event(self.context, event_id, CL.clEnqueueNDRangeKernel)
+            if CL.print_info:
+                print(f"launch OpenCL {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
 
         return self.__after_call(cmd_queue, launch_event, bound)
 
@@ -357,7 +408,17 @@ class Kernel(CLObject):
             if isinstance(host_data, list):
                 host_data[:] = buffer.data.tolist()
             elif isinstance(host_data, np.ndarray):
-                host_data[:] = buffer.data
+                # A complex argument's device buffer holds the record layout, which is the
+                # same bytes as the complex array: the copy has to speak the complex dtype
+                # or numpy refuses the assignment under its casting rule.
+                device_data:Any = buffer.data
+                if (isinstance(device_data, np.ndarray)
+                        and device_data.dtype.fields is not None
+                        and host_data.dtype.kind == "c"):
+                    complex_dtype:Any = complex_of_dtype(device_data.dtype)
+                    if complex_dtype is not None and complex_dtype == host_data.dtype:
+                        device_data = device_data.view(complex_dtype)
+                host_data[:] = device_data
             elif isinstance(host_data, (Structure, ctypes_union)):
                 # A union instance is a `ctypes` record too: its bytes are the copy target,
                 # the same way a structure's are. Testing for `Structure` alone skipped the
@@ -606,6 +667,16 @@ class Kernel(CLObject):
                     # because `bytes(record)` is refused for an overlapping (union) dtype.
                     value = content_type.from_buffer_copy(
                         ProgramParser._structure_bytes(value))
+                elif is_struct and isinstance(value, (complex, np.complexfloating)):
+                    # A complex scalar is a two-real value, which is exactly the record the
+                    # structure declares: the value is converted through that layout, never
+                    # through the structure's own constructor -- the constructor assigns each
+                    # member by name and would narrow the complex into its first real field,
+                    # silently dropping the imaginary part. `np.complexfloating` is checked as
+                    # well as `complex`: a numpy `complex64` is *not* a python `complex`.
+                    value = np.asarray(value).view(np.dtype(content_type))[()]
+                    value = content_type.from_buffer_copy(
+                        ProgramParser._structure_bytes(value))
                 if isinstance(value, content_type):
                     used_value = value
                 else:
@@ -668,7 +739,16 @@ class Kernel(CLObject):
                         else:
                             if content_dtype is not None:
                                 if value.dtype != content_dtype:
-                                    used_value = np.ascontiguousarray(value).view(content_dtype)
+                                    # A complex structure binds a complex array: the two
+                                    # layouts are byte-identical, so nothing is converted --
+                                    # the dtype view is the whole of it.
+                                    complex_dtype:Any = complex_of_dtype(content_dtype)
+                                    if complex_dtype is not None:
+                                        used_value = np.ascontiguousarray(value).view(
+                                            complex_dtype)
+                                    else:
+                                        used_value = np.ascontiguousarray(value).view(
+                                            content_dtype)
                             elif value.dtype != content_type:
                                 used_value = value.astype(_element_dtype(content_type))
 

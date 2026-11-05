@@ -21,6 +21,7 @@ import numpy as np
 from .builtin_registry import builtin_name_of
 from .device_library import library_function_name, library_functions
 from .structs import dtype_for as structs_dtype_for, member_types as structs_member_types
+from . import complex as complex_support
 from .device_builtins import (
     ATOMIC_BUILTINS,
     CUDA_ONLY_BUILTINS,
@@ -156,6 +157,33 @@ def _returns_a_value(body:List[ast.stmt])->bool:
         if isinstance(node.value, ast.Constant) and node.value.value is None:
             continue
         return True
+    return False
+
+
+def _has_device_return(body:List[ast.stmt])->bool:
+    """True when some `return` of this body is emitted into the generated kernel.
+
+    A body's statements fall into three regions (see PyKernel._run_host_region): the ones
+    above the first magic loop and the ones after the last run on the host, so their
+    `return`s never reach the device. A `return` inside a magic loop's body -- nested `if`
+    blocks and serial loops included -- *is* device code, and it claims the result.
+
+    A bare `return` counts: it claims with None, which is how python's "the first work item
+    to leave decides" rule survives a value-returning site elsewhere in the body. A
+    gid-style body has no host regions at all, so every statement of it is device code.
+    """
+    loops:List[ast.For] = [stmt for stmt in body
+                           if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt)]
+    if not loops:
+        regions:List[ast.AST] = list(body)
+    else:
+        # Only the loop bodies: a statement between two loops is a gap the host runs, and a
+        # `return` there answers on the host like the tail's does.
+        regions = [ast.Module(body=list(loop.body), type_ignores=[]) for loop in loops]
+    for region in regions:
+        for node in ast.walk(region):
+            if isinstance(node, ast.Return):
+                return True
     return False
 
 
@@ -549,7 +577,16 @@ DTYPE_MAP:Dict[str, str] = {
     "int8": "char", "int16": "short", "int32": "int", "int64": "long",
     "uint8": "uchar", "uint16": "ushort", "uint32": "uint", "uint64": "ulong",
     "float16": "half", "float32": "float", "float64": "double",
+    # A complex value is one of the fixed structures the complex header declares, not a
+    # scalar: the entry here is the type *name* a signature and a subscript use, exactly as
+    # a structure name is. `is_complex_type` is what tells the two apart.
+    "complex64": "c64", "complex128": "c128",
 }
+
+# The device type names that are complex values rather than structures. Unlike a structure
+# they travel by value, their arithmetic is generated (not refused), and their two members
+# are read with the header's own accessors.
+COMPLEX_TYPE_NAMES:Set[str] = {"c64", "c128"}
 
 # The numpy scalars whose device type is the *narrow* one, as it always was: an 8- or
 # 16-bit value is an `int` on the device, and a float64 is a `float`. A caller who wants
@@ -563,6 +600,50 @@ PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string
 
 # A zeros_per_group() slice: that group's storage, plus the shape it was declared with.
 SHARED_SLICE = "shared_slice"
+
+# Names a kernel body may use that C, C++ or OpenCL C reserves. A parameter or local called
+# `new` is legal python and illegal in every one of those languages -- CUDA and HIP compile
+# as C++, so `void f(c64 new, ...)` fails with a bare `expected a ")"` that names nothing the
+# user wrote. The mapping is the prefix `_pyg_` plus the name, which is the one spelling that
+# cannot collide with a user's own identifier (a python name cannot contain the prefix
+# without also being mapped, so the two never meet).
+#
+# The set is the union of C89/C99/C11 keywords, C++ keywords as far as CUDA C++ accepts
+# them, and OpenCL C's address-space and function qualifiers (`__global`, `__kernel`, ...),
+# because one generated body is compiled by all three.
+RESERVED_DEVICE_NAMES:Set[str] = {
+    # C and C++ keywords
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
+    "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
+    "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct",
+    "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
+    "bool", "catch", "class", "constexpr", "const_cast", "delete", "dynamic_cast",
+    "explicit", "export", "false", "friend", "mutable", "namespace", "new", "noexcept",
+    "nullptr", "operator", "private", "protected", "public", "reinterpret_cast",
+    "static_cast", "template", "this", "throw", "true", "try", "typeid", "typename",
+    "using", "virtual", "wchar_t",
+    # C++20 spellings CUDA/HIP toolchains accept
+    "concept", "constinit", "consteval", "co_await", "co_return", "co_yield",
+    "requires", "char8_t", "char16_t", "char32_t",
+    # OpenCL C qualifiers and types
+    "__global", "__local", "__constant", "__private", "__kernel", "__read_only",
+    "__write_only", "__read_write", "__generic", "__attribute__", "__kernel_exec",
+}
+
+RESERVED_PREFIX:str = "_pyg_"
+
+
+def device_name(name:str)->str:
+    """The C identifier a python name is emitted as.
+
+    A name the device language reserves is spelled with the `_pyg_` prefix, so a kernel
+    parameter called `new`, `register`, `float`, `global` or `kernel` compiles. Everything
+    else is emitted unchanged, so the generated source still reads like the python it came
+    from. The two spellings are disjoint by construction: `_pyg_new` is only produced for
+    `new`, and a python identifier `_pyg_new` is itself prefixed (`_pyg__pyg_new`).
+    """
+    return f"{RESERVED_PREFIX}{name}" if name in RESERVED_DEVICE_NAMES else name
+
 
 # The internal type names use OpenCL's spellings, because one generator serves every backend.
 # CUDA C does not define uchar/ushort/uint/ulong (NVRTC rejects them; char/short/int/long
@@ -868,6 +949,41 @@ _MATH_CONSTS:Dict[str, str] = {
     "inf": "(1.0f / 0.0f)",
 }
 
+# ---------- the complex vocabulary ----------
+
+# Which of the math vocabulary's names map to which of the complex header's functions, which
+# answer a *real* (the magnitude and the phase), and which have no complex meaning at all.
+# numpy is the authority here: it defines exactly this split, the interpreter backend runs
+# numpy, and the device has to agree with it rather than inventing an answer.
+COMPLEX_DEVICE_FUNCTIONS:Dict[str, str] = {
+    "sqrt": "sqrt", "exp": "exp", "log": "log", "log2": "log2", "log10": "log10",
+    "sin": "sin", "cos": "cos", "tan": "tan",
+    # numpy spells the inverse trig `arcsin`/`arccos`/`arctan`, and its `np.sin`-shaped
+    # aliases (`np.asin`, ...) exist too; both spellings mean the same function here.
+    "asin": "asin", "acos": "acos", "atan": "atan",
+    "arcsin": "asin", "arccos": "acos", "arctan": "atan",
+    "sinh": "sinh", "cosh": "cosh", "tanh": "tanh",
+    "square": "square", "reciprocal": "reciprocal", "conjugate": "conjugate",
+    "conj": "conjugate", "exp2": "exp2",
+}
+# A complex argument answering a *real*: numpy's own rule (`abs` is the magnitude, `np.angle`
+# the phase). An empty spelling means the plain real function of the magnitude.
+COMPLEX_ABS_FUNCTIONS:Dict[str, str] = {
+    "absolute": "abs", "abs": "abs", "angle": "angle", "sign": "",
+}
+# The real-only names, which numpy refuses for a complex input -- with the complex spelling
+# that is the right counterpart, or the fact that there is none.
+COMPLEX_UNSUPPORTED_FUNCTIONS:Dict[str, str] = {
+    "floor": "there is none: a complex value has no ordering",
+    "ceil": "there is none: a complex value has no ordering",
+    "trunc": "there is none: a complex value has no ordering",
+    "fmod": "use `a - b * floor(a / b)`, or np.mod for a real pair",
+    "hypot": "use `np.abs(a - b)` on the difference",
+    "cbrt": "use `np.pow(z, 1 / 3)`",
+    "ldexp": "use `z * 2 ** exponent`",
+    "atan2": "use `np.angle(a / b)`, or `np.atan(a / b)`",
+}
+
 # ---------- print() support ----------
 
 # print() is a host builtin, so the name means nothing on a device. The translator rewrites
@@ -948,6 +1064,27 @@ def is_int(t:Any)->bool:
 
 def is_float(t:Any)->bool:
     return isinstance(t, str) and t in FLOAT_TYPES
+
+def is_complex(t:Any)->bool:
+    """True for a device type that is a complex value (`c64` / `c128`).
+
+    A complex value is a *value* like a scalar -- it is passed by value, returned in a slot,
+    and stored in a local -- but its arithmetic is generated rather than a C operator, and
+    its two members are read through the header's accessors. So the predicates that ask
+    "can this take part in an ordinary scalar operator" must answer False for it, and the
+    predicates that ask "is this a pointer/aggregate" must answer False as well.
+    """
+    return isinstance(t, str) and t in COMPLEX_TYPE_NAMES
+
+def is_aggregate(t:Any)->bool:
+    """True for a value the device carries as a *structure* (`c64`/`c128` included).
+
+    The difference from `structs_dtype_for` is that this answers from the type name alone,
+    without the registry: a complex type is a structure on the device even though it is not
+    a numpy record dtype here.
+    """
+    return isinstance(t, str) and (t in COMPLEX_TYPE_NAMES
+                                   or structs_dtype_for(t) is not None)
 
 def is_ptr(t:Any)->bool:
     return isinstance(t, tuple) and len(t) == 2 and t[0] == PTR
@@ -1097,11 +1234,21 @@ def infer_ctype(value:object)->DeviceType:
         return "float"
     if isinstance(value, float):
         return "float"
+    # A complex scalar. `np.complex64` and `np.complex128` are numpy scalars (they are
+    # `np.complexfloating`, not `np.floating`), and a python `complex` has no width of its own
+    # -- the same rule a python `float` follows, which is why it is 64-bit. A python complex
+    # is never one of the numpy scalars, so `isinstance(complex(1, 2), complex)` is checked
+    # on its own and would answer `complex128` either way.
+    if isinstance(value, np.complexfloating):
+        dtype_name = np.dtype(type(value)).name
+        return DTYPE_MAP.get(dtype_name, "c128")
+    if isinstance(value, complex):
+        return "c128"
     if _is_device_handle(value):
         # A texture or surface reaches the device as an opaque 64-bit handle, which
         # the kernel reads through tex2D or writes through surf2Dwrite.
         return _handle_device_type(value)
-    raise SyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays, int/float/bool scalars and texture handles are supported)") from None
+    raise SyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays, int/float/bool/complex scalars and texture handles are supported)") from None
 
 
 TEXTURE_HANDLE_TYPES = ("TextureObject", "cudaTextureObject_t")
@@ -1658,6 +1805,13 @@ class FunctionTranslator:
         # The quaternion blocks a generated source needs, as the `QUAT_NEED_*` macro names. One
         # header serves both widths; only the blocks in use have to be compiled.
         self.quaternion_needs:Set[str] = set()
+        # The complex blocks this source needs, as the `COMPLEX_NEED_*` macro names -- the
+        # same contract as the quaternion widths: one header, and only the widths in use are
+        # compiled (a `double` block does not compile where fp64 is absent).
+        self.complex_needs:Set[str] = set()
+        # Set when the body reads or writes a complex value at all, which is what decides
+        # whether the generated source includes the complex header.
+        self.uses_complex:bool = False
         # The headers a registered device-side library function asked for: what the registry
         # spells for them (a path, or a full `#include` line). The compile step turns them
         # into the include lines the generated source carries.
@@ -1708,9 +1862,30 @@ class FunctionTranslator:
         # True when statements currently being visited are inside (or after) the magic
         # loop, where building data would happen once per work item (see _visit_assign).
         self.creation_below_loop:bool = False
+        # The conditions of the enclosing `if` blocks, innermost last. A store to a
+        # launch-wide location is safe when a guard decides the same way for every work
+        # item (`if i == 0:`); see `_store_is_guarded`.
+        self._guard_conditions:List[ast.expr] = []
+        # True while the statements being visited are the magic loop's own body -- one
+        # execution per work item, as opposed to `after_magic_loop`, which means after the
+        # dispatch. A shared store is racy in the first case and refused (see
+        # `_named_outer_target`), and the two flags are deliberately separate because a
+        # statement inside the loop is not "after" it.
+        self.in_work_item_body:bool = False
         # True when any site returns a value; then the kernel needs the claim and site
         # parameters even if some other site is a bare `return`.
         self.has_returns:bool = False
+        # True when a `return` actually reaches the generated device code. A body whose only
+        # return sits after the magic loop hands its value back through the host tail (see
+        # PyKernel._run_host_region), so it never claims, and the claim/site words it would
+        # otherwise declare are two wasted uploads and two never-read parameters.
+        self._claims_on_device:bool = False
+        # How many real C loops enclose the statement being visited. Only a nested serial
+        # `for`/`while` that is emitted as a loop counts: the magic loop itself does not,
+        # because it becomes the work-item dispatch rather than a loop in the generated
+        # source (see _visit_work_item_body). `break` and `continue` are meaningful only
+        # while this is non-zero, which is what decides how they are translated.
+        self.loop_depth:int = 0
         # Outer-scope variables: a name the body uses that is neither a parameter nor a
         # local becomes a device parameter instead (see _bind_outer_variables). Each entry
         # records how the host reaches the name ("closure" through a cell, "global" through
@@ -1928,7 +2103,11 @@ class FunctionTranslator:
         key = (array_name, dim)
         if key not in self.shapes_used:
             self.shapes_used.append(key)
-        return f"_{array_name}_shape{dim}"
+        # The extent parameter is named after the array it bounds, and an array called
+        # `register` or `new` would put the reserved word inside the identifier. Mapping the
+        # array name here is the one place that decides the spelling, because every extent
+        # parameter is built by this call.
+        return f"_{device_name(array_name)}_shape{dim}"
 
     def _trim_source(self)->str:
         return get_dedented_source(self.func)
@@ -1953,6 +2132,9 @@ class FunctionTranslator:
             # that is known only after the whole body has been seen; every site's code
             # depends on it, so the body is scanned once first.
             self.has_returns = _returns_a_value(body)
+            # Whether any of those returns is device code, which is a different question:
+            # a tail return runs on the host and claims nothing (see render_return_params).
+            self._claims_on_device = _has_device_return(body)
             # A local initialized above the loop and written inside it is one location for
             # the whole launch, not one per work item -- see _carried_scalars.
             self._bind_carried_scalars(body)
@@ -2066,7 +2248,19 @@ class FunctionTranslator:
                 if name in used and name not in phase.scopes[-1]:
                     phase.scopes[-1][name] = ("carried", name)
             phase.has_returns = _returns_a_value(body)
+            # Every phase is its own kernel, so whether one of them claims is a fact about
+            # its own slice: a pass whose only return sits in its tail hands it back on the
+            # host and needs no claim word (see render_return_params).
+            phase._claims_on_device = _has_device_return(body)
             phase._translate_magic_loop(body)
+            # The statements after this phase's own loop. For the last phase that is the
+            # body's tail, which the host runs after the final launch; for an earlier one it
+            # is the gap that feeds the next pass, and the launch already runs it as a region
+            # (see _run_host_region). Recording it on the phase keeps the tail honest for a
+            # multi-loop body: only the main translator used to keep one, so a body split
+            # into passes lost its tail entirely and a `return out` after the last loop
+            # answered None.
+            phase.body_tail = list(body[_magic_loop_end(body):])
             for name in gap_values:
                 if name in used and name not in dict(phase.params):
                     phase.params.append((name, (PTR, "int")))
@@ -2867,17 +3061,102 @@ class FunctionTranslator:
         A `return` here is exactly what a kernel return is (one work item leaving early),
         so this is *not* the "after the loop" region -- but a creation here would build one
         object per work item, which is why creations are refused with `after_loop_only`.
+
+        `in_work_item_body` is set for the duration: a store to a launch-wide location here
+        is one location shared by every work item, which is a race unless it is atomic or
+        guarded (see `_named_outer_target`). It is deliberately **not** `after_magic_loop`:
+        that flag means "runs after the dispatch", which a statement inside the loop does
+        not, and setting it there refused a perfectly good `return` from inside the loop.
         """
         previous:bool = self.after_magic_loop
         previous_creation:bool = self.creation_below_loop
+        previous_body:bool = self.in_work_item_body
         self.after_magic_loop = previous
         self.creation_below_loop = True
+        self.in_work_item_body = True
         try:
             for stmt in statements:
                 self._visit_statement(stmt)
         finally:
             self.after_magic_loop = previous
             self.creation_below_loop = previous_creation
+            self.in_work_item_body = previous_body
+
+    def _store_is_guarded(self, node:ast.AST)->bool:
+        """Whether a store is inside a branch every work item takes the same way.
+
+        A template for one work item's slice is a real pattern (`if i == 0: total = x[0]`),
+        and its store is not racy because exactly one work item enters the branch. The
+        condition has to be a test on a *launch-wide* value -- the work-item index, a scalar
+        argument, an outer scalar -- so a data-driven condition (`if x[i] > 0`) stays refused:
+        there every work item decides for itself, which is the race.
+        """
+        for guard in self._guard_conditions:
+            names:List[str] = [n.id for n in ast.walk(guard)
+                               if isinstance(n, ast.Name)]
+            if not names:
+                continue
+            if all(self._is_launch_wide_name(name) for name in names):
+                return True
+        return False
+
+    def _is_launch_wide_name(self, name:str)->bool:
+        """Whether a name's value is the same in every work item.
+
+        The magic loop's own indices, the kernel's scalar parameters and its outer-scope
+        values all are; an array element, a per-item local and a value computed inside the
+        loop are not.
+        """
+        if name in self.work_item_indices:
+            return True
+        binding:DeviceType = self._lookup(name)
+        if binding is None:
+            # An unresolved name is a module global or a builtin -- the same for everyone.
+            return True
+        if isinstance(binding, tuple):
+            return False
+        if is_ptr(binding) or is_image(binding):
+            # A pointer says nothing by itself: `x[i]` is per-item even though `x` is not.
+            return False
+        return True
+
+    def _visit_loop_exit(self, node:ast.stmt, spelling:str)->None:
+        """Translate `break`/`continue` for the loop they actually sit in.
+
+        Three cases, and the difference between them is not cosmetic:
+
+        * **Inside a real loop** (a nested serial `for`/`while`, or the body of an element
+          loop): the generated source has a C loop there, so the statement is emitted
+          verbatim and keeps python's meaning.
+        * **Directly in a work item** (the magic loop's body, which becomes the dispatch
+          rather than a loop): `continue` means "this work item stops here and the next one
+          -- which is another thread -- does its own work", so it becomes a plain `return;`.
+          That is the *same* control flow, because there is no loop left to continue. It must
+          NOT go through _visit_kernel_return: that one claims the kernel result, so a work
+          item merely skipping its turn would race the value-returning sites for the answer
+          and could hand back None.
+        * **`break` in a work item**: there is no meaning to give it. Stopping the magic
+          loop means stopping every other work item too, and they are already running in
+          parallel, so the only honest translation is a refusal.
+        """
+        if self.loop_depth:
+            self._emit(f"{spelling};")
+            return
+        if not self.is_kernel or not self.creation_below_loop:
+            # Outside a loop and outside a work item: nothing to exit and nothing to
+            # enforce. `break`/`continue` outside a loop is a SyntaxError in python too,
+            # and the body's own statements above the loop never reach here as device code.
+            self._emit(f"{spelling};")
+            return
+        if spelling == "continue":
+            self._emit("return;")
+            return
+        self._error(
+            "`break` cannot stop a magic loop: its iterations are work items running in "
+            "parallel, so stopping the loop means stopping every other work item too, which "
+            "the device cannot express. Guard the rest of this work item's body with `if`, "
+            "or put the sequential loop you want to leave inside the body with "
+            "`for j in range(...)` and `break` that one instead", node)
 
     def _carried_scalars(self, body:List[ast.stmt])->List[str]:
         """The locals assigned *above* the magic loop and written *inside* it.
@@ -3024,7 +3303,11 @@ class FunctionTranslator:
             cond, _ = self._visit_expression(node.test)
             self._emit(f"if ({cond})")
             self._emit("{")
-            self._push_scope_block(node.body)
+            self._guard_conditions.append(node.test)
+            try:
+                self._push_scope_block(node.body)
+            finally:
+                self._guard_conditions.pop()
             if node.orelse:
                 self._emit("}")
                 self._emit("else")
@@ -3036,7 +3319,7 @@ class FunctionTranslator:
             cond, _ = self._visit_expression(node.test)
             self._emit(f"while ({cond})")
             self._emit("{")
-            self._push_scope_block(node.body)
+            self._push_scope_block(node.body, is_loop=True)
             self._emit("}")
             self._emit_blank()
         elif isinstance(node, ast.For):
@@ -3080,9 +3363,9 @@ class FunctionTranslator:
                                               lineno=node.lineno,
                                               col_offset=node.col_offset))
         elif isinstance(node, ast.Break):
-            self._emit("break;")
+            self._visit_loop_exit(node, "break")
         elif isinstance(node, ast.Continue):
-            self._emit("continue;")
+            self._visit_loop_exit(node, "continue")
         elif isinstance(node, (ast.Nonlocal, ast.Global)):
             # The scope declarations themselves emit nothing: they were already read while
             # binding the outer variables (see _bind_outer_variables), so the name travels
@@ -3105,13 +3388,27 @@ class FunctionTranslator:
             self._visit_statement(statement)
         self.scopes.pop()
 
-    def _push_scope_block(self, statements:List[ast.stmt])->None:
+    def _push_scope_block(self, statements:List[ast.stmt], is_loop:bool=False)->None:
+        """Translate a braced block, optionally marking it as a real C loop body.
+
+        `is_loop` is what makes `break`/`continue` mean their C meaning inside this block:
+        the generated source emits them verbatim, and only a real loop can contain them
+        (see _visit_loop_exit). A plain block -- the `if` half of an `if`/`else` -- leaves
+        the depth alone, so an exit statement inside it belongs to whichever enclosing
+        loop there is.
+        """
         self.scopes.append({})
         self._indent += 1
-        for stmt in statements:
-            self._visit_statement(stmt)
-        self._indent -= 1
-        self.scopes.pop()
+        if is_loop:
+            self.loop_depth += 1
+        try:
+            for stmt in statements:
+                self._visit_statement(stmt)
+        finally:
+            if is_loop:
+                self.loop_depth -= 1
+            self._indent -= 1
+            self.scopes.pop()
 
     def _visit_for(self, node:ast.For)->None:
         if isinstance(node.iter, (ast.Name, ast.Attribute)):
@@ -3162,7 +3459,7 @@ class FunctionTranslator:
             self._emit("{")
         else:
             self._error("range() step must be a constant integer", node.iter.args[-1])
-        self._push_scope_block(node.body)
+        self._push_scope_block(node.body, is_loop=True)
         self._emit("}")
         self._emit_blank()
 
@@ -3214,10 +3511,14 @@ class FunctionTranslator:
         # a generated source read as if the copy lived outside its block.
         self._define(name, element_t, node.target)
         self._indent += 1
-        self._emit(f"{self._device_type(element_t)} {name} = {code}[{index}];")
-        for statement in node.body:
-            self._visit_statement(statement)
-        self._indent -= 1
+        self.loop_depth += 1
+        try:
+            self._emit(f"{self._device_type(element_t)} {name} = {code}[{index}];")
+            for statement in node.body:
+                self._visit_statement(statement)
+        finally:
+            self.loop_depth -= 1
+            self._indent -= 1
         self._emit("}")
         self._emit_blank()
 
@@ -3260,6 +3561,10 @@ class FunctionTranslator:
         "ulong": ("ulong", np.uint64),
         "float": ("float", np.float32),
         "double": ("double", np.float64),
+        # A complex value's slot is one complex element for the same reason: the structure
+        # the device declares is the complex layout, so a complex array *is* the buffer.
+        "c64": ("c64", np.complex64),
+        "c128": ("c128", np.complex128),
     }
 
     def _return_position(self, node:ast.expr)->ReturnPosition:
@@ -3439,7 +3744,9 @@ class FunctionTranslator:
                 # The value already lives in the parameter it travels in: there is no slot to
                 # store it into, and the host reads it from the argument it passed.
                 continue
-            self._emit(f"    {self._return_slot(slot)}[0] = {position['code']};")
+            stored:str = self._complex_store(self.return_layout[slot]["type"],
+                                             position["type"], position["code"])
+            self._emit(f"    {self._return_slot(slot)}[0] = {stored};")
         self._emit("}")
         self._emit("return;")
 
@@ -3522,12 +3829,24 @@ class FunctionTranslator:
 
         A kernel that returns only an array still needs the claim and site words, so this
         is gated on `has_returns` rather than on the value slots alone.
+
+        The claim and site words are withheld when this kernel contains **no device-side
+        return at all**: a body whose only `return` sits after the magic loop hands its value
+        back through the host tail (see PyKernel._run_host_region), so no work item ever
+        reaches the claim, the word stays zero, and the two buffers would become a pair of
+        wasted uploads. A phase of a multi-loop body is considered the same way and on its
+        own: every phase is a separate kernel, and whether one of them claims is a fact
+        about the statements it contains.
         """
         if not self.has_returns:
             return []
         qualifier:str = self._buffer_qualifier()
         params:List[str] = [f"{qualifier}{entry['ctype']}* {self._return_slot(index)}"
                             for index, entry in enumerate(self.return_layout)]
+        # A movable claim/site pair, decided by whether anything on the device claims: a
+        # tail-only return never reaches the translator, so it needs neither word.
+        if not self._claims_on_device:
+            return params
         params.append(f"{qualifier}int* {self.RETURN_CLAIM}")
         params.append(f"{qualifier}int* {self.RETURN_SITE}")
         return params
@@ -3699,7 +4018,7 @@ class FunctionTranslator:
                                                              scalar_element)
         if initialiser is None:
             return False
-        self._emit(f"{ctype} {name}[{total}]{initialiser};")
+        self._emit(f"{ctype} {device_name(name)}[{total}]{initialiser};")
         self._define(name, ("bodyarr", total, shape, element_t), node)
         return True
 
@@ -3853,13 +4172,13 @@ class FunctionTranslator:
         if isinstance(target, ast.Name):
             outer:Optional[Dict[str, Any]] = self._named_outer_target(target, node)
             if outer is not None:
-                self._emit(f"{target.id}[0] = {code};")
+                self._emit(f"{device_name(target.id)}[0] = {code};")
                 return
             existing:DeviceType = self._lookup(target.id)
             if isinstance(existing, tuple) and len(existing) == 2 and existing[0] == "carried":
                 # One location for the whole launch: store through the pointer, exactly as
                 # the outer-scalar path does.
-                self._emit(f"{target.id}[0] = {code};")
+                self._emit(f"{device_name(target.id)}[0] = {code};")
                 return
             if existing is not None and is_ptr(existing):
                 self._error(f"cannot assign to array parameter '{target.id}'", node)
@@ -3882,7 +4201,7 @@ class FunctionTranslator:
                     decl = f"{const}{self._kernel_scalar_type(t[1])}* "
                 else:
                     decl = self._device_type(t) + " "
-            self._emit(f"{decl}{target.id} = {code};")
+            self._emit(f"{decl}{device_name(target.id)} = {code};")
         elif isinstance(target, ast.Subscript):
             # A string subscript on a structure value writes a member: `s["i"] = 1` becomes
             # `s.i = 1`. Recognized before the array path, which rejects a structure base
@@ -3915,6 +4234,7 @@ class FunctionTranslator:
                 self._emit_image_write(base_code, base_t, target, code)
                 return
             index_code, _ = self._visit_subscript_index(target)
+            code = self._complex_store(base_t, t, code)
             self._emit(f"{base_code}[{index_code}] = {code};")
         elif isinstance(target, ast.Attribute):
             # `p.x = ...`: a C member store on a structure value, the write twin of the
@@ -3949,6 +4269,15 @@ class FunctionTranslator:
         `total = total + x` writes the scope value and the host copies it back after the
         launch. An undeclared outer name is refused: python would create a local there,
         which would silently shadow the scope variable instead of touching it.
+
+        **A plain store from inside the work-item body is a race, so it is refused.** The
+        variable is one location for the whole launch, so every work item overwrites it and
+        the value that survives is whichever finished last -- the same hazard the *carried*
+        scalars are checked for (see `_non_atomic_writes`). `total += x[i]` is the spelling
+        that works, because it becomes a device atomic; a store guarded by something every
+        work item agrees on (`if i == 0`) is a template for one work item's slice, and is
+        also fine. What is not fine is an unguarded `counter = counter + x[i]`, which
+        compiles and then answers one work item's partial value.
         """
         outer:Optional[Dict[str, Any]] = self.outer_vars.get(target.id)
         if outer is None:
@@ -3958,6 +4287,15 @@ class FunctionTranslator:
                 f"cannot assign to the outer variable '{target.id}': without a "
                 f"'nonlocal {target.id}' or 'global {target.id}' declaration this would "
                 f"create a local variable, shadowing the outer one", node)
+        if self.in_work_item_body and not self._store_is_guarded(node):
+            self._error(
+                f"'{target.id}' is one location shared by every work item (it is an outer "
+                f"variable of the enclosing scope), so a plain store here races: whichever "
+                f"work item finishes last decides the value. This is the same rule an "
+                f"accumulated local follows -- write `{target.id} += value` (which becomes a "
+                f"device atomic), or guard the store with the iteration index "
+                f"(`if i == 0: {target.id} = ...`), or keep the work item's own value in a "
+                f"local and reduce it afterwards", node)
         if is_ptr(outer["type"]):
             self._error(
                 f"cannot rebind the outer array '{target.id}': the array object itself is "
@@ -5037,27 +5375,83 @@ class FunctionTranslator:
             if not text.endswith(("f", "F", "y")) and "inf" not in text:
                 text += "f"
             return text, "float"
+        if isinstance(value, complex):
+            # A complex literal is written with its two parts, because C has no complex
+            # constant: the header builds the value from the reals. A python complex has no
+            # width of its own, so it is the double one -- the same rule a python float
+            # follows, which is why `1 + 2j` meets a complex64 operand as a complex128.
+            return self._emit_complex_literal(value.imag, value.real), "c128"
         self._error(f"unsupported constant: {value!r}", node)
+
+    def _complex_store(self, target_t:Any, value_t:Any, code:str)->str:
+        """`code` as a value the target type can hold, for a complex assignment.
+
+        C has no complex conversion operator, so a store between two different widths --
+        `out64[i] = z` where `z` is a complex128, or a return slot of the other width -- would
+        emit `c64 = c128` and fail to compile. The header's widening and narrowing functions
+        are the conversion, and they are the *same* ones a cast uses, so a store and an
+        explicit `np.complex64(z)` mean the same thing.
+
+        A real source assigned into a complex target is lifted to the complex value with a
+        zero imaginary part, which is numpy's rule (`out64[i] = 2.0` is `2 + 0i`).
+        """
+        target_complex:Optional[np.dtype] = self._complex_dtype_of(target_t)
+        value_complex:Optional[np.dtype] = self._complex_dtype_of(value_t)
+        if target_complex is None:
+            if value_complex is not None:
+                self._error(
+                    f"cannot assign a complex value ({value_t}) into a {target_t}: a complex"
+                    f" number has no real counterpart, so write `.real` or `.imag` if that"
+                    f" is what you meant")
+            return code
+        kind:str = self._complex_side(target_t, target_complex)
+        self._require_complex(target_complex)
+        if value_complex is None:
+            if is_ptr(value_t) or is_vec(value_t) or is_image(value_t):
+                return code
+            element:str = "double" if kind == "c128" else "float"
+            return f"{kind}_from_real(({element})({code}))"
+        value_kind:str = self._complex_side(value_t, value_complex)
+        if value_kind == kind:
+            return code
+        self.complex_needs.update(complex_support.mixed_needs())
+        converter:str = (f"{value_kind}_widen_{kind}" if kind == "c128"
+                         else f"{value_kind}_narrow_{kind}")
+        return f"{converter}({code})"
+
+    def _emit_complex_literal(self, imaginary:float, real:float)->str:
+        """One complex constant, as the header's constructor over two real literals."""
+        self._require_complex(np.dtype(np.complex128))
+        return f"c128_make({self._real_literal(real, 'double')}, {self._real_literal(imaginary, 'double')})"
+
+    def _real_literal(self, value:float, width:str)->str:
+        """A real literal of the given width, spelled so the C compiler reads it as one."""
+        text:str = repr(float(value))
+        if not ("." in text or "e" in text or "E" in text or "inf" in text or "nan" in text):
+            text += ".0"
+        if width != "double" and not text.endswith(("f", "F", "y")) and "inf" not in text:
+            text += "f"
+        return text
 
     def _visit_name(self, node:ast.Name)->Translated:
         host:Optional[HostValueEntry] = self.host_values.get(node.id)
         if host is not None:
             # The host created this object; on the device it is just the parameter that
             # carries it (see _host_created_assignment).
-            return node.id, host["type"]
+            return device_name(node.id), host["type"]
         outer:Optional[Dict[str, Any]] = self.outer_vars.get(node.id)
         if outer is not None:
             # A writable outer variable travels as `T*`, so every use is a dereference; a
             # read-only one travels as `T` and is simply the parameter itself.
             if outer["writable"]:
-                return f"(*{node.id})", outer["type"]
-            return node.id, outer["type"]
+                return f"(*{device_name(node.id)})", outer["type"]
+            return device_name(node.id), outer["type"]
         t:DeviceType = self._lookup(node.id)
         if isinstance(t, tuple) and len(t) == 2 and t[0] == "carried":
             # One location for the whole launch. A subscript rather than (*name) for the
             # same reason an outer scalar uses one: the read/write analysis only recognizes
             # that form as a write, so the host reads the final value back.
-            return f"{t[1]}[0]", "int"
+            return f"{device_name(t[1])}[0]", "int"
         if t is not None:
             if isinstance(t, tuple) and len(t) == 5 and t[0] == "shared":
                 # A shared buffer is not itself a pointer: it is one slice per group, and
@@ -5068,8 +5462,8 @@ class FunctionTranslator:
             if isinstance(t, tuple) and len(t) == 4 and t[0] == "bodyarr":
                 # A private array created in the body is indexed like any array; its extents
                 # are constants (see _shape_var).
-                return node.id, (PTR, t[3])
-            return node.id, t
+                return device_name(node.id), (PTR, t[3])
+            return device_name(node.id), t
         # CUDA's index vectors are values, not calls (`buf[blockIdx][j]`), so the *name*
         # resolves to the vector the backend builds from its own launch terms.
         if node.id in INDEX_VECTOR_BUILTINS:
@@ -5237,6 +5631,198 @@ class FunctionTranslator:
             return call(name, quaternion.wider(left_quat, right_quat), f"{left}, {right}",
                         result, mixed=structs_name(left_quat) != structs_name(right_quat))
 
+        return None
+
+    # ---------- complex values ----------
+
+    def _require_complex(self, dtype:Any)->None:
+        """Record that this source uses a complex width, and enable its block."""
+        need:Optional[str] = complex_support.needs(dtype)
+        self.uses_complex = True
+        if need is not None:
+            self.complex_needs.add(need)
+
+    def _complex_dtype_of(self, t:Any)->Optional[np.dtype]:
+        """The complex dtype behind a translated type name, or None."""
+        base:Any = t[1] if isinstance(t, tuple) and is_ptr(t) else t
+        if not isinstance(base, str):
+            return None
+        return complex_support.dtype_for_type_name(base)
+
+    def _complex_operand(self, code:str, t:Any)->Tuple[str, Optional[np.dtype]]:
+        """A complex operand as a value: a pointer is dereferenced first."""
+        dtype:Optional[np.dtype] = self._complex_dtype_of(t)
+        if dtype is not None and isinstance(t, tuple) and is_ptr(t):
+            return f"(*{code})", dtype
+        return code, dtype
+
+    def _complex_side(self, t:Any, dtype:Optional[np.dtype])->str:
+        """One operand's width, in the header's spelling: ``c64``/``c128``/``float``/``double``."""
+        if dtype is not None:
+            return complex_support.complex_type_name(dtype) or "c64"
+        base:Any = t[1] if isinstance(t, tuple) and is_ptr(t) else t
+        return "double" if base == "double" else "float"
+
+    def _emit_complex_binop(self, operator:str, left:str, lt:Any, right:str, rt:Any,
+                            node:ast.BinOp)->Optional[Translated]:
+        """A complex operation, as a call to one of the header's functions.
+
+        A complex value is a structure on the device, so none of `+ - * / **` is a C operator:
+        each becomes a function from the fixed header, named after the operand widths. The
+        arithmetic itself is numpy's, which is also what the interpreter computes.
+
+        A float and a double operand mix freely and the result is the **double** form, the same
+        rule the quaternion arithmetic follows: `c64 + c128` is a `c128`, `c64 * 2.0` (a python
+        float, which is a double) is a `c128`, while `c64 * np.float32(2)` stays a `c64`.
+        Widening only ever goes that way, so nothing is rounded down.
+        """
+        left_code, left_dtype = self._complex_operand(left, lt)
+        right_code, right_dtype = self._complex_operand(right, rt)
+        if left_dtype is None and right_dtype is None:
+            return None
+        if operator not in ("Add", "Sub", "Mult", "Div", "Pow"):
+            return None
+
+        left_side:str = self._complex_side(lt, left_dtype)
+        right_side:str = self._complex_side(rt, right_dtype)
+        widened:bool = "c128" in (left_side, right_side) or "double" in (left_side, right_side)
+        kind:str = "c128" if widened else "c64"
+        suffix:str = {"Add": "add", "Sub": "sub", "Mult": "mul", "Div": "div",
+                      "Pow": "pow"}[operator]
+
+        # A mixed operation's body widens one width to the other, so its source needs both
+        # blocks; a same-width one needs only its own.
+        if left_dtype is not None and right_dtype is not None \
+                and left_side != right_side:
+            self.complex_needs.update(complex_support.mixed_needs())
+        elif (left_dtype is not None and right_dtype is not None) and widened:
+            self._require_complex(np.dtype(np.complex128))
+        elif not widened and (left_dtype is not None or right_dtype is not None):
+            self._require_complex(np.dtype(np.complex64))
+        elif widened:
+            self._require_complex(np.dtype(np.complex128))
+            if (left_side == "double" or right_side == "double") \
+                    and (left_side == "c64" or right_side == "c64"):
+                self.complex_needs.update(complex_support.mixed_needs())
+
+        if left_dtype is not None and right_dtype is not None:
+            if left_side == right_side:
+                return f"{kind}_{suffix}({left_code}, {right_code})", kind
+            return f"{left_side}_{suffix}_{right_side}({left_code}, {right_code})", kind
+
+        # One complex operand and one real scalar. The scalar's own width decides whether the
+        # result widens, and the header names the mixed conversion after the widths it joins.
+        complex_is_left:bool = left_dtype is not None
+        scalar_side:str = right_side if complex_is_left else left_side
+        complex_code:str = left_code if complex_is_left else right_code
+        scalar_code:str = right_code if complex_is_left else left_code
+        mixed_scalar:bool = scalar_side == "double"
+        # The real operand is cast to the width the function declares: a literal `1` in
+        # `1 + 2j` is an int in C, and the header's `float`/`double` parameter would then be
+        # ambiguous (CUDA rejects it with "no suitable constructor exists").
+        element:str = "double" if mixed_scalar or kind == "c128" else "float"
+        typed_scalar:str = f"(({element})({scalar_code}))"
+        # The complex operand's own width is what the function declares, so a c64 value
+        # reaching a c128 function (the `mixed_scalar` case) is widened first.
+        typed_complex:str = complex_code
+        if mixed_scalar and kind == "c64":
+            typed_complex = f"c64_widen_c128({complex_code})"
+            self.complex_needs.update(complex_support.mixed_needs())
+
+        def scalar_call(name:str)->Translated:
+            if mixed_scalar:
+                self.complex_needs.update(complex_support.mixed_needs())
+                return f"{name}_c128({typed_complex}, {typed_scalar})", "c128"
+            return f"{name}({typed_complex}, {typed_scalar})", kind
+
+        if operator == "Mult":
+            # `s * z` and `z * s` are the same product: the scalar is the second argument.
+            return scalar_call(f"{kind}_scale")
+        if operator == "Div":
+            if complex_is_left:
+                return scalar_call(f"{kind}_scale_div")
+            return (f"{kind}_rdiv({scalar_code}, {complex_code})" if not mixed_scalar
+                    else f"{kind}_rdiv_c128({scalar_code}, {complex_code})"), (
+                        "c128" if mixed_scalar else kind)
+        if operator in ("Add", "Sub"):
+            # `z + s` and `z - s` add or subtract the real part; `s + z` is the *same* sum as
+            # `z + s` (addition commutes, so it reuses the same function), while `s - z` has to
+            # be its own operation -- the earlier spelling used `rsub` for both, which turned
+            # the commonest constant in a body (`3 + 4j`, an `Add` over a real 3) into `3 - 4j`.
+            if operator == "Add":
+                if not complex_is_left:
+                    scalar_code, complex_code = complex_code, scalar_code
+                return scalar_call(f"{kind}_add_real")
+            if complex_is_left:
+                return scalar_call(f"{kind}_sub_real")
+            return (f"{kind}_rsub({scalar_code}, {complex_code})" if not mixed_scalar
+                    else f"{kind}_rsub_c128({scalar_code}, {complex_code})"), (
+                        "c128" if mixed_scalar else kind)
+        if operator == "Pow":
+            if complex_is_left:
+                return scalar_call(f"{kind}_pow_real")
+            return (f"{kind}_rpow({scalar_code}, {complex_code})" if not mixed_scalar
+                    else f"{kind}_rpow_c128({scalar_code}, {complex_code})"), (
+                        "c128" if mixed_scalar else kind)
+        return None
+
+    def _emit_complex_compare(self, operator:str, left:str, lt:Any, right:str,
+                              rt:Any) -> Optional[Translated]:
+        """`z == w` / `z != w` as the header's equality test.
+
+        numpy compares the two parts, so an equality is a real comparison of both. A real
+        operand is widened (`c64 == np.float32(2)` is the comparison with `2 + 0i`), which is
+        the same widening the arithmetic uses; anything else has no device meaning.
+        """
+        left_code, left_dtype = self._complex_operand(left, lt)
+        right_code, right_dtype = self._complex_operand(right, rt)
+        if left_dtype is None and right_dtype is None:
+            return None
+        left_side:str = self._complex_side(lt, left_dtype)
+        right_side:str = self._complex_side(rt, right_dtype)
+        widened:bool = "c128" in (left_side, right_side) or "double" in (left_side, right_side)
+        kind:str = "c128" if widened else "c64"
+        if left_dtype is not None and right_dtype is not None:
+            if left_side == right_side:
+                self._require_complex(left_dtype)
+                comparison:str = f"{kind}_equal({left_code}, {right_code})"
+            else:
+                self.complex_needs.update(complex_support.mixed_needs())
+                comparison = (f"{left_side}_equal_{right_side}"
+                              f"({left_code}, {right_code})")
+        else:
+            complex_is_left:bool = left_dtype is not None
+            scalar_side:str = right_side if complex_is_left else left_side
+            complex_code:str = left_code if complex_is_left else right_code
+            scalar_code:str = right_code if complex_is_left else left_code
+            if scalar_side == "double" and not widened:
+                self.complex_needs.update(complex_support.mixed_needs())
+                comparison:str = f"{kind}_equal_c128({complex_code}, {scalar_code})"
+            else:
+                # The scalar is widened by building the complex value it means, which the
+                # header spells as its own conversion.
+                self._require_complex(np.dtype(np.complex128 if widened else np.complex64))
+                widener:str = "c128_from_real" if widened else "c64_from_real"
+                scalar_element:str = "double" if widened else "float"
+                comparison = (f"{kind}_equal({complex_code},"
+                              f" {widener}(({scalar_element})({scalar_code})))")
+        if operator == "NotEq":
+            return f"(!{comparison})", "bool"
+        return f"({comparison})", "bool"
+
+    def _emit_complex_method(self, attr:str, base_code:str, base_t:Any,
+                             dtype:np.dtype, node:ast.Call)->Optional[Translated]:
+        """One of a complex value's own methods, as the header's function.
+
+        numpy's complex scalars define `conjugate()` (and its alias `conj()`), plus
+        `astype()` for a width change. Nothing else is a method -- the rest of the complex
+        vocabulary is the module functions -- so a miss returns None and the caller names
+        the methods that exist.
+        """
+        kind:str = self._complex_side(base_t, dtype)
+        if not node.args and attr in ("conjugate", "conj"):
+            self._require_complex(dtype)
+            return f"{kind}_conjugate({base_code})", kind
         return None
 
     def _magic_receiver_type(self, t:DeviceType)->DeviceType:
@@ -5483,6 +6069,14 @@ class FunctionTranslator:
         if quat_result is not None:
             return quat_result
 
+        # A complex value is a structure too, and its arithmetic likewise has a device
+        # meaning -- numpy's own, which the header implements -- so it is answered here,
+        # before the general structure refusal below.
+        complex_result:Optional[Translated] = self._emit_complex_binop(
+            name, left, lt, right, rt, node)
+        if complex_result is not None:
+            return complex_result
+
         # A class that defines the operator's magic method gives it a meaning, and the
         # translation keeps that meaning: `a + b` becomes `Class___add__(&a, &b)`, the same
         # shape `ray.at(t)` takes. Only a method written in the class body counts, so an
@@ -5585,8 +6179,16 @@ class FunctionTranslator:
             if is_vec(t) and self.backend == "cuda":
                 # CUDA has no unary minus on a vector type: the negation is per component.
                 return self._vec_componentwise("-", code, t), t
+            if self._complex_dtype_of(t) is not None:
+                # A complex value is a structure, so `-z` is the header's own negation.
+                self._require_complex(self._complex_dtype_of(t))
+                kind:str = self._complex_side(t, self._complex_dtype_of(t))
+                return f"{kind}_neg({code})", kind
             return f"(-{code})", t
         if name == "UAdd":
+            if self._complex_dtype_of(t) is not None:
+                # `+z` is z: python answers the value unchanged, and so does a C++ copy.
+                return code, self._complex_side(t, self._complex_dtype_of(t))
             return f"(+{code})", t
         if name == "Invert":
             if not is_int(t):
@@ -5635,6 +6237,23 @@ class FunctionTranslator:
                             "chained comparison is not supported on a class that defines "
                             "its own comparison; write the two comparisons separately", op)
                     return call
+            # A complex value compares with `==` and `!=` (numpy compares the two parts), and
+            # nothing else: python has no ordering for a complex number, so numpy and the
+            # device raise the same TypeError rather than inventing one.
+            if self._complex_dtype_of(lt) is not None or self._complex_dtype_of(rt) is not None:
+                if name not in ("Eq", "NotEq"):
+                    self._error(
+                        f"complex numbers have no '{symbols[name]}' comparison: python orders"
+                        f" no complex value, so only == and != are defined. Compare the"
+                        f" magnitude (abs) or a component (.real / .imag) instead", op)
+                call:Optional[Translated] = self._emit_complex_compare(name, left, lt, right, rt)
+                if call is None:
+                    self._error(
+                        f"cannot compare {lt} with {rt}: a complex value compares with a"
+                        f" complex number, or with a real one it is widened to", op)
+                parts.append(call[0])
+                left = right
+                continue
             # A structure value has no comparison either: C rejects `s == s` outright, so it
             # is refused here with the same explanation the arithmetic gets.
             if self._is_structure_operand(lt) or self._is_structure_operand(rt):
@@ -6194,6 +6813,21 @@ class FunctionTranslator:
                 self._error(f"{node.value.id}.{node.attr} is not supported", node)
 
         base_code, base_t = self._visit_expression(node.value)
+        # A complex value's members are its real and imaginary parts, which the header
+        # spells as its own accessors: the structure's members are `re`/`im` on the device
+        # and `.real`/`.imag` in numpy, and a reader should never have to know which.
+        complex_dtype:Optional[np.dtype] = self._complex_dtype_of(base_t)
+        if complex_dtype is not None:
+            kind:str = self._complex_side(base_t, complex_dtype)
+            member:str = {"real": "real", "imag": "imag", "re": "real", "im": "imag"}.get(
+                node.attr, "")
+            if member:
+                self._require_complex(complex_dtype)
+                element:str = "double" if kind == "c128" else "float"
+                return f"{kind}_{member}({base_code})", element
+            self._error(
+                f"a complex value has no member '.{node.attr}': use '.real', '.imag', or"
+                f" call '.conjugate()'", node)
         if is_vec(base_t):
             component:str = _vec_component_name(node.attr)
             if len(component) > 1:
@@ -6311,8 +6945,16 @@ class FunctionTranslator:
             arg_type, arg_code = arg_type[1], f"(*{arg_code})"
         dtype:Optional[np.dtype] = quaternion.is_quaternion(arg_type)
         if dtype is None:
+            # `conjugate` serves both meanings: a quaternion flips its axis, a complex value
+            # its imaginary part. pygf's own `conjugate` accepts either, so the device has to
+            # as well -- otherwise one kernel would mean two things per type.
+            complex_dtype:Optional[np.dtype] = self._complex_dtype_of(arg_type)
+            if complex_dtype is not None:
+                kind:str = self._complex_side(arg_type, complex_dtype)
+                self._require_complex(complex_dtype)
+                return f"{kind}_conjugate({arg_code})", kind
             self._error(
-                f"conjugate() needs a quaternion, got {arg_type}", node)
+                f"conjugate() needs a quaternion or a complex value, got {arg_type}", node)
         type_name:str = structs_name(dtype)
         self._require_quaternion_header(dtype)
         return f"{type_name}_conjugate({arg_code})", type_name
@@ -6654,6 +7296,19 @@ class FunctionTranslator:
         from . import structs
 
         base_code, base_t = self._visit_expression(func.value)
+        # A complex value's methods are numpy's, and the device header spells the same
+        # operations: `.conjugate()` flips the imaginary part, and the rest are the free
+        # functions a reader may reach for through the value itself.
+        complex_dtype:Optional[np.dtype] = self._complex_dtype_of(base_t)
+        if complex_dtype is not None:
+            translated:Optional[Translated] = self._emit_complex_method(
+                func.attr, base_code, base_t, complex_dtype, node)
+            if translated is not None:
+                return translated
+            self._error(
+                f"a complex value has no method '.{func.attr}()': numpy's complex scalars"
+                f" define 'conjugate()' and 'conj()', and the rest are the module functions"
+                f" (np.sqrt, np.abs, np.angle, ...)", node)
         receiver_is_pointer:bool = (isinstance(base_t, tuple) and is_ptr(base_t))
         base_struct:str = base_t[1] if receiver_is_pointer else base_t
         owner:Optional[type] = None
@@ -6727,6 +7382,13 @@ class FunctionTranslator:
                 return f"fabs({code})", t
             if is_int(t):
                 return f"abs({code})", t
+            complex_dtype:Optional[np.dtype] = self._complex_dtype_of(t)
+            if complex_dtype is not None:
+                # numpy's `abs(complex)` is the magnitude, a *real*: the same rule the
+                # module-level `np.abs`/`np.absolute` follows (see _emit_complex_math).
+                kind:str = self._complex_side(t, complex_dtype)
+                self._require_complex(complex_dtype)
+                return f"{kind}_abs({code})", ("double" if kind == "c128" else "float")
             self._error("abs() requires a numeric argument", node)
 
         if name in ("min", "max"):
@@ -6922,13 +7584,21 @@ class FunctionTranslator:
         the math table (which rejects the name with its own message).
         """
         if attr in ("clip", "where", "abs", "fabs", "power", "arctan2",
-                    "minimum", "maximum", "square", "reciprocal", "round"):
+                    "minimum", "maximum", "square", "reciprocal", "round",
+                    "angle", "real", "imag", "conj", "conjugate", "sign"):
             for code, t in args:
                 if is_ptr(t) or is_image(t):
                     self._error_numpy_array_form(attr, node)
         if attr in ("abs", "fabs"):
             # numpy has two spellings; the device picks by type, as python's abs does.
             code, t = args[0]
+            complex_dtype:Optional[np.dtype] = self._complex_dtype_of(t)
+            if complex_dtype is not None:
+                # `np.abs(complex)` and `np.fabs(complex)` are both the modulus, a real.
+                kind:str = self._complex_side(t, complex_dtype)
+                self._require_complex(complex_dtype)
+                element:str = "double" if kind == "c128" else "float"
+                return f"{kind}_abs({code})", element
             if is_float(t):
                 return f"fabs({code})", t
             if is_int(t):
@@ -6936,11 +7606,49 @@ class FunctionTranslator:
             self._error(f"np.{attr}() requires a numeric argument", node)
         if attr == "square":
             code, t = args[0]
+            complex_dtype:Optional[np.dtype] = self._complex_dtype_of(t)
+            if complex_dtype is not None:
+                # A complex square is the full product, not `x * x` spelled with a C
+                # operator -- the same reason the `*` operator goes through the header.
+                kind:str = self._complex_side(t, complex_dtype)
+                self._require_complex(complex_dtype)
+                return f"{kind}_square({code})", kind
             return f"(({code}) * ({code}))", t
         if attr == "reciprocal":
             code, t = args[0]
+            complex_dtype = self._complex_dtype_of(t)
+            if complex_dtype is not None:
+                kind = self._complex_side(t, complex_dtype)
+                self._require_complex(complex_dtype)
+                return f"{kind}_reciprocal({code})", kind
             return f"(1.0f / ((float)({code})))", "float"
-        if attr in ("minimum", "maximum"):
+        if attr in ("angle", "real", "imag", "conj", "conjugate", "sign"):
+            # The complex-only members and functions, spelled as numpy spells them. Each one
+            # is the header's own operation, and each answers either a real or a complex
+            # value -- `np.real`/`np.imag`/`np.angle` are the first kind, the rest the second.
+            code, t = args[0]
+            complex_dtype:Optional[np.dtype] = self._complex_dtype_of(t)
+            if complex_dtype is None:
+                if attr == "sign" and (is_float(t) or is_int(t)):
+                    # `np.sign` on a real is the ordinary sign, which the builtin answers.
+                    return self._emit_shared_math_builtin("sign", args, node)
+                self._error(
+                    f"np.{attr}() is a complex operation; here the argument is {t}", node)
+            kind:str = self._complex_side(t, complex_dtype)
+            self._require_complex(complex_dtype)
+            element:str = "double" if kind == "c128" else "float"
+            if attr == "real":
+                return f"{kind}_real({code})", element
+            if attr == "imag":
+                return f"{kind}_imag({code})", element
+            if attr == "angle":
+                return f"{kind}_angle({code})", element
+            if attr == "sign":
+                # numpy's complex `sign` is the direction on the unit circle, which is not
+                # the header's; a division by the magnitude is exactly that.
+                return (f"{kind}_scale_div({code}, {kind}_abs({code}))"), kind
+            return f"{kind}_conjugate({code})", kind
+        if attr == "minimum" or attr == "maximum":
             if len(args) != 2:
                 self._error(f"np.{attr}() takes exactly 2 arguments", node)
             (lcode, lt), (rcode, rt) = args
@@ -7028,7 +7736,54 @@ class FunctionTranslator:
                 "np.clip() bounds must be scalars, not arrays", call)
         return code
 
+    def _emit_complex_math(self, attr:str, args:List[Translated],
+                           node:ast.Call, module_name:str)->Optional[Translated]:
+        """A math/numpy function applied to a complex value, as the header's function.
+
+        numpy defines the whole elementary set on a complex scalar -- `sqrt`, `exp`, `log`,
+        the trigonometric and hyperbolic families and their inverses, `square`, `absolute`,
+        `angle`, `conjugate` -- and refuses the real-only ones (`floor`, `ceil`, `trunc`,
+        `fmod`, `hypot`, `cbrt`, `ldexp`, `atan2`), which have no complex meaning at all. The
+        device mirrors that exactly: a name numpy refuses is refused here, with the reason
+        named, rather than computed into something python never would.
+
+        Returns None when neither argument is complex, so the ordinary scalar path answers.
+        """
+        complex_dtypes:List[Optional[np.dtype]] = [self._complex_dtype_of(t) for _, t in args]
+        if not any(dtype is not None for dtype in complex_dtypes):
+            return None
+        if attr in COMPLEX_ABS_FUNCTIONS:
+            # A real result: `abs`, `np.abs`, `np.angle`, `xFabs` on a complex is the
+            # magnitude or the phase, not a complex value.
+            code, t = args[0]
+            dtype:np.dtype = (self._complex_dtype_of(t) or complex_dtypes[0]  # type: ignore[assignment]
+                              or np.dtype(np.complex128))
+            kind:str = self._complex_side(t, dtype)
+            self._require_complex(dtype)
+            device:str = COMPLEX_ABS_FUNCTIONS[attr]
+            element:str = "double" if kind == "c128" else "float"
+            if device == "":
+                return f"fabs({code})", element
+            return f"{kind}_{device}({code})", element
+        if attr in COMPLEX_UNSUPPORTED_FUNCTIONS:
+            self._error(
+                f"{module_name}.{attr}() has no complex meaning: numpy refuses it for a"
+                f" complex input, and so does this package. Its complex counterpart is"
+                f" {COMPLEX_UNSUPPORTED_FUNCTIONS[attr]}", node)
+        if attr not in COMPLEX_DEVICE_FUNCTIONS:
+            self._error(
+                f"{module_name}.{attr}() is not defined for a complex value: the complex"
+                f" functions are {', '.join(sorted(COMPLEX_DEVICE_FUNCTIONS))}", node)
+        code, t = args[0]
+        dtype = self._complex_side(t, self._complex_dtype_of(t))
+        self._require_complex(np.dtype(np.complex128 if dtype == "c128" else np.complex64))
+        return f"{dtype}_{COMPLEX_DEVICE_FUNCTIONS[attr]}({code})", dtype
+
     def _emit_math_call(self, attr:str, args:List[Translated], node:ast.Call, module_name:str="math")->Translated:
+        complex_result:Optional[Translated] = self._emit_complex_math(attr, args, node,
+                                                                      module_name)
+        if complex_result is not None:
+            return complex_result
         if attr not in _MATH_FUNCS:
             self._error(f"{module_name}.{attr} is not supported", node)
         ret_override:Optional[str] = _MATH_FUNCS[attr]
@@ -7103,6 +7858,28 @@ class FunctionTranslator:
         target_t:Any = DTYPE_MAP.get(name)
         if target_t is None:
             self._error(f"np.{name}() has no device equivalent", node)
+        # A complex cast is not a C cast: the target and the source are structures, so the
+        # conversion goes through the header's own widening and narrowing functions.
+        target_complex:Optional[np.dtype] = complex_support.dtype_for_type_name(target_t)
+        if target_complex is not None:
+            source_complex:Optional[np.dtype] = self._complex_dtype_of(source_t)
+            source_kind:str = self._complex_side(source_t, source_complex)
+            if source_complex is not None:
+                self._require_complex(target_complex)
+                if source_kind == target_t or source_complex == target_complex:
+                    return code, target_t
+                self.complex_needs.update(complex_support.mixed_needs())
+                converter:str = (f"{source_kind}_widen_{target_t}"
+                                 if target_t == "c128" else f"{source_kind}_narrow_{target_t}")
+                return f"{converter}({code})", target_t
+            if not is_float(source_t) and not is_int(source_t):
+                self._error(
+                    f"np.{name}() cannot convert {source_t} to a complex value; convert a"
+                    f" real or a complex number", node)
+            # A real becomes the complex value with a zero imaginary part.
+            self._require_complex(target_complex)
+            element:str = "double" if target_t == "c128" else "float"
+            return f"{target_t}_from_real(({element})({code}))", target_t
         return f"(({self._device_type(target_t)})({code}))", target_t
 
     def _unsupported_vec_reason(self, target:Any)->Optional[str]:
@@ -8137,6 +8914,8 @@ class FunctionTranslator:
                 # travel with the entry so the compile step can emit them once.
                 "quaternion_helpers": dict(callee.quaternion_helpers),
                 "quaternion_needs": set(callee.quaternion_needs),
+                # The same for complex values: a helper's body may use them too.
+                "complex_needs": set(callee.complex_needs),
             }
             self.device_cache[sig_key] = entry
         except Exception:
@@ -8275,13 +9054,13 @@ class FunctionTranslator:
                                   if isinstance(t[1], str) else False)
                 const:str = ("const " if is_struct and name not in self.member_writes
                              else "")
-                params.append(f"{const}{self._device_type(t[1])}* {name}")
+                params.append(f"{const}{self._device_type(t[1])}* {device_name(name)}")
             elif isinstance(t, str) and structs_dtype_for(t) is not None:
                 # A structure value that reached a device parameter by value (a helper's
                 # receiver before the pointer rule, or a caller's own spelling) travels as
                 # a pointer too: one spelling for every structure.
                 const = ("const " if name not in self.member_writes else "")
-                params.append(f"{const}{self._device_type(t)}* {name}")
+                params.append(f"{const}{self._device_type(t)}* {device_name(name)}")
             elif isinstance(t, tuple) and t and t[0] == SHARED_SLICE:
                 # A `zeros_per_group` slice handed to a helper. It is a *pointer* into
                 # the group's own storage, in the space that storage lives in -- Metal
@@ -8295,16 +9074,16 @@ class FunctionTranslator:
                 elif self._opencl_syntax:
                     space = "__local "
                 element:str = self._device_type(t[1])
-                params.append(f"{space}{element}* {name}")
+                params.append(f"{space}{element}* {device_name(name)}")
             elif isinstance(t, tuple) and len(t) == 3 and t[0] == IMAGE:
                 # An image parameter reaching a helper. It is the backend's own image
                 # type -- `__read_only image2d_t` on OpenCL, a texture/surface object on
                 # CUDA -- so the same spelling the kernel signature uses applies here.
                 # Falling through would print the internal marker (`('image', 4,
                 # 'float')`) into the C source, which no compiler accepts.
-                params.append(f"{self._image_param_type(name, t)} {name}")
+                params.append(f"{self._image_param_type(name, t)} {device_name(name)}")
             else:
-                params.append(f"{self._device_type(t)} {name}")
+                params.append(f"{self._device_type(t)} {device_name(name)}")
         # A structure in the signature needs its typedef emitted too, and this helper's own
         # `private_structs` is what the caller collects.
         from . import structs
@@ -8362,8 +9141,8 @@ class FunctionTranslator:
         t:Any = entry["type"]
         if is_ptr(t):
             qualifier:str = "" if device else self._buffer_qualifier()
-            return f"{qualifier}{self._device_type(t[1])}* {name}"
-        return f"{self._kernel_scalar_type(t)} {name}"
+            return f"{qualifier}{self._device_type(t[1])}* {device_name(name)}"
+        return f"{self._kernel_scalar_type(t)} {device_name(name)}"
 
     def _device_type(self, t:str)->str:
         """The backend's spelling of a scalar type name.
@@ -8417,11 +9196,11 @@ class FunctionTranslator:
                              else "")
                 qualifier = self._buffer_qualifier()
                 params.append(
-                    f"{qualifier}{const}{self._kernel_scalar_type(t[1])}* {name}")
+                    f"{qualifier}{const}{self._kernel_scalar_type(t[1])}* {device_name(name)}")
             elif is_image(t):
-                params.append(f"{self._image_param_type(name, t)} {name}")
+                params.append(f"{self._image_param_type(name, t)} {device_name(name)}")
             else:
-                params.append(f"{self._kernel_scalar_type(t)} {name}")
+                params.append(f"{self._kernel_scalar_type(t)} {device_name(name)}")
         for array_name, dim in self.shapes_used:
             params.append(f"const int {self._shape_var(array_name, dim)}")
         # OpenCL sampling takes the sampler as a kernel argument; one per sampled

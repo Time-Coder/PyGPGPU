@@ -111,6 +111,8 @@ def histogram(data: np.ndarray, counts: np.ndarray) -> None:
 
 Supported: scalar/array/vector arguments, if/while/for-range, arithmetic/comparison/bit ops, `math.*` and `np.*` math functions, class methods (`self.xxx` attributes become arguments automatically), static methods, and calling helpers through a name — a module-level function, `module.func(...)`, `SomeClass.static_method(...)`, and `self.method(...)` for another method of the same class. Unsupported syntax raises a `SyntaxError` carrying the line number.
 
+`break` and `continue` work where they have a loop to act on: inside a nested serial `for`/`while` (or `for x in arr`) they mean exactly what they mean in Python. Directly in the magic loop's body there is no loop to continue — each iteration is a separate work item — so `continue` becomes "this work item stops here" (the next iteration is another thread, which does its own work anyway), and `break` is a `SyntaxError`: stopping the magic loop would mean stopping every other work item too, which the device cannot express. Guard the rest of the body with `if` instead.
+
 ### `+=` into an array element
 
 `arr[i] op= value` follows Python's semantics even when several work items meet at the same element: `bins[image[i, j, k]] += 1` accumulates every pixel, without writing `atomic_add` by hand. The translator emits a device atomic whenever it cannot prove the element belongs to one work item — the proof being that the subscript is built from exactly the magic loop's own index variables, so `out[i] += x[i]` stays a plain (faster) read-modify-write.

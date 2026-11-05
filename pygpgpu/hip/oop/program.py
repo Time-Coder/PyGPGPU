@@ -1,5 +1,6 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer
+import threading
 from typing import Dict, List, Any, Optional, Set
 from typing_extensions import override
 
@@ -20,6 +21,9 @@ class Program(HIPObject):
 
     def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, compiler:Optional[HipCompiler]=None):
         self._kernels:Dict[str, Kernel] = {}
+        # The kernel dict is filled lazily (see _fetch_kernels), and every thread that
+        # reaches this program shares it.
+        self._kernel_lock:threading.RLock = threading.RLock()
         self._type_checked:bool = type_checked
         if compiler is None:
             self._compiler:HipCompiler = HipCompiler(file_name, includes, defines, options)
@@ -95,14 +99,17 @@ class Program(HIPObject):
         return self._compiler.structs
     
     def _fetch_kernels(self):
-        if self._kernels:
-            return
+        # See the CUDA counterpart: one critical section, so two threads cannot resolve
+        # every entry point twice and replace each other's handles.
+        with self._kernel_lock:
+            if self._kernels:
+                return
 
-        for kernel_name, kernel_info in self.kernel_infos.items():
-            kernel = Kernel(self, kernel_name)
-            kernel.args = kernel_info.args
-            kernel.type_checked = self._type_checked
-            self._kernels[kernel_name] = kernel
+            for kernel_name, kernel_info in self.kernel_infos.items():
+                kernel = Kernel(self, kernel_name)
+                kernel.args = kernel_info.args
+                kernel.type_checked = self._type_checked
+                self._kernels[kernel_name] = kernel
 
     def __getattr__(self, name:str):
         if name in self.kernel_infos:

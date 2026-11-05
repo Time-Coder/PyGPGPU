@@ -914,7 +914,10 @@ def test_two_kernels_in_one_file_share_one_helper_definition(tmp_path: Any,
 def body_with_unknown_call(x, out):
     """A body calling a name that is no device function (the refusal under test)."""
     for i in range(out.shape[0]):
-        out[i] = unknown_device_function(x[i])  # noqa: F821  (refused by design)
+        # Deliberately undefined: the translator must refuse an unknown device helper and
+        # report where the name sits. Both linters are told, because neither understands
+        # that the call is the test.
+        out[i] = unknown_device_function(x[i])  # noqa: F821  # ty: ignore[unresolved-reference]
 
 
 def test_a_translation_error_names_the_file_and_line() -> None:

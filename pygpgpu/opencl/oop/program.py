@@ -1,5 +1,7 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer, c_size_t, c_char, POINTER, c_ubyte, string_at
+import contextlib
+import threading
 import warnings
 from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union, Set
 from typing_extensions import override
@@ -16,8 +18,7 @@ from ..driver import (
     cl_uint,
     cl_program_build_info,
     ErrorCode,
-    cl_program,
-    cl_kernel
+    cl_program
 )
 from .program_parser import ProgramParser
 from .program_info import KernelInfo
@@ -35,6 +36,9 @@ class Program(CLObject):
         self._context:Context = context
         self._binaries:Dict[Device, bytes] = {}
         self._kernels:Dict[str, Kernel] = {}
+        # The kernel dict is filled lazily (see _fetch_kernels), and it is shared by every
+        # thread that reaches this program.
+        self._kernel_lock:threading.RLock = threading.RLock()
         self._type_checked:bool = type_checked
 
         if program_parser is None:
@@ -45,18 +49,34 @@ class Program(CLObject):
             newest_mtime = program_parser.newest_mtime
 
         old_check_error = CL.check_error
-        if not self._load_bin(newest_mtime):
-            self._create_with_source()
-        else:
-            try:
-                CL.check_error = True
-                self._create_with_binary()
-            except:
-                CL.check_error = old_check_error
-                self._binaries.clear()
+        # The binary cache is one artifact per (module, device), read by every process that
+        # loads this program and written by whichever one has to compile. The read, the
+        # compile and the save are one step under the cache's own lock file, so a reader
+        # never sees a half-written artifact and two processes do not compile the same
+        # module twice and race on the save (see utils.save_bin for the atomic write).
+        with self._binary_cache_lock():
+            if not self._load_bin(newest_mtime):
                 self._create_with_source()
-            finally:
-                CL.check_error = old_check_error
+            else:
+                try:
+                    CL.check_error = True
+                    self._create_with_binary()
+                except:
+                    CL.check_error = old_check_error
+                    self._binaries.clear()
+                    self._create_with_source()
+                finally:
+                    CL.check_error = old_check_error
+
+    @contextlib.contextmanager
+    def _binary_cache_lock(self):
+        """Hold the cross-process lock for this program's binary cache files."""
+        from ...kernel import source_paths
+
+        path:str = (self._bin_file_name(self.devices[0]) if self.devices
+                    else f"{self._program_parser.cache_folder}/{self._program_parser.base_name}")
+        with source_paths.write_lock(path):
+            yield
 
     def _create_with_source(self)->cl_program:
         source_len:int = c_size_t(len(self._program_parser.clean_code))
@@ -261,16 +281,41 @@ class Program(CLObject):
         return self._program_parser._struct_types
     
     def _fetch_kernels(self):
-        if self._kernels:
-            return
-        
-        kernel_ids = (cl_kernel * self.n_kernels)()
-        CL.clCreateKernelsInProgram(self.id, self.n_kernels, kernel_ids, None)
-        for kernel_id in kernel_ids:
-            kernel = Kernel(self, kernel_id)
-            kernel.args = self.kernel_infos[kernel.name].args
-            kernel.type_checked = self._type_checked
-            self._kernels[kernel.name] = kernel
+        # Several threads may load the same program: one compiles a kernel while another
+        # launches one that is already in the file. `clCreateKernelsInProgram` fills every
+        # entry of the dict from that one call, so a second unsynchronized fetch created a
+        # second set of handles and overwrote the first -- and a kernel the caller had
+        # already resolved by name was replaced mid-launch. One critical section, so the
+        # second thread waits and then reads the finished dict.
+        with self._kernel_lock:
+            if self._kernels:
+                return
+
+            # Each kernel is created by *name*, not by enumerating whatever the program
+            # happens to hold. The binary in the cache was produced from an earlier version
+            # of this file -- a sibling kernel of the same module may have been added since
+            # -- so the program's own kernel list can disagree with the parsed one, and
+            # `clCreateKernelsInProgram` then reports CL_INVALID_VALUE ("num_kernels is less
+            # than the number of kernels in program"). A name the program really exports is
+            # created; one it does not is simply absent from the dict, which is what the
+            # caller's KeyError already reports.
+            for kernel_name in self.kernel_infos:
+                # `clCreateKernel` answers the handle itself and reports through the
+                # `errcode_ret` out-parameter, so that pointer is always passed: the driver
+                # reads it back to decide whether the call failed (see cl.Func.__call__).
+                error_code = cl_int(0)
+                try:
+                    kernel_id = CL.clCreateKernel(self.id, kernel_name.encode("utf-8"),
+                                                  pointer(error_code))
+                except RuntimeError:
+                    # The cached binary predates this kernel (a sibling was added after it
+                    # was built). Leaving it out is correct: the launch that needs it reports
+                    # the missing entry point, and a rebuild replaces the stale binary.
+                    continue
+                kernel = Kernel(self, kernel_id)
+                kernel.args = self.kernel_infos[kernel_name].args
+                kernel.type_checked = self._type_checked
+                self._kernels[kernel_name] = kernel
 
     def __getattr__(self, name:str):
         if name in ["build_status", "build_options", "build_log", "binary_type", "global_variable_total_size"]:

@@ -4,6 +4,7 @@ import os
 import sys
 import copy
 import json
+import pickle
 from ctypes import c_char_p, c_uint64, Structure
 from ctypes import Union as ctypes_union
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Union
@@ -206,7 +207,14 @@ class Kernel_{kernel_name}(KernelWrapper):
             return False
         
         newest_mtime:float = 0
-        meta:Dict[str, Any] = load_var(self._meta_file_name)
+        try:
+            meta:Dict[str, Any] = load_var(self._meta_file_name)
+        except (OSError, EOFError, pickle.UnpicklingError, ValueError, TypeError):
+            # A meta file another process was replacing when this one opened it is either
+            # absent or not yet complete; both mean "no usable cache", which is a re-parse
+            # rather than a failure. The write is atomic (see utils.save_var), so this is
+            # the rare window where the file was removed just before the read.
+            return False
         for related_file in meta["related_files"]:
             if not os.path.isfile(related_file):
                 return False

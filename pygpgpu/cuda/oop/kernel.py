@@ -31,6 +31,29 @@ if TYPE_CHECKING:
     from .context import Context
 
 
+def complex_of_dtype(dtype:Any)->Any:
+    """The complex dtype behind a numpy record layout of two reals, or None.
+
+    A complex array's bytes *are* the record's bytes: `complex64` is a `float` pair and
+    `complex128` a `double` pair, in that order. So an argument declared against one of the
+    package's fixed complex structures binds a complex array unchanged, and the upload and
+    read-back have to speak the *complex* dtype -- a record and a complex array will not
+    assign to one another under numpy's casting rules.
+    """
+    if not isinstance(dtype, np.dtype) or dtype.fields is None:
+        return None
+    if tuple(dtype.names or ()) != ("re", "im"):
+        return None
+    first:np.dtype = np.dtype(dtype.fields["re"][0])
+    if first != np.dtype(dtype.fields["im"][0]):
+        return None
+    if first.name == "float32":
+        return np.dtype(np.complex64)
+    if first.name == "float64":
+        return np.dtype(np.complex128)
+    return None
+
+
 def _handle_types()->tuple:
     """The oop classes whose instances are passed to a kernel as opaque handles.
 
@@ -350,7 +373,17 @@ class Kernel(CUObject):
             if isinstance(host_data, list):
                 host_data[:] = buffer.data.tolist()
             elif isinstance(host_data, np.ndarray):
-                host_data[:] = buffer.data
+                # A complex argument's device buffer holds the record layout, whose bytes are
+                # the complex array's own: the copy has to speak the complex dtype, or numpy
+                # refuses the assignment under its casting rule.
+                device_data:Any = buffer.data
+                if (isinstance(device_data, np.ndarray)
+                        and device_data.dtype.fields is not None
+                        and host_data.dtype.kind == "c"):
+                    complex_dtype:Any = complex_of_dtype(device_data.dtype)
+                    if complex_dtype is not None and complex_dtype == host_data.dtype:
+                        device_data = device_data.view(complex_dtype)
+                host_data[:] = device_data
             elif isinstance(host_data, (Structure, ctypes_union)):
                 # A union instance is a `ctypes` record too: its bytes are the copy target,
                 # the same way a structure's are. Testing for `Structure` alone skipped the
@@ -581,13 +614,25 @@ class Kernel(CUObject):
                     packed:Any = self._pack_vec3_value(value, content_type)
                     return pointer(packed)
 
-                if is_struct and isinstance(value, (np.void, bytes, bytearray, Structure, ctypes_union)):
+                if is_struct and isinstance(value, (np.void, bytes, bytearray,
+                                                    Structure, ctypes_union)):
                     # A numpy record holds exactly the bytes the dtype described, which is the
                     # layout the parsed structure has, so it can back the ctypes value directly.
                     # A ctypes.Structure instance is the caller's own class, which is a
                     # different type from the one the parser generated for the same layout,
                     # so it goes through its bytes as well.
                     value = content_type.from_buffer_copy(bytes(value))
+                elif is_struct and isinstance(value, (complex, np.complexfloating)):
+                    # A complex scalar is a two-real value, which is exactly the record the
+                    # structure declares: the value is converted through a one-element array
+                    # of that layout, never through the structure's own constructor -- the
+                    # constructor assigns each member by name and would narrow the complex
+                    # into its first real field, silently dropping the imaginary part.
+                    # `np.complexfloating` is checked as well as `complex`: a numpy
+                    # `complex64` is *not* a python `complex`, which is why the plain
+                    # isinstance test missed it and the narrowing went unnoticed.
+                    value = np.asarray(value).view(np.dtype(content_type))[()]
+                    value = content_type.from_buffer_copy(ProgramParser._structure_bytes(value))
 
                 if isinstance(value, content_type):
                     used_value = value
@@ -616,7 +661,13 @@ class Kernel(CUObject):
                 elif isinstance(value, np.ndarray):
                     used_value = value
                     if not isinstance(value, gnp.ndarray) and value.dtype != content_type:
-                        used_value = value.astype(content_type)
+                        # A complex structure binds a complex array: the bytes of the two
+                        # layouts are identical, so the dtype view is the whole conversion.
+                        complex_dtype:Any = complex_of_dtype(np.dtype(content_type))
+                        if complex_dtype is not None and value.dtype == complex_dtype:
+                            used_value = value
+                        else:
+                            used_value = value.astype(content_type)
                 else:
                     ProgramParser._apply_structure_pointers(value, stream)
                     used_value = np.array(value, dtype=content_type)

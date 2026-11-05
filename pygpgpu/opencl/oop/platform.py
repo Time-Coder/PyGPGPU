@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from ctypes import pointer
 from typing import List, Dict, Tuple, Optional, Any
 from typing_extensions import override
@@ -27,6 +28,14 @@ class Platform(CLObject):
         self.__n_devices:int = 0
         self.__devices:Tuple[Device, ...] = ()
         self.__default_context:Optional[Context] = None
+        # The device list is fetched lazily, and two threads reaching it at once both ran
+        # `clGetDeviceIDs` for the same platform. That is not a slow path that merely
+        # repeated work: the driver answers the second concurrent enumeration with
+        # `CL_DEVICE_NOT_FOUND`, so a thread launching a kernel while another thread was
+        # compiling one failed with "no OpenCL devices that matched device_type were found"
+        # on a machine that plainly had a device. The fetch is one critical section instead,
+        # so the second thread waits and then sees the finished tuple.
+        self.__device_lock = threading.RLock()
     
     @property
     def extensions(self)->List[str]:
@@ -34,25 +43,27 @@ class Platform(CLObject):
     
     @property
     def n_devices(self)->int:
-        if self.__n_devices == 0:
-            n_devices = cl_uint()
-            CL.clGetDeviceIDs(self._id, cl_device_type.CL_DEVICE_TYPE_ALL, 0, None, pointer(n_devices))
-            self.__n_devices = n_devices.value
+        with self.__device_lock:
+            if self.__n_devices == 0:
+                n_devices = cl_uint()
+                CL.clGetDeviceIDs(self._id, cl_device_type.CL_DEVICE_TYPE_ALL, 0, None, pointer(n_devices))
+                self.__n_devices = n_devices.value
 
         return self.__n_devices
 
     def __fetch_devices(self):
-        if self.__devices:
-            return
-        
-        devices = []
-        device_ids = (cl_device_id * self.n_devices)()
-        CL.clGetDeviceIDs(self.id, cl_device_type.CL_DEVICE_TYPE_ALL, self.n_devices, device_ids, None)
-        for device_id in device_ids:
-            device = Device(cl_device_id(device_id), self)
-            devices.append(device)
+        with self.__device_lock:
+            if self.__devices:
+                return
 
-        self.__devices = tuple(devices)
+            devices = []
+            device_ids = (cl_device_id * self.n_devices)()
+            CL.clGetDeviceIDs(self.id, cl_device_type.CL_DEVICE_TYPE_ALL, self.n_devices, device_ids, None)
+            for device_id in device_ids:
+                device = Device(cl_device_id(device_id), self)
+                devices.append(device)
+
+            self.__devices = tuple(devices)
 
     @property
     def devices(self)->Tuple[Device]:
@@ -61,8 +72,9 @@ class Platform(CLObject):
     
     @property
     def default_context(self)->Context:
-        if self.__default_context is None:
-            self.__default_context = Context(*self.devices)
+        with self.__device_lock:
+            if self.__default_context is None:
+                self.__default_context = Context(*self.devices)
 
         return self.__default_context
     

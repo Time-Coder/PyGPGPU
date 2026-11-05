@@ -1,4 +1,5 @@
 from ctypes import c_int, pointer
+import threading
 from typing import List, Dict, Iterator, Optional, Set
 
 from ..driver import CUDA, CUdevice
@@ -11,31 +12,39 @@ class MetaDevices(type):
     __devices_list:List[Device] = []
     __devices_map:Dict[str, Device] = {}
     __devices_set:Set[CUdevice] = set()
+    # The device list is built on first use and every thread launching a kernel reaches it.
+    # Two of them used to run the fetch at once: both saw the empty list, both enumerated,
+    # and both appended, which duplicated every device in the list and could hand out a
+    # `Device` whose context was not the one the enumeration built. The fetch is one
+    # critical section instead, so the second thread waits and sees the finished list.
+    __fetch_lock = threading.RLock()
 
     @property
     def n_devices(self)->int:
-        if MetaDevices.__n_devices == 0:
-            n_devices = c_int(0)
-            ptr_n_devices = pointer(n_devices)
-            CUDA.cuDeviceGetCount(ptr_n_devices)
-            MetaDevices.__n_devices = n_devices.value
+        with MetaDevices.__fetch_lock:
+            if MetaDevices.__n_devices == 0:
+                n_devices = c_int(0)
+                ptr_n_devices = pointer(n_devices)
+                CUDA.cuDeviceGetCount(ptr_n_devices)
+                MetaDevices.__n_devices = n_devices.value
 
-        return MetaDevices.__n_devices
+            return MetaDevices.__n_devices
     
     def __len__(self)->int:
         return self.n_devices
     
     def __fetch_devices(self):
-        if self.__devices_list:
-            return
-        
-        for i in range(self.n_devices):
-            device_id = CUdevice()
-            ptr_device_id = pointer(device_id)
-            CUDA.cuDeviceGet(ptr_device_id, i)
-            device = Device(device_id.value)
-            self.__devices_list.append(device)
-            self.__devices_set.add(device_id.value)
+        with MetaDevices.__fetch_lock:
+            if self.__devices_list:
+                return
+
+            for i in range(self.n_devices):
+                device_id = CUdevice()
+                ptr_device_id = pointer(device_id)
+                CUDA.cuDeviceGet(ptr_device_id, i)
+                device = Device(device_id.value)
+                self.__devices_list.append(device)
+                self.__devices_set.add(device_id.value)
     
     def device(self, keyword:str)->Device:
         """Look up a device by index / name or vendor substring / "name:ordinal"."""

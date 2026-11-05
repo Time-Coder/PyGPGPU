@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 import os
 import pickle
+import threading
+import time
 import asyncio
 from functools import lru_cache
 from collections.abc import Iterable
@@ -71,25 +74,94 @@ def echo(content:str, file_name:str)->None:
     with open(file_name, "w", encoding='utf-8') as file:
         file.write(content)
 
-def save_var(var:Any, file_name:str)->None:
-    target_folder:str = os.path.dirname(os.path.abspath(file_name))
-    if not os.path.isdir(target_folder) or not os.path.exists(target_folder):
-        os.makedirs(target_folder)
+def _atomic_write(file_name:str, data:bytes)->None:
+    """Write `data` to `file_name` in a way no concurrent reader can observe half-done.
 
-    with open(file_name, "wb") as file:
-        pickle.dump(var, file)
+    The write goes to a temp file in the same directory and is moved into place with
+    `os.replace`, which is atomic on every platform this targets, so a reader sees either
+    the previous file or the finished new one. The temp name carries both the pid and the
+    thread id: two writers in one process and two processes must never share a temp file, or
+    the replace would install one writer's bytes over the other's unfinished ones.
+
+    `os.replace` can still refuse on Windows with a sharing violation when another thread
+    happens to hold the destination open for a read at that instant -- the name is in use,
+    not the data. That is transient by construction, so it is retried briefly; a failure
+    that outlives the retries falls back to a plain overwrite, which is the pre-existing
+    behaviour rather than a new error.
+    """
+    temp_name:str = f"{file_name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(temp_name, "wb") as file:
+            file.write(data)
+        for _attempt in range(8):
+            try:
+                os.replace(temp_name, file_name)
+                return
+            except PermissionError:
+                # A reader has the destination open; let it finish and try again.
+                time.sleep(0.05)
+        with open(file_name, "wb") as file:
+            file.write(data)
+    finally:
+        with contextlib.suppress(OSError):
+            if os.path.isfile(temp_name):
+                os.unlink(temp_name)
+
+
+def save_var(var:Any, file_name:str)->None:
+    """Pickle `var` to its cache file, atomically (see `_atomic_write`)."""
+    _ensure_directory(os.path.dirname(os.path.abspath(file_name)))
+    _atomic_write(file_name, pickle.dumps(var))
 
 def load_var(file_name:str)->Any:
     with open(file_name, "rb") as file:
         return pickle.load(file)
     
-def save_bin(bin:Union[bytes, bytearray], file_name:str)->None:
-    target_folder:str = os.path.dirname(os.path.abspath(file_name))
-    if not os.path.isdir(target_folder) or not os.path.exists(target_folder):
-        os.makedirs(target_folder)
+def _ensure_directory(directory:str)->None:
+    """Make `directory` exist, tolerating the losers of a concurrent create.
 
-    with open(file_name, "wb") as file:
-        file.write(bin)
+    `os.makedirs(..., exist_ok=True)` is not atomic on Windows: it creates each missing
+    segment with its own call and can still raise for a segment another thread just made, so
+    two writers that both find a parent missing can fail the one that was only second. The
+    levels are therefore raised one segment at a time, and each segment's failure is
+    re-checked against the filesystem: if the segment exists now, another writer created
+    exactly the directory this call needed, so there is nothing to report.
+    """
+    if not directory:
+        return
+    absolute:str = os.path.abspath(directory)
+    head, tail = os.path.split(absolute)
+    if tail:
+        _ensure_directory(head)
+    for _attempt in range(8):
+        try:
+            os.mkdir(absolute)
+            return
+        except FileExistsError:
+            if os.path.isdir(absolute):
+                return
+        except OSError:
+            if os.path.isdir(absolute):
+                return
+            time.sleep(0.05)
+    if os.path.isdir(absolute):
+        return
+    os.makedirs(absolute, exist_ok=True)
+
+
+def save_bin(bin:Union[bytes, bytearray], file_name:str)->None:
+    """Write a compiled binary to its cache file, atomically.
+
+    The file is one compiled artifact and several processes may be compiling the same
+    module at once. A reader could see a half-written file and load a truncated binary
+    (`CL_INVALID_KERNEL`), and two writers interleaving their bytes would leave one that is
+    a mix of both. The write therefore goes to a temp file in the same directory and is
+    moved into place with `os.replace`, which is atomic on every platform this targets -- so
+    a reader sees either the previous artifact or the finished new one, never a partial one.
+    """
+    target_folder:str = os.path.dirname(os.path.abspath(file_name))
+    _ensure_directory(target_folder)
+    _atomic_write(file_name, bytes(bin))
 
 def load_bin(file_name:str)->bytes:
     with open(file_name, "rb") as file:

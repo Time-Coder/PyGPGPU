@@ -14,7 +14,9 @@ what the body may assume, not an instruction to stop copying.
 The return claim/site words are **not** an exception to the first rule even though the
 library owns them: `atomicCAS(&_ret_claim[0], 0, 1)` reads the word to compare it against
 zero, so a slot that was never uploaded would decide the claim against whatever the device
-buffer happened to hold.
+buffer happened to hold. They are however declared **only when a `return` reaches device
+code**: a body whose only `return` sits after the magic loop hands its value back through
+the host tail, so nothing claims and the two words would be two wasted copies.
 """
 from __future__ import annotations
 
@@ -33,7 +35,18 @@ def ignores_a_spare(spare: np.ndarray, out: np.ndarray):
 
 @kernel
 def returns_a_created_array(a: np.ndarray) -> np.ndarray:
-    """A returning kernel, so the claim/site slots are part of the signature."""
+    """A returning kernel whose return is *device* code, so the claim/site slots exist."""
+    out = np.zeros_like(a)
+    for i in range(out.shape[0]):
+        out[i] = a[i] + 10
+        if i == 0:
+            return out
+    return out
+
+
+@kernel
+def returns_a_created_array_in_its_tail(a: np.ndarray) -> np.ndarray:
+    """The same body, but its only `return` is the tail one -- a host statement."""
     out = np.zeros_like(a)
     for i in range(out.shape[0]):
         out[i] = a[i] + 10
@@ -70,6 +83,22 @@ def test_the_return_words_are_bidirectional(gpu_backend):
         assert info.kernel_flags & KernelFlags.Readed, name
         assert info.need_upload is True, name
         assert info.need_read_back is True, name
+
+
+def test_a_tail_only_return_needs_no_claim_words(gpu_backend):
+    """A `return` after the magic loop runs on the host, so nothing claims.
+
+    The words would be uploaded and read back on every call and never consulted: the
+    translator withholds them when no `return` reaches the device code, and the launch then
+    neither allocates nor binds them. The result still comes back through the host tail.
+    """
+    values = np.arange(4, dtype=np.int32)
+    result = returns_a_created_array_in_its_tail[gpu_backend](values)
+    np.testing.assert_array_equal(result, values + 10)
+
+    compiled = _compiled(returns_a_created_array_in_its_tail, gpu_backend)
+    assert "_ret_claim" not in compiled._args, sorted(compiled._args)
+    assert "_ret_site" not in compiled._args, sorted(compiled._args)
 
 
 def test_a_written_argument_is_still_uploaded(gpu_backend):

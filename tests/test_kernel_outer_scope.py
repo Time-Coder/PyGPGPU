@@ -152,8 +152,19 @@ def test_global_write_reaches_the_module(runner, monkeypatch):
     assert scope.TOTAL == 17
 
 
-def test_declared_write_from_every_work_item_is_not_raced(runner):
-    """Every work item may add, but the test only pins down the declared shape."""
+def test_an_unguarded_shared_store_is_refused(gpu_backend, runner):
+    """A plain store to an outer scalar from every work item is a race, not a feature.
+
+    It used to compile and then answer whichever work item finished last -- one work item's
+    partial value, with nothing in the program looking wrong. It is now refused with the
+    same explanation a carried local gets, because both are one location for the whole
+    launch. The spellings that *do* work are `+=` (a device atomic) and a guard every work
+    item agrees on (`if i == 0:`).
+
+    The refusal is the *translator*'s, so it applies to the device backends: the `python`
+    backend executes the body as written, where a serial run really does accumulate every
+    contribution.
+    """
     counter = 0
 
     @kernel
@@ -163,10 +174,28 @@ def test_declared_write_from_every_work_item_is_not_raced(runner):
             if x[i] > 0.0:
                 counter = counter + 1
 
-    runner(accumulate, np.array([1.0, -1.0, 2.0], dtype=np.float32))
-    # Each work item runs on its own copy of the parameter and only one write-back
-    # survives, so the exact count is not portable; the write itself must still land.
-    assert isinstance(counter, int)
+    with pytest.raises(SyntaxError) as caught:
+        runner(accumulate, np.array([1.0, -1.0, 2.0], dtype=np.float32))
+    message = str(caught.value)
+    assert "counter" in message
+    assert "race" in message
+    # The message has to name the spelling that works, which is the whole point of refusing.
+    assert "+=" in message
+
+
+def test_a_guarded_shared_store_is_accepted(runner):
+    """A branch on the work-item index is a template, not a race: one work item enters it."""
+    counter = 0
+
+    @kernel
+    def take_first(x: np.ndarray):
+        nonlocal counter
+        for i in range(x.shape[0]):
+            if i == 0:
+                counter = int(x[i])
+
+    runner(take_first, np.array([7.0, 1.0], dtype=np.float32))
+    assert counter == 7
 
 
 # ---------------------------------------------------------------------------

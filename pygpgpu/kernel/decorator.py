@@ -1386,6 +1386,11 @@ class PyKernel(_KernelBase[_P]):
         # first kernel does not, or skip one it does.
         phase_param_names:List[List[str]] = list(
             launch_meta.get("phase_param_names") or [[] for _ in active_kernels])
+        # Whether each phase kernel declares the return claim/site words. A pass whose only
+        # return runs in its host tail never claims, so its signature omits them and its
+        # argument list has to omit them too (empty for a single-phase body, whose one
+        # kernel is the main translator's own).
+        phase_claims:List[bool] = list(launch_meta.get("phase_claims") or [])
 
         outer_writable:List[Dict[str, Any]] = []
         carried_slots:Dict[str, Any] = {}
@@ -1468,6 +1473,11 @@ class PyKernel(_KernelBase[_P]):
         runtime_values:List[object] = list(outer_state["full"]) + _created_arguments(created)
         return_state:Dict[str, Any] = (self._alloc_return_slots(returns)
                                       if returns else {})
+        # Whether this launch's first kernel declares the return claim/site words. A
+        # single-phase body has one kernel -- the main translator's -- and this is its own
+        # answer; with several phases each entry of `phase_claims` decides instead. The
+        # value is recorded at compile time because the translator is not reachable here.
+        main_claims:bool = bool(launch_meta.get("main_claims", True))
         # Launch order must match the device signature: own arguments, shape extents, then
         # the values the host supplies (outer scope, then created objects). The shape
         # extents are read from `full` by device-parameter index, so the runtime values are
@@ -1481,7 +1491,8 @@ class PyKernel(_KernelBase[_P]):
 
         def build_phase_args(extents:List[Tuple[int, int]],
                              extra_created:Optional[List[str]],
-                             phase_index:int=0)->List[object]:
+                             phase_index:int=0,
+                             claims:Optional[bool]=None)->List[object]:
             """The launch arguments for one phase kernel.
 
             The shared prefix is the device parameter list up to `own_count`; the extents
@@ -1536,8 +1547,13 @@ class PyKernel(_KernelBase[_P]):
                     phase_args.append(_kernel_scalar_argument(value, infer_ctype(value)))
             if return_state:
                 phase_args.extend(return_state["buffers"])
-                phase_args.append(return_state["claim"])
-                phase_args.append(return_state["site"])
+                # A pass that never claims -- one whose only return runs in its host tail --
+                # does not declare the words, so it must not receive them either. `claims`
+                # is None only for the single-phase fast path, whose one kernel is the main
+                # translator's: its own signature is what `main_claims` records.
+                if claims if claims is not None else main_claims:
+                    phase_args.append(return_state["claim"])
+                    phase_args.append(return_state["site"])
             return phase_args
 
         # The read-back of a previous launch is a stream callback, and the caller may have
@@ -1777,14 +1793,17 @@ class PyKernel(_KernelBase[_P]):
                     and phase_names == first_names):
                 bound_kernel(*launch_args)
             else:
-                bound_kernel(*build_phase_args(phase_shapes, phase_created_names, position))
+                bound_kernel(*build_phase_args(phase_shapes, phase_created_names, position,
+                                               phase_claims[position]
+                                               if position < len(phase_claims) else True))
         # The statements after the last loop are python: they run once, on the host, now that
         # every work item has finished -- the same moment python would run them.
         tail_writable:Dict[str, np.ndarray] = {
             entry["name"]: entry["buffer"] for entry in outer_state.get("writable", [])} \
             if outer_state else {}
         tail_result:Any = self._run_host_region(
-            list(launch_meta.get("body_tail") or []), args, instance,
+            list(launch_meta.get("body_tail") or launch_meta.get("phase_tail") or []),
+            args, instance,
             carried_slots, gap_slots, created_objects=created_objects,
             outer_state=outer_state, writable_outer=tail_writable)
         for packed_value, unpack in unpackers:
@@ -2288,6 +2307,21 @@ class PyKernel(_KernelBase[_P]):
             include_lines = quaternion_header.include_line(
                 tuple(sorted(quaternion_needs)), backend, self._cache_dir(backend))
 
+        # Complex values work the same way, from their own fixed header: the two structures
+        # and every operation on them are declared there, so a source that includes it says
+        # nothing else about a complex number. A helper's blocks travel with its cache entry,
+        # exactly as a helper's quaternion widths do.
+        complex_needs:Set[str] = set(translator.complex_needs)
+        for entry in device_cache.values():
+            complex_needs.update(entry.get("complex_needs") or ())
+        if complex_needs:
+            from . import complex as complex_header
+
+            complex_lines:str = complex_header.include_line(
+                tuple(sorted(complex_needs)), backend, self._cache_dir(backend))
+            include_lines = (f"{include_lines}\n{complex_lines}" if include_lines
+                             else complex_lines)
+
         # A registered device-side library function may need headers the compilation does
         # not have yet. A header the user ships as a *path* is copied into the cache's
         # include folder and included by name; a header given as a full `#include` line
@@ -2387,9 +2421,17 @@ class PyKernel(_KernelBase[_P]):
                     linked = "<<<" in file.read()
             except OSError:
                 linked = False
-        kernels:List[object] = [
-            self._backend_compile(source_path, name, backend, device_obj, linked=linked)
-            for name, _ in rendered]
+        # The write above and the compile below are one critical section. A sibling kernel
+        # of this same module may be appending its definition concurrently, and the compile
+        # keys its cached binary on the file's *content*: a compile that started between two
+        # appends would cache a binary of a half-populated file, and the kernel appended last
+        # would find no entry point of its own in it (`KeyError` naming the kernel). Holding
+        # the lock across both steps makes the file's content and the binary that describes
+        # it change together.
+        with source_paths.write_lock(source_path):
+            kernels:List[object] = [
+                self._backend_compile(source_path, name, backend, device_obj, linked=linked)
+                for name, _ in rendered]
         # A phase kernel declares only the shapes it indexes itself, so its launch needs its
         # own trailing extent arguments rather than the ones the first kernel wants.
         extra_shapes:List[List[Tuple[int, int]]] = []
@@ -2406,6 +2448,9 @@ class PyKernel(_KernelBase[_P]):
             any(isinstance(stmt, ast.For) for stmt in translator.tree.body)
         phase_carried:List[List[str]] = []
         phase_param_names:List[List[str]] = []
+        # Per phase, whether its kernel declares the return claim/site words (see
+        # render_return_params): a pass whose only return runs in its host tail does not.
+        phase_claims:List[bool] = []
         if translator.phase_translators:
             for phase in translator.phase_translators:
                 phase_index:Dict[str, int] = {
@@ -2413,6 +2458,7 @@ class PyKernel(_KernelBase[_P]):
                 extra_shapes.append([(phase_index[array_name], dim)
                                      for array_name, dim in phase.shapes_used])
                 phase_created.append(list(phase.host_values))
+                phase_claims.append(bool(phase._claims_on_device))
         else:
             # One magic loop: the main translator *is* the only phase, and it binds the
             # created objects on itself.
@@ -2427,6 +2473,7 @@ class PyKernel(_KernelBase[_P]):
             if is_magic_body:
                 phase_carried.append(list(translator.carried_scalars))
                 phase_param_names.append(list(dict(translator.params)))
+                phase_claims.append(bool(translator._claims_on_device))
 
         kernel:Any = kernels[0]
 
@@ -2513,6 +2560,26 @@ class PyKernel(_KernelBase[_P]):
                  "phase_param_names": (phase_param_names if phase_param_names else
                                        [list(dict(phase.params))
                                         for phase in translator.phase_translators]),
+                 # Whether each phase's kernel declares the return claim/site words. A
+                 # single-phase body has one kernel (the main translator's) and no entry
+                 # here: the launch then treats it as claiming, which its signature says.
+                 "phase_claims": (phase_claims if phase_claims else
+                                  [bool(phase._claims_on_device)
+                                   for phase in translator.phase_translators]),
+                 # Whether the main kernel declares the claim/site words. The fast path
+                 # launches that kernel with the argument list built once up front, so this
+                 # has to describe the *first* kernel: a phase of a multi-loop body is one
+                 # kernel of its own, while a single-loop body's only kernel is the main
+                 # translator's (see render_return_params).
+                 "main_claims": (bool(translator.phase_translators[0]._claims_on_device)
+                                 if translator.phase_translators
+                                 else bool(translator._claims_on_device)),
+                 # The statements after the last magic loop, for a body split into passes:
+                 # `body_tail` above belongs to a single-loop body, whose translation never
+                 # enters _translate_phase_kernels. The last phase's own tail is the one the
+                 # host runs after the final launch.
+                 "phase_tail": (list(translator.phase_translators[-1].body_tail)
+                                if translator.phase_translators else []),
                  # The receiver-struct members whose values are loop extents, in the
                  # order the -3 markers appear in work_size_dims (see _invoke's -3 branch).
                  "work_size_members": list(getattr(translator, "work_size_members", [])),
@@ -2821,6 +2888,10 @@ def _outer_scope_value(raw:object, t:DeviceType)->object:
         return bool(int(raw))
     if t in ("char", "uchar", "short", "ushort", "int", "uint", "long", "ulong"):
         return int(raw)
+    if t in ("c64", "c128"):
+        # A complex value comes back as a complex number, never as the record the buffer
+        # holds: the caller assigned a `complex`, so that is what the scope gets again.
+        return complex(raw)
     return float(raw)
 
 
@@ -2836,6 +2907,10 @@ _SCALAR_SLOT_DTYPES:Dict[str, Any] = {
     "ulong": np.uint64,
     "float": np.float32,
     "double": np.float64,
+    # A complex value travels as a one-element complex buffer, which is the same bytes as
+    # the fixed structure the device declares -- so a slot and its read-back agree.
+    "c64": np.complex64,
+    "c128": np.complex128,
 }
 
 
@@ -3146,6 +3221,9 @@ def _return_value(raw:Any, dtype:Any, kind:str)->Any:
         # A structure slot holds a record: the caller gets the record itself, and reads its
         # members exactly as the kernel body did (`result["i"]`).
         return value
+    if kind == "c64" or kind == "c128":
+        # A complex slot holds the complex layout, so the value is already a complex number.
+        return complex(value)
     if kind == "bool":
         return bool(int(value))
     if kind in ("char", "uchar", "short", "ushort", "int", "uint", "long", "ulong"):

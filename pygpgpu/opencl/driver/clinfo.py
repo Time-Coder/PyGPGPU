@@ -625,6 +625,33 @@ class CLInfo:
             }
         },
 
+        # cl_kernel clCreateKernel(
+        #     cl_program program,
+        #     const char* kernel_name,
+        #     cl_int* errcode_ret
+        # );
+        #
+        # Its return type is the handle itself, not a status, so the driver's error check
+        # reads the `errcode_ret` this call leaves behind (see Func.__call__: a NULL result
+        # with a non-zero errcode is the failure).
+        "clCreateKernel": {
+            "args": {
+                "program": cl_program,
+                "kernel_name": c_char_p,
+                "errcode_ret": ptr_cl_int
+            },
+            "restype": cl_kernel,
+            "errors": {
+                ErrorCode.CL_INVALID_PROGRAM: "program is not a valid program object.",
+                ErrorCode.CL_INVALID_PROGRAM_EXECUTABLE: "there is no successfully built executable for program.",
+                ErrorCode.CL_INVALID_KERNEL_NAME: "kernel_name is not found in program.",
+                ErrorCode.CL_INVALID_KERNEL_DEFINITION: "the definition of the function for kernel_name is not the same for all devices for which the program executable has been built.",
+                ErrorCode.CL_INVALID_VALUE: "kernel_name is NULL.",
+                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+            }
+        },
+
         # cl_int clCreateKernelsInProgram(
         #     cl_program program,
         #     cl_uint num_kernels,

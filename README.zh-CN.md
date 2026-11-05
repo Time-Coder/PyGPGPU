@@ -112,6 +112,8 @@ def histogram(data: np.ndarray, counts: np.ndarray) -> None:
 
 支持的能力: 标量/数组/向量参数, if/while/for-range, 算术/比较/位运算, `math.*` 与 `np.*` 数学函数, 类方法(`self.xxx` 属性自动转为参数), 静态方法, 以及按名字调用辅助函数 —— 模块级函数、`module.func(...)`、`SomeClass.static_method(...)`, 以及同一个类里 `self.method(...)` 这种实例方法互调。不支持的语法抛出带行号的 `SyntaxError`。
 
+`break` 与 `continue` 只在真正有循环可作用的地方成立: 写在嵌套的串行 `for`/`while`(或 `for x in arr`)里时, 含义与 Python 完全一致。直接写在魔法循环体内则没有"可继续的循环"可言 —— 每次迭代是一个独立的 work item —— 所以 `continue` 变成"本 work item 到此为止"(下一次迭代是另一个线程, 它本来就会做自己的活), 而 `break` 会抛 `SyntaxError`: 停掉魔法循环等于同时停掉其他所有 work item, 设备无法表达。需要提前结束当前 work item 的剩余部分时, 用 `if` 包住即可。
+
 类型注解是可选项: 本 README 里的代码片段带上注解只为便于阅读, 设备端类型来自调用时的实参, 所以同样的代码不写注解也能跑(`self` 不是 kernel 参数, 给它加注解没有任何影响)。
 
 kernel 需要一个迭代域才能推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环边界就是迭代域); 要么在基于 `get_global_id` 的写法里用装饰器指明数组: `@kernel(domain="x")`。迭代域会贡献 `x` 的全部维度, 用 `k[(blocks, threads)]` 中括号指定也可以。三者都没有时调用会直接报错, 而不是猜测。

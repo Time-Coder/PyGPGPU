@@ -1,4 +1,5 @@
 from ctypes import c_uint, pointer
+import threading
 from typing import List, Dict, Iterator, Optional
 
 from ..driver import CL, cl_platform_id
@@ -12,30 +13,38 @@ class MetaPlatforms(type):
     __platforms_list:List[Platform] = []
     __platforms_map:Dict[cl_platform_id, Platform] = {}
     __devices_map:Dict[str, Device] = {}
+    # The platform list is built on first use, and every thread that reaches a kernel
+    # launch passes through here. Two of them used to run the fetch at once: both saw the
+    # empty list, both called `clGetPlatformIDs`, and both appended to the same list --
+    # which duplicated every platform and could hand out a half-built `Platform` object.
+    # One lock per step makes each fetch a single critical section.
+    __fetch_lock = threading.RLock()
 
     @property
     def n_platforms(self)->int:
-        if MetaPlatforms.__n_platforms == 0:
-            n_platforms = c_uint()
-            ptr_n_platforms = pointer(n_platforms)
-            CL.clGetPlatformIDs(0, None, ptr_n_platforms)
-            MetaPlatforms.__n_platforms = n_platforms.value
+        with MetaPlatforms.__fetch_lock:
+            if MetaPlatforms.__n_platforms == 0:
+                n_platforms = c_uint()
+                ptr_n_platforms = pointer(n_platforms)
+                CL.clGetPlatformIDs(0, None, ptr_n_platforms)
+                MetaPlatforms.__n_platforms = n_platforms.value
 
-        return MetaPlatforms.__n_platforms
+            return MetaPlatforms.__n_platforms
     
     def __len__(self)->int:
         return self.n_platforms
     
     def __fetch_platforms(self):
-        if self.__platforms_list:
-            return
-        
-        platform_ids = (cl_platform_id * self.n_platforms)()
-        CL.clGetPlatformIDs(self.n_platforms, platform_ids, None)
-        for platform_id in platform_ids:
-            platform = Platform(cl_platform_id(platform_id))
-            self.__platforms_list.append(platform)
-            self.__platforms_map[platform_id] = platform
+        with MetaPlatforms.__fetch_lock:
+            if self.__platforms_list:
+                return
+
+            platform_ids = (cl_platform_id * self.n_platforms)()
+            CL.clGetPlatformIDs(self.n_platforms, platform_ids, None)
+            for platform_id in platform_ids:
+                platform = Platform(cl_platform_id(platform_id))
+                self.__platforms_list.append(platform)
+                self.__platforms_map[platform_id] = platform
 
     def platform(self, index:int)->Platform:
         self.__fetch_platforms()
