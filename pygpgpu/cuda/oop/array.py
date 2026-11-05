@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import byref
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import numpy as np
 from typing_extensions import override
@@ -50,7 +50,7 @@ class Array(CUObject):
     """
 
     def __init__(self, width:int, height:int=1, depth:int=1,
-                 dtype:Any=np.float32, num_channels:int=1,
+                 dtype:object=np.float32, num_channels:int=1,
                  surface:bool=False):
         dtype = np.dtype(dtype)
         if dtype not in _FORMAT_BY_DTYPE:
@@ -265,7 +265,7 @@ class Array(CUObject):
 
     @staticmethod
     @override
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CUDA.cuArrayGetDescriptor_v2
 
     @staticmethod
@@ -275,5 +275,5 @@ class Array(CUObject):
 
     @staticmethod
     @override
-    def _release_func()->Any:
+    def _release_func()->object:
         return CUDA.cuArrayDestroy

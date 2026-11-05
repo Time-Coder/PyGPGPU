@@ -2,7 +2,7 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ..driver import HIP
 
@@ -202,7 +202,7 @@ class Context:
             stream.busy = False
         self._async_slots.release()
 
-    def create_buffer(self, size:int=0, flags:Any=None)->"Buffer":
+    def create_buffer(self, size:int=0, flags:object=None)->"Buffer":
         """Aligns with the gnp ndarray._to_device interface."""
         from .buffer import Buffer
         return Buffer(size)

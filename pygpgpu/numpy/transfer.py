@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import threading
-from typing import Any, Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 
 class Transfer:
@@ -96,7 +96,8 @@ class Transfer:
         self.wait(timeout)
         return None
 
-    def future(self, kind: str = "concurrent") -> Any:
+    def future(self, kind: str = "concurrent") -> Union[
+            "concurrent.futures.Future[None]", "asyncio.Future[None]"]:
         """A standard future that mirrors this transfer.
 
         ``kind="concurrent"`` returns a ``concurrent.futures.Future``;
@@ -105,7 +106,7 @@ class Transfer:
         """
         if kind == "asyncio":
             loop = asyncio.get_running_loop()
-            future: Any = loop.create_future()
+            future: "asyncio.Future[None]" = loop.create_future()
 
             def settle(error: Optional[BaseException]) -> None:
                 if error is None:

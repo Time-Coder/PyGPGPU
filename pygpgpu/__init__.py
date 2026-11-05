@@ -116,7 +116,7 @@ _HIP_LIBRARY_EXPORTS = (
 )
 
 
-def _make_library_proxy(proxy_name:str, package:str, exports:Any,
+def _make_library_proxy(proxy_name:str, package:str, exports:object,
                         doc:str)->types.ModuleType:
     """A module object that imports a backend's libraries on first attribute read.
 

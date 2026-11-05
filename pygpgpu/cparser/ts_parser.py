@@ -31,6 +31,20 @@ if TYPE_CHECKING:
         type_qualifiers: List[str]
         kernel_flags: KernelFlags
 
+    class ParseMeta(TypedDict):
+        """What a parser caches beside a compiled source, and reads back on the next run.
+
+        `_save`/`load_var` round-trip it, so the five keys are the whole record: the
+        preprocessed text, the files it pulled in, the line remapping for diagnostics,
+        and the two tables the launch path needs. The value types are the per-backend
+        records, named here by the shapes the walk relies on.
+        """
+        clean_code: str
+        related_files: Set[str]
+        line_map: Dict[int, str]
+        struct_infos: Dict[str, "StructInfoLike"]
+        kernel_infos: Dict[str, "KernelInfoLike"]
+
     class StructInfoLike(Protocol):
         """What the tree walk needs from a backend's structure record."""
         name: str

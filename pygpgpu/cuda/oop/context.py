@@ -2,7 +2,7 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from ctypes import pointer, c_uint, c_size_t
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Union
 from typing_extensions import override
 
 from .cuobject import CUObject
@@ -10,6 +10,9 @@ from .event import Event
 from ..driver import CUDA, CUctx_flags, CUcontext, CUfunc_cache, CUlimit, CUstream_flags
 
 if TYPE_CHECKING:
+    # numpy is imported inside the methods that use it; the annotation needs the name.
+    import numpy as np
+
     from .surface import SurfaceObject
 
     from .device import Device
@@ -72,7 +75,7 @@ class Context(CUObject):
         return Context.instance(context_id)
 
     def create_array(self, width:int, height:int=1, depth:int=1,
-                     dtype:Any=None, num_channels:int=1,
+                     dtype:object=None, num_channels:int=1,
                      surface:bool=False)->Array:
         """Allocate a device-side image: 1D, 2D or 3D depending on the dimensions.
 
@@ -86,7 +89,7 @@ class Context(CUObject):
         return Array(width, height, depth, np.float32 if dtype is None else dtype,
                      num_channels, surface)
 
-    def create_texture(self, array:Array, **options:Any)->TextureObject:
+    def create_texture(self, array:Array, **options:object)->TextureObject:
         """Build a sampled view over ``array`` for use as a kernel argument.
 
         A refusal is retried by rebuilding the image from the array's contents: the
@@ -118,7 +121,7 @@ class Context(CUObject):
 
         raise last_error
 
-    def texture(self, data:Any, **options:Any)->TextureObject:
+    def texture(self, data:object, **options:object)->TextureObject:
         """Upload a host image and return a texture that samples it.
 
         The short form of ``create_texture(create_array(...))`` for the common case
@@ -144,7 +147,7 @@ class Context(CUObject):
         array.set_data(image)
         return self.create_texture(array, **options)
 
-    def create_surface(self, array_or_shape:Any, **options:Any)->SurfaceObject:
+    def create_surface(self, array_or_shape:"Union[Array, np.ndarray, Tuple[int, ...]]", **options:object)->SurfaceObject:
         """Build a writable view for a kernel to store through.
 
         Pass either an array created with ``surface=True``, or a numpy image, or a
@@ -181,7 +184,7 @@ class Context(CUObject):
                                        surface=True)
         return SurfaceObject(target)
 
-    def create_image(self, image:Any, writable:bool=False)->Any:
+    def create_image(self, image:object, writable:bool=False)->object:
         """Bind a backend-neutral :class:`pygpgpu.Image` to this CUDA context.
 
         The device needs different objects depending on how the kernel uses the
@@ -203,8 +206,8 @@ class Context(CUObject):
         if image.data is not None:
             array.set_data(image.data)
 
-        texture:Optional[Any] = None
-        surface:Optional[Any] = None
+        texture:Optional[object] = None
+        surface:Optional[object] = None
 
         if writable:
             surface = SurfaceObject(array)
@@ -395,7 +398,7 @@ class Context(CUObject):
             stream.busy = False
         self._async_slots.release()
 
-    def create_buffer(self, size:int=0, flags:Any=None)->Buffer:
+    def create_buffer(self, size:int=0, flags:object=None)->Buffer:
         """Aligns with the gnp ndarray._to_device interface (flags are only recorded under CUDA)."""
         from .buffer import Buffer
         return Buffer(size)
@@ -544,7 +547,7 @@ class Context(CUObject):
 
     @staticmethod
     @override
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return None
 
     @staticmethod
@@ -554,6 +557,6 @@ class Context(CUObject):
 
     @staticmethod
     @override
-    def _release_func()->Any:
+    def _release_func()->object:
         return CUDA.cuCtxDestroy_v2
 

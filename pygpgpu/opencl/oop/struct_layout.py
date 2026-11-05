@@ -12,12 +12,12 @@ ctypes type and the numpy record match.
 from __future__ import annotations
 
 from ctypes import c_char
-from typing import Any, List, Optional
+from typing import Tuple, List, Optional
 
 import numpy as np
 
 
-def np_alignment(dtype:Any) -> int:
+def np_alignment(dtype:object) -> int:
     """The OpenCL C alignment of a field type.
 
     A three- or four-component vector is 16-byte aligned (a padded vec3 occupies 16 bytes), a
@@ -46,7 +46,8 @@ def np_alignment(dtype:Any) -> int:
     return int(field.itemsize) or 1
 
 
-def align_struct(fields:List[Any], spec:List[Any], is_union:bool=False) -> tuple:
+def align_struct(fields:List[Tuple[str, type]], spec:List[Tuple[object, ...]],
+                 is_union:bool=False) -> tuple:
     """The aligned ctypes fields and numpy dtype for one parsed structure or union.
 
     ``fields`` are the ``(name, ctype)`` members and ``spec`` the matching
@@ -61,12 +62,12 @@ def align_struct(fields:List[Any], spec:List[Any], is_union:bool=False) -> tuple
     if is_union:
         widest:int = 0
         strictest:int = 1
-        members:List[Any] = []
+        members:List[object] = []
         names:List[str] = []
-        formats:List[Any] = []
+        formats:List[object] = []
         for (member_name, ctype), entry in zip(fields, spec):
             base:np.dtype = np.dtype(entry[1]) if len(entry) > 1 else np.dtype("u1")
-            shape:Any = entry[2] if len(entry) > 2 else ()
+            shape:Tuple[int, ...] = entry[2] if len(entry) > 2 else ()
             count:int = 1
             for extent in shape or ():
                 count *= int(extent)
@@ -88,7 +89,7 @@ def align_struct(fields:List[Any], spec:List[Any], is_union:bool=False) -> tuple
     alignment:int = 1
     for (member_name, ctype), entry in zip(fields, spec):
         base:np.dtype = np.dtype(entry[1]) if len(entry) > 1 else np.dtype("u1")
-        shape:Any = entry[2] if len(entry) > 2 else ()
+        shape:Tuple[int, ...] = entry[2] if len(entry) > 2 else ()
         element_align:int = np_alignment(base)
         count:int = 1
         for extent in shape or ():
@@ -100,9 +101,9 @@ def align_struct(fields:List[Any], spec:List[Any], is_union:bool=False) -> tuple
 
     itemsize:int = -(-cursor // alignment) * alignment
 
-    aligned_fields:List[Any] = []
+    aligned_fields:List[object] = []
     names:List[str] = []
-    formats:List[Any] = []
+    formats:List[object] = []
     offsets:List[int] = []
     cursor = 0
     for index, (_member_name, ctype, base, shape, offset, count) in enumerate(layout):

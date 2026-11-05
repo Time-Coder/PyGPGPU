@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, List, Dict, Any
+from typing import TYPE_CHECKING, List, Dict
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -44,7 +44,7 @@ class Device(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CL.clGetDeviceInfo
 
     @override
@@ -59,5 +59,5 @@ class Device(CLObject):
     
     @override
     @staticmethod
-    def _release_func()->Any:
+    def _release_func()->object:
         return None

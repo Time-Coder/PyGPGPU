@@ -34,7 +34,7 @@ import sys
 import os
 import types
 import threading
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 
 # The extension each backend's sources carry, in the probe order `@kernel` uses.
@@ -195,30 +195,30 @@ class _BackendSource:
     device, because that is where the backend's compiler and context belong.
     """
 
-    def __init__(self, backend:str, file_name:str, options:Any, type_checked:bool):
+    def __init__(self, backend:str, file_name:str, options:object, type_checked:bool):
         self.backend:str = backend
         self.file_name:str = file_name
-        self.options:Any = options
+        self.options:object = options
         self.type_checked:bool = type_checked
-        self.parser:Any = self._parse()
+        self.parser:object = self._parse()
         self._lock = threading.Lock()
-        self._programs:Dict[str, Any] = {}
-        self._kernels:Dict[str, Any] = {}
+        self._programs:Dict[str, object] = {}
+        self._kernels:Dict[str, object] = {}
         # The per-source compiler object each backend needs: NVRTC for CUDA, the clang
         # wrapper for HIP, and nothing extra for OpenCL (a context compiles directly).
-        self._compiler:Any = None
+        self._compiler:object = None
 
-    def _parse(self)->Any:
+    def _parse(self)->object:
         # Importing `pygpgpu.<backend>` initializes that backend's driver, whose init()
         # records -- but does not raise -- a runtime the machine lacks (see the driver
         # layer). Nothing special is needed here: a parse is pure tree-sitter over a
         # file, and the driver's own failure surfaces when a call is actually made.
-        module:Any = importlib.import_module(_PARSER_MODULES[self.backend], "pygpgpu")
-        parser:Any = module.ProgramParser()
+        module:object = importlib.import_module(_PARSER_MODULES[self.backend], "pygpgpu")
+        parser:object = module.ProgramParser()
         parser.parse(self.file_name, options=self.options)
         return parser
 
-    def kernel_infos(self)->Dict[str, Any]:
+    def kernel_infos(self)->Dict[str, object]:
         return self.parser.kernel_infos
 
     def struct_types(self)->Dict[str, type]:
@@ -227,18 +227,18 @@ class _BackendSource:
     # ---------- kernels ----------
 
     def kernel(self, name:str, device_sel:Optional[str],
-               bracket:Optional[Union[int, str, Tuple[int, ...]]])->Any:
+               bracket:Optional[Union[int, str, Tuple[int, ...]]])->object:
         """The backend's own `Kernel`, bound to a device and to the bracket's work size.
 
         The device is resolved through the decorator's resolver, so every spelling the
         `@kernel` bracket accepts works here too. ``bracket`` is what the caller wrote:
         a CUDA ``(blocks, threads)`` pair, a bare item count, or None for automatic.
         """
-        device:Any = self._device(device_sel)
+        device:object = self._device(device_sel)
         device_key:str = getattr(device, "unique_key", None) or str(device)
         key:str = f"{device_key}|{name}"
         with self._lock:
-            kernel:Any = self._kernels.get(key)
+            kernel:object = self._kernels.get(key)
             if kernel is None:
                 kernel = self._program(device)[name]
                 self._kernels[key] = kernel
@@ -251,19 +251,19 @@ class _BackendSource:
             kernel = kernel[_work_size_item(bracket)]
         return kernel
 
-    def _device(self, device_sel:Optional[str])->Any:
+    def _device(self, device_sel:Optional[str])->object:
         from .kernel.decorator import _resolve_device
-        device:Any
+        device:object
         device, _key = _resolve_device(self.backend, device_sel)
         return device
 
-    def _program(self, device:Any)->Any:
+    def _program(self, device:object)->object:
         """This backend's `Program` for one device, compiled on first use."""
         backend:str = self.backend
         if backend == "opencl":
             from .opencl.oop.program import Program
             platform_key:str = str(id(device.platform))
-            program:Optional[Any] = self._programs.get(platform_key)
+            program:Optional[object] = self._programs.get(platform_key)
             if program is None:
                 program = Program(device.platform.default_context,
                                   type_checked=self.type_checked,
@@ -303,7 +303,7 @@ class _BackendSource:
             return program
         raise ValueError(f"unknown backend '{backend}'")
 
-    def _nvrtc(self, device:Any)->Any:
+    def _nvrtc(self, device:object)->object:
         """The NVRTC program for this source, parsed once and compiled per device."""
         from .cuda.oop.nvrtc_program import NVRTCProgram
         if self._compiler is None:
@@ -311,7 +311,7 @@ class _BackendSource:
                                           program_parser=self.parser)
         return self._compiler
 
-    def _hip_compiler(self)->Any:
+    def _hip_compiler(self)->object:
         """The HIP compiler for this source, parsed once and compiled per architecture."""
         from .hip.oop.hip_compiler import HipCompiler
         if self._compiler is None:
@@ -354,7 +354,7 @@ class KernelImportWrapper:
         self._declarations:Dict[str, Tuple[Tuple[str, str], ...]] = dict(declarations)
         self._bracket_backend:Optional[str] = None
         self._bracket_device:Optional[str] = None
-        self._bracket:Any = None
+        self._bracket:object = None
 
     # ---------- introspection ----------
 
@@ -443,13 +443,13 @@ class KernelImportWrapper:
     # ---------- declaration matching ----------
 
     def _bind_arguments(self, signature:Tuple[Tuple[str, str], ...],
-                        args:Tuple[Any, ...],
-                        kwargs:Dict[str, Any])->Optional[List[Any]]:
+                        args:Tuple[object, ...],
+                        kwargs:Dict[str, object])->Optional[List[object]]:
         """The arguments in declaration order, or None when they do not fit the signature."""
         names:List[str] = [name for name, _ in signature]
         if len(args) > len(names):
             return None
-        values:Dict[str, Any] = dict(zip(names, args))
+        values:Dict[str, object] = dict(zip(names, args))
         for key, value in kwargs.items():
             if key not in names or key in values:
                 return None
@@ -459,8 +459,8 @@ class KernelImportWrapper:
         return [values[name] for name in names]
 
     def _declaration_accepts(self, backend:str, signature:Tuple[Tuple[str, str], ...],
-                             args:Tuple[Any, ...],
-                             kwargs:Dict[str, Any])->Optional[bool]:
+                             args:Tuple[object, ...],
+                             kwargs:Dict[str, object])->Optional[bool]:
         """Whether the declaration can take these arguments; None when it cannot be told.
 
         A pointer parameter accepts an array whose dtype the parsed element type names; a
@@ -468,7 +468,7 @@ class KernelImportWrapper:
         is -- the shape of the value is the backend's own business, not this dispatch's.
         """
         import numpy as _np
-        bound:Optional[List[Any]] = self._bind_arguments(signature, args, kwargs)
+        bound:Optional[List[object]] = self._bind_arguments(signature, args, kwargs)
         if bound is None:
             return False
         tables:Dict[str, Dict[str, type]] = _scalar_tables(backend)
@@ -481,7 +481,7 @@ class KernelImportWrapper:
             if pointer:
                 if not isinstance(value, _np.ndarray):
                     return False
-                expected:Any = (scalar_types.get(base) or vec_types.get(base))
+                expected:object = (scalar_types.get(base) or vec_types.get(base))
                 if expected is None:
                     uncertain = True
                     continue
@@ -501,8 +501,8 @@ class KernelImportWrapper:
                     return False
         return None if uncertain else True
 
-    def _select_backend(self, args:Tuple[Any, ...],
-                        kwargs:Dict[str, Any])->Tuple[str, Optional[bool]]:
+    def _select_backend(self, args:Tuple[object, ...],
+                        kwargs:Dict[str, object])->Tuple[str, Optional[bool]]:
         """The backend this call runs on, and whether its declaration definitely fits.
 
         With a bracket the backend is named, so it is used even when the check cannot
@@ -550,19 +550,19 @@ class KernelImportWrapper:
 
     # ---------- calls ----------
 
-    def _ready_kernel(self, args:Tuple[Any, ...], kwargs:Dict[str, Any])->Any:
+    def _ready_kernel(self, args:Tuple[object, ...], kwargs:Dict[str, object])->object:
         backend:str = self._select_backend(args, kwargs)[0]
         source:_BackendSource = self._sources[backend]
         return source.kernel(self._name, self._bracket_device, self._bracket)
 
-    def __call__(self, *args:Any, **kwargs:Any)->Any:
+    def __call__(self, *args:object, **kwargs:object)->object:
         return self._ready_kernel(args, kwargs)(*args, **kwargs)
 
-    def submit(self, *args:Any, **kwargs:Any)->Any:
+    def submit(self, *args:object, **kwargs:object)->object:
         """Non-blocking launch; the bracket language matches the call."""
         return self._ready_kernel(args, kwargs).submit(*args, **kwargs)
 
-    def async_call(self, *args:Any, **kwargs:Any)->Any:
+    def async_call(self, *args:object, **kwargs:object)->object:
         """Non-blocking asyncio launch; the bracket language matches the call."""
         return self._ready_kernel(args, kwargs).async_call(*args, **kwargs)
 
@@ -575,17 +575,17 @@ class _MergedModuleLoader:
     """Parses every backend's source at import and publishes the merged attributes."""
 
     def __init__(self, fullname:str, sources:Dict[str, str],
-                 options:Dict[str, Any], type_checked:bool, generate_pyi:bool):
+                 options:Dict[str, object], type_checked:bool, generate_pyi:bool):
         self.fullname:str = fullname
         self.sources:Dict[str, str] = sources
-        self.options:Dict[str, Any] = options
+        self.options:Dict[str, object] = options
         self.type_checked:bool = type_checked
         self.generate_pyi:bool = generate_pyi
         self.backends:Dict[str, _BackendSource] = {}
         self.kernels:Dict[str, KernelImportWrapper] = {}
         self.structs:Dict[str, type] = {}
 
-    def create_module(self, spec:Any)->None:
+    def create_module(self, spec:object)->None:
         # The default module creation is what a merged module wants (a plain ModuleType);
         # returning None asks the import machinery to do exactly that.
         return None
@@ -641,7 +641,7 @@ class kernel_import:
 
     _lock = threading.Lock()
     _installed:bool = False
-    _config:Dict[str, Any] = {
+    _config:Dict[str, object] = {
         "type_checked": False,
         "generate_pyi": True,
         # Per-backend build options; None keeps each backend's own default.
@@ -667,7 +667,7 @@ class kernel_import:
 
     @staticmethod
     def config(type_checked:bool=False, generate_pyi:bool=True,
-               options:Optional[Dict[str, Any]]=None)->None:
+               options:Optional[Dict[str, object]]=None)->None:
         """Configure the hook. `options` maps backend -> BuildOptions (None = default)."""
         with kernel_import._lock:
             kernel_import._config["type_checked"] = type_checked
@@ -680,12 +680,12 @@ class _KernelImportFinder:
     """The meta-path finder: resolve a name to same-named .cl/.cu/.hip sources."""
 
     def find_spec(self, fullname:str, path:Optional[List[str]] = None,
-                  target:Any = None)->Optional[Any]:
+                  target:object = None)->Optional[object]:
         import importlib.util
         sources:Dict[str, str] = _source_paths_for(fullname, path)
         if not sources:
             return None
-        config:Dict[str, Any] = kernel_import._config
+        config:Dict[str, object] = kernel_import._config
         loader = _MergedModuleLoader(fullname, sources, config["options"],
                                      config["type_checked"], config["generate_pyi"])
         # The module's file location is whichever source comes first in the probe order;

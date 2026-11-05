@@ -5,7 +5,7 @@ from functools import partial
 import concurrent.futures
 import asyncio
 import threading
-from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional
+from typing import Dict, List, TYPE_CHECKING, Union, Tuple, Optional
 from typing_extensions import override
 
 import numpy as np
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .context import Context
 
 
-def complex_of_dtype(dtype:Any)->Any:
+def complex_of_dtype(dtype:object)->object:
     """The complex dtype behind a numpy record layout of two reals, or None.
 
     A complex array's bytes *are* the record's bytes: `complex64` is a `float` pair and
@@ -85,7 +85,7 @@ def _async_workers()->concurrent.futures.ThreadPoolExecutor:
         return _async_executor
 
 
-def _set_future_error(future:Any, error:BaseException)->None:
+def _set_future_error(future:object, error:BaseException)->None:
     """Deliver an exception to an asyncio or concurrent future from any thread."""
     if isinstance(future, asyncio.Future):
         loop = future.get_loop()
@@ -95,7 +95,7 @@ def _set_future_error(future:Any, error:BaseException)->None:
     future.set_exception(error)
 
 
-def _deliver(future:Any, pending:concurrent.futures.Future)->Optional[BaseException]:
+def _deliver(future:object, pending:concurrent.futures.Future)->Optional[BaseException]:
     """Move a completed stream future onto the caller's future; return any error."""
     try:
         error = pending.exception()
@@ -260,7 +260,7 @@ class Kernel(CUObject):
 
         self._attach_completion(stream, future, future_type)
 
-    def _attach_completion(self, stream:Stream, future:Any, future_type:type)->None:
+    def _attach_completion(self, stream:Stream, future:object, future_type:type)->None:
         """Mirror the stream's completion onto ``future`` and return the stream."""
         def relay(pending:concurrent.futures.Future)->None:
             _deliver(future, pending)
@@ -327,8 +327,8 @@ class Kernel(CUObject):
         # Argument bindings for this launch only. They used to be stashed on the
         # shared ArgInfo objects, which two threads launching the same kernel
         # would overwrite under each other -- producing silently wrong results.
-        bound:Dict[str, Any] = {}
-        seen_arrays:Dict[int, Tuple[MemObject, Any]] = {}
+        bound:Dict[str, object] = {}
+        seen_arrays:Dict[int, Tuple[MemObject, object]] = {}
         value_ptrs = (c_void_p * len(self._args))()
         i = 0
         for key, arg_info in self._args.items():
@@ -358,14 +358,14 @@ class Kernel(CUObject):
         return global_work_size, local_work_size, value_ptrs, bound
 
     @staticmethod
-    def __copy_to_host(arg_value:Union[np.ndarray, List[Any]], buffer:MemObject):
+    def __copy_to_host(arg_value:Union[np.ndarray, List[object]], buffer:MemObject):
         host_data = arg_value
         if host_data is not buffer.data:
             if isinstance(host_data, np.ndarray) and getattr(host_data.dtype, "fields", None) is not None:
                 # 3-component vector: device uses a compact layout, unpack back into structured fields
                 fields:List[str] = list(host_data.dtype.fields.keys())[:3]
-                packed:Any = buffer.data
-                flat:Any = (packed.reshape(-1, 3) if packed.ndim > 1 else packed)
+                packed:object = buffer.data
+                flat:object = (packed.reshape(-1, 3) if packed.ndim > 1 else packed)
                 count:int = int(np.prod(host_data.shape)) if host_data.ndim > 0 else 1
                 for i, f in enumerate(fields):
                     host_data.reshape(-1)[f] = flat[:count, i]
@@ -376,11 +376,11 @@ class Kernel(CUObject):
                 # A complex argument's device buffer holds the record layout, whose bytes are
                 # the complex array's own: the copy has to speak the complex dtype, or numpy
                 # refuses the assignment under its casting rule.
-                device_data:Any = buffer.data
+                device_data:object = buffer.data
                 if (isinstance(device_data, np.ndarray)
                         and device_data.dtype.fields is not None
                         and host_data.dtype.kind == "c"):
-                    complex_dtype:Any = complex_of_dtype(device_data.dtype)
+                    complex_dtype:object = complex_of_dtype(device_data.dtype)
                     if complex_dtype is not None and complex_dtype == host_data.dtype:
                         device_data = device_data.view(complex_dtype)
                 host_data[:] = device_data
@@ -390,9 +390,9 @@ class Kernel(CUObject):
                 # write-back, so a kernel that wrote `p.i` left the caller's union unchanged.
                 memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
-    def __after_call(self, stream:Stream, bound:Dict[str, Any]):
+    def __after_call(self, stream:Stream, bound:Dict[str, object]):
         
-        def on_completed(arg_info:ArgInfo, arg_value:Any, mem_obj:MemObject, stream:Stream, error_code:CUresult):
+        def on_completed(arg_info:ArgInfo, arg_value:object, mem_obj:MemObject, stream:Stream, error_code:CUresult):
             if error_code == CUresult.CUDA_SUCCESS:
                 self.__copy_to_host(arg_value, mem_obj)
                 if CUDA.print_info:
@@ -403,7 +403,7 @@ class Kernel(CUObject):
         for arg_info in self._args.values():
             entry = bound.get(arg_info.name)
             mem_obj:Optional[MemObject] = entry[0] if entry is not None else None
-            arg_value:Any = entry[1] if entry is not None else None
+            arg_value:object = entry[1] if entry is not None else None
 
             # A gnp array's buffer belongs to the array, not to the context's pool: it is
             # reused by the next launch that names the same array, so it is never handed
@@ -438,7 +438,7 @@ class Kernel(CUObject):
             callback = partial(on_completed, arg_info, arg_value, mem_obj)
             stream.add_callback(callback)
 
-    def __check_args(self, args, kwargs)->Dict[str, Any]:
+    def __check_args(self, args, kwargs)->Dict[str, object]:
         for key in kwargs:
             if key not in self._args:
                 raise TypeError(f"{self._func_head} got an unexpected keyword argument '{key}'")
@@ -477,7 +477,7 @@ class Kernel(CUObject):
 
         return used_kwargs
     
-    def __detect_work_size(self, bound:Dict[str, Any]):
+    def __detect_work_size(self, bound:Dict[str, object]):
         max_shape = None
         for arg in self._arg_list:
             if arg.need_read_back:
@@ -488,7 +488,7 @@ class Kernel(CUObject):
                 entry = bound.get(arg.name)
                 if entry is None:
                     continue
-                mem_obj:Any = entry[0]
+                mem_obj:object = entry[0]
                 if mem_obj is None:
                     # A texture or surface handle carries no buffer; a scalar argument
                     # carries no shape. Neither contributes a launch extent.
@@ -536,8 +536,8 @@ class Kernel(CUObject):
 
         return grid_dims, block_dims
 
-    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:Any, bound:Dict[str, Any],
-                     seen_arrays:Optional[Dict[int, Tuple[MemObject, Any]]]=None)->Any:
+    def _process_arg(self, stream:Stream, arg_info:ArgInfo, value:object, bound:Dict[str, object],
+                     seen_arrays:Optional[Dict[int, Tuple[MemObject, object]]]=None)->object:
         arg_type_str = arg_info.type_str        
         base_type_str = arg_info.base_type_str
 
@@ -596,7 +596,7 @@ class Kernel(CUObject):
                 # members reads the buffer back like any written array.
                 # The bytes come through `_structure_bytes`, because `bytes(record)` is
                 # refused for a dtype whose members overlap -- which is exactly a union.
-                packed:Any = value if isinstance(value, np.void) else \
+                packed:object = value if isinstance(value, np.void) else \
                     content_type.from_buffer_copy(ProgramParser._structure_bytes(value))
                 data:np.ndarray = np.frombuffer(ProgramParser._structure_bytes(packed),
                                                 dtype=np.uint8)
@@ -611,7 +611,7 @@ class Kernel(CUObject):
                     # CUDA passes 3-component vectors in a compact layout (no 4th-component
                     # padding), and cuLaunchKernel wants the address of the argument's value,
                     # so the packed element is a ctypes buffer rather than an array.
-                    packed:Any = self._pack_vec3_value(value, content_type)
+                    packed:object = self._pack_vec3_value(value, content_type)
                     return pointer(packed)
 
                 if is_struct and isinstance(value, (np.void, bytes, bytearray,
@@ -657,13 +657,13 @@ class Kernel(CUObject):
                 if is_vec3:
                     # CUDA types like float3* use a compact layout (12B elements etc.) while the host
                     # structured array is 16B (with a padding field) -> pack/unpack conversion
-                    used_value:Any = self._pack_vec3(value, content_type)
+                    used_value:object = self._pack_vec3(value, content_type)
                 elif isinstance(value, np.ndarray):
                     used_value = value
                     if not isinstance(value, gnp.ndarray) and value.dtype != content_type:
                         # A complex structure binds a complex array: the bytes of the two
                         # layouts are identical, so the dtype view is the whole conversion.
-                        complex_dtype:Any = complex_of_dtype(np.dtype(content_type))
+                        complex_dtype:object = complex_of_dtype(np.dtype(content_type))
                         if complex_dtype is not None and value.dtype == complex_dtype:
                             used_value = value
                         else:
@@ -697,7 +697,7 @@ class Kernel(CUObject):
         else:
             raise NotImplementedError(f"arg type {arg_type_str} is legal, but not implemented.")
 
-    def _bind_image(self, image:Any)->Any:
+    def _bind_image(self, image:object)->object:
         """Turn a host-side image description into a device object for this launch.
 
         The ``cudaTextureObject_t`` / ``cudaSurfaceObject_t`` descriptions carry no
@@ -731,7 +731,7 @@ class Kernel(CUObject):
         if image.image is not None:
             array.set_data(image.image)
 
-        options:Dict[str, Any] = {"normalized": image.normalized}
+        options:Dict[str, object] = {"normalized": image.normalized}
         if image.address_mode is not None:
             options["address_mode"] = image.address_mode
         if image.filter_mode is not None:
@@ -751,20 +751,20 @@ class Kernel(CUObject):
         turns every scalar pointer argument into an AttributeError.
         """
         base:str = arg_info.base_type_str
-        cls:Any = CUInfo.vec_types.get(base)
-        fields:Any = getattr(cls, "_fields_", None)
+        cls:object = CUInfo.vec_types.get(base)
+        fields:object = getattr(cls, "_fields_", None)
         return (fields is not None and len(fields) == 3)
 
     @staticmethod
-    def _pack_vec3(value:Any, content_type:Any)->Any:
+    def _pack_vec3(value:object, content_type:object)->object:
         """Pack 3-component data such as float3/int3 into the CUDA compact layout (drop the padding component)."""
         fields:List[str] = [f for f, _ in content_type._fields_][:3]
-        elem_dtype:Any = content_type.dtype.fields[fields[0]][0]
+        elem_dtype:object = content_type.dtype.fields[fields[0]][0]
 
         if isinstance(value, np.ndarray) and value.dtype.fields is not None:
             count:int = int(np.prod(value.shape)) if value.ndim > 0 else 1
-            flat:Any = value.reshape(-1)
-            packed:Any = np.empty((count, 3), dtype=elem_dtype)
+            flat:object = value.reshape(-1)
+            packed:object = np.empty((count, 3), dtype=elem_dtype)
             for i, f in enumerate(fields):
                 packed[:, i] = flat[f]
             return packed.reshape(value.shape + (3,)) if value.ndim > 1 else packed
@@ -784,7 +784,7 @@ class Kernel(CUObject):
         raise TypeError(f"cannot pack {type(value).__name__} as 3-component vector")
 
     @staticmethod
-    def _pack_vec3_value(value:Any, content_type:Any)->Any:
+    def _pack_vec3_value(value:object, content_type:object)->object:
         """Pack one 3-component *value* into CUDA's compact layout, as a ctypes buffer.
 
         This is the by-value counterpart of :meth:`_pack_vec3`, which packs whole arrays for
@@ -792,8 +792,8 @@ class Kernel(CUObject):
         be a ctypes object, and CUDA's `float3` is three floats with no padding.
         """
         fields:List[str] = [f for f, _ in content_type._fields_][:3]
-        element:Any = content_type._fields_[0][1]
-        packed:Any = (element * 3)()
+        element:object = content_type._fields_[0][1]
+        packed:object = (element * 3)()
         for i, f in enumerate(fields):
             packed[i] = value[f] if isinstance(value, np.void) else getattr(value, f)
         return packed
@@ -831,7 +831,7 @@ class Kernel(CUObject):
 
     @override    
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return None
 
     @override    

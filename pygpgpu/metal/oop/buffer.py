@@ -15,13 +15,17 @@ read/write flags decide which of those a launch performs.
 from __future__ import annotations
 
 import ctypes
-from typing import Any, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import numpy as np
 
 from ..driver.objc import ObjC
 from .event import Event
 from .metalobject import MTLObject
+
+if TYPE_CHECKING:
+    from ...constants import KernelFlags
+    from .context import CommandQueue, Context
 
 # MTLResourceOptions: StorageModeShared is (0 << 4); on macOS the CPU can map it.
 MTL_RESOURCE_STORAGE_MODE_SHARED:int = 0
@@ -30,11 +34,12 @@ MTL_RESOURCE_STORAGE_MODE_SHARED:int = 0
 class Buffer(MTLObject):
     """A `MTLBuffer` with the host-copy surface the shared launch code expects."""
 
-    def __init__(self, context:Any, data:Union[bytes, bytearray, np.ndarray, None]=None,
-                 size:int=0, flags:Any=None)->None:
-        self._context:Any = context
-        self._flags:Any = flags
-        self._kernel_flags:Any = 0
+    def __init__(self, context:"Context",
+                 data:Union[bytes, bytearray, np.ndarray, None]=None,
+                 size:int=0, flags:Optional[int]=None)->None:
+        self._context:"Context" = context
+        self._flags:Optional[int] = flags
+        self._kernel_flags:"KernelFlags" = KernelFlags(0)
         self._data:Union[bytes, bytearray, np.ndarray, None] = data
         self._host_ptr:Optional[int] = None
         self._using:bool = False
@@ -68,7 +73,7 @@ class Buffer(MTLObject):
     # ---- the MemObject surface ----
 
     @property
-    def context(self)->Any:
+    def context(self)->"Context":
         return self._context
 
     @property
@@ -76,15 +81,15 @@ class Buffer(MTLObject):
         return self._data
 
     @property
-    def flags(self)->Any:
+    def flags(self)->Optional[int]:
         return self._flags
 
     @property
-    def kernel_flags(self)->Any:
+    def kernel_flags(self)->"KernelFlags":
         return self._kernel_flags
 
     @kernel_flags.setter
-    def kernel_flags(self, flags:Any)->None:
+    def kernel_flags(self, flags:"KernelFlags")->None:
         self._kernel_flags = flags
 
     @property
@@ -136,7 +141,7 @@ class Buffer(MTLObject):
     # ---- copies ----
 
     @staticmethod
-    def _contiguous_with_size(data:Any)->Tuple[Any, int]:
+    def _contiguous_with_size(data:object)->Tuple[np.ndarray, int]:
         if isinstance(data, bytes):
             return np.frombuffer(data, dtype=np.uint8), len(data)
         if isinstance(data, bytearray):
@@ -153,8 +158,9 @@ class Buffer(MTLObject):
     def _host_byte_view(self)->bytes:
         return ctypes.string_at(self._host_ptr, self._size)
 
-    def write(self, cmd_queue:Any, origin:int=0, region:Optional[int]=None,
-              host_ptr:Optional[int]=None, after_events:Optional[List[Any]]=None)->Event:
+    def write(self, cmd_queue:"CommandQueue", origin:int=0,
+              region:Optional[int]=None, host_ptr:Optional[int]=None,
+              after_events:Optional[List[Event]]=None)->Event:
         """Copy `region` bytes from host memory into the buffer."""
         if region is None:
             region = self._size
@@ -162,8 +168,9 @@ class Buffer(MTLObject):
         ctypes.memmove(self._host_ptr + int(origin), int(source), int(region))
         return Event()
 
-    def read(self, cmd_queue:Any, origin:int=0, region:Optional[int]=None,
-             host_ptr:Optional[int]=None, after_events:Optional[List[Any]]=None)->Event:
+    def read(self, cmd_queue:"CommandQueue", origin:int=0,
+             region:Optional[int]=None, host_ptr:Optional[int]=None,
+             after_events:Optional[List[Event]]=None)->Event:
         """Copy `region` bytes from the buffer into host memory."""
         if region is None:
             region = self._size
@@ -171,7 +178,7 @@ class Buffer(MTLObject):
         ctypes.memmove(int(target), self._host_ptr + int(origin), int(region))
         return Event()
 
-    def _host_pointer_of(self, data:Any)->Tuple[int, Any]:
+    def _host_pointer_of(self, data:object)->Tuple[int, np.ndarray]:
         array, size = self._contiguous_with_size(data)
         if size != self._size:
             raise ValueError("data size is not equal to buffer size")
@@ -188,8 +195,9 @@ class Buffer(MTLObject):
         self._host_ptr = host_ptr
         self._data = array
 
-    def set_data(self, cmd_queue:Any, data:Union[bytes, bytearray, np.ndarray],
-                 after_events:Optional[List[Any]]=None)->Event:
+    def set_data(self, cmd_queue:"CommandQueue",
+                 data:Union[bytes, bytearray, np.ndarray],
+                 after_events:Optional[List[Event]]=None)->Event:
         """Record the host data and upload it into the buffer."""
         host_ptr, array = self._host_pointer_of(data)
         self._data = array

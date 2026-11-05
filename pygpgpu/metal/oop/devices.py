@@ -12,11 +12,14 @@ threads per threadgroup and the maximum threads per axis of a threadgroup.
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from ..driver.metal import MTL, MetaMetal, _wait_ready
 from ..driver.objc import ObjC
 from .metalobject import MTLObject
+
+if TYPE_CHECKING:
+    from .context import Context
 
 
 class Device(MTLObject):
@@ -25,7 +28,7 @@ class Device(MTLObject):
         MTLObject.__init__(self, device_id)
         self._name:str = ""
         self._max_threadgroup:Optional[Tuple[int, int, int]] = None
-        self._default_context:Any = None
+        self._default_context:Optional["Context"] = None
 
     @property
     def name(self)->str:
@@ -99,12 +102,12 @@ class Device(MTLObject):
         from ...utils import sanitize_filename
         return sanitize_filename(f"{self.name} {self.registry_id}")
 
-    def create_context(self)->Any:
+    def create_context(self)->"Context":
         from .context import Context
         return Context(self)
 
     @property
-    def default_context(self)->Any:
+    def default_context(self)->"Context":
         if self._default_context is None:
             from .context import Context
             self._default_context = Context(self)

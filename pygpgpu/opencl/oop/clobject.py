@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_void_p, sizeof, _SimpleCData, Structure, c_size_t, cast, pointer, POINTER, c_char
-from typing import Dict, Any
+from typing import Dict
 from typing_extensions import get_args, get_origin
 from abc import ABC, abstractmethod
 import weakref
@@ -41,7 +41,7 @@ class CLObject(ABC):
             id = c_void_p(id)
             
         self._id = id
-        self._info:Dict[str, Any] = {}
+        self._info:Dict[str, object] = {}
         self._finalizer = weakref.finalize(self, self._release, self._id)
 
     @property
@@ -54,7 +54,7 @@ class CLObject(ABC):
         else:
             return self._id
 
-    def __getattr__(self, name:str)->Any:
+    def __getattr__(self, name:str)->object:
         if name in self._info:
             return self._info[name]
 
@@ -81,7 +81,7 @@ class CLObject(ABC):
     def __eq__(self, other:CLObject)->bool:
         return (self.__class__ == other.__class__ and self.id == other.id)
     
-    def _fetch_info(self, key)->Any:
+    def _fetch_info(self, key)->object:
         get_info_func = self._get_info_func()
 
         result_size = c_size_t()
@@ -113,7 +113,7 @@ class CLObject(ABC):
 
     @staticmethod
     @abstractmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         pass
 
     @staticmethod
@@ -128,7 +128,7 @@ class CLObject(ABC):
 
     @staticmethod
     @abstractmethod
-    def _release_func()->Any:
+    def _release_func()->object:
         pass
 
     @classmethod

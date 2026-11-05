@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from ctypes import (c_char_p, c_float, c_int, c_int64, c_size_t, c_uint64, c_void_p,
                     POINTER, Structure)
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ...constants import IntEnum
 from ._base import Library
@@ -128,7 +128,7 @@ class cublasLtMatmulHeuristicResult_t(Structure):
 class CUBLASLtInfo:
     """cuBLASLt's signature table and its status codes."""
 
-    func_signatures:Dict[str, Dict[str, Any]] = {
+    func_signatures:Dict[str, Dict[str, object]] = {
         # cublasStatus_t cublasLtCreate(cublasLtHandle_t *lightHandle)
         "cublasLtCreate": {
             "args": {

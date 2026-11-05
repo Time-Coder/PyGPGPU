@@ -1,6 +1,5 @@
 from __future__ import annotations
 from ctypes import pointer, c_float
-from typing import Any
 from typing_extensions import override
 
 from .cuobject import CUObject
@@ -41,7 +40,7 @@ class Event(CUObject):
 
     @staticmethod
     @override
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return None
 
     @staticmethod
@@ -51,5 +50,5 @@ class Event(CUObject):
 
     @staticmethod
     @override
-    def _release_func()->Any:
+    def _release_func()->object:
         return CUDA.cuEventDestroy

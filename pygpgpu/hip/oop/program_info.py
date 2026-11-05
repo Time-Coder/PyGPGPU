@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Tuple, Any, Dict, List, Optional
+from typing import Tuple, Dict, List, Optional
 
 import numpy as np
 from ... import numpy as gnp
@@ -43,7 +43,7 @@ class VarInfo:
         self.array_shape = array_shape
         self.type_qualifiers = type_qualifiers
         self.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed) if kernel_flags is None else kernel_flags
-        self.value: Any = None
+        self.value: object = None
         self.mem_obj: Optional[MemObject] = None
 
     @property
@@ -131,7 +131,7 @@ class ArgInfo(VarInfo):
         VarInfo.__init__(self, name, type_str, array_shape, type_qualifiers, kernel_flags)
         self.parent = parent
     
-    def check_type(self, value:Any)->None:
+    def check_type(self, value:object)->None:
         base_type_str = self.base_type_str
         if self.is_ptr:
             if not isinstance(value, np.ndarray):

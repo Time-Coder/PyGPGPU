@@ -1,7 +1,7 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer, c_size_t, c_char
 import warnings
-from typing import Dict, List, Any, Optional, Set
+from typing import Dict, List, Optional, Set
 from typing_extensions import override
 
 from .cuobject import CUObject
@@ -20,7 +20,7 @@ from ...utils import save_bin, load_bin, modify_time
 
 class NVRTCProgram(CUObject):
 
-    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, program_parser:Optional[ProgramParser]=None):
+    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, object]]=None, options:Optional[BuildOptions]=None, program_parser:Optional[ProgramParser]=None):
         self._ptx:Dict[Device, bytes] = {}
         self._cubin:Dict[Device, bytes] = {}
 
@@ -171,7 +171,7 @@ class NVRTCProgram(CUObject):
         return self._program_parser.includes
     
     @property
-    def defines(self)->Dict[str, Any]:
+    def defines(self)->Dict[str, object]:
         return self._program_parser.defines
     
     @property

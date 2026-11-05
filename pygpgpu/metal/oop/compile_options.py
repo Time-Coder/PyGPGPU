@@ -29,7 +29,7 @@ half-filled object to the compiler would be worse than passing nil.
 from __future__ import annotations
 
 import ctypes
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from ..driver.objc import ObjC
 
@@ -56,7 +56,7 @@ class CompileOptions:
     def __init__(self, language_version: Optional[int] = None,
                  fast_math: Optional[bool] = None,
                  math_mode: Optional[str] = None,
-                 macros: Optional[Dict[str, Any]] = None)->None:
+                 macros: Optional[Dict[str, str]] = None)->None:
         self.language_version = language_version
         self.fast_math = fast_math
         self.math_mode = math_mode
@@ -83,7 +83,7 @@ class CompileOptions:
         return "CompileOptions(" + ", ".join(parts) + ")"
 
 
-def from_mapping(options: Any)->Optional[CompileOptions]:
+def from_mapping(options: object)->Optional[CompileOptions]:
     """A `CompileOptions` from what a caller passed, or None for the defaults.
 
     Accepts a `CompileOptions` (as it is), a mapping with the field names, or
@@ -132,7 +132,7 @@ def build(options: Optional[CompileOptions])->int:
             "cannot build MTLCompileOptions: the Metal runtime is not loaded "
             f"({reason})")
 
-    objc: Any = ObjC
+    objc: type[ObjC] = ObjC
     alloc: int = objc.send_ptr(objc.class_("MTLCompileOptions"), "alloc", ())
     if not alloc:
         return 0
@@ -152,7 +152,7 @@ def build(options: Optional[CompileOptions])->int:
     return target
 
 
-def _configure(objc: Any, target: int, options: CompileOptions)->None:
+def _configure(objc: type[ObjC], target: int, options: CompileOptions)->None:
     """Set every field `options` names on the already-created object."""
     if options.language_version is not None:
         # `MTLLanguageVersion` and `MTLMathMode` are both `NSUInteger` (pointer-sized).
@@ -171,9 +171,9 @@ def _configure(objc: Any, target: int, options: CompileOptions)->None:
                       (ctypes.c_void_p,), ctypes.c_void_p(dictionary))
 
 
-def _dictionary(macros: Dict[str, Any])->int:
+def _dictionary(macros: Dict[str, str])->int:
     """An `NSDictionary` of `NSString` -> `NSString` for the preprocessor macros."""
-    objc: Any = ObjC
+    objc: type[ObjC] = ObjC
     dictionary: int = objc.send_ptr(objc.class_("NSMutableDictionary"), "dictionary", ())
     if not dictionary:
         return 0
@@ -195,7 +195,7 @@ def _dictionary(macros: Dict[str, Any])->int:
 
 def _string(text: str)->int:
     """An `NSString` for `text`."""
-    objc: Any = ObjC
+    objc: type[ObjC] = ObjC
     return objc.send_ptr(objc.class_("NSString"), "stringWithUTF8String:",
                          (ctypes.c_char_p,), ctypes.c_char_p(text.encode("utf-8")))
 

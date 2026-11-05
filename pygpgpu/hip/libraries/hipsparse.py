@@ -25,8 +25,9 @@ its hipSPARSE case with that reason rather than failing.
 """
 from __future__ import annotations
 
+import ctypes
 from ctypes import POINTER, c_char_p, c_int, c_size_t, c_void_p, c_int64
-from typing import Any, Dict
+from typing import Dict
 
 from ...libraries import Library, resolve_dll
 from ._enums import hipsparseStatus_t
@@ -83,7 +84,7 @@ class HIPSPARSE(Library):
     _dll_name = "hipsparse.dll"
     _so_name = "libhipsparse.so"
 
-    _signatures:Dict[str, Dict[str, Any]] = {
+    _signatures:Dict[str, Dict[str, object]] = {
         # hipsparseStatus_t hipsparseCreate(hipsparseHandle_t* handle)
         "hipsparseCreate": {
             "args": {"handle": ptr_hipsparseHandle_t},
@@ -196,7 +197,7 @@ class HIPSPARSE(Library):
     _no_error_check = ["hipsparseGetVersion", "hipsparseGetErrorString"]
 
     @classmethod
-    def dll(cls)->Any:
+    def dll(cls)->ctypes.CDLL:
         """The library's DLL, loaded on first use."""
         if cls._dll_instance is None:
             from ctypes import CDLL

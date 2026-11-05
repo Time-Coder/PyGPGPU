@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import Dict, TYPE_CHECKING, Any
+from typing import Dict, TYPE_CHECKING
 from typing_extensions import override
 
 from ..driver import (
@@ -64,7 +64,7 @@ class sampler(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CL.clGetSamplerInfo
 
     @override
@@ -79,5 +79,5 @@ class sampler(CLObject):
 
     @override
     @staticmethod
-    def _release_func()->Any:
+    def _release_func()->object:
         return CL.clReleaseSampler

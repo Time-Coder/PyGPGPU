@@ -18,7 +18,7 @@ the names suggest:
 from __future__ import annotations
 
 from ctypes import c_int, c_size_t, c_void_p, POINTER
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ...constants import IntEnum
 from ._base import Library
@@ -65,7 +65,7 @@ cudaStream_t = c_void_p
 class CUFFTInfo:
     """cuFFT's signature table and its result codes."""
 
-    func_signatures:Dict[str, Dict[str, Any]] = {
+    func_signatures:Dict[str, Dict[str, object]] = {
         # cufftResult cufftCreate(cufftHandle *handle)
         "cufftCreate": {
             "args": {

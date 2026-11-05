@@ -19,7 +19,7 @@ what keeps the common case free.
 from __future__ import annotations
 
 import ctypes
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -37,7 +37,8 @@ def _host_classes()->dict[str, type]:
 
     classes:dict[str, type] = {}
     for name in _vec_registry():
-        host:Any = getattr(pygf, name, None)
+        # `getattr` with a runtime name returns `Any`; the value is tested at once.
+        host:object = getattr(pygf, name, None)
         classes[name] = host if isinstance(host, type) else _vec_registry()[name]
     _HOST_CLASSES = classes
     return classes
@@ -79,10 +80,19 @@ def _alignment_of(dtype:np.dtype)->int:
     return int(dtype.itemsize) or 1
 
 
-def _opencl_record_layout(fields:List[Any])->np.dtype:
+# One field of a record as the packers describe it: its name, its dtype (or the ctypes
+# type that stands for it), and the shape it is an array of when it is one.
+RecordField = Tuple[str, object, Optional[Tuple[int, ...]]]
+
+# What every packer hands back: the value in the device's own layout, plus the callable
+# that copies a moved value back into the host's form (None when nothing moved).
+Packed = Tuple[object, Optional[Callable[[object], None]]]
+
+
+def _opencl_record_layout(fields:List[RecordField])->np.dtype:
     """A record dtype with the offsets and total size OpenCL C would give the structure."""
     names:List[str] = []
-    formats:List[Any] = []
+    formats:List[object] = []
     offsets:List[int] = []
     cursor:int = 0
     alignment:int = 1
@@ -113,11 +123,11 @@ def _record_device_dtype(dtype:np.dtype, backend:str)->Tuple[np.dtype, bool]:
     Every field is looked at on its own: a vector field of width three is replaced by the
     padded device type, a nested record is rebuilt, and an array of either keeps its extents.
     """
-    fields:List[Any] = []
+    fields:List[RecordField] = []
     changed:bool = False
     for name in dtype.names or ():
         field_dtype:np.dtype = np.dtype(dtype.fields[name][0])
-        shape:Any = None
+        shape:Optional[Tuple[int, ...]] = None
         if field_dtype.subdtype is not None:
             base_dtype, shape = field_dtype.subdtype
             field_dtype = base_dtype
@@ -137,11 +147,11 @@ def _record_device_dtype(dtype:np.dtype, backend:str)->Tuple[np.dtype, bool]:
     return _opencl_record_layout(fields), changed
 
 
-def _copy_record(host:Any, target:Any, backend:str)->None:
+def _copy_record(host:object, target:object, backend:str)->None:
     """Copy a record's fields into a device-layout record (or back, when reversed)."""
     for name in host.dtype.names or ():
         field_dtype:np.dtype = np.dtype(host.dtype.fields[name][0])
-        shape:Any = None
+        shape:Optional[Tuple[int, ...]] = None
         if field_dtype.subdtype is not None:
             base_dtype, shape = field_dtype.subdtype
             field_dtype = base_dtype
@@ -155,7 +165,7 @@ def _copy_record(host:Any, target:Any, backend:str)->None:
             target[name] = host[name]
 
 
-def _pack_record_array(array:np.ndarray, backend:str)->Tuple[Any, Optional[Callable[[Any], None]]]:
+def _pack_record_array(array:np.ndarray, backend:str)->Packed:
     """A record array in the device layout, with a callable that copies results home."""
     if backend != "opencl":
         return array, None
@@ -165,14 +175,14 @@ def _pack_record_array(array:np.ndarray, backend:str)->Tuple[Any, Optional[Calla
     packed:np.ndarray = np.zeros(array.shape, dtype=device_dtype)
     _copy_record(array, packed, backend)
 
-    def unpack(source:Any)->None:
+    def unpack(source:object)->None:
         # The kernel wrote the device layout; the caller's array keeps the host one.
         _copy_record(np.asarray(source), array, backend)
 
     return packed, unpack
 
 
-def vector_name_of(value:Any)->Optional[str]:
+def vector_name_of(value:object)->Optional[str]:
     """The vector type name of a vector instance, or None."""
     if not isinstance(value, type(value)):
         return None
@@ -186,7 +196,7 @@ def vector_name_of(value:Any)->Optional[str]:
     return None
 
 
-def _is_vector_class(cls:Any)->Optional[str]:
+def _is_vector_class(cls:object)->Optional[str]:
     """The vector type name a class stands for, or None."""
     if not isinstance(cls, type):
         return None
@@ -220,18 +230,18 @@ def _host_components(name:str)->List[str]:
 # ---------------------------------------------------------------------------
 
 
-def _pack_vector(value:Any, backend:str)->Any:
+def _pack_vector(value:object, backend:str)->object:
     name:str = vector_name_of(value) or ""
     if not name or not _needs_padding(name, backend):
         return value
     target:type = _device_class(name, backend)
-    packed:Any = target()
+    packed:object = target()
     for field in _host_components(name):
         setattr(packed, field, getattr(value, field))
     return packed
 
 
-def _unpack_vector(device_value:Any, host_value:Any)->None:
+def _unpack_vector(device_value:object, host_value:object)->None:
     """Copy the components back; the padding slot is ignored."""
     for field in _host_components(vector_name_of(host_value) or ""):
         setattr(host_value, field, getattr(device_value, field))
@@ -260,7 +270,7 @@ def _vector_dtype_name(dtype:np.dtype)->Optional[str]:
     return None
 
 
-def _pack_array(array:np.ndarray, backend:str)->Tuple[Any, Optional[Callable[[Any], None]]]:
+def _pack_array(array:np.ndarray, backend:str)->Packed:
     """A vector-typed ndarray in the device layout, plus a way to copy results back."""
     name:Optional[str] = _vector_dtype_name(array.dtype)
     if name is None or not _needs_padding(name, backend):
@@ -270,7 +280,7 @@ def _pack_array(array:np.ndarray, backend:str)->Tuple[Any, Optional[Callable[[An
     for field in _host_components(name):
         packed[field] = array[field]
 
-    def unpack(source:Any)->None:
+    def unpack(source:object)->None:
         # The kernel may have written the padding slot; only real components come home.
         current:np.ndarray = source if isinstance(source, np.ndarray) else packed
         for field in _host_components(name):
@@ -284,7 +294,7 @@ def _pack_array(array:np.ndarray, backend:str)->Tuple[Any, Optional[Callable[[An
 # ---------------------------------------------------------------------------
 
 
-def pack(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any], None]]]:
+def pack(value:object, backend:str)->Packed:
     """The device-layout version of ``value``, and a callable that writes results back.
 
     ``value`` may be a vector instance, an ndarray of vectors, or a ctypes structure that
@@ -319,7 +329,7 @@ def pack(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any], None]]]:
 _DEV_TYPE_CACHE:Dict[Tuple[type, str], type] = {}
 
 
-def _ctypes_align(field_type:Any)->int:
+def _ctypes_align(field_type:type)->int:
     """The OpenCL C alignment of a ctypes field type, which ctypes does not know.
 
     `ctypes` lays out an OpenCL `float3` (a 16-byte padded class) with align 4, because the
@@ -338,14 +348,14 @@ def _ctypes_align(field_type:Any)->int:
     return ctypes.alignment(field_type) or 1
 
 
-def _opencl_field_list(members:List[Tuple[str, Any, Any]])->List[Tuple[str, Any]]:
+def _opencl_field_list(members:List[RecordField])->List[Tuple[str, object]]:
     """The ctypes field list that reproduces OpenCL C's layout.
 
     Each field is placed at the offset OpenCL would give it, and the gaps are spelled as
     anonymous padding arrays -- ctypes has no way to set an offset or an alignment directly,
     so the padding has to be a field of its own.
     """
-    fields:List[Tuple[str, Any]] = []
+    fields:List[Tuple[str, object]] = []
     cursor:int = 0
     alignment:int = 1
     for index, (name, device_type, _) in enumerate(members):
@@ -362,7 +372,7 @@ def _opencl_field_list(members:List[Tuple[str, Any, Any]])->List[Tuple[str, Any]
     return fields
 
 
-def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any], None]]]:
+def _pack_structure(value:object, backend:str)->Packed:
     """Re-lay a ctypes structure whose members include vectors or arrays of them.
 
     The device type is built on the fly: same field order, with every vector member (and
@@ -377,10 +387,10 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
     if backend != "opencl":
         return value, None
     source_type:type = type(value)
-    members:List[Tuple[str, Any, Any]] = []
+    members:List[RecordField] = []
     changed:bool = False
     for field_name, field_type in source_type._fields_:
-        device_type:Any = field_type
+        device_type:type = field_type
         name:Optional[str] = _is_vector_class(field_type)
         if name is not None:
             # Only a vector the device stores in more slots than the host does changes the
@@ -399,7 +409,7 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
             elif issubclass(field_type._type_, ctypes.Structure):
                 # An array of structures: the element's own class says whether its layout
                 # differs, and a nested array is asked the same question recursively.
-                packed_element:Any = _pack_structure(field_type._type_(), backend)[0]
+                packed_element:object = _pack_structure(field_type._type_(), backend)[0]
                 if type(packed_element) is not field_type._type_:
                     device_type = type(packed_element) * field_type._length_
                     changed = True
@@ -424,14 +434,14 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
                                (ctypes.Structure,),
                                {"_fields_": _opencl_field_list(members)})
         _DEV_TYPE_CACHE[(source_type, backend)] = device_type_new
-    packed:Any = device_type_new()
+    packed:object = device_type_new()
     for field_name, device_field_type, host_field_type in members:
         name = _is_vector_class(host_field_type)
         if name is not None:
             setattr(packed, field_name, _pack_vector(getattr(value, field_name), backend))
         elif issubclass(host_field_type, ctypes.Array) and _is_vector_class(host_field_type._type_):
-            host_array:Any = getattr(value, field_name)
-            target:Any = getattr(packed, field_name)
+            host_array:object = getattr(value, field_name)
+            target:object = getattr(packed, field_name)
             for index in range(host_field_type._length_):
                 target[index] = _pack_vector(host_array[index], backend)
         elif issubclass(host_field_type, ctypes.Array) \
@@ -455,7 +465,7 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
         else:
             setattr(packed, field_name, getattr(value, field_name))
 
-    def unpack(source:Any)->None:
+    def unpack(source:object)->None:
         for field_name, _device_field, host_field_type in members:
             name = _is_vector_class(host_field_type)
             if name is not None:
@@ -470,7 +480,7 @@ def _pack_structure(value:Any, backend:str)->Tuple[Any, Optional[Callable[[Any],
                 # vector members are padded on the device, so `source.x` is a device `float3`
                 # and assigning it straight onto the caller's field answered "incompatible
                 # types, float3 instance instead of point3f instance".
-                source_array:Any = getattr(source, field_name)
+                source_array:object = getattr(source, field_name)
                 host_array = getattr(value, field_name)
                 for index in range(host_field_type._length_):
                     _packed_element, element_unpack = _pack_structure(

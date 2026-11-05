@@ -26,7 +26,8 @@ Usage::
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Sequence,
+                    Tuple, Union)
 
 from numpy.typing import DTypeLike
 
@@ -344,7 +345,7 @@ class _IndexVector:
     def __init__(self, **readers:Callable[[], int])->None:
         object.__setattr__(self, "_readers", readers)
 
-    def _value(self)->Any:
+    def _value(self)->object:
         from pygf import int3
 
         return int3(*[reader() for reader in self._readers.values()])
@@ -363,7 +364,7 @@ class _IndexVector:
                 f"an index vector has .x, .y and .z; it has no '{name}'")
         return readers[name]()
 
-    def __setattr__(self, name:str, value:Any)->None:
+    def __setattr__(self, name:str, value:object)->None:
         raise TypeError(
             "an index vector is read-only: it reports the launch, and cannot be assigned to")
 
@@ -371,7 +372,7 @@ class _IndexVector:
         # Never evaluates the readers: this object is a registry key (see
         # `builtin_registry.BUILTIN_NAMES_BY_FUNCTION`), and hashing or printing it during
         # import must not need a launch frame.
-        readers:Any = object.__getattribute__(self, "_readers")
+        readers:object = object.__getattribute__(self, "_readers")
         axes:str = ", ".join(readers)
         return f"<index vector: {axes}>"
 
@@ -399,7 +400,7 @@ def barrier() -> None:
     return None
 
 
-def zeros_per_group(shape: Any, dtype: Any = "float32") -> Any:
+def zeros_per_group(shape: object, dtype: object = "float32") -> object:
     """Shared (work-group) memory: a zeroed array of ``shape``/``dtype``, one slice per group.
 
     The arguments are ``np.zeros``' own, in its own order: the **shape first** (an int or a
@@ -440,7 +441,7 @@ def zeros_per_group(shape: Any, dtype: Any = "float32") -> Any:
     """
     from .host_runtime import require_frame
 
-    frame: Any = require_frame("zeros_per_group")
+    frame: object = require_frame("zeros_per_group")
     return _GroupSlices(shape, dtype, frame)
 
 
@@ -484,7 +485,7 @@ class _GroupSlices:
         return f"<zeros_per_group{self._shape} dtype={self._dtype}>"
 
 
-def _group_key(group: Any)->Tuple[int, ...]:
+def _group_key(group: Union[int, Sequence[int], "_IndexVector"])->Tuple[int, ...]:
     """The block id a `buf[blockIdx]` subscript names, as a tuple of axis indices."""
     if isinstance(group, int):
         return (int(group), )
@@ -493,7 +494,7 @@ def _group_key(group: Any)->Tuple[int, ...]:
     if isinstance(group, _IndexVector):
         from .host_runtime import get_host_frame
 
-        frame: Any = get_host_frame()
+        frame: object = get_host_frame()
         axes: int = len(frame.global_size) if frame is not None else 3
         return tuple(group[axis] for axis in range(max(1, axes)))
     try:
@@ -507,7 +508,7 @@ def _group_key(group: Any)->Tuple[int, ...]:
 # One object, two names: a CUDA reader looks for "block" and an OpenCL reader for "group".
 # They are the same function, so the host and the device cannot disagree about them however
 # they are spelled (see the one-object-per-name rule in AGENTS.md).
-zeros_per_block: Any = zeros_per_group
+zeros_per_block: object = zeros_per_group
 
 
 # ---------------------------------------------------------------------------
@@ -517,61 +518,61 @@ zeros_per_block: Any = zeros_per_group
 
 def atomic_add(array: "np.ndarray[Any, Any]",
             index: Union[int, Tuple[int, ...]],
-            value: "np.number[Any]") -> Any:
+            value: "np.number[Any]") -> object:
     """Add ``value`` to ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current + value)
 
 
 def atomic_sub(array: "np.ndarray[Any, Any]",
             index: Union[int, Tuple[int, ...]],
-            value: "np.number[Any]") -> Any:
+            value: "np.number[Any]") -> object:
     """Subtract ``value`` from ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current - value)
 
 
 def atomic_min(array: "np.ndarray[Any, Any]",
             index: Union[int, Tuple[int, ...]],
-            value: "np.number[Any]") -> Any:
+            value: "np.number[Any]") -> object:
     """Keep the smaller of ``array[index]`` and ``value``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: min(current, value))
 
 
 def atomic_max(array: "np.ndarray[Any, Any]",
             index: Union[int, Tuple[int, ...]],
-            value: "np.number[Any]") -> Any:
+            value: "np.number[Any]") -> object:
     """Keep the larger of ``array[index]`` and ``value``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: max(current, value))
 
 
 def atomic_and(array: "np.ndarray[Any, Any]",
             index: Union[int, Tuple[int, ...]],
-            value: "np.number[Any]") -> Any:
+            value: "np.number[Any]") -> object:
     """Bitwise-and ``value`` into ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current & value)
 
 
 def atomic_or(array: "np.ndarray[Any, Any]",
             index: Union[int, Tuple[int, ...]],
-            value: "np.number[Any]") -> Any:
+            value: "np.number[Any]") -> object:
     """Bitwise-or ``value`` into ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current | value)
 
 
 def atomic_xor(array: "np.ndarray[Any, Any]",
             index: Union[int, Tuple[int, ...]],
-            value: "np.number[Any]") -> Any:
+            value: "np.number[Any]") -> object:
     """Bitwise-xor ``value`` into ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: current ^ value)
 
 
 def atomic_xchg(array: "np.ndarray[Any, Any]",
             index: Union[int, Tuple[int, ...]],
-            value: "np.number[Any]") -> Any:
+            value: "np.number[Any]") -> object:
     """Store ``value`` into ``array[index]``; returns the previous value."""
     return atomic_in_place(array, index, lambda current: value)
 
 
-def atomic_cas(array: Any, index: int, compare: Any, value: Any) -> Any:
+def atomic_cas(array: object, index: int, compare: object, value: object) -> object:
     """Store ``value`` into ``array[index]`` when it still holds ``compare``.
 
     Returns the previous value, so a caller can tell whether the swap happened.

@@ -13,26 +13,32 @@ bodies depend on.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from ..driver.metal import _wait_ready
 from ..driver.objc import ObjC
 from .metalobject import MTLObject
 
+if TYPE_CHECKING:
+    from ...constants import KernelFlags
+    from .buffer import Buffer
+    from .devices import Device
+    from .event import Event
+
 
 class CommandQueue(MTLObject):
     """One `MTLCommandQueue`: a serial stream of command buffers."""
 
-    def __init__(self, device:Any)->None:
+    def __init__(self, device:"Device")->None:
         _wait_ready()
         queue_id = ObjC.send_ptr(device.id, "newCommandQueue")
         if not queue_id:
             raise RuntimeError("Metal could not create a command queue")
         MTLObject.__init__(self, queue_id)
-        self._device:Any = device
+        self._device:"Device" = device
 
     @property
-    def device(self)->Any:
+    def device(self)->"Device":
         return self._device
 
     def new_command_buffer(self)->int:
@@ -55,15 +61,15 @@ class Context(MTLObject):
     the process, so it is the honest answer.
     """
 
-    def __init__(self, device:Any)->None:
+    def __init__(self, device:"Device")->None:
         _wait_ready()
-        self._device:Any = device
+        self._device:"Device" = device
         self._queue:CommandQueue = CommandQueue(device)
         MTLObject.__init__(self, device.id)
-        self._buffers:Dict[int, List[Any]] = {}
+        self._buffers:Dict[int, List["Buffer"]] = {}
 
     @property
-    def device(self)->Any:
+    def device(self)->"Device":
         return self._device
 
     @property
@@ -82,14 +88,15 @@ class Context(MTLObject):
         does, and for the same reason.
         """
 
-    def create_buffer(self, size:int=0, flags:Any=None)->Any:
+    def create_buffer(self, size:int=0,
+                      flags:Optional["KernelFlags"]=None)->"Buffer":
         from .buffer import Buffer
         return Buffer(self, size=size)
 
-    def get_buffer(self, size:int=0)->Any:
+    def get_buffer(self, size:int=0)->"Buffer":
         """A reusable device buffer of `size` bytes, per the shared allocation path."""
         from .buffer import Buffer
-        available:Optional[Any] = None
+        available:Optional["Buffer"] = None
         for buffer in self._buffers.get(size, []):
             if not buffer.using:
                 available = buffer
@@ -106,5 +113,5 @@ class Context(MTLObject):
         # buffer, so a completed launch is already a completed queue.
         return
 
-    def wait_event(self, event:Any)->None:
+    def wait_event(self, event:"Event")->None:
         event.wait()

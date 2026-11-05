@@ -15,7 +15,7 @@ handle can still be passed straight to `objc_msgSend`.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from ..driver.objc import ObjC
 
@@ -33,11 +33,13 @@ class Handle(int):
         return int(self)
 
     @classmethod
-    def of(cls, handle:Any)->"Handle":
+    def of(cls, handle:object)->"Handle":
         """Wrap a handle that may already be a `Handle`, an int or a ctypes value."""
         if isinstance(handle, Handle):
             return handle
-        inner:Any = getattr(handle, "value", handle)
+        # `getattr` with a runtime name is `Any` by typeshed's own signature; the value
+        # is narrowed immediately by taking it as `object`.
+        inner:object = getattr(handle, "value", handle)
         return cls(int(inner))
 
 

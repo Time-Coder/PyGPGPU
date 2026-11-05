@@ -22,7 +22,7 @@ own, which is why the header is copied into the cache beside the sources that in
 from __future__ import annotations
 
 import os
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -78,7 +78,7 @@ def quat_member_names(dtype:np.dtype)->Optional[Tuple[str, ...]]:
     return _MEMBERS
 
 
-def is_quaternion(type_name:Any)->Optional[np.dtype]:
+def is_quaternion(type_name:object)->Optional[np.dtype]:
     """The quaternion dtype behind a device type name, or None."""
     if not isinstance(type_name, str):
         return None

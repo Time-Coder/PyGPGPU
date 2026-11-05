@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 class Program(CLObject):
 
-    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, program_parser:Optional[ProgramParser]=None):
+    def __init__(self, context:Context, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, object]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, program_parser:Optional[ProgramParser]=None):
         self._context:Context = context
         self._binaries:Dict[Device, bytes] = {}
         self._kernels:Dict[str, Kernel] = {}
@@ -236,7 +236,7 @@ class Program(CLObject):
         return self._program_parser.includes
     
     @property
-    def defines(self)->Dict[str, Any]:
+    def defines(self)->Dict[str, object]:
         return self._program_parser.defines
     
     @property
@@ -335,7 +335,7 @@ class Program(CLObject):
         else:
             raise KeyError(name)
 
-    def _get_build_attr(self, name:str)->Any:
+    def _get_build_attr(self, name:str)->object:
         if name in self._info:
             return self._info[name]
         
@@ -395,7 +395,7 @@ class Program(CLObject):
 
     @override    
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CL.clGetProgramInfo
 
     @override    

@@ -18,7 +18,7 @@ class Constant:
 
     __instances:Dict[Union[str, int], Constant] = {}
 
-    def __init__(self, name:str, value:Any):
+    def __init__(self, name:str, value:object):
         self.__name:str = name
         Constant.__instances[name] = self
 

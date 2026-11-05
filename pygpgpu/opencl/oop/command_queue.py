@@ -1,6 +1,6 @@
 from __future__ import annotations
 from ctypes import pointer
-from typing import TYPE_CHECKING, Dict, Optional, Any
+from typing import TYPE_CHECKING, Dict, Optional
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -66,7 +66,7 @@ class CommandQueue(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CL.clGetCommandQueueInfo
 
     @override

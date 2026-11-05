@@ -1,7 +1,7 @@
 from __future__ import annotations
 from ctypes import c_char_p, pointer
 import threading
-from typing import Dict, List, Any, Optional, Set
+from typing import Dict, List, Optional, Set
 from typing_extensions import override
 
 from .hipobject import HIPObject
@@ -19,7 +19,7 @@ from .context import Context
 
 class Program(HIPObject):
 
-    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, compiler:Optional[HipCompiler]=None):
+    def __init__(self, file_name:str="", includes:Optional[List[str]]=None, defines:Optional[Dict[str, object]]=None, options:Optional[BuildOptions]=None, type_checked:bool=False, compiler:Optional[HipCompiler]=None):
         self._kernels:Dict[str, Kernel] = {}
         # The kernel dict is filled lazily (see _fetch_kernels), and every thread that
         # reaches this program shares it.
@@ -54,7 +54,7 @@ class Program(HIPObject):
         return self._compiler.includes
     
     @property
-    def defines(self)->Dict[str, Any]:
+    def defines(self)->Dict[str, object]:
         return self._compiler.defines
     
     @property

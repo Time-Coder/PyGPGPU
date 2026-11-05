@@ -24,7 +24,7 @@ the `Func` pattern here.
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Callable, Dict, Optional
 from ctypes import CDLL, c_ulonglong, c_void_p
 
 from .objc import ObjC
@@ -74,7 +74,7 @@ class MTL(metaclass=MetaMetal):
 
     # The C entry points, with their real signatures. `MTLCopyAllDevices` exists
     # on macOS only; a probe on another platform fails earlier, at the CDLL.
-    func_signatures:Dict[str, Dict[str, Any]] = {
+    func_signatures:Dict[str, Dict[str, object]] = {
         # id<MTLDevice> MTLCreateSystemDefaultDevice(void)
         "MTLCreateSystemDefaultDevice": {"args": {}, "restype": c_void_p},
         # id<MTLDevice>* MTLCopyAllDevices(size_t* count)  (macOS only)

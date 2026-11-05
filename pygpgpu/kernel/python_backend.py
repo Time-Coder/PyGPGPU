@@ -35,7 +35,8 @@ import asyncio
 import concurrent.futures
 import functools
 import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from types import CodeType
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from pygf import wrap_vector_array
@@ -70,7 +71,7 @@ _MAGIC_NDENUMERATE = "ndenumerate"
 
 # Sentinel for "no work item returned a value yet": a kernel that returns None has to be
 # distinguishable from one that has not returned at all.
-_NO_RESULT: Any = object()
+_NO_RESULT: object = object()
 
 
 def _dedented_ast(func: Callable) -> Optional[ast.FunctionDef]:
@@ -89,7 +90,7 @@ def _dedented_ast(func: Callable) -> Optional[ast.FunctionDef]:
     return tree.body[0]
 
 
-def _globals_of(func: Callable) -> Dict[str, Any]:
+def _globals_of(func: Callable) -> Dict[str, object]:
     return getattr(func, "__globals__", None) or {}
 
 
@@ -128,7 +129,7 @@ def _enumerate_holder(iter_node: ast.expr, self_param: str) -> Optional[Holder]:
     return _holder_of(iter_node.args[0], self_param)
 
 
-def _nd_magic(iter_node: ast.expr, self_param: str, globals_of: Dict[str, Any]) -> Optional[Tuple[str, Holder]]:
+def _nd_magic(iter_node: ast.expr, self_param: str, globals_of: Dict[str, object]) -> Optional[Tuple[str, Holder]]:
     """``np.ndindex(<holder>.shape)`` / ``np.ndenumerate(<holder>)`` -> (form, holder)."""
     if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Attribute)
             and isinstance(iter_node.func.value, ast.Name) and len(iter_node.args) == 1
@@ -149,7 +150,7 @@ def _nd_magic(iter_node: ast.expr, self_param: str, globals_of: Dict[str, Any]) 
     return (form, holder) if holder is not None else None
 
 
-def _gpu_attr(call: ast.Call, globals_of: Dict[str, Any]) -> Optional[str]:
+def _gpu_attr(call: ast.Call, globals_of: Dict[str, object]) -> Optional[str]:
     """The builtin name a call invokes, or None when it invokes something else.
 
     Identity, not spelling: the callee is resolved through the kernel's globals the way
@@ -191,7 +192,7 @@ def analyse(func: Callable, self_param: str = "", domain: str = "") -> PythonAna
     body: Optional[ast.FunctionDef] = _dedented_ast(func)
     if body is None:
         return analysis
-    globals_of: Dict[str, Any] = _globals_of(func)
+    globals_of: Dict[str, object] = _globals_of(func)
     if domain:
         # A parameter is held as ("arg", <name>), the same shape the statement produces.
         analysis.declared.append(("arg", domain))
@@ -235,7 +236,7 @@ def analyse(func: Callable, self_param: str = "", domain: str = "") -> PythonAna
 # ---------------------------------------------------------------------------
 
 
-def as_host_array(value: Any) -> Any:
+def as_host_array(value: object) -> object:
     """The value as the body should see it: records and vectors, not their carriers.
 
     A `ctypes.Structure` instance is a structure *value* and is passed through unchanged: it
@@ -258,7 +259,7 @@ def as_host_array(value: Any) -> Any:
     return wrap_vector_array(value)
 
 
-def prepare_structure_classes(func: Any) -> None:
+def prepare_structure_classes(func: Callable[..., object]) -> None:
     """Give every `ctypes` structure or union class this function names a member subscript.
 
     The interpreter runs the body unchanged, so `ray["origin"]` needs to work on the
@@ -369,7 +370,7 @@ def _asyncio_future(work: concurrent.futures.Future) -> asyncio.Future:
 
     def complete(done: concurrent.futures.Future) -> None:
         error: Optional[BaseException] = None
-        result: Any = None
+        result: object = None
         try:
             error = done.exception()
             if error is None:
@@ -411,7 +412,7 @@ class PythonKernel:
         self.func: Callable = func
         self.is_method: bool = is_method
         self.self_param: str = self_param
-        code: Any = func.__code__
+        code: CodeType = func.__code__
         names: List[str] = list(code.co_varnames[:code.co_argcount])
         if is_method and names and names[0] == self_param:
             names = names[1:]
@@ -420,7 +421,7 @@ class PythonKernel:
 
     # ----- argument lookup -----
 
-    def _resolve(self, holder: Holder, instance: Any, args: Tuple[Any, ...]) -> Any:
+    def _resolve(self, holder: Holder, instance: object, args: Tuple[object, ...]) -> object:
         kind, name = holder
         if kind == "self":
             if instance is None:
@@ -438,8 +439,8 @@ class PythonKernel:
                 f"@kernel(domain=...)")
         return args[index]
 
-    def _extents(self, holders: List[Holder], instance: Any,
-                 args: Tuple[Any, ...]) -> Tuple[int, ...]:
+    def _extents(self, holders: List[Holder], instance: object,
+                 args: Tuple[object, ...]) -> Tuple[int, ...]:
         extents: List[int] = []
         for holder in holders:
             array = self._resolve(holder, instance, args)
@@ -452,12 +453,12 @@ class PythonKernel:
 
     # ----- caller-facing entry points -----
 
-    def call(self, instance: Any, args: Tuple[Any, ...],
+    def call(self, instance: object, args: Tuple[object, ...],
              global_size: Optional[Tuple[int, ...]] = None,
              local_size: Optional[Tuple[int, ...]] = None,
-             launch: str = "call") -> Any:
+             launch: str = "call") -> object:
         """Run (or enqueue) one launch, honouring the bracket work size if present."""
-        work: Callable[[], Any] = functools.partial(
+        work: Callable[[], object] = functools.partial(
             self._run, instance, args, global_size, local_size)
         if launch == "call":
             return work()
@@ -469,9 +470,9 @@ class PythonKernel:
 
     # ----- execution -----
 
-    def _run(self, instance: Any, args: Tuple[Any, ...],
+    def _run(self, instance: object, args: Tuple[object, ...],
              global_size: Optional[Tuple[int, ...]],
-             local_size: Optional[Tuple[int, ...]]) -> Any:
+             local_size: Optional[Tuple[int, ...]]) -> object:
         # A body that builds a structure reads its members by name (`ray["origin"]`), which
         # the class has to answer: nothing else on this path would tell the class about it,
         # because the interpreter never inspects argument types.
@@ -538,9 +539,9 @@ class PythonKernel:
         # item, so one plain call is the whole kernel.
         return self._execute(instance, args, PythonFrame())
 
-    def _run_items(self, instance: Any, args: Tuple[Any, ...],
+    def _run_items(self, instance: object, args: Tuple[object, ...],
                    domain: Tuple[int, ...],
-                   local: Optional[Tuple[int, ...]]) -> Any:
+                   local: Optional[Tuple[int, ...]]) -> object:
         """Run the body once per work item of the domain.
 
         The result is the first value a work item returned, matching the "first one
@@ -557,18 +558,18 @@ class PythonKernel:
         frame = PythonFrame(domain, local or local_size_for_global(domain))
         previous: Optional[PythonFrame] = get_host_frame()
         set_host_frame(frame)
-        winner: Any = _NO_RESULT
+        winner: object = _NO_RESULT
         try:
             for coords in np.ndindex(*domain):
                 frame.coords = tuple(int(c) for c in coords)
-                result: Any = self.func(*self._call_args(instance, args))
+                result: object = self.func(*self._call_args(instance, args))
                 if winner is _NO_RESULT and result is not None:
                     winner = result
         finally:
             set_host_frame(previous)
         return None if winner is _NO_RESULT else winner
 
-    def _execute(self, instance: Any, args: Tuple[Any, ...], frame: PythonFrame) -> Any:
+    def _execute(self, instance: object, args: Tuple[object, ...], frame: PythonFrame) -> object:
         previous: Optional[PythonFrame] = get_host_frame()
         set_host_frame(frame)
         try:
@@ -576,20 +577,20 @@ class PythonKernel:
         finally:
             set_host_frame(previous)
 
-    def _call_args(self, instance: Any, args: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    def _call_args(self, instance: object, args: Tuple[object, ...]) -> Tuple[object, ...]:
         """The positional arguments of one body execution.
 
         Every value is passed through :func:`as_host_array`, so a vector-dtype array
         yields vector instances element-wise; self attributes stay on the instance,
         because the body reads them through it.
         """
-        call_args: Tuple[Any, ...] = tuple(as_host_array(arg) for arg in args)
+        call_args: Tuple[object, ...] = tuple(as_host_array(arg) for arg in args)
         if self.is_method:
             return (instance, ) + call_args
         return call_args
 
-    def _serial_sizes(self, analysis: PythonAnalysis, instance: Any,
-                      args: Tuple[Any, ...]) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    def _serial_sizes(self, analysis: PythonAnalysis, instance: object,
+                      args: Tuple[object, ...]) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
         """Work sizes a magic-loop kernel would have been launched with.
 
         Only used to answer gpu.get_global_size/get_local_size/get_num_groups; the loop

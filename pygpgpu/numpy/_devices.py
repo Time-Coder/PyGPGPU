@@ -10,7 +10,7 @@ GPU runtimes, and ``pygpgpu`` keeps its backends behind the same rule.
 """
 from __future__ import annotations
 
-from typing import Any, NamedTuple, Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 # Backend names, in the same spelling the kernel brackets use.
 BACKENDS: Tuple[str, ...] = ("cuda", "hip", "opencl", "metal")
@@ -20,11 +20,11 @@ class Target(NamedTuple):
     """One device a copy can target."""
 
     backend: str
-    device: Any
+    device: object
     name: str
 
     @property
-    def key(self) -> Tuple[str, Any]:
+    def key(self) -> Tuple[str, object]:
         """The dict key a binding is stored under.
 
         The device object itself is the key, because every backend's Device compares --
@@ -76,7 +76,7 @@ def default_target() -> Target:
     return resolve(backend, device_selector)
 
 
-def resolve(backend: Optional[str], device_selector: Optional[Any] = None) -> Target:
+def resolve(backend: Optional[str], device_selector: object = None) -> Target:
     """Resolve a (backend, device) pair to a concrete device object.
 
     ``backend=None`` means "find the device on any backend, in the default order", which
@@ -114,7 +114,7 @@ def resolve(backend: Optional[str], device_selector: Optional[Any] = None) -> Ta
     return Target(backend, device, name)
 
 
-def target_of(selector: Any) -> Target:
+def target_of(selector: object) -> Target:
     """Resolve anything the copy API accepts into a Target.
 
     Accepted: a selector string (``"cuda"``, ``"opencl:1"``, ``"gfx1036"``), ``None``
@@ -145,7 +145,7 @@ def target_of(selector: Any) -> Target:
         f"'cuda:0', a (backend, device) pair, or a Device object")
 
 
-def context_for(target: Target) -> Any:
+def context_for(target: Target) -> object:
     """The context a copy to ``target`` runs in."""
     if target.backend == "opencl":
         context = target.device.default_context
@@ -155,7 +155,7 @@ def context_for(target: Target) -> Any:
     return target.device.default_context
 
 
-def copy_queue(target: Target) -> Any:
+def copy_queue(target: Target) -> object:
     """Take an execution channel for one copy, from the asynchronous pool.
 
     Copies are asynchronous like an asynchronous launch, so they draw from the same
@@ -178,7 +178,7 @@ def copy_queue(target: Target) -> Any:
     raise NotImplementedError(f"the {target.backend} backend has no copy channel")
 
 
-def release_copy_queue(target: Target, queue: Any) -> None:
+def release_copy_queue(target: Target, queue: object) -> None:
     """Return a channel taken by :func:`copy_queue` to its pool."""
     if queue is None:
         return

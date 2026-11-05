@@ -55,7 +55,7 @@ def library_names()->List[str]:
     return list(LIBRARY_MODULES.keys())
 
 
-def driver_for(name:str)->Any:
+def driver_for(name:str)->type:
     """The driver class of a named library (``"cublas"``, ``"cufft"``, ...).
 
     The module is imported on demand, so asking for a library never loads the DLLs
@@ -91,7 +91,7 @@ _WRAPPER_NAMES:List[str] = [
 ]
 
 
-def __getattr__(name:str)->Any:
+def __getattr__(name:str)->object:
     """The pythonic wrappers, imported on first use.
 
     ``pygpgpu.cuda_libraries.gemm(a, b)`` reaches the wrapper this way: the

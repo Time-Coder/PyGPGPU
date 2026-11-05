@@ -19,11 +19,15 @@ Two directions, and the same three rules on both:
 from __future__ import annotations
 
 import weakref
-from typing import Any
+from types import ModuleType
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
 from . import _backends
+
+if TYPE_CHECKING:
+    from .ndarray import ndarray
 
 # torch's dtype spellings, keyed by numpy's kind+itemsize signature.
 _TORCH_DTYPES: dict = {
@@ -61,7 +65,7 @@ _NUMPY_FROM_TORCH: dict = {
 }
 
 
-def _torch() -> Any:
+def _torch() -> ModuleType:
     """Import torch, or say what is missing."""
     try:
         import torch
@@ -81,7 +85,7 @@ def _torch_dtype_name(dtype: np.dtype) -> str:
     return name
 
 
-def _numpy_dtype_of(tensor: Any) -> np.dtype:
+def _numpy_dtype_of(tensor: object) -> np.dtype:  # noqa: ANN401 - an untyped torch.Tensor
     spelling = str(tensor.dtype).replace("torch.", "")
     numpy_type = _NUMPY_FROM_TORCH.get(spelling)
     if numpy_type is None:
@@ -105,14 +109,15 @@ def _buffer_at(pointer: int, shape: tuple, dtype: np.dtype) -> np.ndarray:
     return raw.view(dtype).reshape(shape)
 
 
-def _call_safely(function: Any) -> None:
+def _call_safely(function: Callable[[], None]) -> None:
     try:
         function()
     except BaseException:
         pass
 
 
-def from_torch(cls: Any, tensor: Any, zero_copy: bool = False) -> Any:
+def from_torch(cls: type, tensor: object,
+               zero_copy: bool = False) -> "ndarray":  # noqa: ANN401 - a torch.Tensor
     """Build a gnp array over (or copied from) a ``torch.Tensor``."""
     torch = _torch()
     if not isinstance(tensor, torch.Tensor):
@@ -158,7 +163,8 @@ def from_torch(cls: Any, tensor: Any, zero_copy: bool = False) -> Any:
     return array
 
 
-def to_torch(array: Any, zero_copy: bool = False) -> Any:
+def to_torch(array: object,
+             zero_copy: bool = False) -> object:  # noqa: ANN401 - a torch.Tensor
     """Build a ``torch.Tensor`` over (or copied from) a gnp array."""
     torch = _torch()
     if not isinstance(array, np.ndarray):

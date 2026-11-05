@@ -65,16 +65,33 @@ from __future__ import annotations
 import functools
 import threading
 import weakref
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
+from numpy.typing import DTypeLike
 
+from ..constants import KernelFlags
 from ..utils import get_print_info
 from ._backends import (allocate, allocate_image, download, error_code_ok, event_callback,
                         is_host_mapped, release, sync_queue, upload, wait_event,
                         zero_copy_support)
 from ._devices import Target, copy_queue, release_copy_queue, target_of
 from .transfer import Transfer
+
+
+if TYPE_CHECKING:
+    from typing_extensions import Protocol
+
+    class ImageDescriptor(Protocol):
+        """What a launch needs to know about an image argument.
+
+        The concrete descriptor belongs to whichever backend owns the image, so the
+        array layer describes only the three facts it reads: the shape it must match,
+        the flags the texture declares, and the dtype.
+        """
+        shape: Tuple[int, ...]
+        flags: int
+        dtype: DTypeLike
 
 
 # ---------- per-device binding ----------
@@ -84,8 +101,8 @@ class _Binding:
 
     __slots__ = ("mem_obj", "epoch", "pending", "target", "zero_copy", "image_info")
 
-    def __init__(self, mem_obj: Any, epoch: int, target: Target, zero_copy: bool,
-                 image_info: Any = None) -> None:
+    def __init__(self, mem_obj: object, epoch: int, target: Target, zero_copy: bool,
+                 image_info: Optional["ImageDescriptor"] = None) -> None:
         self.mem_obj = mem_obj
         self.epoch = epoch
         self.target = target
@@ -126,7 +143,7 @@ class _Family:
         # The epoch the host bytes reflect; it lags `epoch` while a device is ahead.
         self.current_epoch = 1
         # Members whose bindings may hold device content (weak, so views may be collected).
-        self.writers: List[Any] = []
+        self.writers: List[weakref.ReferenceType["ndarray"]] = []
 
     # -- reader/writer gate --
 
@@ -173,7 +190,7 @@ class _Family:
     def newest_binding(self) -> Optional[Tuple["ndarray", _Binding]]:
         """The (member, binding) pair holding the newest device content."""
         best: Optional[Tuple["ndarray", _Binding]] = None
-        alive: List[Any] = []
+        alive: List[weakref.ReferenceType["ndarray"]] = []
         for reference in self.writers:
             member = reference()
             if member is None:
@@ -186,7 +203,7 @@ class _Family:
         return best
 
 
-def _queue_backend(cmd_queue: Any) -> str:
+def _queue_backend(cmd_queue: object) -> str:
     """Which backend an execution channel belongs to, from its own class."""
     mapping = _queue_classes()
     for cls in type(cmd_queue).__mro__:
@@ -238,7 +255,7 @@ class ndarray(np.ndarray):
 
     # ---------- construction ----------
 
-    def __new__(cls, input_array: Any) -> "ndarray":
+    def __new__(cls, input_array: object) -> "ndarray":
         obj = np.asarray(input_array).view(cls)
         obj._parent = None
         obj._children = []
@@ -250,7 +267,7 @@ class ndarray(np.ndarray):
         obj._should_copy = True
         return obj
 
-    def __array_finalize__(self, obj: Any) -> None:
+    def __array_finalize__(self, obj: Optional[np.ndarray]) -> None:
         if obj is None:
             return
         self._bindings = {}
@@ -424,8 +441,8 @@ class ndarray(np.ndarray):
 
     # ---------- transfers ----------
 
-    def to_host(self, stream: Any = None, *, backend: Optional[str] = None,
-                device: Optional[Any] = None, wait: bool = False) -> Transfer:
+    def to_host(self, stream: object = None, *, backend: Optional[str] = None,
+                device: object = None, wait: bool = False) -> Transfer:
         """Start copying this array's contents back to host memory.
 
         The copy is asynchronous: the returned :class:`Transfer` is already valid, and
@@ -464,7 +481,7 @@ class ndarray(np.ndarray):
             release_copy_queue(target, queue)
             raise
 
-        def complete(error_code: Any = None) -> None:
+        def complete(error_code: Optional[int] = None) -> None:
             try:
                 if not error_code_ok(target.backend, error_code):
                     transfer._complete(RuntimeError(
@@ -488,8 +505,8 @@ class ndarray(np.ndarray):
             transfer.wait()
         return transfer
 
-    def to_device(self, target: Any = None, stream: Any = None, *,
-                  backend: Optional[str] = None, device: Optional[Any] = None,
+    def to_device(self, target: object = None, stream: object = None, *,
+                  backend: Optional[str] = None, device: object = None,
                   zero_copy: Optional[bool] = None, wait: bool = False) -> Transfer:
         """Start copying this array's contents to a device.
 
@@ -583,7 +600,7 @@ class ndarray(np.ndarray):
             release_copy_queue(target, queue)
             raise
 
-        def complete(error_code: Any = None) -> None:
+        def complete(error_code: Optional[int] = None) -> None:
             try:
                 family.end_read()
                 if not error_code_ok(target.backend, error_code):
@@ -615,7 +632,7 @@ class ndarray(np.ndarray):
         release(binding.mem_obj)
         binding.mem_obj = None
 
-    def release(self, target: Any = None) -> None:
+    def release(self, target: object = None) -> None:
         """Release the device copies of this array (the host bytes stay untouched).
 
         Without a target it releases every copy; with one it releases that device's copy.
@@ -654,10 +671,12 @@ class ndarray(np.ndarray):
 
     # ---------- the launch path's entry point ----------
 
-    def _to_device(self, cmd_queue: Any, arg_name: str, flags: Any = (1 << 0),
-                   kernel_flags: Any = (1 << 0), image_info: Any = None,
+    def _to_device(self, cmd_queue: object, arg_name: str,
+                   flags: KernelFlags = KernelFlags(1 << 0),
+                   kernel_flags: KernelFlags = KernelFlags(1 << 0),
+                   image_info: Optional["ImageDescriptor"] = None,
                    *, backend: Optional[str] = None,
-                   device: Optional[Any] = None) -> Tuple[Any, Any]:
+                   device: object = None) -> Tuple[object, object]:
         """Bind this argument to the device a launch runs on; returns ``(mem_obj, event)``.
 
         This is the interface the backends' ``use_buffer``/``use_image`` call. ``event`` is
@@ -678,8 +697,8 @@ class ndarray(np.ndarray):
             return self._bind_image(target, cmd_queue, arg_name, image_info, kernel_flags)
         return self._bind_for_launch(target, cmd_queue, kernel_flags)
 
-    def _bind_for_launch(self, target: Target, cmd_queue: Any,
-                         kernel_flags: Any) -> Tuple[Any, Any]:
+    def _bind_for_launch(self, target: Target, cmd_queue: object,
+                         kernel_flags: KernelFlags) -> Tuple[object, object]:
         """Bind this element's bytes to ``target`` on the caller's own channel."""
         family = self._state
         key = (target.key, self._layout_key(target.backend))
@@ -719,8 +738,9 @@ class ndarray(np.ndarray):
             print(f"copy data to device for argument '{self._arg_name}'")
         return binding.mem_obj, event
 
-    def _bind_image(self, target: Target, cmd_queue: Any, arg_name: str,
-                    image_info: Any, kernel_flags: Any) -> Tuple[Any, Any]:
+    def _bind_image(self, target: Target, cmd_queue: object, arg_name: str,
+                    image_info: "ImageDescriptor",
+                    kernel_flags: KernelFlags) -> Tuple[object, object]:
         """Bind an image argument: images are re-uploaded per launch, as they always were."""
         host_array, _offset = self._member_bytes()
         view = self.view(np.ndarray)
@@ -752,7 +772,7 @@ class ndarray(np.ndarray):
             print(f"copy data to device for argument '{arg_name}'")
         return binding.mem_obj, event
 
-    def _mark_device_written(self, mem_obj: Any = None,
+    def _mark_device_written(self, mem_obj: object = None,
                              target: Optional[Target] = None) -> None:
         """Record that a kernel wrote this argument on the device.
 
@@ -799,7 +819,7 @@ class ndarray(np.ndarray):
 
     # ---------- zero-copy ----------
 
-    def to_device_zero_copy(self, target: Any = None) -> Transfer:
+    def to_device_zero_copy(self, target: object = None) -> Transfer:
         """``to_device(..., zero_copy=True)`` as its own spelling.
 
         Equivalent to ``to_device(target, zero_copy=True)``: the device reads and writes
@@ -808,7 +828,7 @@ class ndarray(np.ndarray):
         """
         return self._to_device_target(target_of(target), zero_copy=True)
 
-    def is_zero_copy(self, target: Any = None) -> bool:
+    def is_zero_copy(self, target: object = None) -> bool:
         """Whether the array's bytes are bound to that device's own memory.
 
         ``target=None`` asks about any device: True when at least one binding is zero-copy.
@@ -822,7 +842,7 @@ class ndarray(np.ndarray):
     # ---------- PyTorch interop ----------
 
     @classmethod
-    def from_torch(cls, tensor: Any, zero_copy: bool = False) -> "ndarray":
+    def from_torch(cls, tensor: object, zero_copy: bool = False) -> "ndarray":
         """A gnp array sharing (or holding a copy of) a ``torch.Tensor``'s values.
 
         A CPU tensor's storage is ordinary host memory, so with ``zero_copy=True`` the
@@ -835,7 +855,7 @@ class ndarray(np.ndarray):
 
         return from_torch(cls, tensor, zero_copy=zero_copy)
 
-    def to_torch(self, zero_copy: bool = False) -> Any:
+    def to_torch(self, zero_copy: bool = False) -> object:
         """A ``torch.Tensor`` holding this array's values.
 
         With ``zero_copy=True`` a host-side array hands its own buffer to torch, so the
@@ -848,16 +868,19 @@ class ndarray(np.ndarray):
 
     # ---------- numpy protocol ----------
 
-    def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray:
+    def __array__(self, dtype: Optional[DTypeLike] = None,
+                  copy: Optional[bool] = None) -> np.ndarray:
         self._ensure_host_bytes()
         plain = self.view(np.ndarray)
         if dtype is not None and plain.dtype != np.dtype(dtype):
             return plain.astype(dtype)
         return plain
 
-    def __array_ufunc__(self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any) -> Any:
+    def __array_ufunc__(self, ufunc: np.ufunc, method: str, *inputs: object,
+                        **kwargs: object) -> object:
         self._ensure_host_bytes()
-        result = _call_ufunc(ufunc, method, _to_plain(inputs), _to_plain_mapping(kwargs))
+        result = _call_ufunc(ufunc, method, _to_plain_args(inputs),
+                             _to_plain_mapping(kwargs))
         out = kwargs.get("out")
         if out is not None:
             for value in (out if isinstance(out, tuple) else (out,)):
@@ -865,12 +888,14 @@ class ndarray(np.ndarray):
                     value._after_host_write()
         return self._change_result(result)
 
-    def __array_function__(self, func: Any, types: Any, args: Any, kwargs: Any) -> Any:
+    def __array_function__(self, func: Callable[..., object],
+                           types: Tuple[type, ...], args: Tuple[object, ...],
+                           kwargs: Mapping[str, object]) -> object:
         self._ensure_host_bytes()
-        result = func(*_to_plain(args), **_to_plain_mapping(kwargs))
+        result = func(*_to_plain_args(args), **_to_plain_mapping(kwargs))
         return self._change_result(result)
 
-    def _change_to_ndarray(self, value: Any) -> Any:
+    def _change_to_ndarray(self, value: object) -> object:
         if value is self:
             return value
         if not isinstance(value, ndarray):
@@ -889,7 +914,7 @@ class ndarray(np.ndarray):
             value._parent = None
         return value
 
-    def _change_result(self, result: Any) -> Any:
+    def _change_result(self, result: object) -> object:
         if isinstance(result, np.ndarray):
             return self._change_to_ndarray(result)
         if isinstance(result, tuple):
@@ -899,11 +924,11 @@ class ndarray(np.ndarray):
 
     # ---------- the array surface ----------
 
-    def __getitem__(self, key: Any) -> Any:
+    def __getitem__(self, key: object) -> object:
         self._ensure_host_bytes()
         return self._change_result(np.ndarray.__getitem__(self.view(np.ndarray), key))
 
-    def __setitem__(self, key: Any, value: Any) -> None:
+    def __setitem__(self, key: object, value: object) -> None:
         self._ensure_host_bytes()
         if isinstance(value, ndarray):
             value._ensure_host_bytes()
@@ -919,7 +944,7 @@ class ndarray(np.ndarray):
         self._ensure_host_bytes()
         return np.ndarray.__str__(self.view(np.ndarray))
 
-    def tolist(self) -> Any:
+    def tolist(self) -> object:
         self._ensure_host_bytes()
         return np.ndarray.tolist(self.view(np.ndarray))
 
@@ -927,7 +952,7 @@ class ndarray(np.ndarray):
         self._ensure_host_bytes()
         return np.ndarray.tobytes(self.view(np.ndarray))
 
-    def tofile(self, fid: Any, sep: str = "", format: str = "%s") -> None:
+    def tofile(self, fid: object, sep: str = "", format: str = "%s") -> None:
         self._ensure_host_bytes()
         np.ndarray.tofile(self.view(np.ndarray), fid, sep, format)
 
@@ -939,22 +964,22 @@ class ndarray(np.ndarray):
         self._ensure_host_bytes()
         return np.ndarray.dumps(self.view(np.ndarray))
 
-    def dump(self, file: Any) -> None:
+    def dump(self, file: object) -> None:
         self._ensure_host_bytes()
         np.ndarray.dump(self.view(np.ndarray), file)
 
-    def item(self, *args: Any) -> Any:
+    def item(self, *args: int) -> object:
         self._ensure_host_bytes()
         return np.ndarray.item(self.view(np.ndarray), *args)
 
-    def itemset(self, *args: Any) -> None:
+    def itemset(self, *args: object) -> None:
         self._ensure_host_bytes()
         np.ndarray.itemset(self.view(np.ndarray), *args)
         self._after_host_write()
 
     def _inplace(func):
         @functools.wraps(func)
-        def wrapper(self: "ndarray", *args: Any, **kwargs: Any):
+        def wrapper(self: "ndarray", *args: object, **kwargs: object) -> object:
             self._ensure_host_bytes()
             result = func(self, *args, **kwargs)
             self._after_host_write()
@@ -980,7 +1005,7 @@ class ndarray(np.ndarray):
         return self._change_to_ndarray(np.transpose(self.view(np.ndarray)))
 
     @property
-    def data(self) -> Any:
+    def data(self) -> memoryview:
         self._ensure_host_bytes()
         return self.view(np.ndarray).data
 
@@ -995,12 +1020,12 @@ class ndarray(np.ndarray):
         return self._change_result(self.view(np.ndarray).imag)
 
     @property
-    def flat(self) -> Any:
+    def flat(self) -> np.flatiter:
         self._ensure_host_bytes()
         return self.view(np.ndarray).flat
 
     @property
-    def ctypes(self) -> Any:
+    def ctypes(self) -> object:
         self._ensure_host_bytes()
         return self.view(np.ndarray).ctypes
 
@@ -1011,8 +1036,8 @@ class ndarray(np.ndarray):
 
 # ---------- helpers for the numpy protocol ----------
 
-def _to_plain(values: Any) -> Any:
-    """Replace every gnp array in a tuple/list of values by its plain numpy view."""
+def _to_plain(values: object) -> object:
+    """Replace a gnp array by its plain numpy view, recursing into a tuple or list."""
     if isinstance(values, ndarray):
         values._ensure_host_bytes()
         return values.view(np.ndarray)
@@ -1023,11 +1048,16 @@ def _to_plain(values: Any) -> Any:
     return values
 
 
-def _to_plain_mapping(mapping: Any) -> Dict[Any, Any]:
+def _to_plain_args(values: Tuple[object, ...]) -> Tuple[object, ...]:
+    """Every positional argument's plain view, as a tuple a call can be splatted with."""
+    return tuple(_to_plain(item) for item in values)
+
+
+def _to_plain_mapping(mapping: Mapping[str, object]) -> Dict[str, object]:
     return {key: _to_plain(value) for key, value in mapping.items()}
 
 
-def _aliases(value: Any, original: Any) -> bool:
+def _aliases(value: object, original: object) -> bool:
     """Whether ``value`` overlaps ``original``'s memory.
 
     Both are gnp elements, so the question is asked of the plain buffers they index:
@@ -1038,7 +1068,8 @@ def _aliases(value: Any, original: Any) -> bool:
                             max_work=2 ** 20)
 
 
-def _call_ufunc(ufunc: Any, method: str, inputs: Any, kwargs: Any) -> Any:
+def _call_ufunc(ufunc: np.ufunc, method: str, inputs: Tuple[object, ...],
+                kwargs: Mapping[str, object]) -> object:
     """Run a ufunc with plain arrays, keeping the method (``__call__``, ``reduce``, ...).
 
     numpy refuses to dispatch a ufunc whose inputs are its own subclass back to the same

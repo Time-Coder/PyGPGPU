@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import create_string_buffer, c_size_t, pointer
-from typing import Optional, Any
+from typing import Optional
 from typing_extensions import override
 from uuid import UUID
 
@@ -74,7 +74,7 @@ class Device(CUObject):
 
     @staticmethod
     @override
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CUDA.cuDeviceGetAttribute
 
     @staticmethod
@@ -84,5 +84,5 @@ class Device(CUObject):
 
     @staticmethod
     @override
-    def _release_func()->Any:
+    def _release_func()->object:
         return None

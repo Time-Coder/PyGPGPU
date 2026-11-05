@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import byref
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
@@ -56,7 +56,7 @@ class SurfaceObject(CUObject):
 
     @staticmethod
     @override
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return None
 
     @staticmethod
@@ -66,5 +66,5 @@ class SurfaceObject(CUObject):
 
     @staticmethod
     @override
-    def _release_func()->Any:
+    def _release_func()->object:
         return CUDA.cuSurfObjectDestroy

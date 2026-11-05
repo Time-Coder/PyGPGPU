@@ -21,7 +21,7 @@ on this machine: a buffer allocated with ``cuMemAlloc_v2`` and copied with
 from __future__ import annotations
 
 from ctypes import c_char_p, c_int, c_size_t, c_void_p, POINTER
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ...constants import IntEnum
 from ._base import Library
@@ -168,7 +168,7 @@ ptr_cudaStream_t = POINTER(cudaStream_t)
 class CUDARTInfo:
     """The CUDA runtime's signature table and its error codes."""
 
-    func_signatures:Dict[str, Dict[str, Any]] = {
+    func_signatures:Dict[str, Dict[str, object]] = {
         # cudaError_t cudaMalloc(void **devPtr, size_t size)
         "cudaMalloc": {
             "args": {

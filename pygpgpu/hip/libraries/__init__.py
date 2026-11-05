@@ -110,7 +110,7 @@ __all__ = [
 
 
 # The library classes, by the name a caller knows them by.
-LIBRARY_CLASSES:Dict[str, Any] = {
+LIBRARY_CLASSES:Dict[str, type] = {
     "hipblas": HIPBLAS,
     "hipblaslt": HIPBLASLt,
     "hipfft": HIPFFT,
@@ -124,7 +124,7 @@ def library_names()->List[str]:
     return list(LIBRARY_CLASSES.keys())
 
 
-def driver_for(name:str)->Any:
+def driver_for(name:str)->type:
     """The driver class of a named library (``"hipblas"``, ``"hipfft"``, ...)."""
     key = name.lower()
     if key not in LIBRARY_CLASSES:
@@ -143,7 +143,7 @@ _WRAPPER_NAMES:List[str] = [
 ]
 
 
-def __getattr__(name:str)->Any:
+def __getattr__(name:str)->object:
     """The numpy-friendly wrappers, imported on first use."""
     if name in _WRAPPER_NAMES:
         module = importlib.import_module(".wrappers", __package__)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from ctypes import pointer
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional
 from typing_extensions import override
 
 from ..driver import (
@@ -91,7 +91,7 @@ class Platform(CLObject):
     def compile(self,
         file_name:str,
         includes:Optional[List[str]] = None,
-        defines:Optional[Dict[str, Any]] = None,
+        defines:Optional[Dict[str, object]] = None,
         single_precision_constant:bool=False,
         denorms_are_zero:bool=False,
         fp32_correctly_rounded_divide_sqrt:bool=False,
@@ -150,7 +150,7 @@ class Platform(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CL.clGetPlatformInfo
 
     @override
@@ -165,5 +165,5 @@ class Platform(CLObject):
     
     @override
     @staticmethod
-    def _release_func()->Any:
+    def _release_func()->object:
         return None

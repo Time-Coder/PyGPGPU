@@ -4,7 +4,7 @@ from .clobject import CLObject
 from ctypes import pointer, c_void_p
 import concurrent.futures
 import asyncio
-from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, Set, Any
+from typing import Dict, Optional, Callable, List, TYPE_CHECKING, Union, Set
 from typing_extensions import override
 
 from ..driver import (
@@ -196,7 +196,7 @@ class Event(CLObject):
 
     @override
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CL.clGetEventInfo
 
     @override

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Union, Tuple, Optional, Any
+from typing import TYPE_CHECKING, Dict, Union, Tuple, Optional
 from typing_extensions import override
 from ctypes import c_void_p
 from abc import abstractmethod
@@ -132,7 +132,7 @@ class MemObject(CUObject):
 
     @override
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return None
 
     @override
@@ -147,5 +147,5 @@ class MemObject(CUObject):
 
     @override
     @staticmethod
-    def _release_func()->Any:
+    def _release_func()->object:
         return CUDA.cuMemFree_v2

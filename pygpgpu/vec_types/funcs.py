@@ -19,7 +19,7 @@ weight -- a different operation, not a different spelling, so it stays here.
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 
 from pygf.funcs import (
     clamp,
@@ -72,6 +72,27 @@ from pygf.funcs import all as all
 
 from .genVec import genVec
 
+# What a component-wise builtin accepts. A **host vector** is either a pygf vector type
+# (a `genType` subclass) or one of this package's own `genVec` classes, and `_is_vec` is
+# what tells the two apart from a scalar; the shape they share is `_fields_` plus a
+# length, so that is what the Protocol says.
+Scalar = Union[int, float]
+
+
+if TYPE_CHECKING:
+    from typing_extensions import Protocol
+
+    class HostVector(Protocol):
+        """A host vector: fixed component fields, indexable, with a length."""
+        _fields_: Tuple[Tuple[str, type], ...]
+
+        def __len__(self) -> int: ...
+        def __getitem__(self, index: int) -> float: ...
+
+
+# A parameter of a component-wise builtin: a vector, or a scalar it broadcasts.
+Component = Union["HostVector", Scalar]
+
 __all__ = [
     "fract", "sign", "ldexp",
     "dot", "cross", "normalize", "length", "distance",
@@ -105,7 +126,7 @@ __all__ = [
 ]
 
 
-def _is_vec(v:Any)->bool:
+def _is_vec(v:object)->bool:
     """Whether v is a host vector: a ctypes Structure with component fields.
 
     Duck-typed so both PyGPGPU's own genVec types and the pygf vector types that
@@ -114,11 +135,11 @@ def _is_vec(v:Any)->bool:
     return isinstance(v, genVec) or (hasattr(v, "_fields_") and hasattr(v, "__len__"))
 
 
-def _components(v:Any)->Optional[List[Any]]:
+def _components(v:object)->Optional[List[Component]]:
     return list(v) if _is_vec(v) else None
 
 
-def _check_same_shape(a:Any, b:Any)->None:
+def _check_same_shape(a:object, b:object)->None:
     a_components, b_components = _components(a), _components(b)
     if (a_components is not None and b_components is not None
             and len(a_components) != len(b_components)):
@@ -126,7 +147,7 @@ def _check_same_shape(a:Any, b:Any)->None:
                          f"{len(a_components)} and {len(b_components)}")
 
 
-def _int_vector_type(size:int)->Any:
+def _int_vector_type(size:int)->type:
     """The int vector class of a given width, for a component-wise predicate's result.
 
     Every width this package can see has one: pygf supplies int2/int3/int4 and the wider
@@ -139,48 +160,51 @@ def _int_vector_type(size:int)->Any:
     return {2: int2, 3: int3, 4: int4, 8: int8, 16: int16}.get(size, int4)
 
 
-def select(a:Any, b:Any, cond:Any)->Any:
+def select(a:Component, b:Component, cond:Component)->Component:
     """Component-wise selection: pick b where the cond component is nonzero, otherwise a."""
     a_components, b_components, cond_components = _components(a), _components(b), _components(cond)
 
-    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
+    def value_at(values:Component, components:Optional[List[Component]],
+                 i:int)->Component:
         return values[i] if components is not None else values
 
-    result_type:Any = (type(a) if _is_vec(a) else type(b) if _is_vec(b) else float)
+    result_type:type = (type(a) if _is_vec(a) else type(b) if _is_vec(b) else float)
     if a_components is None:
         return b if cond else a
 
-    result:List[Any] = []
+    result:List[Component] = []
     for i in range(len(a_components)):
         result.append(value_at(b, b_components, i) if value_at(cond, cond_components, i) else value_at(a, a_components, i))
     return result_type(*result)
 
 
-def _relation(op:Callable, a:Any, b:Any)->Any:
+def _relation(op:Callable[[float, float], bool], a:Component,
+              b:Component)->Component:
     """A component-wise predicate as an int vector (1/0), the OpenCL convention."""
     _check_same_shape(a, b)
     a_components, b_components = _components(a), _components(b)
     if a_components is None:
         return int(op(a, b))
 
-    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
+    def value_at(values:Component, components:Optional[List[Component]],
+                 i:int)->Component:
         return values[i] if components is not None else values
 
     # `a` is a vector; `b` may be a scalar, in which case it broadcasts across components.
-    int_vec:Any = _int_vector_type(len(a_components))
+    int_vec:type = _int_vector_type(len(a_components))
     return int_vec(*[int(op(x, value_at(b, b_components, i)))
                      for i, x in enumerate(a_components)])
 
 
-def isordered(a:Any, b:Any)->Any:
+def isordered(a:Component, b:Component)->Component:
     return _relation(lambda x, y: not (math.isnan(x) or math.isnan(y)), a, b)
 
 
-def isunordered(a:Any, b:Any)->Any:
+def isunordered(a:Component, b:Component)->Component:
     return _relation(lambda x, y: math.isnan(x) or math.isnan(y), a, b)
 
 
-def abs_diff(a:Any, b:Any)->Any:
+def abs_diff(a:Component, b:Component)->Component:
     _check_same_shape(a, b)
     a_components, b_components = _components(a), _components(b)
     if a_components is None:
@@ -188,7 +212,7 @@ def abs_diff(a:Any, b:Any)->Any:
     return type(a)(*[abs(x - y) for x, y in zip(a_components, b_components)])
 
 
-def hadd(a:Any, b:Any)->Any:
+def hadd(a:Component, b:Component)->Component:
     _check_same_shape(a, b)
     a_components, b_components = _components(a), _components(b)
     if a_components is None:
@@ -196,7 +220,7 @@ def hadd(a:Any, b:Any)->Any:
     return type(a)(*[(x & y) + ((x ^ y) >> 1) for x, y in zip(a_components, b_components)])
 
 
-def rhadd(a:Any, b:Any)->Any:
+def rhadd(a:Component, b:Component)->Component:
     _check_same_shape(a, b)
     a_components, b_components = _components(a), _components(b)
     if a_components is None:
@@ -204,7 +228,7 @@ def rhadd(a:Any, b:Any)->Any:
     return type(a)(*[(x | y) - ((x ^ y) >> 1) for x, y in zip(a_components, b_components)])
 
 
-def mul24(a:Any, b:Any)->Any:
+def mul24(a:Component, b:Component)->Component:
     _check_same_shape(a, b)
     a_components, b_components = _components(a), _components(b)
     if a_components is None:
@@ -212,17 +236,18 @@ def mul24(a:Any, b:Any)->Any:
     return type(a)(*[(x * y) for x, y in zip(a_components, b_components)])
 
 
-def mad24(a:Any, b:Any, c:Any)->Any:
+def mad24(a:Component, b:Component, c:Component)->Component:
     _check_same_shape(a, b)
     a_components, b_components, c_components = _components(a), _components(b), _components(c)
 
-    def value_at(values:Any, components:Optional[List[Any]], i:int)->Any:
+    def value_at(values:Component, components:Optional[List[Component]],
+                 i:int)->Component:
         return values[i] if components is not None else values
 
     if a_components is None:
         return a * b + c
 
-    result:List[Any] = []
+    result:List[Component] = []
     for i in range(len(a_components)):
         result.append(value_at(a, a_components, i) * value_at(b, b_components, i)
                       + value_at(c, c_components, i))

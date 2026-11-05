@@ -5,7 +5,7 @@ from functools import partial
 import concurrent.futures
 import asyncio
 import threading
-from typing import Dict, Any, List, TYPE_CHECKING, Union, Tuple, Optional
+from typing import Dict, List, TYPE_CHECKING, Union, Tuple, Optional, cast
 from typing_extensions import override
 
 import numpy as np
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from .device import Device
 
 
-def complex_of_dtype(dtype: Any) -> Any:
+def complex_of_dtype(dtype: object) -> object:
     """The complex dtype behind a numpy record layout of two reals, or None.
 
     A complex array's bytes *are* the record's bytes: `complex64` is a `float` pair and
@@ -69,7 +69,7 @@ def complex_of_dtype(dtype: Any) -> Any:
     return None
 
 
-def _host_dtype_for(content_type: Any) -> Any:
+def _host_dtype_for(content_type: object) -> object:
     """The dtype a host array must have to bind this device element type.
 
     A complex structure binds a *complex* array, not an array of records: the two layouts are
@@ -82,7 +82,7 @@ def _host_dtype_for(content_type: Any) -> Any:
     return content_type
 
 
-def _element_dtype(content_type: Any) -> Any:
+def _element_dtype(content_type: object) -> object:
     """The numpy dtype an array argument's elements should be cast to.
 
     `char` binds as `ctypes.c_char`, and numpy reads that as a one-byte *string*: casting an
@@ -124,7 +124,7 @@ def _async_workers()->concurrent.futures.ThreadPoolExecutor:
         return _async_executor
 
 
-def _set_error(future:Any, error:BaseException)->None:
+def _set_error(future:object, error:BaseException)->None:
     """Deliver an exception to an asyncio or concurrent future from any thread."""
     if isinstance(future, asyncio.Future):
         loop = future.get_loop()
@@ -134,7 +134,7 @@ def _set_error(future:Any, error:BaseException)->None:
     future.set_exception(error)
 
 
-def _deliver(future:Any, pending:concurrent.futures.Future)->Optional[BaseException]:
+def _deliver(future:object, pending:concurrent.futures.Future)->Optional[BaseException]:
     """Move a completed stream future onto the caller's future; return any error."""
     try:
         error = pending.exception()
@@ -154,7 +154,7 @@ def _deliver(future:Any, pending:concurrent.futures.Future)->Optional[BaseExcept
     return error
 
 
-def _bridge(completion:Any, future:Any, on_done:Any)->None:
+def _bridge(completion:object, future:object, on_done:object)->None:
     """Mirror a completion future onto the caller's and then run ``on_done``.
 
     ``on_done`` returns the queue to the pool, so it must wait until every event
@@ -380,7 +380,7 @@ class Kernel(CLObject):
 
         if cmd_queue is None:
             cmd_queue = self.context.create_command_queue(used_device)
-        bound:Dict[str, Any] = {}
+        bound:Dict[str, object] = {}
         for key, value in used_kwargs.items():
             self._set_arg(cmd_queue, key, value, bound)
 
@@ -399,7 +399,7 @@ class Kernel(CLObject):
         return cmd_queue, global_work_size, local_work_size, bound
 
     @staticmethod
-    def __copy_to_host(arg_value:Union[np.ndarray, image2d_t, List[Any]], buffer:MemObject):
+    def __copy_to_host(arg_value:Union[np.ndarray, image2d_t, List[object]], buffer:MemObject):
         host_data = arg_value
         if isinstance(arg_value, image2d_t):
             host_data = arg_value.data
@@ -411,11 +411,11 @@ class Kernel(CLObject):
                 # A complex argument's device buffer holds the record layout, which is the
                 # same bytes as the complex array: the copy has to speak the complex dtype
                 # or numpy refuses the assignment under its casting rule.
-                device_data:Any = buffer.data
+                device_data:object = buffer.data
                 if (isinstance(device_data, np.ndarray)
                         and device_data.dtype.fields is not None
                         and host_data.dtype.kind == "c"):
-                    complex_dtype:Any = complex_of_dtype(device_data.dtype)
+                    complex_dtype:object = complex_of_dtype(device_data.dtype)
                     if complex_dtype is not None and complex_dtype == host_data.dtype:
                         device_data = device_data.view(complex_dtype)
                 host_data[:] = device_data
@@ -425,9 +425,9 @@ class Kernel(CLObject):
                 # write-back, so a kernel that wrote `p.i` left the caller's union unchanged.
                 memmove(byref(host_data), buffer.data.ctypes.data_as(c_void_p), sizeof(host_data))
 
-    def __after_call(self, cmd_queue:CommandQueue, launch_event:Event, bound:Dict[str, Any])->List[Event]:
+    def __after_call(self, cmd_queue:CommandQueue, launch_event:Event, bound:Dict[str, object])->List[Event]:
 
-        def on_completed(arg_value:Union[np.ndarray, List[Any]], mem_obj:MemObject, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
+        def on_completed(arg_value:Union[np.ndarray, List[object]], mem_obj:MemObject, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
             if error_code == ErrorCode.CL_SUCCESS:
                 self.__copy_to_host(arg_value, mem_obj)
                 if CL.print_info:
@@ -442,7 +442,7 @@ class Kernel(CLObject):
         for arg_info in self._args.values():
             entry = bound.get(arg_info.name)
             mem_obj:Optional[MemObject] = entry[0] if entry is not None else None
-            arg_value:Any = entry[1] if entry is not None else None
+            arg_value:object = entry[1] if entry is not None else None
 
             # A gnp array's buffer belongs to the array, not to the context's pool: the next
             # launch naming the same array reuses it, so it is never handed back and
@@ -480,7 +480,12 @@ class Kernel(CLObject):
                 event.on_completed_callbacks.append(call_back)
                 events.append(event)
 
-        for entry in bound.get("__member_readbacks__", []):
+        # `bound` maps argument names to their values; this one key holds a list of
+        # records instead, which `_process_arg` appends to (see the `setdefault`
+        # below). The cast states that invariant where the list is read back.
+        readbacks = cast("List[Dict[str, object]]",
+                         bound.get("__member_readbacks__", []))
+        for entry in readbacks:
             mem_obj:MemObject = entry["mem_obj"]
             if entry["need_read_back"]:
                 event:Event = mem_obj.read(cmd_queue)
@@ -499,7 +504,7 @@ class Kernel(CLObject):
 
         return events
 
-    def __check_args(self, args, kwargs)->Dict[str, Any]:
+    def __check_args(self, args, kwargs)->Dict[str, object]:
         for key in kwargs:
             if key not in self._args:
                 raise TypeError(f"{self._func_head} got an unexpected keyword argument '{key}'")
@@ -538,7 +543,7 @@ class Kernel(CLObject):
 
         return used_kwargs
     
-    def __detect_work_size(self, device:Device, bound:Dict[str, Any]):
+    def __detect_work_size(self, device:Device, bound:Dict[str, object]):
         max_shape = None
         for arg in self._arg_list:
             if not arg.need_read_back:
@@ -607,7 +612,7 @@ class Kernel(CLObject):
             total_local_size, max_shape, max_work_group_size=max_group, max_work_item_sizes=max_items)
         return global_work_size, local_work_size
 
-    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:Any, bound:Dict[str, Any]):
+    def _set_arg(self, cmd_queue:CommandQueue, index_or_name:Union[int, str], value:object, bound:Dict[str, object]):
         if isinstance(index_or_name, int):
             arg_info = self._arg_list[index_or_name]
             index = index_or_name
@@ -716,7 +721,7 @@ class Kernel(CLObject):
                         # Allocate a buffer, upload the bytes, and pass that pointer; a
                         # body that writes the members reads the buffer back like any
                         # written array.
-                        packed:Any = (value if isinstance(value, np.void)
+                        packed:object = (value if isinstance(value, np.void)
                                       else content_type.from_buffer_copy(
                                           ProgramParser._structure_bytes(value)))
                         data:np.ndarray = np.frombuffer(
@@ -742,7 +747,7 @@ class Kernel(CLObject):
                                     # A complex structure binds a complex array: the two
                                     # layouts are byte-identical, so nothing is converted --
                                     # the dtype view is the whole of it.
-                                    complex_dtype:Any = complex_of_dtype(content_dtype)
+                                    complex_dtype:object = complex_of_dtype(content_dtype)
                                     if complex_dtype is not None:
                                         used_value = np.ascontiguousarray(value).view(
                                             complex_dtype)
@@ -773,7 +778,7 @@ class Kernel(CLObject):
             # A backend-neutral Image becomes the descriptor this backend binds, with
             # its channel count and element type taken from the image itself.
             from ...image import Image as _Image
-            original_image:Any = value if isinstance(value, _Image) else None
+            original_image:object = value if isinstance(value, _Image) else None
             if original_image is not None:
                 # Only CLAMP is portable, and the sampler is built during translation, so
                 # this repeats the check to fail with the same message if that path was
@@ -835,7 +840,7 @@ class Kernel(CLObject):
 
     @override    
     @staticmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         return CL.clGetKernelInfo
 
     @override    

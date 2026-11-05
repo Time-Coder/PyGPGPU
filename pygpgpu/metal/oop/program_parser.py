@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from .program_info import ArgInfo, KernelInfo
+
+if TYPE_CHECKING:
+    from .compile_options import CompileOptions
 
 # `kernel void name(` at a declaration position. The qualifier may carry the
 # `[[...]]` attributes MSL allows between it and the return type, so the match
@@ -72,7 +75,7 @@ class ProgramParser:
         self._file_name:str = ""
         self._clean_code:str = ""
         self._kernel_infos:Dict[str, KernelInfo] = {}
-        self._structs:Dict[str, Any] = {}
+        self._structs:Dict[str, type] = {}
         # `kernel_import` reads this off every backend's parser to build the module's
         # `struct` members (see `_BackendSource.struct_types`). MSL structures are not
         # parsed here yet -- an MSL `struct Foo { ... }` has no host counterpart the
@@ -82,11 +85,11 @@ class ProgramParser:
         self._struct_types:Dict[str, type] = {}
         # The stub generator walks `_struct_infos` (name -> StructInfo) to declare the
         # ctypes classes in the `.pyi`. Empty for the same reason.
-        self._struct_infos:Dict[str, Any] = {}
+        self._struct_infos:Dict[str, object] = {}
 
     def parse(self, file_name:str, includes:Optional[List[str]]=None,
-              defines:Optional[Dict[str, Any]]=None,
-              options:Optional[Any]=None)->float:
+              defines:Optional[Dict[str, str]]=None,
+              options:Optional["CompileOptions"]=None)->float:
         """Read one source file and record its kernel layout.
 
         `options` is accepted and ignored: it carries the backend's build options
@@ -165,7 +168,7 @@ class ProgramParser:
             current.append(character)
         raise ValueError(f"{os.path.basename(start and 'the source')}: unterminated parameter list")
 
-    def _parse_parameter(self, text:str)->Optional[Dict[str, Any]]:
+    def _parse_parameter(self, text:str)->Optional[Dict[str, object]]:
         """One parameter declaration -> the descriptor a launch needs."""
         attributes:List[str] = [match.strip()
                                 for match in _ATTRIBUTE_INNER_RE.findall(text)]
@@ -230,5 +233,5 @@ class ProgramParser:
         return self._kernel_infos
 
     @property
-    def structs(self)->Dict[str, Any]:
+    def structs(self)->Dict[str, type]:
         return self._structs

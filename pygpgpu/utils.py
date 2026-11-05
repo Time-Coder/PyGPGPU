@@ -10,7 +10,7 @@ import time
 import asyncio
 from functools import lru_cache
 from collections.abc import Iterable
-from typing import Union, Any, Tuple, Optional, List
+from typing import List, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 
@@ -108,12 +108,12 @@ def _atomic_write(file_name:str, data:bytes)->None:
                 os.unlink(temp_name)
 
 
-def save_var(var:Any, file_name:str)->None:
+def save_var(var:object, file_name:str)->None:
     """Pickle `var` to its cache file, atomically (see `_atomic_write`)."""
     _ensure_directory(os.path.dirname(os.path.abspath(file_name)))
     _atomic_write(file_name, pickle.dumps(var))
 
-def load_var(file_name:str)->Any:
+def load_var(file_name:str)->object:
     with open(file_name, "rb") as file:
         return pickle.load(file)
     
@@ -372,7 +372,7 @@ def join_with_and(items):
     
     return ', '.join(items[:-1]) + ', and ' + items[-1]
 
-def device_limits(device: Any) -> Tuple[Optional[int], Optional[Tuple[int, ...]]]:
+def device_limits(device: object) -> Tuple[Optional[int], Optional[Tuple[int, ...]]]:
     """Best-effort (max_work_group_size, max_work_item_sizes) for a backend device.
 
     OpenCL devices expose these names directly; CUDA/HIP expose the equivalent
@@ -380,7 +380,7 @@ def device_limits(device: Any) -> Tuple[Optional[int], Optional[Tuple[int, ...]]
     (None, None) when nothing is available, so callers can fall back to a
     conservative default instead of failing.
     """
-    def read(name: str) -> Any:
+    def read(name: str) -> object:
         try:
             value = getattr(device, name, None)
             return value() if callable(value) else value
@@ -399,7 +399,10 @@ def device_limits(device: Any) -> Tuple[Optional[int], Optional[Tuple[int, ...]]
     value = read("max_work_item_sizes")
     if value is not None:
         try:
-            items = tuple(int(v) for v in value if int(v) > 0)
+            # What comes back is a per-axis sequence on every backend this reads; the cast
+            # states that, and the `except` below is what a value of another shape hits.
+            sequence = cast("Sequence[object]", value)
+            items = tuple(int(v) for v in sequence if int(v) > 0)
             if items:
                 max_items = items
         except Exception:
@@ -557,7 +560,7 @@ def get_print_info() -> bool:
     return False
 
 
-def settle_future(future:Any, error:Optional[BaseException]=None) -> None:
+def settle_future(future:object, error:Optional[BaseException]=None) -> None:
     """Complete an asyncio or concurrent future from any thread.
 
     Driver completion callbacks run on a driver thread, not on the event loop's.

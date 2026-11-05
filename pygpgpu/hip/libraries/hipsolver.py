@@ -29,8 +29,9 @@ skips its hipSOLVER case with the reason.
 """
 from __future__ import annotations
 
+import ctypes
 from ctypes import POINTER, c_char, c_double, c_float, c_int, c_void_p
-from typing import Any, Dict
+from typing import Dict
 
 from ...libraries import Library, resolve_dll
 from ._enums import hipsolverStatus_t
@@ -85,7 +86,7 @@ class HIPSOLVER(Library):
     _dll_name = "hipsolver.dll"
     _so_name = "libhipsolver.so"
 
-    _signatures:Dict[str, Dict[str, Any]] = {
+    _signatures:Dict[str, Dict[str, object]] = {
         # hipsolverStatus_t hipsolverDnCreate(hipsolverHandle_t* handle)
         "hipsolverDnCreate": {
             "args": {"handle": ptr_hipsolverHandle_t},
@@ -204,7 +205,7 @@ class HIPSOLVER(Library):
     _error_codes = _status_messages()
 
     @classmethod
-    def dll(cls)->Any:
+    def dll(cls)->ctypes.CDLL:
         """The library's DLL, loaded on first use."""
         if cls._dll_instance is None:
             from ctypes import CDLL

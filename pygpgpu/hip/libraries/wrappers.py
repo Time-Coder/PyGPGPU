@@ -14,9 +14,10 @@ arrays to the device and runs one library call, so it is not expressible inside 
 from __future__ import annotations
 
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_void_p
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from ...hip.driver import HIP, CUdeviceptr
 from ._enums import hipblasOperation_t, hipfftType
@@ -93,7 +94,7 @@ def free(pointer:CUdeviceptr)->None:
     HIP.hipFree(pointer)
 
 
-def to_device(array:Any)->CUdeviceptr:
+def to_device(array:ArrayLike)->CUdeviceptr:
     """Copy a host array to a fresh device buffer and return its address."""
     host = np.ascontiguousarray(array)
     pointer = allocate(host.nbytes)
@@ -132,7 +133,7 @@ def destroy_handle(handle:c_void_p)->None:
     HIPBLAS.hipblasDestroy(handle)
 
 
-def set_stream(handle:c_void_p, stream:Any)->None:
+def set_stream(handle:c_void_p, stream:object)->None:
     """Order a handle's work on a stream.
 
     The stream is the HIP driver's stream object or its raw id.
@@ -141,7 +142,7 @@ def set_stream(handle:c_void_p, stream:Any)->None:
     HIPBLAS.hipblasSetStream(handle, _stream_pointer(stream_id))
 
 
-def _stream_pointer(stream_id:Any)->c_void_p:
+def _stream_pointer(stream_id:object)->c_void_p:
     """The raw pointer of a stream id, whatever shape that id has."""
     if isinstance(stream_id, c_void_p):
         return stream_id
@@ -158,7 +159,7 @@ def _stream_pointer(stream_id:Any)->c_void_p:
 # ---------------------------------------------------------------------------
 
 
-def _element_type(dtype:np.dtype)->Any:
+def _element_type(dtype:np.dtype)->Optional[type]:
     """The ctypes scalar type of a numpy dtype, or None when it is not supported."""
     return {np.dtype(np.float32): c_float, np.dtype(np.float64): None}.get(dtype)
 
@@ -171,18 +172,18 @@ def _is_double(dtype:np.dtype)->bool:
     return dtype == np.dtype(np.float64)
 
 
-def _device_pointer(pointer:CUdeviceptr, target:Any)->Any:
+def _device_pointer(pointer:CUdeviceptr, target:type)->object:
     """A device address as the typed pointer an entry point wants."""
     return _cast(c_void_p(int(pointer.value)), target)
 
 
-def _cast(value:Any, target:Any)->Any:
+def _cast(value:object, target:type)->object:
     from ctypes import cast
 
     return cast(value, target)
 
 
-def _scalar_pointer(value:float, dtype:np.dtype)->Tuple[Any, Any]:
+def _scalar_pointer(value:float, dtype:np.dtype)->Tuple[object, object]:
     """A host scalar as the pointer a level-1 call reads it through, and its keeper."""
     holder = c_float(value) if _is_single(dtype) else None
     if holder is None:
@@ -192,7 +193,7 @@ def _scalar_pointer(value:float, dtype:np.dtype)->Tuple[Any, Any]:
     return byref(holder), holder
 
 
-def gemm(a:Any, b:Any, out:Optional[Any]=None, alpha:float=1.0, beta:float=0.0,
+def gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0, beta:float=0.0,
          transpose_a:bool=False, transpose_b:bool=False)->np.ndarray:
     """A general matrix multiply: ``out = alpha * op(a) @ op(b) + beta * out``.
 
@@ -305,15 +306,15 @@ def gemm(a:Any, b:Any, out:Optional[Any]=None, alpha:float=1.0, beta:float=0.0,
     return result
 
 
-def _double_pointer()->Any:
+def _double_pointer()->type:
     from ctypes import c_double
 
     return POINTER(c_double)
 
 
-def _gemm_call(handle:c_void_p, op_a:Any, op_b:Any, m:int, n:int, k:int,
-               alpha:Any, A:Any, lda:int, B:Any, ldb:int, beta:Any, C:Any, ldc:int,
-               dtype:np.dtype)->None:
+def _gemm_call(handle:c_void_p, op_a:object, op_b:object, m:int, n:int, k:int,
+               alpha:object, A:object, lda:int, B:object, ldb:int, beta:object,
+               C:object, ldc:int, dtype:np.dtype)->None:
     """One gemm, in the single or the double precision entry point."""
     if _is_single(dtype):
         HIPBLAS.hipblasSgemm(handle, op_a, op_b, c_int(m), c_int(n), c_int(k),
@@ -323,7 +324,7 @@ def _gemm_call(handle:c_void_p, op_a:Any, op_b:Any, m:int, n:int, k:int,
                          alpha, A, c_int(lda), B, c_int(ldb), beta, C, c_int(ldc))
 
 
-def axpy(alpha:float, x:Any, y:Any)->np.ndarray:
+def axpy(alpha:float, x:ArrayLike, y:ArrayLike)->np.ndarray:
     """``y = alpha * x + y``, elementwise, and return ``y``."""
     ensure_context()
     x_array = np.ascontiguousarray(x).reshape(-1)
@@ -358,7 +359,7 @@ def axpy(alpha:float, x:Any, y:Any)->np.ndarray:
     return y_array.reshape(np.shape(y))
 
 
-def scal(alpha:float, x:Any)->np.ndarray:
+def scal(alpha:float, x:ArrayLike)->np.ndarray:
     """``x = alpha * x``, elementwise, and return ``x``."""
     ensure_context()
     x_array = np.ascontiguousarray(x).reshape(-1)
@@ -385,7 +386,7 @@ def scal(alpha:float, x:Any)->np.ndarray:
     return x_array.reshape(np.shape(x))
 
 
-def dot(x:Any, y:Any)->float:
+def dot(x:ArrayLike, y:ArrayLike)->float:
     """The dot product of two 1-D arrays."""
     ensure_context()
     x_array = np.ascontiguousarray(x).reshape(-1)
@@ -424,7 +425,7 @@ def dot(x:Any, y:Any)->float:
     return float(result[0])
 
 
-def lt_gemm(a:Any, b:Any, out:Optional[Any]=None, alpha:float=1.0, beta:float=0.0,
+def lt_gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0, beta:float=0.0,
             transpose_a:bool=False, transpose_b:bool=False)->np.ndarray:
     """A general matrix multiply through hipBLASLt, the newer matmul path.
 
@@ -528,7 +529,7 @@ def lt_gemm(a:Any, b:Any, out:Optional[Any]=None, alpha:float=1.0, beta:float=0.
 # ---------------------------------------------------------------------------
 
 
-def rfft(x:Any)->np.ndarray:
+def rfft(x:ArrayLike)->np.ndarray:
     """The 1-D real-to-complex transform of a real array.
 
     The result is ``n/2 + 1`` complex numbers, in the same layout as
@@ -564,7 +565,7 @@ def rfft(x:Any)->np.ndarray:
     return spectrum
 
 
-def irfft(spectrum:Any, n:Optional[int]=None)->np.ndarray:
+def irfft(spectrum:ArrayLike, n:Optional[int]=None)->np.ndarray:
     """The 1-D complex-to-real transform of a spectrum.
 
     ``n`` is the length of the signal the spectrum came from; it defaults to

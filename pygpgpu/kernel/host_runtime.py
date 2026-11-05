@@ -37,7 +37,7 @@ def get_host_frame() -> Optional["PythonFrame"]:
     return getattr(_FRAME, "frame", None)
 
 
-def _dimension(dim: Any, what: str) -> int:
+def _dimension(dim: object, what: str) -> int:
     """Validate a work-size dimension argument."""
     if not isinstance(dim, int) or isinstance(dim, bool) or dim not in (0, 1, 2):
         raise SyntaxError(f"{what}(dim) requires a dimension of 0, 1 or 2") from None
@@ -112,7 +112,7 @@ def _flat_position(array: "np.ndarray[Any, Any]", index: Union[int, Tuple[int, .
 
 def atomic_in_place(array: "np.ndarray[Any, Any]",
                     index: Union[int, Tuple[int, ...]],
-                    apply: Callable[[Any], Any]) -> Any:
+                    apply: Callable[[Any], Any]) -> object:
     """Read-modify-write one element of ``array`` and return the previous value.
 
     ``index`` is a *flat* offset, because that is what the device code means: the emitted
@@ -121,10 +121,10 @@ def atomic_in_place(array: "np.ndarray[Any, Any]",
     instead, so the buffer is flattened first -- and, being a view of a contiguous array,
     the write still lands in the caller's data.
     """
-    store: Any = array
+    store: object = array
     if getattr(array, "ndim", 1) > 1:
         store = array.reshape(-1)
     position: int = _flat_position(array, index)
-    previous: Any = store[position]
+    previous: object = store[position]
     store[position] = apply(previous)
     return previous

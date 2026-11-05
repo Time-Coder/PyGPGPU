@@ -85,7 +85,10 @@ class ObjC:
         return ObjC.lib.sel_registerName(name.encode("ascii"))
 
     @staticmethod
-    def send(obj:int, sel_name:str, argtypes:tuple = (), restype = c_void_p, *args)->Any:
+    # The result is whatever `restype` names, and `restype` is a runtime argument to
+    # a ctypes call, so no annotation can be more specific than this one.
+    def send(obj:int, sel_name:str, argtypes:tuple = (), restype = c_void_p,
+             *args)->Any:
         """Send one message: `[obj sel_name: ...args]`.
 
         `argtypes`/`restype` describe the CALLED method's signature, set per

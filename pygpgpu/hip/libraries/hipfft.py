@@ -17,8 +17,9 @@ The declarations these come from are ROCm's `include/hipfft/hipfft.h`.
 """
 from __future__ import annotations
 
+import ctypes
 from ctypes import POINTER, c_int, c_size_t, c_void_p
-from typing import Any, Dict
+from typing import Dict
 
 from ...libraries import Library, resolve_dll
 from ._enums import hipfftResult
@@ -72,7 +73,7 @@ class HIPFFT(Library):
     _dll_name = "hipfft.dll"
     _so_name = "libhipfft.so"
 
-    _signatures:Dict[str, Dict[str, Any]] = {
+    _signatures:Dict[str, Dict[str, object]] = {
         # hipfftResult hipfftCreate(hipfftHandle* plan)
         "hipfftCreate": {
             "args": {"plan": ptr_hipfftHandle},
@@ -146,7 +147,7 @@ class HIPFFT(Library):
     _no_error_check = ["hipfftGetVersion"]
 
     @classmethod
-    def dll(cls)->Any:
+    def dll(cls)->ctypes.CDLL:
         """The library's DLL, loaded on first use."""
         if cls._dll_instance is None:
             from ctypes import CDLL

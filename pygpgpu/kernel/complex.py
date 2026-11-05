@@ -28,7 +28,7 @@ spelled on a device.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -80,7 +80,7 @@ _DTYPES:Dict[str, np.dtype] = {"complex64": np.dtype(np.complex64),
 _REAL_NAMES:Dict[str, str] = {"complex64": "float", "complex128": "double"}
 
 
-def is_complex(dtype:Any) -> bool:
+def is_complex(dtype:object) -> bool:
     """True when a dtype is one of the two complex widths this package supports."""
     if not isinstance(dtype, np.dtype):
         try:
@@ -90,12 +90,12 @@ def is_complex(dtype:Any) -> bool:
     return dtype.name in _TYPE_NAMES
 
 
-def complex_dtype_of(dtype:Any) -> Optional[np.dtype]:
+def complex_dtype_of(dtype:object) -> Optional[np.dtype]:
     """The complex dtype itself, when `dtype` is one; None otherwise."""
     return np.dtype(dtype) if is_complex(dtype) else None
 
 
-def complex_type_name(dtype:Any) -> Optional[str]:
+def complex_type_name(dtype:object) -> Optional[str]:
     """The fixed C type name a complex dtype translates to, or None.
 
     A complex value gets a name the header already knows instead of the content hash every
@@ -106,7 +106,7 @@ def complex_type_name(dtype:Any) -> Optional[str]:
     return _TYPE_NAMES[np.dtype(dtype).name]
 
 
-def dtype_for_type_name(name:Any) -> Optional[np.dtype]:
+def dtype_for_type_name(name:object) -> Optional[np.dtype]:
     """The complex dtype behind a fixed C name (`c64` / `c128`), or None."""
     if not isinstance(name, str):
         return None
@@ -116,12 +116,12 @@ def dtype_for_type_name(name:Any) -> Optional[np.dtype]:
     return None
 
 
-def is_complex_type(type_name:Any) -> bool:
+def is_complex_type(type_name:object) -> bool:
     """True when a translated device type name is one of the fixed complex names."""
     return dtype_for_type_name(type_name) is not None
 
 
-def needs(dtype:Any) -> Optional[str]:
+def needs(dtype:object) -> Optional[str]:
     """The macro a generated source defines to compile this complex width's block."""
     if not is_complex(dtype):
         return None
@@ -138,7 +138,7 @@ def mixed_needs() -> tuple:
     return tuple(_NEED_MACROS[name] for name in ("complex64", "complex128"))
 
 
-def wider(first:Any, second:Any) -> Optional[np.dtype]:
+def wider(first:object, second:object) -> Optional[np.dtype]:
     """The complex dtype a mixed pair promotes to; None when neither operand is one.
 
     The rule is numpy's: a double operand widens the whole operation, so a `complex64` meeting
@@ -153,12 +153,12 @@ def wider(first:Any, second:Any) -> Optional[np.dtype]:
     return _DTYPES["complex64"]
 
 
-def _is_wide(dtype:Any) -> bool:
+def _is_wide(dtype:object) -> bool:
     """True for a complex128."""
     return is_complex(dtype) and np.dtype(dtype).name == "complex128"
 
 
-def _any_double(first:Any, second:Any) -> bool:
+def _any_double(first:object, second:object) -> bool:
     """True when either operand carries the double width, complex or real."""
     for candidate in (first, second):
         if candidate is None:
@@ -172,7 +172,7 @@ def _any_double(first:Any, second:Any) -> bool:
     return False
 
 
-def wider_dtype(dtype:Any) -> Optional[np.dtype]:
+def wider_dtype(dtype:object) -> Optional[np.dtype]:
     """The double form of one complex dtype, or None when it is not a complex width."""
     return _DTYPES["complex128"] if is_complex(dtype) else None
 
@@ -182,7 +182,7 @@ def member_names() -> tuple:
     return _MEMBERS
 
 
-def scalar_width(dtype:Any) -> Optional[str]:
+def scalar_width(dtype:object) -> Optional[str]:
     """The translator's scalar type name of one component (`float` / `double`)."""
     if not is_complex(dtype):
         return None

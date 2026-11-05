@@ -19,7 +19,7 @@ Two things differ from CUDA and are load-bearing:
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -28,6 +28,9 @@ from ...constants import KernelFlags
 
 from .buffer import Buffer
 from .event import Event
+
+if TYPE_CHECKING:
+    from .context import CommandQueue
 
 
 class VarInfo:
@@ -57,8 +60,8 @@ class VarInfo:
         self.array_shape = array_shape
         self.type_qualifiers = list(type_qualifiers or [])
         self.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed) if kernel_flags is None else kernel_flags
-        self.value: Any = None
-        self.mem_obj: Optional[Any] = None
+        self.value: object = None
+        self.mem_obj: Optional[Buffer] = None
 
     @property
     def is_ptr(self)->bool:
@@ -94,7 +97,8 @@ class VarInfo:
     def need_read_back(self)->bool:
         return (self.is_ptr and bool(self.kernel_flags & KernelFlags.Writed))
 
-    def use_buffer(self, cmd_queue:Any, data:np.ndarray)->Tuple[Buffer, Optional[Event]]:
+    def use_buffer(self, cmd_queue:"CommandQueue",
+                   data:np.ndarray)->Tuple[Buffer, Optional[Event]]:
         if isinstance(data, gnp.ndarray):
             used_buffer, event = data._to_device(cmd_queue, self.name,
                                                  kernel_flags=self.kernel_flags)
@@ -124,7 +128,7 @@ class ArgInfo(VarInfo):
         self.dispatch_supplied:bool = False
         self.member_infos:Dict[str, "VarInfo"] = {}
 
-    def check_type(self, value:Any)->None:
+    def check_type(self, value:object)->None:
         """Validate one launch argument against its declared device type."""
         base = self.base_type_str
         if self.is_ptr:

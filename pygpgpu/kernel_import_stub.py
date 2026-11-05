@@ -11,7 +11,7 @@ imported from a single-backend file.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 _STUB_HEADER = """from typing import override, overload, Tuple
@@ -50,14 +50,14 @@ def _annotation_for(type_str:str, backend:str)->str:
     """The annotation one parsed parameter carries, in the backend stubs' vocabulary."""
     from .kernel_import import _scalar_tables
 
-    tables:Dict[str, Any] = _scalar_tables(backend)
+    tables:Dict[str, object] = _scalar_tables(backend)
     stripped:str = type_str.strip()
     pointer:bool = stripped.endswith("*")
     base:str = (stripped[:-1].strip() if pointer else stripped).strip()
 
     if pointer:
         dtype_name:str = base
-        scalar:Any = tables.get("basic", {}).get(base)
+        scalar:object = tables.get("basic", {}).get(base)
         if scalar is not None:
             import numpy as np
             dtype_name = "np." + np.dtype(scalar).name
@@ -124,8 +124,8 @@ def _call_block(parameters:List[Tuple[str, str]], backend_note:str, overload:boo
     return call + submit + async_call
 
 
-def generate_pyi_for(sources:Dict[str, str], backends:Dict[str, Any],
-                     kernels:Dict[str, Any])->None:
+def generate_pyi_for(sources:Dict[str, str], backends:Dict[str, object],
+                     kernels:Dict[str, object])->None:
     """Write `<stem>.pyi` next to the module's first source (probe order)."""
     from .kernel_import import _BACKEND_EXTENSIONS
 
@@ -138,7 +138,7 @@ def generate_pyi_for(sources:Dict[str, str], backends:Dict[str, Any],
     # Structures, from the first backend that declares each one.
     seen_structs:set = set()
     for backend, _extension in _BACKEND_EXTENSIONS:
-        source:Optional[Any] = backends.get(backend)
+        source:Optional[object] = backends.get(backend)
         if source is None:
             continue
         for struct_name, struct_info in source.parser._struct_infos.items():

@@ -14,7 +14,7 @@ per entry point, and the kernel owns its pipeline.
 from __future__ import annotations
 
 from ctypes import POINTER, byref, c_char_p, c_void_p
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from ..driver.metal import _wait_ready
 from ..driver.objc import ObjC
@@ -27,13 +27,18 @@ from .compile_options import CompileOptions, from_mapping
 from .program_info import KernelInfo
 from .program_parser import ProgramParser
 
+if TYPE_CHECKING:
+    from .context import Context
+    from .devices import Device
+
 
 class Program:
     """One `MTLLibrary` built from a source file, plus the layouts of its kernels."""
 
     def __init__(self, file_name:str, includes:Optional[List[str]]=None,
-                 defines:Optional[Dict[str, Any]]=None, type_checked:bool=False,
-                 device:Any=None, options:Any=None, **build_options:Any)->None:
+                 defines:Optional[Dict[str, str]]=None, type_checked:bool=False,
+                 device:object=None, options:Optional[CompileOptions]=None,
+                 **build_options:object)->None:
         # The parser reads the signature the launch binds arguments to; it runs
         # before the compile so a source the scanner cannot read is refused with
         # the scanner's own message rather than the compiler's.
@@ -53,8 +58,8 @@ class Program:
         _wait_ready()
         context = (device.default_context if device is not None
                    else _default_context())
-        self._context:Any = context
-        self._device:Any = context.device
+        self._context:"Context" = context
+        self._device:"Device" = context.device
 
         library_id = self._compile(self._parser.clean_code, self.compile_options)
         if not library_id:
@@ -102,11 +107,11 @@ class Program:
         return self._library_id
 
     @property
-    def context(self)->Any:
+    def context(self)->"Context":
         return self._context
 
     @property
-    def device(self)->Any:
+    def device(self)->"Device":
         return self._device
 
     @property
@@ -122,7 +127,7 @@ class Program:
         return list(self.kernel_infos.keys())
 
     @property
-    def structs(self)->Dict[str, Any]:
+    def structs(self)->Dict[str, type]:
         return self._parser.structs
 
     @property
@@ -148,7 +153,7 @@ class Program:
             return self.kernels[name]
         raise KeyError(name)
 
-    def __getattr__(self, name:str)->Any:
+    def __getattr__(self, name:str)->MetalKernel:
         if name.startswith("_"):
             raise AttributeError(name)
         if name in self.kernel_infos:
@@ -156,7 +161,7 @@ class Program:
         raise AttributeError(f"the program {self._file_name} declares no kernel {name!r}")
 
 
-def _default_context()->Any:
+def _default_context()->"Context":
     """The context a Program compiles for when the caller did not name a device."""
     from .devices import Devices
     return Devices[0].default_context

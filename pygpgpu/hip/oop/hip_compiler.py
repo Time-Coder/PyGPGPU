@@ -12,7 +12,7 @@ import glob
 import os
 import platform
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from ...utils import modify_time
 from .program_parser import ProgramParser
@@ -26,7 +26,7 @@ class HipCompiler:
     _include_dirs:Optional[List[str]] = None
 
     def __init__(self, file_name:str="", includes:Optional[List[str]]=None,
-                 defines:Optional[Dict[str, Any]]=None, options:Any=None,
+                 defines:Optional[Dict[str, object]]=None, options:object=None,
                  program_parser:Optional[ProgramParser]=None):
         self._objects:Dict[str, bytes] = {}   # (md5, arch) -> code object bytes
 
@@ -110,7 +110,7 @@ class HipCompiler:
 
     # ---------- compilation ----------
 
-    def code_object(self, device:Any)->bytes:
+    def code_object(self, device:object)->bytes:
         """Compile for the device architecture (gfx1036 etc.) and return code object bytes hipModuleLoadData can load directly."""
         arch:str = device.arch
         parser:ProgramParser = self._program_parser

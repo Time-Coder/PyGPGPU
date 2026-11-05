@@ -32,12 +32,24 @@ Two bindings are Metal's own and are load-bearing:
 from __future__ import annotations
 
 import ctypes
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, NoReturn, Optional, Tuple, Union
 
 import numpy as np
 
 from ..driver.metal import _wait_ready
 from ..driver.objc import ObjC
+
+if TYPE_CHECKING:
+    from .buffer import Buffer
+    from .program import Program
+    from .program_info import ArgInfo
+
+# A bracket side: one axis count, or one per axis.
+Extents = Union[int, Tuple[int, ...]]
+
+# What `_bind_args` produces per argument: the index to bind at, the buffer a pointer
+# argument uploaded (or the bytes a scalar occupies), and whether it is a buffer.
+BoundEntry = Tuple[int, Union["Buffer", bytes], bool]
 
 
 # MTLSize is a three-NSUInteger struct, passed by value to the dispatch calls.
@@ -49,7 +61,7 @@ class MTLSize(ctypes.Structure):
                 ("depth", ctypes.c_size_t)]
 
 
-def _axis_extents(value:Any, what:str)->Tuple[int, int, int]:
+def _axis_extents(value:Extents, what:str)->Tuple[int, int, int]:
     """One side of the bracket as Metal's three axes, padded with 1.
 
     `MTLSize` is always three-dimensional, while a bracket may name one axis (`4`)
@@ -84,7 +96,7 @@ _SCALAR_SIZES:Dict[str, int] = {
 }
 
 
-def _scalar_bytes(device_type:str, value:Any)->bytes:
+def _scalar_bytes(device_type:str, value:object)->bytes:
     """One scalar argument as the bytes the device's own type would hold.
 
     A kernel's extent parameter is declared `const int`, so the host has to send
@@ -154,10 +166,10 @@ def _pack_integer(device_type:str, size:int, value:int, signed:bool)->bytes:
 class MetalKernel:
     """One Metal entry point: its argument layout and its compute pipeline state."""
 
-    def __init__(self, program:Any, name:str)->None:
-        self._program:Any = program
+    def __init__(self, program:"Program", name:str)->None:
+        self._program:"Program" = program
         self._name:str = name
-        self.args:Dict[str, Any] = {}
+        self.args:Dict[str, "ArgInfo"] = {}
         # The device signature's trailing attribute parameters, which the threadgroup
         # dispatch fills in. They are not bindable, and `args` therefore stops before
         # them -- which is what makes a host-bound parameter's position in `args` equal
@@ -165,7 +177,7 @@ class MetalKernel:
         self.dispatch_parameters:List[str] = []
         self.type_checked:bool = False
         self._pipeline:Optional[int] = None
-        self._bound_entries:List[Any] = []
+        self._bound_entries:List[Tuple["Buffer", object, bool]] = []
 
     def __repr__(self)->str:
         return f"MetalKernel({self._name})"
@@ -175,7 +187,7 @@ class MetalKernel:
         return self._name
 
     @property
-    def program(self)->Any:
+    def program(self)->"Program":
         return self._program
 
     @property
@@ -223,8 +235,8 @@ class MetalKernel:
         return [name for name in self.args
                 if not getattr(self.args[name], "dispatch_supplied", False)]
 
-    def _bind_args(self, args:Tuple[Any, ...], kwargs:Dict[str, Any]
-                   )->List[Tuple[int, Any, bool]]:
+    def _bind_args(self, args:Tuple[object, ...],
+                   kwargs:Dict[str, object])->List[BoundEntry]:
         """Upload every host-bound argument, paired with its index and its kind.
 
         Each entry is `(index, value, is_buffer)`. A pointer argument becomes a
@@ -260,11 +272,11 @@ class MetalKernel:
                 f"among the bindable arguments; they are filled in by the dispatch and "
                 f"must not be bound, so every buffer index after them would be wrong")
         self._bound_entries = []
-        bound:List[Tuple[int, Any, bool]] = []
+        bound:List[BoundEntry] = []
         for position, name in enumerate(names):
             index:int = list(self.args).index(name)
-            argument:Any = args[position]
-            arg_info:Any = self.args[name]
+            argument:object = args[position]
+            arg_info:"ArgInfo" = self.args[name]
             if arg_info.is_ptr:
                 if not isinstance(argument, np.ndarray):
                     raise TypeError(
@@ -287,11 +299,11 @@ class MetalKernel:
                               False))
         return bound
 
-    def __getitem__(self, work_sizes:Any)->"BoundKernel":
+    def __getitem__(self, work_sizes:Optional[Extents])->"BoundKernel":
         """Bind a CUDA-style `(blocks, threads_per_block)` work size."""
         return BoundKernel(self, work_sizes)
 
-    def __call__(self, *args:Any, **kwargs:Any)->None:
+    def __call__(self, *args:object, **kwargs:object)->None:
         self.__getitem__(None)(*args, **kwargs)
 
     # `@kernel` offers `submit`/`async_call` on every backend, and a Metal kernel
@@ -299,14 +311,14 @@ class MetalKernel:
     # asynchronous form needs a completion handler on the command buffer, which is
     # the one thing the synchronous launch here does not build. The message says
     # what to use instead, which is what a user reaching for a future needs.
-    def submit(self, *args:Any, **kwargs:Any)->Any:
+    def submit(self, *args:object, **kwargs:object)->NoReturn:
         raise NotImplementedError(
             "asynchronous launches are not supported on the metal backend yet: the "
             "launch path waits on its command buffer (`waitUntilCompleted`), and the "
             "future-based form needs a completion handler. Call the kernel directly "
             "(it is synchronous), or run it on the opencl or cuda backend")
 
-    def async_call(self, *args:Any, **kwargs:Any)->Any:
+    def async_call(self, *args:object, **kwargs:object)->NoReturn:
         raise NotImplementedError(
             "asynchronous launches are not supported on the metal backend yet: the "
             "launch path waits on its command buffer (`waitUntilCompleted`), and the "
@@ -317,18 +329,19 @@ class MetalKernel:
 class BoundKernel:
     """A kernel with its work size fixed: the object a launch is made on."""
 
-    def __init__(self, kernel:MetalKernel, work_sizes:Any)->None:
+    def __init__(self, kernel:MetalKernel,
+                 work_sizes:Optional[Extents])->None:
         self._kernel = kernel
         self._work_sizes = work_sizes
 
-    def __call__(self, *args:Any, **kwargs:Any)->None:
+    def __call__(self, *args:object, **kwargs:object)->None:
         _wait_ready()
         kernel = self._kernel
         bound = kernel._bind_args(args, kwargs)
 
-        command_buffer:Any = kernel.program.context.command_queue.new_command_buffer()
+        command_buffer:int = kernel.program.context.command_queue.new_command_buffer()
         try:
-            encoder:Any = ObjC.send_ptr(command_buffer, "computeCommandEncoder")
+            encoder:int = ObjC.send_ptr(command_buffer, "computeCommandEncoder")
             if not encoder:
                 raise RuntimeError("Metal could not create a compute command encoder")
             ObjC.send(encoder, "setComputePipelineState:", (ctypes.c_void_p,),
@@ -370,14 +383,14 @@ class BoundKernel:
 
     def _dispatch_shape(self)->Tuple[Tuple[int, ...], Tuple[int, ...]]:
         """The `(threadgroups, threads_per_threadgroup)` pair for this launch."""
-        work_sizes:Any = self._work_sizes
+        work_sizes:Optional[Extents] = self._work_sizes
         if work_sizes is None:
             # Automatic: the caller did not bracket, so one threadgroup of one
             # thread is the safe launch -- work items that ask for an id get 0.
             return (1, 1, 1), (1, 1, 1)
         if isinstance(work_sizes, int):
             work_sizes = (work_sizes,)
-        extents:List[Any] = list(work_sizes)
+        extents:List[Extents] = list(work_sizes)
         if len(extents) == 1:
             # A bare item count: that many one-thread groups, so every item is one
             # thread. The shared work-size code derived the same total on the other
@@ -398,7 +411,8 @@ class BoundKernel:
         return threadgroups, threads
 
 
-def _finish_buffer(buffer:Any, host_value:Any, need_read_back:bool)->None:
+def _finish_buffer(buffer:"Buffer", host_value:object,
+                   need_read_back:bool)->None:
     """Copy a written buffer back into the caller's array and release its claim.
 
     `need_read_back` comes from the argument's `ArgInfo` -- the shared read/write

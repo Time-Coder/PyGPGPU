@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 from . import builtins as _namespace
 
 # name -> the function object published under it.
-BUILTIN_FUNCTIONS: Dict[str, Any] = {
+BUILTIN_FUNCTIONS: Dict[str, object] = {
     name: getattr(_namespace, name) for name in _namespace.__all__}
 
 # The same table the other way round, keyed by the function object itself.
@@ -28,7 +28,7 @@ BUILTIN_NAMES_BY_FUNCTION: Dict[Any, str] = {
     function: name for name, function in BUILTIN_FUNCTIONS.items()}
 
 
-def builtin_name_of(target: Any) -> Optional[str]:
+def builtin_name_of(target: object) -> Optional[str]:
     """The builtin name ``target`` is, or None when it is not one of ours.
 
     Used for a call whose callee was resolved through the kernel's globals: the answer is
@@ -37,6 +37,6 @@ def builtin_name_of(target: Any) -> Optional[str]:
     return BUILTIN_NAMES_BY_FUNCTION.get(target)
 
 
-def builtin_function(name: str) -> Optional[Any]:
+def builtin_function(name: str) -> Optional[object]:
     """The function published as ``name``, or None when there is no such builtin."""
     return BUILTIN_FUNCTIONS.get(name)

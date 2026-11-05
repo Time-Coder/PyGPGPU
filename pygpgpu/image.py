@@ -57,7 +57,7 @@ class StrEnum(str, Enum):
         return str(self.value)
 
     @classmethod
-    def parse(cls, value:Any, what:str)->"StrEnum":
+    def parse(cls, value:object, what:str)->"StrEnum":
         """Accept a member, its value, or its name (case-insensitive)."""
         if isinstance(value, cls):
             return value

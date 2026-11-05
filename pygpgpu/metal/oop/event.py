@@ -12,7 +12,7 @@ its public shape.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional
+from typing import Callable, List, Optional
 
 
 class Event:
@@ -20,20 +20,21 @@ class Event:
 
     def __init__(self, error:Optional[BaseException]=None)->None:
         self._error:Optional[BaseException] = error
-        self._callbacks:List[Callable[["Event", Any], None]] = []
+        self._callbacks:List[Callable[["Event", Optional[BaseException]], None]] = []
 
     @property
     def finished(self)->bool:
         return True
 
     @property
-    def status(self)->Any:
+    def status(self)->Optional[BaseException]:
         return self._error
 
     def wait(self)->None:
         """Block until the work this event describes has finished (already true)."""
 
-    def add_callback(self, callback:Callable[["Event", Any], None])->None:
+    def add_callback(
+            self, callback:Callable[["Event", Optional[BaseException]], None])->None:
         """Run `callback` now: this event is already complete.
 
         Metal reports completion through the command buffer's status and the launch
@@ -43,7 +44,8 @@ class Event:
         """
         callback(self, self._error)
 
-    def on_completed_callbacks_add(self, callback:Callable[["Event", Any], None])->None:
+    def on_completed_callbacks_add(
+            self, callback:Callable[["Event", Optional[BaseException]], None])->None:
         """Register a completion callback and run it, exactly as `add_callback` does.
 
         This used to append to a list nothing ever drained: the callback was accepted
@@ -57,5 +59,6 @@ class Event:
         callback(self, self._error)
 
     @property
-    def on_completed_callbacks(self)->List[Callable[["Event", Any], None]]:
+    def on_completed_callbacks(
+            self)->List[Callable[["Event", Optional[BaseException]], None]]:
         return self._callbacks

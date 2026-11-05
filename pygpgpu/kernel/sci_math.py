@@ -21,7 +21,6 @@ device's, not the model's).
 from __future__ import annotations
 
 import math
-from typing import Any
 
 __all__ = [
     # both backends (the ones pygf does not publish are defined here; the ones it does
@@ -46,7 +45,7 @@ __all__ = [
 ]
 
 
-def _scalar_only(name:str, value:Any)->Any:
+def _scalar_only(name:str, value:object)->object:
     """Refuse a vector argument: CUDA spells these for scalars only."""
     if hasattr(value, "_fields_") and hasattr(value, "__len__"):
         raise TypeError(
@@ -351,7 +350,7 @@ def exact_fma(x:float, y:float, z:float)->float:
     _scalar_only("exact_fma", z)
     # `math.fma` is the fused form, when the platform has it; the plain product plus is
     # the same to within one rounding.
-    fused:Any = getattr(math, "fma", None)
+    fused:object = getattr(math, "fma", None)
     return fused(x, y, z) if fused is not None else x * y + z
 
 

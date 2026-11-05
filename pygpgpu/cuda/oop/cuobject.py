@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ctypes import c_int, c_size_t, c_void_p, cast, pointer, POINTER
-from typing import Dict, Any, Union, TYPE_CHECKING
+from typing import Dict, Union, TYPE_CHECKING
 from abc import ABC, abstractmethod
 import weakref
 
@@ -49,7 +49,7 @@ class CUObject(ABC):
 
     def __init__(self, id:Union[int, c_void_p]):
         self._id:Union[int, c_void_p] = id
-        self._info:Dict[str, Any] = {}
+        self._info:Dict[str, object] = {}
         self._finalizer = weakref.finalize(self, self._release, self._id)
         CUObject._instances[self.__hash__()] = self
 
@@ -97,7 +97,7 @@ class CUObject(ABC):
         else:
             return self._id
 
-    def __getattr__(self, name:str)->Any:
+    def __getattr__(self, name:str)->object:
         if name in self._info:
             return self._info[name]
 
@@ -147,7 +147,7 @@ class CUObject(ABC):
 
     @staticmethod
     @abstractmethod
-    def _get_info_func()->Any:
+    def _get_info_func()->object:
         pass
 
     @staticmethod
@@ -157,7 +157,7 @@ class CUObject(ABC):
 
     @staticmethod
     @abstractmethod
-    def _release_func()->Any:
+    def _release_func()->object:
         pass
 
     @classmethod

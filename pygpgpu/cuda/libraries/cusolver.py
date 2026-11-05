@@ -22,7 +22,7 @@ the tests skip with that reason instead of failing.
 from __future__ import annotations
 
 from ctypes import c_char, c_int, c_float, c_double, c_void_p, POINTER
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ...constants import IntEnum
 from ._base import Library
@@ -61,7 +61,7 @@ cudaStream_t = c_void_p
 class CUSOLVERInfo:
     """cuSOLVER's signature table and its status codes."""
 
-    func_signatures:Dict[str, Dict[str, Any]] = {
+    func_signatures:Dict[str, Dict[str, object]] = {
         # cusolverStatus_t cusolverDnCreate(cusolverDnHandle_t *handle)
         "cusolverDnCreate": {
             "args": {

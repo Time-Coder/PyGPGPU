@@ -19,7 +19,9 @@ are the same; only the names change.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import ctypes
+
+from typing import Dict, List
 
 from ...cuda.libraries import cublas as _cuda_cublas
 from ...cuda.libraries import cublaslt as _cuda_cublaslt
@@ -38,8 +40,8 @@ HIP_DLL_ROOTS:List[str] = [
 ]
 
 
-def hip_signatures_from(cuda_signatures:Dict[str, Dict[str, Any]],
-                        hip_library:str)->Dict[str, Dict[str, Any]]:
+def hip_signatures_from(cuda_signatures:Dict[str, Dict[str, object]],
+                        hip_library:str)->Dict[str, Dict[str, object]]:
     """The HIP signature table, derived from the CUDA one.
 
     The parameters are the CUDA ones -- the API is the same -- and only the name of each
@@ -51,7 +53,7 @@ def hip_signatures_from(cuda_signatures:Dict[str, Dict[str, Any]],
     a cuBLASLt call would end up in hipBLASLt. The ctypes types themselves are shared
     safely, they are immutable.
     """
-    table:Dict[str, Dict[str, Any]] = {}
+    table:Dict[str, Dict[str, object]] = {}
     for cuda_symbol, signature in cuda_signatures.items():
         hip_name = hip_symbol(hip_library, cuda_symbol)
         if hip_name is None:
@@ -61,7 +63,7 @@ def hip_signatures_from(cuda_signatures:Dict[str, Dict[str, Any]],
     return table
 
 
-def _no_error_check(cuda_no_error_check:List[str], signatures:Dict[str, Dict[str, Any]],
+def _no_error_check(cuda_no_error_check:List[str], signatures:Dict[str, Dict[str, object]],
                     hip_library:str)->List[str]:
     """The entries whose return value is not an error code, under their HIP names."""
     names:List[str] = []
@@ -112,7 +114,7 @@ class _HipLibrary(Library):
     """A HIP library: the CUDA binding machinery with HIP's DLL search."""
 
     @classmethod
-    def dll(cls)->Any:
+    def dll(cls)->ctypes.CDLL:
         """The library's DLL, loaded on first use."""
         if cls._dll_instance is None:
             from ctypes import CDLL

@@ -15,7 +15,7 @@ own numbering, and a code that means "success" in one library does not in the ot
 from __future__ import annotations
 
 from ctypes import c_char_p, c_int, c_float, c_double, c_void_p, POINTER
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ...constants import IntEnum
 from ._base import Library
@@ -118,7 +118,7 @@ class CUBLASInfo:
     type it returns, which is what the ``Func`` wrapper binds on first use.
     """
 
-    func_signatures:Dict[str, Dict[str, Any]] = {
+    func_signatures:Dict[str, Dict[str, object]] = {
         # cublasStatus_t cublasCreate_v2(cublasHandle_t *handle)
         "cublasCreate_v2": {
             "args": {

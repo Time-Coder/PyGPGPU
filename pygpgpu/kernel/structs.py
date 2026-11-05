@@ -18,7 +18,8 @@ between runs would defeat it.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Dict, List, Optional, Tuple
+from types import CodeType, ModuleType
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy.typing import DTypeLike
@@ -107,7 +108,7 @@ def field_type(field_dtype:DTypeLike, backend:str)->Tuple[str, str]:
     from ..vec_types.layout import _vector_dtype_name
 
     dtype:np.dtype = np.dtype(field_dtype)
-    shape:Any = None
+    shape:Optional[Tuple[int, ...]] = None
     if dtype.subdtype is not None:
         base_dtype, shape = dtype.subdtype
         dtype = base_dtype
@@ -141,7 +142,7 @@ def structure_fields(dtype:np.dtype, backend:str)->List[str]:
     """One C member declaration per field, in declaration order."""
     members:List[str] = []
     for name in dtype.names or ():
-        field_dtype:Any = dtype.fields[name][0]
+        field_dtype:object = dtype.fields[name][0]
         base, suffix = field_type(field_dtype, backend)
         members.append(f"{base} {name}{suffix}")
     return members
@@ -170,14 +171,14 @@ def _class_source_file(cls:type) -> str:
     """The file a class was written in, from any function it defines."""
     import sys
 
-    module:Any = sys.modules.get(getattr(cls, "__module__", ""))
+    module:Optional[ModuleType] = sys.modules.get(getattr(cls, "__module__", ""))
     module_file:str = getattr(module, "__file__", "") or ""
     if module_file:
         return module_file
     # A class a test module created on the fly can name a module without a file; its own
     # method still carries the source location.
     for value in getattr(cls, "__dict__", {}).values():
-        code:Any = getattr(getattr(value, "__func__", value), "__code__", None)
+        code:Optional[CodeType] = getattr(getattr(value, "__func__", value), "__code__", None)
         if code is not None:
             return getattr(code, "co_filename", "") or ""
     return ""
@@ -409,7 +410,7 @@ def register_declared_class(dtype:np.dtype, cls:type) -> None:
     register(dtype)
 
 
-def reregister_class(cls:Any) -> Optional[np.dtype]:
+def reregister_class(cls:type) -> Optional[np.dtype]:
     """Register `cls` for its dtype, replacing any class recorded earlier.
 
     A synthesized structure is built per member set, and two member sets can produce
@@ -423,7 +424,7 @@ def reregister_class(cls:Any) -> Optional[np.dtype]:
     return dtype
 
 
-def _add_subscript_access(cls:Any) -> None:
+def _add_subscript_access(cls:type) -> None:
     """Let a structure instance read a member by name (`s["i"]`), like a record element.
 
     Only installed when the class has no subscript of its own, so a user's `__getitem__`
@@ -446,9 +447,9 @@ def _add_subscript_access(cls:Any) -> None:
     if any("__getitem__" in base.__dict__ for base in getattr(cls, "__mro__", ())):
         return
 
-    def __getitem__(self:Any, key:Any)->Any:
+    def __getitem__(self:object, key:object)->object:
         if isinstance(key, str):
-            member:Any = getattr(self, key)
+            member:object = getattr(self, key)
             # A structure member can be a union (`s["value"]["i"]`), and on the
             # platforms where a union needs the proxy the bare value would fail the
             # second subscript. See `union_needs_proxy`.
@@ -508,12 +509,12 @@ class UnionProxy:
 
     __slots__ = ("_wrapped",)
 
-    def __init__(self, wrapped:Any)->None:
+    def __init__(self, wrapped:object)->None:
         object.__setattr__(self, "_wrapped", wrapped)
 
-    def __getitem__(self:Any, key:Any)->Any:
+    def __getitem__(self:object, key:object)->object:
         if isinstance(key, str):
-            member:Any = getattr(self._wrapped, key)
+            member:object = getattr(self._wrapped, key)
             # A structure member may itself be a union (`s["value"]["i"]`), and that
             # nested value is the bare ctypes object, so it needs the same wrapping
             # or the second subscript fails on the platforms this proxy exists for.
@@ -522,19 +523,19 @@ class UnionProxy:
             return member
         return self._wrapped[key]
 
-    def __setitem__(self:Any, key:Any, value:Any)->None:
+    def __setitem__(self:object, key:object, value:object)->None:
         if isinstance(key, str):
             setattr(self._wrapped, key, value)
             return
         self._wrapped[key] = value
 
-    def __getattr__(self:Any, name:str)->Any:
+    def __getattr__(self:object, name:str)->object:
         return getattr(self._wrapped, name)
 
-    def __setattr__(self:Any, name:str, value:Any)->None:
+    def __setattr__(self:object, name:str, value:object)->None:
         setattr(self._wrapped, name, value)
 
-    def __repr__(self:Any)->str:
+    def __repr__(self:object)->str:
         return repr(self._wrapped)
 
 
@@ -580,13 +581,13 @@ def structure_dtype_of(value:object) -> Optional[np.dtype]:
 
     if not is_ctypes_record(value):
         return None
-    cls:Any = type(value) if not isinstance(value, type) else value
+    cls:type = type(value) if not isinstance(value, type) else value
     if cls in _vec_registry().values() or _is_vector_alias(cls):
         return None
     return register_class(cls)
 
 
-def _is_vector_alias(cls:Any) -> bool:
+def _is_vector_alias(cls:type) -> bool:
     """True when a class is a pygf vector or one of its aliases (`point3f`, `color3d`)."""
     from ..vec_types.layout import _host_classes
 
@@ -602,7 +603,7 @@ def dtype_for(name:str) -> Optional[np.dtype]:
     return _REGISTRY.get(name)
 
 
-def member_types(dtype:np.dtype, backend:str) -> Dict[str, Any]:
+def member_types(dtype:np.dtype, backend:str) -> Dict[str, object]:
     """field name -> the translator's type for reading it.
 
     A scalar member is its scalar type name, a vector member its vector name, a nested
@@ -611,16 +612,16 @@ def member_types(dtype:np.dtype, backend:str) -> Dict[str, Any]:
     """
     from ..vec_types.layout import _vector_dtype_name
 
-    members:Dict[str, Any] = {}
+    members:Dict[str, object] = {}
     for name in dtype.names or ():
         field_dtype:np.dtype = np.dtype(dtype.fields[name][0])
-        shape:Any = None
+        shape:Optional[Tuple[int, ...]] = None
         if field_dtype.subdtype is not None:
             base_dtype, shape = field_dtype.subdtype
             field_dtype = base_dtype
         vector:Optional[str] = _vector_dtype_name(field_dtype)
         if vector is not None:
-            kind:Any = vector
+            kind:object = vector
         elif is_record(field_dtype):
             kind = register(field_dtype)
         else:

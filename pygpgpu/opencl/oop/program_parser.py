@@ -7,7 +7,7 @@ import json
 import pickle
 from ctypes import c_char_p, c_uint64, Structure
 from ctypes import Union as ctypes_union
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Union
+from typing import Dict, List, Optional, Set, TYPE_CHECKING, Union
 
 from ...cparser import CPreprocessor
 from ...cparser.ts_parser import TSParserMixin
@@ -24,6 +24,7 @@ from .program_info import KernelInfo, ArgInfo, StructInfo, VarInfo
 from .struct_layout import align_struct
 
 if TYPE_CHECKING:
+    from ...cparser.ts_parser import ParseMeta, ParsedVar
     from .command_queue import CommandQueue
 
 import numpy as np
@@ -61,7 +62,7 @@ class ProgramParser(TSParserMixin):
         self._cache_folder:str = ""
         self._clean_code:str = ""
         self._includes:List[str] = []
-        self._defines:Dict[str, Any] = {}
+        self._defines:Dict[str, object] = {}
         self._options:BuildOptions = BuildOptions()
         self._options_ptr:c_char_p = c_char_p(str(self._options).encode("utf-8"))
         self._line_map:Dict[int, str] = {}
@@ -71,13 +72,13 @@ class ProgramParser(TSParserMixin):
         self._struct_types:Dict[str, type] = {}
         self._newest_mtime:Union[float, bool] = False
 
-    def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
+    def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, object]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
         self._file_name:str = file_name
         self._base_name:str = os.path.basename(file_name)
         self._cache_folder:str = os.path.dirname(os.path.abspath(file_name)).replace("\\", "/") + "/__clcache__"
         self._includes:List[str] = copy.deepcopy(includes) if includes is not None else []
-        self._defines:Dict[str, Any] = copy.deepcopy(defines) if defines is not None else {}
-        self._options:Dict[str, Any] = copy.deepcopy(options) if options is not None else BuildOptions()
+        self._defines:Dict[str, object] = copy.deepcopy(defines) if defines is not None else {}
+        self._options:Dict[str, object] = copy.deepcopy(options) if options is not None else BuildOptions()
         self._options_ptr:c_char_p = c_char_p(str(self._options).encode("utf-8"))
 
         module_path:str = ""
@@ -134,7 +135,7 @@ class ProgramParser(TSParserMixin):
         return re.sub(r'<kernel>:(\d+)', replace_handler, error_message.strip("\r\n"))
 
     def _save(self)->None:
-        meta:Dict[str, Any] = {
+        meta:"ParseMeta" = {
             "clean_code": self._clean_code,
             "related_files": self._related_files,
             "line_map": self._line_map,
@@ -208,7 +209,7 @@ class Kernel_{kernel_name}(KernelWrapper):
         
         newest_mtime:float = 0
         try:
-            meta:Dict[str, Any] = load_var(self._meta_file_name)
+            meta:"ParseMeta" = load_var(self._meta_file_name)
         except (OSError, EOFError, pickle.UnpicklingError, ValueError, TypeError):
             # A meta file another process was replacing when this one opened it is either
             # absent or not yet complete; both mean "no usable cache", which is a re-parse
@@ -268,7 +269,7 @@ class Kernel_{kernel_name}(KernelWrapper):
         return self._includes
     
     @property
-    def defines(self)->Dict[str, Any]:
+    def defines(self)->Dict[str, object]:
         return self._defines
     
     @property
@@ -295,7 +296,7 @@ class Kernel_{kernel_name}(KernelWrapper):
     def kernel_infos(self)->Dict[str, KernelInfo]:
         return self._kernel_infos
 
-    def _preprocess(self, file_name:str, includes:List[str], defines:Dict[str, Any]):
+    def _preprocess(self, file_name:str, includes:List[str], defines:Dict[str, object]):
         # The source's own directory is on the include path: a `#include "..."` in a
         # generated source names a file beside it (the package's own header lives in the
         # cache's `include/` folder, and a user's header is copied there too).
@@ -415,7 +416,7 @@ class Kernel_{kernel_name}(KernelWrapper):
                 for key, item in used_kwargs.items():
                     setattr(self, key, item)
 
-        def apply_pointers(self, cmd_queue:CommandQueue, member_infos:Optional[Dict[str, Any]]=None)->List[Dict[str, Any]]:
+        def apply_pointers(self, cmd_queue:CommandQueue, member_infos:Optional[Dict[str, object]]=None)->List[Dict[str, object]]:
             result = []
             for field in self._fields_:
                 if field[0].startswith(ptr_field_prefix):
@@ -509,7 +510,7 @@ class Kernel_{kernel_name}(KernelWrapper):
     def _new_kernel_info(self, name:str)->KernelInfo:
         return KernelInfo(name=name)
 
-    def _new_var_info(self, desc:Dict[str, Any])->VarInfo:
+    def _new_var_info(self, desc:"ParsedVar")->VarInfo:
         return VarInfo(
             name=desc["name"],
             type_str=desc["type_str"],
@@ -520,7 +521,7 @@ class Kernel_{kernel_name}(KernelWrapper):
             kernel_flags=desc["kernel_flags"]
         )
 
-    def _new_arg_info(self, parent:KernelInfo, desc:Dict[str, Any])->ArgInfo:
+    def _new_arg_info(self, parent:KernelInfo, desc:"ParsedVar")->ArgInfo:
         return ArgInfo(
             parent=parent,
             name=desc["name"],
@@ -538,10 +539,10 @@ class Kernel_{kernel_name}(KernelWrapper):
             flags |= self._type_qualifier_flags.get(qualifier, cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_NONE)
         return flags
 
-    def _is_mem_arg(self, arg:Any)->bool:
+    def _is_mem_arg(self, arg:object)->bool:
         return arg.is_ptr or (arg.type_str in CLInfo.image_types)
 
-    def _pointer_members(self, arg:Any)->Dict[str, Any]:
+    def _pointer_members(self, arg:object)->Dict[str, object]:
         struct_info:Optional[StructInfo] = self._struct_infos.get(arg.base_type_str)
         if struct_info is None:
             return {}
@@ -564,7 +565,7 @@ class Kernel_{kernel_name}(KernelWrapper):
         return self._cache_folder
 
     @staticmethod
-    def md5_of(includes:Optional[List[str]]=None, defines:Optional[Dict[str, Any]]=None, options:Optional[BuildOptions]=None, file_name:str="")->str:
+    def md5_of(includes:Optional[List[str]]=None, defines:Optional[Dict[str, object]]=None, options:Optional[BuildOptions]=None, file_name:str="")->str:
         if includes is None:
             includes = []
 

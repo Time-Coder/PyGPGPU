@@ -1,8 +1,13 @@
 from __future__ import annotations
 from ctypes import Structure
-from typing import Any
+from typing import TYPE_CHECKING
 
 from .helper import from_import
+
+if TYPE_CHECKING:
+    # numpy is imported inside the method that needs it (this module is imported by every
+    # vector type, and numpy need not be paid for twice); the annotation needs the name.
+    import numpy as np
 
 
 class genVec(Structure):
@@ -23,7 +28,7 @@ class genVec(Structure):
     }
 
     @classmethod
-    def numpy_dtype(cls)->Any:
+    def numpy_dtype(cls)->np.dtype:
         """The structured numpy dtype for this vector type.
 
         Built from the ctypes ``_fields_`` (``('x', c_float)`` and friends), so

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Tuple, Any, Optional, Dict
+from typing import TYPE_CHECKING, Tuple, Optional, Dict
 
 import numpy as np
 
@@ -147,11 +147,11 @@ class ArgInfo(VarInfo):
     def __init__(self, parent:KernelInfo, name: str, type_str: str, array_shape:Tuple[int, ...], address_qualifier: cl_kernel_arg_address_qualifier, access_qualifier: cl_kernel_arg_access_qualifier, type_qualifiers: cl_kernel_arg_type_qualifier, kernel_flags:Optional[KernelFlags]=None):
         VarInfo.__init__(self, name, type_str, array_shape, address_qualifier, access_qualifier, type_qualifiers, kernel_flags)
         self.parent = parent
-        self.value: Any = None
+        self.value: object = None
         self.mem_obj: Optional[MemObject] = None
         self.member_infos: Dict[str, "VarInfo"] = {}
     
-    def check_type(self, value:Any)->None:
+    def check_type(self, value:object)->None:
         base_type_str = self.base_type_str
         if self.type_qualifiers & cl_kernel_arg_type_qualifier.CL_KERNEL_ARG_TYPE_PIPE:
             if not isinstance(value, pipe):

@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import platform
 from ctypes import c_int, c_void_p, CDLL, _Pointer, Array, addressof
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 class LibraryError(RuntimeError):
@@ -154,7 +154,7 @@ class Library(metaclass=MetaLibrary):
     # The name the same library carries on the other platforms (the unversioned
     # SONAME). None means the Windows name is used everywhere.
     _so_name:Optional[str] = None
-    _signatures:Dict[str, Dict[str, Any]] = {}
+    _signatures:Dict[str, Dict[str, object]] = {}
     _error_codes:Dict[int, str] = {}
     # The functions whose return value is not an error code.
     _no_error_check:List[str] = []
@@ -371,7 +371,7 @@ class Library(metaclass=MetaLibrary):
             cls.last_init_error = error
 
     @classmethod
-    def _preheat(cls)->Optional[Callable[[], Any]]:
+    def _preheat(cls)->Optional[Callable[[], object]]:
         """The call that forces the DLL to finish loading, if the library needs one.
 
         Most of these libraries have no runtime to initialize -- the CUDA driver owns

@@ -23,7 +23,7 @@ Three things are load-bearing:
 from __future__ import annotations
 
 import ctypes
-from typing import Any, Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
@@ -146,7 +146,7 @@ def _unregister_range(backend: str, start: int) -> None:
 
 # ---------- waiting ----------
 
-def wait_event(target: Target, event: Any) -> None:
+def wait_event(target: Target, event: object) -> None:
     """Block until one of this backend's copy events has completed."""
     if event is None:
         return
@@ -180,7 +180,7 @@ def wait_target(target: Target) -> None:
         context_for(target).sync()
 
 
-def sync_queue(target: Target, queue: Any) -> None:
+def sync_queue(target: Target, queue: object) -> None:
     """Block until one execution channel is idle."""
     if target.backend == "metal":
         # A Metal copy is a memcpy on the host; there is no queue to wait for.
@@ -194,8 +194,8 @@ def sync_queue(target: Target, queue: Any) -> None:
         queue.sync()
 
 
-def event_callback(target: Target, queue: Any, event: Any,
-                   callback: Callable[[Any], None]) -> None:
+def event_callback(target: Target, queue: object, event: object,
+                   callback: Callable[[int], None]) -> None:
     """Run ``callback(error_code)`` once ``event`` completes, without blocking."""
     if target.backend == "opencl":
         # The event may already have completed by the time the transfer is registered --
@@ -218,7 +218,7 @@ def event_callback(target: Target, queue: Any, event: Any,
     queue.add_callback(lambda _stream, error_code: callback(error_code))
 
 
-def error_code_ok(backend: str, error_code: Any) -> bool:
+def error_code_ok(backend: str, error_code: int) -> bool:
     """Whether a completion callback's status means success."""
     if error_code is None:
         return True
@@ -237,7 +237,7 @@ def error_code_ok(backend: str, error_code: Any) -> bool:
 # ---------- allocation ----------
 
 def allocate(target: Target, size: int, zero_copy: bool = False,
-             host_ptr: Optional[int] = None) -> Any:
+             host_ptr: Optional[int] = None) -> object:
     """Create the device object a binding copies through."""
     context = context_for(target)
     context.make_current()
@@ -248,7 +248,7 @@ def allocate(target: Target, size: int, zero_copy: bool = False,
     return buffer
 
 
-def _create_buffer(target: Target, context: Any, size: int) -> Any:
+def _create_buffer(target: Target, context: object, size: int) -> object:
     """Allocate a device buffer, in whatever spelling this backend's API needs.
 
     OpenCL's ``clCreateBuffer`` has no default flags -- passing None reaches ctypes as a
@@ -262,8 +262,8 @@ def _create_buffer(target: Target, context: Any, size: int) -> Any:
     return context.create_buffer(size=size)
 
 
-def _allocate_zero_copy(target: Target, context: Any, size: int,
-                        host_ptr: Optional[int]) -> Any:
+def _allocate_zero_copy(target: Target, context: object, size: int,
+                        host_ptr: Optional[int]) -> object:
     """Device memory that *is* the host array's own bytes."""
     if host_ptr is None:
         raise ValueError(
@@ -279,7 +279,7 @@ def _allocate_zero_copy(target: Target, context: Any, size: int,
     raise NotImplementedError(reason)
 
 
-def _allocate_zero_copy_metal(context: Any, size: int, host_ptr: int) -> Any:
+def _allocate_zero_copy_metal(context: object, size: int, host_ptr: int) -> object:
     from ..metal.oop.buffer import Buffer
 
     buffer = Buffer(context, size=size)
@@ -306,7 +306,7 @@ def _aligned_range(host_ptr: int, size: int) -> Tuple[int, int, int]:
     return start, registered, offset
 
 
-def _allocate_zero_copy_cuda(context: Any, size: int, host_ptr: int) -> Any:
+def _allocate_zero_copy_cuda(context: object, size: int, host_ptr: int) -> object:
     from ..cuda.driver import CUDA, CUdeviceptr
 
     # A registration is made on the *current* context, so this one has to be current
@@ -355,7 +355,7 @@ def _allocate_zero_copy_cuda(context: Any, size: int, host_ptr: int) -> Any:
     return buffer
 
 
-def _replace_free_with_unregister(buffer: Any, backend: str, start: int,
+def _replace_free_with_unregister(buffer: object, backend: str, start: int,
                                   unregister_range: Callable[[str, int], None]) -> None:
     """Make a registered buffer's release unregister its page range, not free its pointer.
 
@@ -385,7 +385,7 @@ def _safe_release(action: Callable[[], None]) -> None:
         pass
 
 
-def _allocate_zero_copy_hip(context: Any, size: int, host_ptr: int) -> Any:
+def _allocate_zero_copy_hip(context: object, size: int, host_ptr: int) -> object:
     from ..hip.driver import HIP, CUdeviceptr
 
     start, registered, offset = _aligned_range(host_ptr, size)
@@ -449,7 +449,7 @@ def zero_copy_backend_support(backend: str) -> Tuple[bool, str]:
 zero_copy_support = zero_copy_supported
 
 
-def allocate_image(target: Target, queue: Any, image_info: Any) -> Any:
+def allocate_image(target: Target, queue: object, image_info: object) -> object:
     """Create the backend's image object for an image-typed kernel argument."""
     context = context_for(target)
     context.make_current()
@@ -474,12 +474,12 @@ def _require_entry_point(backend: str, name: str) -> None:
             f"registered for zero-copy; use zero_copy=False")
 
 
-def is_host_mapped(mem_obj: Any) -> bool:
+def is_host_mapped(mem_obj: object) -> bool:
     """Whether a binding's device memory *is* the host array, with no copy involved."""
     return bool(getattr(mem_obj, "_gnp_host_mapped", False))
 
 
-def release(mem_obj: Any) -> None:
+def release(mem_obj: object) -> None:
     """Release whatever extra hold the binding took (a host registration)."""
     unregister = getattr(mem_obj, "_gnp_unregister", None)
     if unregister is None:
@@ -491,7 +491,7 @@ def release(mem_obj: Any) -> None:
         mem_obj._gnp_host_mapped = False
 
 
-def device_pointer(target: Target, mem_obj: Any) -> int:
+def device_pointer(target: Target, mem_obj: object) -> int:
     """The address the device uses for this binding's memory."""
     handle = mem_obj.id
     if isinstance(handle, int):
@@ -501,7 +501,8 @@ def device_pointer(target: Target, mem_obj: Any) -> int:
 
 # ---------- the copies ----------
 
-def upload(target: Target, queue: Any, mem_obj: Any, host_array: np.ndarray) -> Any:
+def upload(target: Target, queue: object, mem_obj: object,
+           host_array: np.ndarray) -> Optional[object]:
     """Copy the host array's bytes into the binding, on ``queue``."""
     if is_host_mapped(mem_obj):
         # The device memory already contains these bytes: nothing travels.
@@ -509,14 +510,15 @@ def upload(target: Target, queue: Any, mem_obj: Any, host_array: np.ndarray) -> 
     return mem_obj.set_data(queue, host_array)
 
 
-def download(target: Target, queue: Any, mem_obj: Any, host_array: np.ndarray) -> Any:
+def download(target: Target, queue: object, mem_obj: object,
+             host_array: np.ndarray) -> Optional[object]:
     """Copy the binding's bytes into the host array, on ``queue``."""
     if is_host_mapped(mem_obj):
         return None
     return mem_obj.read(queue)
 
 
-def settle(target: Target, queue: Any, event: Any) -> None:
+def settle(target: Target, queue: object, event: object) -> None:
     """Block until a copy made on ``queue`` has landed (the sync-copy path)."""
     if event is not None:
         wait_event(target, event)

@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import byref, c_float, c_double, c_int, c_size_t, c_uint64, c_void_p, POINTER
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from ...cuda.driver import CUDA, CUcontext, CUdeviceptr
 
@@ -58,7 +59,7 @@ def _device_pointer(value:int)->c_void_p:
     return c_void_p(int(value))
 
 
-def _element_type(dtype:np.dtype)->Any:
+def _element_type(dtype:np.dtype)->Optional[type]:
     """The ctypes scalar type of a numpy dtype, or None when it is not supported."""
     if dtype == _FLOAT32:
         return c_float
@@ -76,7 +77,7 @@ def _data_type(dtype:np.dtype)->Optional[int]:
     return None
 
 
-def _as_matrix(array:Any)->np.ndarray:
+def _as_matrix(array:ArrayLike)->np.ndarray:
     """A 2-D, C-contiguous view of an array, or a refusal naming what is wrong."""
     matrix = np.asarray(array)
     if matrix.ndim != 2:
@@ -200,7 +201,7 @@ def destroy_handle(handle:cublasHandle_t)->None:
     CUBLAS.cublasDestroy_v2(handle)
 
 
-def set_stream(handle:cublasHandle_t, stream:Any)->None:
+def set_stream(handle:cublasHandle_t, stream:object)->None:
     """Order a handle's work on a stream.
 
     The stream is the CUDA driver's stream object (a ``Stream`` of the backend's
@@ -210,7 +211,7 @@ def set_stream(handle:cublasHandle_t, stream:Any)->None:
     CUBLAS.cublasSetStream_v2(handle, _stream_pointer(stream_id))
 
 
-def _stream_pointer(stream_id:Any)->c_void_p:
+def _stream_pointer(stream_id:object)->c_void_p:
     """The raw pointer of a stream id, whatever shape that id has."""
     if isinstance(stream_id, c_void_p):
         return stream_id
@@ -222,7 +223,7 @@ def _stream_pointer(stream_id:Any)->c_void_p:
     raise TypeError(f"cannot read a stream id from {type(stream_id).__name__}")
 
 
-def gemm(a:Any, b:Any, out:Optional[Any]=None, alpha:float=1.0, beta:float=0.0,
+def gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0, beta:float=0.0,
          transpose_a:bool=False, transpose_b:bool=False)->np.ndarray:
     """A general matrix multiply: ``out = alpha * op(a) @ op(b) + beta * out``.
 
@@ -352,7 +353,7 @@ def gemm(a:Any, b:Any, out:Optional[Any]=None, alpha:float=1.0, beta:float=0.0,
     return result
 
 
-def axpy(alpha:float, x:Any, y:Any)->np.ndarray:
+def axpy(alpha:float, x:ArrayLike, y:ArrayLike)->np.ndarray:
     """``y = alpha * x + y``, elementwise.
 
     ``y`` is updated in place and returned.
@@ -396,7 +397,7 @@ def axpy(alpha:float, x:Any, y:Any)->np.ndarray:
     return y_array
 
 
-def scal(alpha:float, x:Any)->np.ndarray:
+def scal(alpha:float, x:ArrayLike)->np.ndarray:
     """``x = alpha * x``, elementwise.
 
     ``x`` is updated in place and returned.
@@ -428,7 +429,7 @@ def scal(alpha:float, x:Any)->np.ndarray:
     return x_array
 
 
-def dot(x:Any, y:Any)->float:
+def dot(x:ArrayLike, y:ArrayLike)->float:
     """The dot product of two 1-D arrays.
 
     cuBLAS writes the result to the device, so it is read back from there.
@@ -479,7 +480,7 @@ def dot(x:Any, y:Any)->float:
 
 # ---------- cuFFT ----------
 
-def rfft(x:Any)->np.ndarray:
+def rfft(x:ArrayLike)->np.ndarray:
     """The 1-D real-to-complex transform of a real array.
 
     The result is ``n/2 + 1`` complex numbers, in the same layout as
@@ -511,7 +512,7 @@ def rfft(x:Any)->np.ndarray:
     return spectrum
 
 
-def irfft(spectrum:Any, n:Optional[int]=None)->np.ndarray:
+def irfft(spectrum:ArrayLike, n:Optional[int]=None)->np.ndarray:
     """The 1-D complex-to-real transform of a spectrum.
 
     ``n`` is the length of the signal the spectrum came from; it defaults to
@@ -549,8 +550,8 @@ def irfft(spectrum:Any, n:Optional[int]=None)->np.ndarray:
 
 # ---------- cuSPARSE ----------
 
-def csrmv(row_offsets:Any, column_indices:Any, values:Any, x:Any,
-          y:Optional[Any]=None)->np.ndarray:
+def csrmv(row_offsets:ArrayLike, column_indices:ArrayLike, values:ArrayLike, x:ArrayLike,
+          y:Optional[ArrayLike]=None)->np.ndarray:
     """A sparse matrix-vector multiply, for a matrix in CSR form.
 
     ``row_offsets`` is the row start of each row (so ``len(row_offsets)`` is the
@@ -664,7 +665,7 @@ def csrmv(row_offsets:Any, column_indices:Any, values:Any, x:Any,
 
 # ---------- cuBLASLt ----------
 
-def lt_gemm(a:Any, b:Any, out:Optional[Any]=None, alpha:float=1.0,
+def lt_gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0,
             beta:float=0.0, workspace_bytes:int=8 * 1024 * 1024)->np.ndarray:
     """A general matrix multiply through cuBLASLt, the newer cuBLAS path.
 

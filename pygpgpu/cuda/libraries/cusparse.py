@@ -13,7 +13,7 @@ other formats.
 from __future__ import annotations
 
 from ctypes import c_int, c_int64, c_size_t, c_void_p, POINTER
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ...constants import IntEnum
 from ._base import Library
@@ -112,7 +112,7 @@ cudaStream_t = c_void_p
 class CUSPARSEInfo:
     """cuSPARSE's signature table and its status codes."""
 
-    func_signatures:Dict[str, Dict[str, Any]] = {
+    func_signatures:Dict[str, Dict[str, object]] = {
         # cusparseStatus_t cusparseCreate(cusparseHandle_t *handle)
         "cusparseCreate": {
             "args": {
