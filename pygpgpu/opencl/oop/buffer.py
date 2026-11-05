@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ctypes import c_void_p, pointer
 import ctypes
-from typing import Any, List, Optional, TYPE_CHECKING, Tuple, Union
+from typing import List, Optional, TYPE_CHECKING, Tuple, Union
 from typing_extensions import override
 
 import numpy as np
@@ -100,7 +100,7 @@ class Buffer(MemObject):
         CL.clEnqueueReadBuffer(cmd_queue.id, self.id, False, origin, region, host_ptr, len(after_events), events_ptr, pointer(event_id))
         return Event(self.context, event_id, CL.clEnqueueReadBuffer)
 
-    def _host_pointer_of(self, data:Union[bytes, bytearray, np.ndarray])->Tuple[ctypes.c_void_p, Any]:
+    def _host_pointer_of(self, data:Union[bytes, bytearray, np.ndarray])->Tuple[ctypes.c_void_p, np.ndarray]:
         """The host pointer and the (contiguous) data a copy would read from."""
         if isinstance(data, bytes):
             size: int = len(data)

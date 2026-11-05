@@ -384,7 +384,7 @@ class Image:
 
     # ---------- device binding ----------
 
-    def bind_cuda(self)->Tuple[Any, Any, Any]:
+    def bind_cuda(self)->Tuple[object, object, object]:
         """Create both device views this image might need, and cache them.
 
         A kernel reads through a texture object and writes through a surface object,

@@ -112,7 +112,7 @@ def _flat_position(array: "np.ndarray[Any, Any]", index: Union[int, Tuple[int, .
 
 def atomic_in_place(array: "np.ndarray[Any, Any]",
                     index: Union[int, Tuple[int, ...]],
-                    apply: Callable[[Any], Any]) -> object:
+                    apply: Callable[[object], object]) -> object:
     """Read-modify-write one element of ``array`` and return the previous value.
 
     ``index`` is a *flat* offset, because that is what the device code means: the emitted

@@ -39,7 +39,7 @@ needs and the generated source includes it.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Union
+from typing import Callable, Dict, Iterable, List, Optional, Set, Union
 
 __all__ = ["device_function", "device_symbol", "library_headers_for",
            "library_functions", "library_function_name"]
@@ -48,7 +48,7 @@ __all__ = ["device_function", "device_symbol", "library_headers_for",
 # The registry. Keyed by the *object* the callee resolves to, so the translator recognizes
 # a registered function by identity rather than by the spelling of its name -- the same
 # rule the builtins follow, and for the same reason.
-_BY_FUNCTION:Dict[Any, "_DeviceFunction"] = {}
+_BY_FUNCTION:Dict[object, "_DeviceFunction"] = {}
 _BY_NAME:Dict[str, "_DeviceFunction"] = {}
 
 

@@ -15,7 +15,7 @@ public API.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from . import builtins as _namespace
 
@@ -24,7 +24,7 @@ BUILTIN_FUNCTIONS: Dict[str, object] = {
     name: getattr(_namespace, name) for name in _namespace.__all__}
 
 # The same table the other way round, keyed by the function object itself.
-BUILTIN_NAMES_BY_FUNCTION: Dict[Any, str] = {
+BUILTIN_NAMES_BY_FUNCTION: Dict[object, str] = {
     function: name for name, function in BUILTIN_FUNCTIONS.items()}
 
 

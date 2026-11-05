@@ -3,7 +3,7 @@ from ctypes import c_char_p, pointer, c_size_t, c_char, POINTER, c_ubyte, string
 import contextlib
 import threading
 import warnings
-from typing import Dict, List, Any, Optional, TYPE_CHECKING, Union, Set
+from typing import Dict, List, Optional, TYPE_CHECKING, Union, Set
 from typing_extensions import override
 
 from .clobject import CLObject
@@ -358,8 +358,8 @@ class Program(CLObject):
 
         return self._info[name]
     
-    def _fetch_build_info(self, key:cl_program_build_info)->Dict[Device, Any]:
-        result:Dict[Device, Any] = {}
+    def _fetch_build_info(self, key:cl_program_build_info)->Dict[Device, object]:
+        result:Dict[Device, object] = {}
         for device in self.devices:
             result_size = c_size_t()
             CL.clGetProgramBuildInfo(self.id, device.id, key, 0, None, pointer(result_size))

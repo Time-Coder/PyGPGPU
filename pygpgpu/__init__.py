@@ -12,7 +12,7 @@ still work. Note that top-level `pygpgpu.kernel` refers to the @kernel
 decorator (same name as the subpackage; the top level exports the decorator),
 so to use things from the submodules write `from pygpgpu.kernel import ...`.
 """
-from typing import Any, List
+from typing import List
 
 # pygf owns the whole numpy surface for its types: importing it patches numpy.array
 # (patch_nparray), the array constructors, and installs the VectorArray view whose

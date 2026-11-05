@@ -34,7 +34,7 @@ kernel body cannot call any of this.
 from __future__ import annotations
 
 import importlib
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ._enums import (
     HIPFFT_BACKWARD,

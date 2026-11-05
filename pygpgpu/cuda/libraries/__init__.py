@@ -26,7 +26,7 @@ README section "Host-side CUDA libraries" for the difference.
 from __future__ import annotations
 
 import importlib
-from typing import Any, Dict, List
+from typing import Dict, List
 
 # The module that owns each library's driver class, and the class inside it. The
 # two tables are public because they are the honest answer to "what can I bind
