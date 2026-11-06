@@ -307,8 +307,10 @@ def test_a_complex_value_is_recognized_by_its_dtype_alone():
 
     assert infer_ctype(np.complex64(1.0 + 2.0j)) == "c64"
     assert infer_ctype(np.complex128(1.0 + 2.0j)) == "c128"
-    # A python complex has no width of its own, so it takes the double one, like a float does.
-    assert infer_ctype(1.0 + 2.0j) == "c128"
+    # A python complex has no width of its own, so it takes the one the python float beside
+    # it takes: `float` by default, `double` under `@kernel(float=np.float64)`.
+    assert infer_ctype(1.0 + 2.0j) == "c64"
+    assert infer_ctype(1.0 + 2.0j, {"float": "double"}) == "c128"
     assert infer_ctype(np.zeros(2, dtype=np.complex64)) == ("*", "c64")
     assert infer_ctype(np.zeros(2, dtype=np.complex128)) == ("*", "c128")
     assert is_complex("c64") and is_complex("c128")
@@ -690,7 +692,7 @@ def test_a_complex_local_inside_the_loop(runner):
 @pytest.mark.parametrize("value", [np.complex64(1 + 2j), np.complex128(1 + 2j), 1 + 2j],
                          ids=["complex64", "complex128", "python"])
 def test_a_complex_scalar_argument(runner, value):
-    """A python complex is a complex128, so it binds a c128 parameter."""
+    """A python complex is a `c64` under the default mapping, so the value arrives narrowed."""
     out = np.zeros(2, np.complex128)
     runner(passed_scalar, value, out)
     np.testing.assert_allclose(out, np.array([value, value], np.complex128))
@@ -854,7 +856,7 @@ def constructed_from_string(out: np.ndarray):
 
 
 def test_complex_of_two_arguments(runner):
-    """`complex(re, im)` is python's own spelling, and the result is the double width."""
+    """`complex(re, im)` is python's own spelling, and the result is the mapped width."""
     out = np.zeros(2, dtype=np.complex128)
     runner(constructed_from_args, np.float32(3.0), np.float32(4.0), out)
     np.testing.assert_allclose(out, np.array([3 + 4j, 3 + 4j], dtype=np.complex128))
@@ -866,8 +868,8 @@ def test_complex_of_two_constants(runner):
     np.testing.assert_allclose(out, np.array([3 + 4j, 3 + 4j], dtype=np.complex128))
 
 
-def test_complex_of_a_complex_value_is_a_copy_at_the_double_width(runner):
-    """`complex(z)` of a complex64 widens, which is what python answers."""
+def test_complex_of_a_complex_value_is_a_copy_at_the_mapped_width(runner):
+    """`complex(z)` of a complex64 is widened under the default mapping before the store."""
     out = np.zeros(2, dtype=np.complex128)
     runner(constructed_from_complex, np.array([1 + 2j, 1 + 2j], np.complex64), out)
     np.testing.assert_allclose(out, np.array([1 + 2j, 1 + 2j], dtype=np.complex128))
@@ -891,3 +893,130 @@ def test_complex_of_a_string_is_refused(gpu_backend, runner):
     with pytest.raises(SyntaxError) as caught:
         runner(constructed_from_string, out)
     assert "complex(" in str(caught.value)
+
+# ---------------------------------------------------------------------------
+# The width of a python complex follows `float=`
+# ---------------------------------------------------------------------------
+#
+# A python `complex` has no width of its own, so it is chosen together with the python `float`
+# beside it: the 32-bit default gives `c64`, `@kernel(float=np.float64)` gives `c128`, and a
+# python complex is never the one value in a body left at the other width. Three places decide
+# a width for a python complex -- the scalar path (`infer_ctype`, pinned in
+# tests/test_kernel_type_map.py), a body literal, and `complex(re, im)` -- and all three read
+# it from `translator.python_complex_type`, so a mapping moves them together. A python complex
+# used to be a `c128` everywhere, which paired a 64-bit complex with the 32-bit real a python
+# float travels as.
+#
+# A device helper is the fourth place, by way of the first: it is translated into the kernel's
+# own translation unit and monomorphized per call site, so it inherits the kernel's mapping
+# (`FunctionTranslator.type_map`) and its device name carries it -- two mappings of one helper
+# are two functions, and a source file holds every kernel written in it.
+
+
+@kernel
+def python_literal(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = 3 + 4j
+
+
+@kernel
+def python_constructed(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = complex(3, 4)
+
+
+@kernel(float=np.float64)
+def double_complex_argument(value, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = value
+
+
+def python_complex_literal_helper(value):
+    """An ordinary helper whose body builds a python complex literal of its own.
+
+    A helper is translated into the *kernel's* translation unit and monomorphized per call
+    site, so it has to make the same width choice its caller does -- otherwise a helper body
+    silently answered the 32-bit default while the kernel around it was mapped to a double.
+    """
+    return value + 0.2j
+
+
+@kernel
+def calls_plain_helper(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = python_complex_literal_helper(a[i])
+
+
+@kernel(float=np.float64)
+def calls_double_helper(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = python_complex_literal_helper(a[i])
+
+
+def _generated_source(func, type_map=None):
+    """The device source a one-array kernel renders, without compiling it."""
+    from pygpgpu.kernel.translator import FunctionTranslator, infer_ctype
+
+    raw = func.raw_func if hasattr(func, "raw_func") else func
+    out = infer_ctype(np.zeros(2, np.complex64))
+    translator = FunctionTranslator(raw, [out], "cuda", lambda name: None, {},
+                                    is_kernel=True, type_map=type_map)
+    translator.translate()
+    return "\n\n".join(source for _, source in translator.render_kernels("k_test"))
+
+
+@pytest.mark.parametrize("type_map, kind", [
+    (None, "c64"),
+    ({"float": "float"}, "c64"),
+    ({"float": "double"}, "c128"),
+], ids=["no-mapping", "float", "double"])
+def test_a_python_complex_literal_is_the_mapped_width(type_map, kind):
+    """`3 + 4j` is built at the width the python float beside it travels as."""
+    source = _generated_source(python_literal, type_map)
+    assert f"{kind}_make(" in source
+    other = "c128" if kind == "c64" else "c64"
+    assert f"{other}_make(" not in source
+
+
+@pytest.mark.parametrize("type_map, kind", [
+    (None, "c64"),
+    ({"float": "float"}, "c64"),
+    ({"float": "double"}, "c128"),
+], ids=["no-mapping", "float", "double"])
+def test_the_complex_constructor_is_the_mapped_width(type_map, kind):
+    """`complex(re, im)` answers the same width a python complex travels as."""
+    source = _generated_source(python_constructed, type_map)
+    assert f"{kind}_make(" in source
+    other = "c128" if kind == "c64" else "c64"
+    assert f"{other}_make(" not in source
+
+
+def test_a_python_complex_argument_is_a_c64_under_the_default_mapping(gpu_backend):
+    """The device declares the 32-bit pair, so the value arrives narrowed, as a float does."""
+    out = np.zeros(2, np.complex128)
+    passed_scalar[gpu_backend](0.1 + 0.2j, out)
+    # A `c128` parameter would have carried 0.1 + 0.2j exactly; a `c64` carries the pair
+    # `np.complex64` rounds to, and the double array holds that without changing it again.
+    assert out[0] == complex(np.complex64(0.1 + 0.2j))
+    assert out[0] != 0.1 + 0.2j
+
+
+def test_a_double_mapping_carries_a_python_complex_at_128_bits(gpu_backend):
+    """`float=np.float64` is what lets a python complex hold a value float32 cannot."""
+    out = np.zeros(2, np.complex128)
+    double_complex_argument[gpu_backend](1e40 + 1e40j, out)
+    # A `c64` parameter would have answered infinity: float32 stops at ~3.4e38.
+    assert out[0] == 1e40 + 1e40j
+
+
+def test_a_helper_body_follows_the_kernel_it_is_translated_in(gpu_backend):
+    """A python complex literal inside a helper takes the caller's width, not the default."""
+    a = np.zeros(2, np.complex64)
+    out = np.zeros(2, np.complex128)
+    # Under `float=np.float64` the helper's literal is a `c128`, so the sum is exact.
+    calls_double_helper[gpu_backend](a, out)
+    assert out[0] == 0.2j
+    # Under the default 32-bit mapping it is a `c64`, so the value is the rounded pair.
+    calls_plain_helper[gpu_backend](a, out)
+    assert out[0] == complex(np.complex64(0.2j))
+    assert out[0] != 0.2j

@@ -272,6 +272,14 @@ def include_line(referrer_path: str, callee_path: str) -> str:
     return '#include "%s"' % target.replace("\\", "/")
 
 
+# The first word of a line that *continues* a body rather than starting a definition. A
+# header line is a declaration (`c64 helper(c64 value)`), while the middle of a generated body
+# reads `if (((b < 768)))` or `if (atomic_cmpxchg(...) == 0)` -- both contain a `(` and no `;`,
+# which is otherwise exactly a header line's shape.
+_CONTROL_KEYWORDS: set = {"if", "else", "for", "while", "do", "switch", "case",
+                          "return", "break", "continue"}
+
+
 def _definition_identity(code: str) -> Optional[str]:
     """A stable identity for one chunk of generated device code.
 
@@ -280,15 +288,35 @@ def _definition_identity(code: str) -> Optional[str]:
     (the same helper specialized twice differs in the parameters, so those stay distinct);
     a structure is identified by the type name it declares, because its member list is part
     of the same declaration and must not be emitted twice.
+
+    **Only a declaration line answers.** A line inside a body can have the header line's shape
+    -- `if (atomic_cmpxchg(...) == 0)` has a `(` and no `;`, exactly like `c64 helper(c64 v)`
+    -- and the file is split on blank lines, so a generated body containing one is several
+    pieces. Reading such a piece as a definition of its own would give a body's middle an
+    identity, which `_merge_definitions` groups by: the definition would then be *two*
+    definitions, and refreshing it appended the second half instead of replacing the first --
+    a file the compiler refuses with "extraneous closing brace". A declaration is therefore a
+    line whose first word is not a control statement and which has no `=` before its opening
+    parenthesis.
     """
     for line in code.splitlines():
         stripped = line.strip()
         if stripped.startswith("struct "):
             return stripped
         if stripped.startswith("typedef struct"):
-            # OpenCL spells a structure as `typedef struct { ... } Name;`
+            # OpenCL spells a structure as `typedef struct { ... } Name;`, on one line or on
+            # several. The one-line spelling ends here, and the whole declaration is its
+            # identity -- it names the type, and the member list is part of that same
+            # declaration. The multi-line one is caught by the reversed scan below, whose
+            # `} Name;` is the type name it closes.
+            if stripped.endswith(";"):
+                return stripped
             continue
         if "(" in stripped and ";" not in stripped:
+            head: str = stripped.split("(", 1)[0].strip()
+            words: List[str] = head.split()
+            if not words or words[0] in _CONTROL_KEYWORDS or "=" in head:
+                continue
             return stripped
     # An OpenCL structure block ends in its own name; that is its identity.
     for line in reversed(code.splitlines()):
@@ -298,32 +326,90 @@ def _definition_identity(code: str) -> Optional[str]:
     return None
 
 
+def _merge_definitions(existing: List[str], definitions: List[str]) -> Tuple[List[str], bool]:
+    """`existing` with `definitions` applied: a changed definition replaces the one held.
+
+    A generated file holds several kernels of one module, and each is written on its own
+    call, so a definition the file already holds is normally skipped -- that is what makes a
+    recompiled kernel idempotent. But "already holds" has to mean **the same text**, not the
+    same signature: the body changes while the header line does not whenever *this package*
+    starts generating something else for the same python source. A python value's width
+    following a different mapping, a builtin emitting a different call, a fix to the
+    emitter -- all of them keep the definition's name (the name hashes the signature, not
+    the body) and change what it says. Skipping there left the file describing code the
+    package no longer generates, and the file is what the compiler reads: the old body kept
+    running. The python-source digest cannot catch it either, because the caller's `.py` did
+    not move.
+
+    Two units have to be kept apart. `definitions` is what the caller rendered: one element
+    is one definition, whatever blank lines its body holds. `existing` is a *file*, split on
+    blank lines, so the rest of a body that holds one is a piece of its own with no identity
+    (the generated bounds guard emits exactly that shape). The pieces are therefore grouped
+    behind the definition they belong to before anything is compared, and a changed
+    definition replaces its whole group **in place** -- the order the kernels were written in
+    is part of the file's shape (callee before caller), so a replacement must not move a
+    definition to the end. A definition whose identity is unknown is appended, as before.
+
+    Returns the merged pieces and whether anything changed, so a caller can skip a no-op
+    write.
+    """
+    groups: List[Tuple[Optional[str], List[str]]] = []
+    for piece in existing:
+        identity:Optional[str] = _definition_identity(piece)
+        if identity is None and groups and groups[-1][0] is not None:
+            groups[-1][1].append(piece)
+            continue
+        groups.append((identity, [piece]))
+    places: Dict[str, int] = {}
+    for index, (identity, _pieces) in enumerate(groups):
+        if identity is not None and identity not in places:
+            places[identity] = index
+    changed: bool = False
+    added: List[str] = []
+    added_identities: set = set()
+    for piece in definitions:
+        cleaned: str = piece.strip("\n")
+        if not cleaned:
+            continue
+        identity = _definition_identity(piece)
+        if identity is not None and identity in added_identities:
+            continue
+        index:Optional[int] = None if identity is None else places.get(identity)
+        if index is None:
+            # A piece with no definition shape of its own (a preprocessor block, say) can
+            # only be appended: nothing identifies it, so nothing can match it.
+            added.append(cleaned)
+            if identity is not None:
+                added_identities.add(identity)
+            continue
+        held:str = "\n\n".join(part.strip("\n") for part in groups[index][1]).strip("\n")
+        if held != cleaned:
+            groups[index] = (identity, [cleaned])
+            changed = True
+    if added:
+        groups.extend((_definition_identity(piece), [piece]) for piece in added)
+        changed = True
+    merged: List[str] = [piece for _identity, pieces in groups for piece in pieces]
+    return merged, changed
+
+
 def merge_source(existing: str, addition: str) -> str:
-    """`existing` with every definition of `addition` it does not already have.
+    """`existing` with every definition of `addition` applied, in place for a changed one.
 
     Python functions in one module have distinct names, so a definition cannot repeat; this
     only guards against a source being regenerated with pieces the file already holds
-    (a kernel that was compiled, its file kept, and the same kernel compiled again).
+    (a kernel that was compiled, its file kept, and the same kernel compiled again) -- and
+    against a piece the file holds that the generator now writes differently, which is what
+    `_merge_definitions` refreshes rather than skips.
     """
     if not existing.strip():
         return addition
-    signatures: set = set()
-    for chunk in existing.split("\n\n"):
-        signature = _definition_identity(chunk)
-        if signature is not None:
-            signatures.add(signature)
-    pieces: List[str] = []
-    for chunk in addition.split("\n\n"):
-        signature = _definition_identity(chunk)
-        if signature is not None and signature in signatures:
-            continue
-        pieces.append(chunk)
-        if signature is not None:
-            signatures.add(signature)
-    if not pieces:
+    chunks: List[str] = existing.split("\n\n")
+    merged: List[str]
+    merged, changed = _merge_definitions(chunks, addition.split("\n\n"))
+    if not changed:
         return existing
-    return existing.rstrip("\n") + "\n\n" + "\n\n".join(piece.rstrip("\n")
-                                                          for piece in pieces) + "\n"
+    return "\n\n".join(piece.rstrip("\n") for piece in merged if piece.strip()) + "\n"
 
 
 def assemble_source(header: List[str], definitions: List[str],
@@ -720,26 +806,17 @@ def _append_source_locked(path: str, header: List[str], definitions: List[str],
             # The file describes python text that has since changed: start it over.
             existing = None
 
-    known: set = set()
     kept_definitions: List[str] = []
     kept_header: List[str] = []
     if existing is not None:
         kept_header, kept_definitions = _split_source(existing, path)
-        for piece in kept_definitions:
-            identity = _definition_identity(piece)
-            if identity is not None:
-                known.add(identity)
 
-    added: List[str] = []
-    for piece in definitions:
-        identity = _definition_identity(piece)
-        if identity is not None and identity in known:
-            continue
-        added.append(piece.strip("\n"))
-        if identity is not None:
-            known.add(identity)
-    # Nothing is skipped here even when every definition is already known: the header may
-    # still gain a quaternion width the earlier run did not need.
+    # A definition the file already holds is kept **unless this render writes it
+    # differently**: the name hashes the signature, so a package-side change to the
+    # generated body keeps the name (see `_merge_definitions`). Nothing is skipped here even
+    # when every definition is already known: the header may still gain a quaternion width
+    # the earlier run did not need.
+    kept_definitions, _ = _merge_definitions(kept_definitions, definitions)
 
     merged_header: List[str] = (list(kept_header) if existing is not None else [])
     for piece in header:
@@ -747,7 +824,7 @@ def _append_source_locked(path: str, header: List[str], definitions: List[str],
         if cleaned:
             merged_header.append(cleaned)
     merged_header = _canonical_header(merged_header)
-    source: str = assemble_source(merged_header, kept_definitions + added, path)
+    source: str = assemble_source(merged_header, kept_definitions, path)
     _ensure_directory(os.path.dirname(path))
     # An unchanged file is not rewritten. Every rewrite opens a window in which a scanner
     # or an indexer can hold the destination exclusively, and the module is re-rendered on

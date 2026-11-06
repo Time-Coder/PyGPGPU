@@ -95,6 +95,15 @@ _SCALAR_SIZES:Dict[str, int] = {
     "long": 8, "ulong": 8, "double": 8,
 }
 
+# A complex value is a *structure* of two reals rather than a scalar, and it is bound the way
+# a scalar is: the generated signature declares `c64 value`, a value in MSL's thread address
+# space, so the host writes the record's bytes with `setBytes:`. The two names are the fixed
+# ones the complex header declares (see `program_info.COMPLEX_TYPE_NAMES`), and each spells
+# the format of *one* component -- `re` then `im`, in declaration order, which is numpy's own
+# complex layout, so a `complex64`/`complex128` array argument and this scalar share one
+# memory shape.
+_COMPLEX_FORMATS:Dict[str, str] = {"c64": "<f", "c128": "<d"}
+
 
 def _scalar_bytes(device_type:str, value:object)->bytes:
     """One scalar argument as the bytes the device's own type would hold.
@@ -104,6 +113,8 @@ def _scalar_bytes(device_type:str, value:object)->bytes:
     `setBytes:` is what the device copies, and a mismatch makes the pipeline read
     half a value.
     """
+    if device_type in _COMPLEX_FORMATS:
+        return _complex_bytes(device_type, value)
     size:int = _SCALAR_SIZES.get(device_type, 4)
     if device_type in ("float",):
         return _pack_real(device_type, "<f", float(value), 3.4028235e38)
@@ -152,6 +163,21 @@ def _pack_real(device_type:str, code:str, value:float,
             f"its largest finite value is {largest}")
     return struct.pack(code, value)
 
+
+def _complex_bytes(device_type:str, value:object)->bytes:
+    """One complex argument as the two real components MSL's record holds.
+
+    The components are packed through `_pack_real`, so a `c64` refuses a value its `float`
+    component cannot hold with the same message a `float` parameter gives (and keeps ±inf
+    and NaN, which IEEE allows). The record is what `setBytes:` copies, so its length is the
+    structure's -- 8 bytes for a `c64`, 16 for a `c128`.
+    """
+    code:str = _COMPLEX_FORMATS[device_type]
+    largest:Optional[float] = 3.4028235e38 if device_type == "c64" else None
+    real:float = float(np.real(value))
+    imaginary:float = float(np.imag(value))
+    return (_pack_real(device_type, code, real, largest)
+            + _pack_real(device_type, code, imaginary, largest))
 
 def _pack_integer(device_type:str, size:int, value:int, signed:bool)->bytes:
     """One integer scalar as `size` little-endian bytes, with the range checked."""

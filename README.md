@@ -158,7 +158,10 @@ than wrapping.
 
 Only `int` and `float` can be mapped, because a numpy scalar already carries its own width and
 keeps it (`np.uint32(x)` stays `uint`). A Python `complex` has no width of its own either, so it
-follows `float=`; a `np.complex64`/`np.complex128` keeps its own.
+follows `float=` — the default 32-bit `float` gives `complex64`, and `float=np.float64` gives
+`complex128`; a `np.complex64`/`np.complex128` keeps its own. The choice reaches every way a
+Python complex value enters the body: the argument, a literal (`3 + 4j`), and
+`complex(re, im)`.
 
 The choice is fixed when the decorator runs — `set_type_map()` does not change a kernel that
 already exists — and it is part of the kernel's identity, so two mappings never share a
