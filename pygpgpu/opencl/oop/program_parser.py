@@ -75,7 +75,8 @@ class ProgramParser(TSParserMixin):
     def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, object]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
         self._file_name:str = file_name
         self._base_name:str = os.path.basename(file_name)
-        self._cache_folder:str = os.path.dirname(os.path.abspath(file_name)).replace("\\", "/") + "/__clcache__"
+        self._cache_folder:str = (os.path.normcase(os.path.dirname(os.path.abspath(file_name)))
+                                  .replace("\\", "/") + "/__clcache__")
         self._includes:List[str] = copy.deepcopy(includes) if includes is not None else []
         self._defines:Dict[str, object] = copy.deepcopy(defines) if defines is not None else {}
         self._options:Dict[str, object] = copy.deepcopy(options) if options is not None else BuildOptions()

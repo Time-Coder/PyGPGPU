@@ -22,7 +22,19 @@ class CPreprocessor:
             return rel_file_name
 
     @staticmethod
-    def __process_line_directives(code:str):
+    def __process_line_directives(code:str, base_directory:str=""):
+        """The expanded code, its line map, and the set of files it came from.
+
+        `#line` directives name the file a line came from, and the preprocessor writes some
+        of them **relative** (a `#include "include/x.h"` keeps that spelling). Resolving a
+        relative name against the process's current directory is wrong: it is relative to
+        the source being expanded, so a run started from another directory collected
+        `E:/project/include/x.h` for a header that really lives at
+        `.../cache/pykernels/include/x.h`. The cache then recorded a file that does not
+        exist, and every later run found a missing related file and re-parsed -- which is
+        exactly the "it recompiles on every run" symptom. `base_directory` is that source's
+        own directory; an empty value keeps the old behaviour for callers that pass none.
+        """
         line_pattern = re.compile(r'^\s*#line\s+(\d+)\s+(?:"(?P<file_name>[^"]*)"|(\S+)).*$', re.MULTILINE)
         lines = code.split('\n')
         processed_lines = []
@@ -48,7 +60,10 @@ class CPreprocessor:
         related_files = set()
         def add_related_file(match:re.Match):
             file_name:str = match.group("file_name")
-            file_name:str = os.path.abspath(file_name).replace("\\", "/")
+            if base_directory and not os.path.isabs(file_name):
+                # Relative to the expanded source, never to the caller's working directory.
+                file_name = os.path.join(base_directory, file_name)
+            file_name = os.path.abspath(file_name).replace("\\", "/")
             related_files.add(file_name)
             return ""
         
@@ -78,7 +93,12 @@ class CPreprocessor:
             cmds.append(arg)
 
         pcmd.CmdPreprocessor(cmds, file, output)
-        return CPreprocessor.__process_line_directives(output.getvalue())
+        # The source's own directory anchors `#line` names that the preprocessor writes
+        # relative; a file object without a name (`<string>`) has none to offer.
+        source_path:str = getattr(file, "name", "") or ""
+        base_directory:str = (os.path.dirname(os.path.abspath(source_path))
+                              if os.path.isfile(source_path) else "")
+        return CPreprocessor.__process_line_directives(output.getvalue(), base_directory)
 
     @staticmethod
     def macros_expand_code(code: str, include_paths: Optional[List[str] ] = None, defines: Optional[Dict[str, str] ] = None)->Tuple[str, Dict[int, Tuple[str, int] ], Set[str]]:
