@@ -71,7 +71,13 @@ dependencies = [
     # `python` backend runs a kernel body's host arithmetic unchanged, and the examples mix
     # positions and directions, so pinning the release keeps the interpreter's result types
     # matched to the documented ones instead of silently degrading to the base vector.
-    "pygf>=0.2.0",
+    # 0.3.0 is what a complex kernel body needs on the host: `pygf`'s element-wise helpers
+    # answer numpy's complex surface (`sqrt`, `exp`, the trigonometric family, `abs`,
+    # `conjugate`, `sign`, `round`, `min`/`max`/`clamp`, the predicates, `pow`), which is
+    # exactly what the `python` backend runs for a body that calls one of them. `0.2.1` does
+    # not have it -- its commit holds only the `np.asarray` fix -- and a container slot cannot
+    # hold a complex value, so the helpers are the whole boundary.
+    "pygf>=0.3.0",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",
