@@ -577,7 +577,7 @@ class Kernel_{kernel_name}(KernelWrapper):
 
         clean_includes:List[str] = []
         for include in includes:
-            include = os.path.abspath(include).replace("\\", "/")
+            include = os.path.normcase(os.path.abspath(include)).replace("\\", "/")
             if include not in clean_includes:
                 clean_includes.append(include)
 
@@ -587,7 +587,8 @@ class Kernel_{kernel_name}(KernelWrapper):
             "options": str(options)
         }
         if file_name:
-            content["file_name"] = os.path.abspath(file_name).replace("\\", "/")
+            content["file_name"] = (os.path.normcase(os.path.abspath(file_name))
+                                    .replace("\\", "/"))
             # The source's *content* belongs to the key: several kernels can share one
             # generated file (every kernel a python module defines), and each is compiled
             # on its own call, so a key that named only the path would let the first
