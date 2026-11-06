@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 from pygf import conjugate
 
-from pygpgpu import (clamp, exp, exp2, floor, fract, hypot, kernel, log, mad, mix, rint,
-                     rsqrt, saturate, sign, sin, sqrt, step)
+from pygpgpu import (clamp, exp, exp2, fmax, fmin, floor, fract, hypot, kernel, log, mad,
+                     mix, rint, rsqrt, saturate, sign, sin, sqrt, step)
 from pygpgpu.kernel import complex as complex_support
 
 
@@ -1139,12 +1139,19 @@ def test_sign_answers_the_unit_direction(runner, dtype):
         np.testing.assert_allclose(out[0], np.sign(value), rtol=1e-6, atol=1e-7)
 
 
+@kernel
+def builtin_rint(z, out):
+    for i in range(out.shape[0]):
+        out[i] = rint(z)
+
+
 @pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
 def test_rounding_a_complex_value_rounds_each_part(runner, dtype):
-    """`np.round(z)` and `np.rint(z)` round both parts to even.
+    """`np.round(z)`, `np.rint(z)` and this package's `rint(z)` all round both parts to even.
 
-    Python's own `round(z)` and this package's `rint(z)` (which rounds through it) are
-    refused, because the interpreter refuses them as well.
+    `rint` is its own host body (`sci_math`), so it answers a complex value by rounding each
+    part with python's `round` -- the same rule the device's `c64_rint` implements. Python's
+    *builtin* `round(z)` still refuses one, which is a different name.
     """
     out = np.zeros(1, dtype=dtype)
     for value in (dtype(1.5 + 2.5j), dtype(2.5 - 3.5j), dtype(-1.5 + 0.5j)):
@@ -1152,6 +1159,35 @@ def test_rounding_a_complex_value_rounds_each_part(runner, dtype):
         np.testing.assert_allclose(out[0], np.round(value))
         runner(numpy_rint, value, out)
         np.testing.assert_allclose(out[0], np.rint(value))
+        runner(builtin_rint, value, out)
+        np.testing.assert_allclose(out[0], np.rint(value))
+
+
+@kernel
+def builtin_fmin_fmax(z, w, out):
+    for i in range(out.shape[0]):
+        out[i] = fmin(z, w) + fmax(z, w)
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+def test_fmin_and_fmax_ignore_a_nan_operand(runner, dtype):
+    """`fmin`/`fmax` are the NaN-ignoring pair, and numpy has two families for a reason.
+
+    `min`/`max` (and `np.minimum`/`np.maximum`) propagate a NaN, because it has a defined
+    place in their order; `fmin`/`fmax` return the operand that is *not* NaN. A complex
+    value is NaN when either part is, so the device needs the second function rather than
+    the ordering one it used to emit.
+    """
+    normal = dtype(3 - 1j)
+    nan_real = dtype(complex(float("nan"), 1.0))
+    nan_imag = dtype(complex(1.0, float("nan")))
+    out = np.zeros(1, dtype=dtype)
+    for pair in ((normal, normal), (nan_real, normal), (normal, nan_real),
+                 (nan_imag, normal), (normal, nan_imag)):
+        out[0] = 0
+        runner(builtin_fmin_fmax, pair[0], pair[1], out)
+        expected = np.fmin(pair[0], pair[1]) + np.fmax(pair[0], pair[1])
+        np.testing.assert_allclose(out[0], expected)
 
 
 @pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
@@ -1218,12 +1254,6 @@ def refuses_rsqrt(z, out):
 
 
 @kernel
-def refuses_rint(z, out):
-    for i in range(out.shape[0]):
-        out[i] = rint(z)
-
-
-@kernel
 def refuses_fract(z, out):
     for i in range(out.shape[0]):
         out[i] = fract(z)
@@ -1249,13 +1279,12 @@ def refuses_hypot(z, w, out):
 
 @pytest.mark.parametrize("function, expected", [
     (refuses_round, "use `np.round(z)`"),
-    (refuses_rint, "use `np.rint(z)`"),
     (refuses_rsqrt, "use `1 / np.sqrt(z)`"),
     (refuses_fract, "np.floor"),
     (refuses_step, "no ordering"),
     (refuses_floor, "no ordering"),
     (refuses_hypot, "np.abs(a - b)"),
-], ids=["round", "rint", "rsqrt", "fract", "step", "floor", "hypot"])
+], ids=["round", "rsqrt", "fract", "step", "floor", "hypot"])
 def test_a_real_only_builtin_is_refused_for_a_complex_value(function, expected):
     """The refusal names the operation to write instead of a compiler's type error."""
     from pygpgpu.kernel.decorator import infer_ctype

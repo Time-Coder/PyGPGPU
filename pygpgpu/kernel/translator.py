@@ -1234,6 +1234,11 @@ COMPLEX_BUILTIN_FUNCTIONS:Dict[str, str] = {
     # `sign` answers a *complex* value (the direction on the unit circle), unlike `abs`,
     # which answers the magnitude -- so it belongs here and not beside `abs`.
     "sign": "sign",
+    # `rint` rounds each part to even. This package's own host body answers that now
+    # (sci_math rounds the two parts with python's `round`), which is what makes the device
+    # allowed to: python's builtin `round` still refuses a complex value, and that is a
+    # different name.
+    "rint": "rint",
 }
 
 # The builtin names that answer a *real* for a complex argument: the magnitude, which is
@@ -1250,8 +1255,6 @@ COMPLEX_BUILTIN_REFUSALS:Dict[str, str] = {
     "ceil": "there is none: a complex value has no ordering",
     "trunc": "there is none: a complex value has no ordering",
     "round": "use `np.round(z)`: python's round() refuses a complex value",
-    "rint": "use `np.rint(z)`: this package's rint() rounds through python's round(), which"
-            " refuses a complex value",
     "fract": "use `z - np.floor(z)`, which is a real-pair operation",
     "fmod": "use `a - b * np.floor(a / b)`, or np.mod for a real pair",
     "remainder": "there is none: numpy has no complex form for it",
@@ -8688,7 +8691,13 @@ class FunctionTranslator:
         if name in ("min", "max", "fmin", "fmax"):
             if len(args) != 2:
                 self._error(f"{name}() takes exactly 2 arguments", node)
-            pick:str = "min" if name in ("min", "fmin") else "max"
+            # `min`/`max` propagate a NaN operand (`np.minimum`'s rule, and python's), while
+            # `fmin`/`fmax` ignore it (`np.fmin`'s), so the two families are two functions in
+            # the header rather than one with a flag.
+            if name in ("fmin", "fmax"):
+                pick:str = name
+            else:
+                pick = "min" if name == "min" else "max"
             return f"{target}_{pick}({codes[0]}, {codes[1]})", target
 
         if name in ("clamp", "saturate"):

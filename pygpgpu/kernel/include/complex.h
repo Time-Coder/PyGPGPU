@@ -258,6 +258,36 @@ COMPLEX_QUAL static COMPLEX_UNUSED int c64_isfinite(c64 a)
     return !c64_isnan(a) && !c64_isinf(a);
 }
 
+/* The NaN-ignoring pair, numpy's `fmin`/`fmax`, which differ from `c64_min`/`c64_max` in
+ * exactly this: an operand holding a NaN loses. `minimum`/`maximum` propagate it (a NaN has a
+ * defined place in the order), `fmin`/`fmax` return the other operand -- the reason numpy has
+ * both families, and why the translator picks one by the builtin's own name. */
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_fmin(c64 a, c64 b)
+{
+    if (c64_isnan(a))
+    {
+        return b;
+    }
+    if (c64_isnan(b))
+    {
+        return a;
+    }
+    return c64_min(a, b);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_fmax(c64 a, c64 b)
+{
+    if (c64_isnan(a))
+    {
+        return b;
+    }
+    if (c64_isnan(b))
+    {
+        return a;
+    }
+    return c64_max(a, b);
+}
+
 /* Rounding to the nearest even integer, per part: numpy's `np.round` and `np.rint` on a
  * complex value, and the same rule the real path spells `rint`. */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_rint(c64 a)
@@ -669,6 +699,34 @@ COMPLEX_QUAL static COMPLEX_UNUSED int c128_isinf(c128 a)
 COMPLEX_QUAL static COMPLEX_UNUSED int c128_isfinite(c128 a)
 {
     return !c128_isnan(a) && !c128_isinf(a);
+}
+
+/* numpy's NaN-ignoring `fmin`/`fmax`; the `c64` block above says why they differ from
+ * `c128_min`/`c128_max`. */
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_fmin(c128 a, c128 b)
+{
+    if (c128_isnan(a))
+    {
+        return b;
+    }
+    if (c128_isnan(b))
+    {
+        return a;
+    }
+    return c128_min(a, b);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_fmax(c128 a, c128 b)
+{
+    if (c128_isnan(a))
+    {
+        return b;
+    }
+    if (c128_isnan(b))
+    {
+        return a;
+    }
+    return c128_max(a, b);
 }
 
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_rint(c128 a)

@@ -54,6 +54,17 @@ def _scalar_only(name:str, value:object)->object:
     return value
 
 
+def _is_complex(value:object)->bool:
+    """Whether a value is a complex scalar -- python's, or numpy's.
+
+    A complex value reaches a host body as either shape: a kernel body's `z[i]` off a
+    complex array is a numpy scalar, while a python complex argument is python's. Both
+    are two reals, which is what the rounding below is defined on.
+    """
+    return isinstance(value, complex) or type(value).__name__ in ("complex64",
+                                                                  "complex128")
+
+
 # ---------------------------------------------------------------------------
 # The functions both backends have
 # ---------------------------------------------------------------------------
@@ -84,8 +95,17 @@ def lgamma(x:float)->float:
 
 
 def rint(x:float)->float:
-    """Round to the nearest integer, halfway cases to even (python's `round`)."""
+    """Round to the nearest integer, halfway cases to even (python's `round`).
+
+    A **complex** value rounds one part at a time, which is what the device's
+    `c64_rint`/`c128_rint` do and what numpy's `np.rint(z)` answers: the two sides of a
+    complex value have no order between them, but each real part rounds on its own.
+    Python's `round` itself refuses a complex value, which is why this is spelled out
+    here rather than delegating to it.
+    """
     _scalar_only("rint", x)
+    if _is_complex(x):
+        return complex(round(float(x.real)), round(float(x.imag)))
     return float(round(x))
 
 
@@ -96,17 +116,53 @@ def remainder(x:float, y:float)->float:
     return math.remainder(x, y)
 
 
+def _complex_less(a:complex, b:complex)->bool:
+    """numpy's order on a complex value: the real parts decide, the imaginary ones break a tie.
+
+    `np.minimum`/`np.maximum` and their device implementation both use it, and so does the
+    builtin `min`/`max` a kernel body may write (`pygf`'s, on the host).
+    """
+    return (a.real < b.real) or (a.real == b.real and a.imag < b.imag)
+
+
+def _complex_fminmax(x:object, y:object, larger:bool)->complex:
+    """`fmin`/`fmax` for a complex pair, with numpy's NaN-ignoring rule.
+
+    numpy has two min/max families and they differ on NaN, which is the whole reason both
+    exist: `minimum`/`maximum` propagate a NaN (it has a defined place in the order), while
+    `fmin`/`fmax` return the operand that is *not* NaN. A complex value is NaN when either
+    part is, so that test is made per operand and the surviving one is then ordered.
+    """
+    left:complex = complex(x)
+    right:complex = complex(y)
+    left_nan:bool = left.real != left.real or left.imag != left.imag
+    right_nan:bool = right.real != right.real or right.imag != right.imag
+    if left_nan and right_nan:
+        return left
+    if left_nan:
+        return right
+    if right_nan:
+        return left
+    if left.real == right.real and left.imag == right.imag:
+        return left
+    return left if (_complex_less(left, right) != larger) else right
+
+
 def fmin(x:float, y:float)->float:
-    """The smaller of two numbers."""
+    """The smaller of two numbers, ignoring a NaN operand (numpy's `fmin`)."""
     _scalar_only("fmin", x)
     _scalar_only("fmin", y)
+    if _is_complex(x) or _is_complex(y):
+        return _complex_fminmax(x, y, larger=False)
     return min(x, y)
 
 
 def fmax(x:float, y:float)->float:
-    """The larger of two numbers."""
+    """The larger of two numbers, ignoring a NaN operand (numpy's `fmax`)."""
     _scalar_only("fmax", x)
     _scalar_only("fmax", y)
+    if _is_complex(x) or _is_complex(y):
+        return _complex_fminmax(x, y, larger=True)
     return max(x, y)
 
 
