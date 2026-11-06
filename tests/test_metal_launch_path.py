@@ -397,6 +397,82 @@ def test_a_scalar_argument_travels_as_its_own_bytes() -> None:
         assert len(_scalar_bytes(type_name, 1)) == expected_widths[type_name]
 
 
+def complex_scalar(value, out):
+    for i in range(out.shape[0]):
+        out[i] = value
+
+
+def test_a_complex_parameter_is_declared_by_value(tmp_path: Any) -> None:
+    """The translator and the parser agree that a complex parameter is a value.
+
+    MSL has no complex type, so `kernel/complex.py` declares the two fixed records (`c64`
+    is a `float` pair, `c128` a `double` pair) and the translator emits one as a parameter
+    the way it emits a scalar: by value, in the thread address space. The parser is what a
+    launch binds against, so a `device c64*` here would be bound as a buffer -- the wrong
+    path entirely.
+    """
+    types = [infer_ctype(1 + 2j), infer_ctype(np.zeros(8, np.complex64))]
+    translator = FunctionTranslator(complex_scalar, types, "metal", lambda name: None, {},
+                                    is_kernel=True)
+    translator.translate()
+    body = "\n\n".join(source for _, source in translator.render_kernels("k_complex"))
+    assert "c64 value" in body, body
+    assert "device c64* value" not in body, body
+
+    source_file = tmp_path / "generated.metal"
+    source_file.write_text(prelude() + "\n" + body, encoding="utf-8")
+    parser = ProgramParser()
+    parser.parse(str(source_file))
+    info = parser.kernel_infos["k_complex"]
+    assert list(info.args) == ["value", "out", "_out_shape0"]
+    assert info.args["value"].base_type_str == "c64"
+    assert not info.args["value"].is_ptr
+    assert info.args["out"].is_ptr and info.args["out"].base_type_str == "c64"
+
+
+def test_a_complex_argument_travels_as_its_record_bytes() -> None:
+    """A complex value is not a scalar, but it is bound the way one is: `setBytes:`.
+
+    The record is two reals in declaration order, which is numpy's own complex layout, so
+    the payload is 8 bytes for a `c64` and 16 for a `c128` -- and the length handed to
+    `setBytes:` is the structure's size, not python's.
+    """
+    import struct
+
+    from pygpgpu.metal.oop.kernel import _scalar_bytes
+
+    assert _scalar_bytes("c64", 1 + 2j) == struct.pack("<ff", 1.0, 2.0)
+    assert _scalar_bytes("c128", 1 + 2j) == struct.pack("<dd", 1.0, 2.0)
+    assert len(_scalar_bytes("c64", 1 + 2j)) == 8
+    assert len(_scalar_bytes("c128", 1 + 2j)) == 16
+    # A numpy complex scalar is the same value, read at its own width.
+    assert _scalar_bytes("c128", np.complex64(3 + 4j)) == struct.pack("<dd", 3.0, 4.0)
+    # The component is what the `c64` width holds, so a value it cannot carry is refused
+    # with the message a `float` parameter gives, not with `struct.pack`'s own.
+    with pytest.raises(OverflowError) as refused:
+        _scalar_bytes("c64", 1e40 + 0j)
+    assert "c64" in str(refused.value)
+
+
+def test_a_complex_parameter_refuses_a_non_complex_argument() -> None:
+    """`ArgInfo.check_type` is what refuses a wrong argument before the launch.
+
+    Without the complex branch the integer fallback answered "must be an integer" for a
+    `c64` parameter, which names neither what the parameter is nor what it accepts.
+    """
+    from pygpgpu.metal.oop.program_info import COMPLEX_TYPE_NAMES, ArgInfo
+
+    assert set(COMPLEX_TYPE_NAMES) == {"c64", "c128"}
+    parameter = ArgInfo("value", "c64", ())
+    for accepted in (1 + 2j, np.complex64(1 + 2j), np.complex128(1 + 2j)):
+        parameter.check_type(accepted)
+    for wrong in (1.5, 3, "z", [1 + 2j], np.float32(1.0)):
+        with pytest.raises(TypeError) as refused:
+            parameter.check_type(wrong)
+        message = str(refused.value)
+        assert "value" in message and "complex" in message
+
+
 def test_the_encoder_never_binds_a_scalar_as_a_buffer() -> None:
     """`_bind_args` marks each entry, so a scalar cannot take the buffer path.
 

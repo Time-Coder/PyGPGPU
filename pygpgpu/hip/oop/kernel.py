@@ -558,9 +558,23 @@ class Kernel(HIPObject):
                     # structure declares: the value is converted through that layout, never
                     # through the structure's own constructor -- the constructor assigns each
                     # member by name and would narrow the complex into its first real field,
-                    # silently dropping the imaginary part. `np.complexfloating` is checked as
-                    # well as `complex`: a numpy `complex64` is *not* a python `complex`.
-                    value = np.asarray(value).view(np.dtype(content_type))[()]
+                    # silently dropping the imaginary part. The value is cast to the record's
+                    # own width first: a python complex is a complex128, and reinterpreting
+                    # its sixteen bytes as an eight-byte record is not a conversion -- numpy
+                    # refuses to view a 0-d array at a different itemsize. So a `c64`
+                    # parameter receives the `float` pair a python complex narrows to,
+                    # exactly as a python float reaches a `float` parameter.
+                    # The cast is `astype`, not an `asarray(..., dtype=...)` call: pygf owns
+                    # the `np.asarray` name process-wide (it adds a view for vector dtypes),
+                    # and a conversion must not depend on that wrapper forwarding the dtype.
+                    element:object = complex_of_dtype(np.dtype(content_type))
+                    if element is None:
+                        raise TypeError(
+                            f"type of argument '{arg_info.name}' need"
+                            f" {content_type.__name__}, got {value.__class__.__name__}: a"
+                            f" complex value is not a {content_type.__name__}")
+                    value = np.asarray(value).astype(element, copy=False)
+                    value = value.view(np.dtype(content_type))[()]
                     value = content_type.from_buffer_copy(
                         ProgramParser._structure_bytes(value))
 

@@ -33,6 +33,15 @@ if TYPE_CHECKING:
     from .context import CommandQueue
 
 
+# The two complex widths the kernel package declares as fixed C structures (`c64` is a
+# `float` pair, `c128` a `double` pair -- see `kernel/complex.py`). A complex value is not a
+# scalar, but MSL binds it exactly as one is bound: the generated signature declares
+# `c64 value`, a value in the thread address space, so the host hands over the record's bytes
+# with `setBytes:`. `check_type` therefore has to accept a complex number here, where the
+# integer fallback below would refuse it with "must be an integer".
+COMPLEX_TYPE_NAMES:Tuple[str, ...] = ("c64", "c128")
+
+
 class VarInfo:
 
     # The driver tables are keyed by the OpenCL-style short names, while MSL writes
@@ -140,6 +149,14 @@ class ArgInfo(VarInfo):
             if not isinstance(value, (int, float, np.floating)):
                 raise TypeError(
                     f"argument '{self.name}' must be a number, got {type(value).__name__}")
+            return
+        if base in COMPLEX_TYPE_NAMES:
+            # A python `complex` and a numpy complex scalar are both the value a complex
+            # parameter holds; anything else is a wrong argument, not a value MSL can read.
+            if not isinstance(value, (complex, np.complexfloating)):
+                raise TypeError(
+                    f"argument '{self.name}' must be a complex number, got"
+                    f" {type(value).__name__}")
             return
         if base in ("bool", "uchar", "char"):
             if not isinstance(value, (bool, int, np.bool_, np.integer)):

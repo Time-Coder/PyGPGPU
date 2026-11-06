@@ -190,12 +190,17 @@ def test_a_numpy_scalar_keeps_its_own_width_under_a_mapping():
 
 
 def test_a_python_complex_follows_the_float_mapping():
-    """64-bit reals must not be paired with a single-precision complex value."""
-    assert infer_ctype(1 + 2j) == "c128"
+    """A python complex is chosen with the python float beside it, both ways."""
+    # The 32-bit default: a python float is `float`, so a python complex is `c64`.
+    assert infer_ctype(1 + 2j) == "c64"
+    assert infer_ctype(1 + 2j, {"float": "float"}) == "c64"
+    # 64-bit reals must not be paired with a single-precision complex value.
     assert infer_ctype(1 + 2j, {"float": "double"}) == "c128"
-    # The numpy spellings still name their own width.
+    # The numpy spellings still name their own width, mapping or no mapping.
     assert infer_ctype(np.complex64(1 + 2j)) == "c64"
     assert infer_ctype(np.complex128(1 + 2j)) == "c128"
+    assert infer_ctype(np.complex64(1 + 2j), {"float": "double"}) == "c64"
+    assert infer_ctype(np.complex128(1 + 2j), {"float": "float"}) == "c128"
 
 
 # ---------------------------------------------------------------------------

@@ -746,10 +746,25 @@ def validate_type_map(type_map:Optional[Dict[str, object]])->Dict[str, str]:
 COMPLEX_TYPE_NAMES:Set[str] = {"c64", "c128"}
 
 # A python `complex` has no width of its own, so its width follows the `float` mapping: a
-# kernel that asks for 64-bit reals asks for 64-bit complex values beside them. The two
-# widths are the only ones a complex value has, so anything that is not a double real is the
-# single-precision pair.
-_COMPLEX_WIDTH_PER_REAL:Dict[str, str] = {"double": "c128"}
+# kernel that asks for 64-bit reals asks for 64-bit complex values beside them, and the
+# default 32-bit real pairs with the single-precision complex. The two widths are the only
+# ones a complex value has, so the table is written out for both of the mapping's own names
+# and anything else is read as the single-precision pair.
+_COMPLEX_WIDTH_PER_REAL:Dict[str, str] = {"float": "c64", "double": "c128"}
+
+
+def python_complex_type(float_type:str)->str:
+    """The complex width a python `complex` travels as beside a real of this width.
+
+    A python `complex` has no width of its own -- the same rule a python `float` follows --
+    so the two are always chosen together: `float=` naming a double gives `c128`, and the
+    32-bit default (`float`, or no mapping at all) gives `c64`. This is the single place that
+    decides it, which is what keeps a python complex value from being the one value in a body
+    whose width disagrees with the reals beside it: the scalar path (`infer_ctype`), a body
+    literal and `complex(re, im)` all read their width from here, so a `float=` mapping moves
+    all three together.
+    """
+    return _COMPLEX_WIDTH_PER_REAL.get(float_type, "c64")
 
 # The range of every integer the device can hold, as (minimum, maximum). A python `int` is
 # arbitrary precision, so a value outside the width it is about to travel as used to wrap
@@ -1462,18 +1477,19 @@ def infer_ctype(value:object, type_map:Optional[Dict[str, str]]=None)->DeviceTyp
     if isinstance(value, float):
         return float_type
     # A complex scalar. `np.complex64` and `np.complex128` are numpy scalars (they are
-    # `np.complexfloating`, not `np.floating`), and a python `complex` has no width of its own
-    # -- the same rule a python `float` follows, and the reason its width follows the `float`
-    # entry of the mapping rather than staying fixed: a kernel that maps `float` to a double
+    # `np.complexfloating`, not `np.floating`), and a python `complex` has no width of its
+    # own -- the same rule a python `float` follows, which is why the two widths are chosen
+    # together rather than one of them staying fixed: a kernel that maps `float` to a double
     # is asking for 64-bit real arithmetic, and a python complex beside it should not be the
-    # single value in the body that silently lost half its precision. A python complex is
-    # never one of the numpy scalars, so `isinstance(complex(1, 2), complex)` is checked on
-    # its own and would answer the double width either way.
+    # single value in the body that silently lost half its precision. The default is the
+    # other way round and just as important: a python float travels as `float`, so a python
+    # complex beside it travels as `c64`. A python complex is never one of the numpy scalars,
+    # so `isinstance(complex(1, 2), complex)` is checked on its own.
     if isinstance(value, np.complexfloating):
         dtype_name = np.dtype(type(value)).name
         return DTYPE_MAP.get(dtype_name, "c128")
     if isinstance(value, complex):
-        return _COMPLEX_WIDTH_PER_REAL.get(float_type, "c128")
+        return python_complex_type(float_type)
     if _is_device_handle(value):
         # A texture or surface reaches the device as an opaque 64-bit handle, which
         # the kernel reads through tex2D or writes through surf2Dwrite.
@@ -5635,9 +5651,11 @@ class FunctionTranslator:
         if isinstance(value, complex):
             # A complex literal is written with its two parts, because C has no complex
             # constant: the header builds the value from the reals. A python complex has no
-            # width of its own, so it is the double one -- the same rule a python float
-            # follows, which is why `1 + 2j` meets a complex64 operand as a complex128.
-            return self._emit_complex_literal(value.imag, value.real), "c128"
+            # width of its own, so it takes the one the `float` mapping chooses -- the same
+            # rule a python float follows -- which is why `1 + 2j` meets a complex64 operand
+            # as a complex64 while `@kernel(float=np.float64)` makes it a complex128.
+            kind:str = self._python_complex_kind()
+            return self._emit_complex_literal(value.imag, value.real, kind), kind
         self._error(f"unsupported constant: {value!r}", node)
 
     def _complex_store(self, target_t:object, value_t:object, code:str)->str:
@@ -5669,17 +5687,37 @@ class FunctionTranslator:
             element:str = "double" if kind == "c128" else "float"
             return f"{kind}_from_real(({element})({code}))"
         value_kind:str = self._complex_side(value_t, value_complex)
-        if value_kind == kind:
+        return self._convert_complex(code, value_kind, kind)
+
+    def _convert_complex(self, code:str, from_kind:str, to_kind:str)->str:
+        """`code` as a value of the other complex width, through the header's conversion.
+
+        C has no complex conversion operator, so the header's widening and narrowing functions
+        are the conversion. They are the *same* ones a cast uses, so a store, an explicit
+        `np.complex64(z)` and a python complex reaching the mapped width all mean one thing.
+        """
+        if from_kind == to_kind:
             return code
         self.complex_needs.update(complex_support.mixed_needs())
-        converter:str = (f"{value_kind}_widen_{kind}" if kind == "c128"
-                         else f"{value_kind}_narrow_{kind}")
+        converter:str = (f"{from_kind}_widen_{to_kind}" if to_kind == "c128"
+                         else f"{from_kind}_narrow_{to_kind}")
         return f"{converter}({code})"
 
-    def _emit_complex_literal(self, imaginary:float, real:float)->str:
+    def _python_complex_kind(self)->str:
+        """The header's spelling of the width a python `complex` travels as in this kernel.
+
+        The one decision point on this side of the translation: the mapping's `float` entry
+        chooses it through `python_complex_type`, so a body literal and `complex(re, im)`
+        cannot disagree with the `c64`/`c128` a python complex *argument* is declared as.
+        """
+        return python_complex_type(self.type_map.get("float", "float"))
+
+    def _emit_complex_literal(self, imaginary:float, real:float, kind:str)->str:
         """One complex constant, as the header's constructor over two real literals."""
-        self._require_complex(np.dtype(np.complex128))
-        return f"c128_make({self._real_literal(real, 'double')}, {self._real_literal(imaginary, 'double')})"
+        element:str = "double" if kind == "c128" else "float"
+        self._require_complex(np.dtype(np.complex128 if kind == "c128" else np.complex64))
+        return (f"{kind}_make({self._real_literal(real, element)},"
+                f" {self._real_literal(imaginary, element)})")
 
     def _real_literal(self, value:float, width:str)->str:
         """A real literal of the given width, spelled so the C compiler reads it as one."""
@@ -6033,9 +6071,10 @@ class FunctionTranslator:
         have to be parsed on the host, and a caller who knows the value can write it as a
         literal.
 
-        The result is the **double** width: a python `complex` has no width of its own, which
-        is the same rule `1 + 2j` and a python `float` already follow. A caller who wants the
-        narrow value writes `np.complex64(complex(re, im))`, and that cast narrows it.
+        The result carries the width the `float` mapping chooses for a python `complex`, which
+        is the same rule `1 + 2j` follows: `c64` under the 32-bit default, `c128` when the
+        kernel asks for 64-bit reals. A caller who wants the other width for one value writes
+        `np.complex64(complex(re, im))` (or `np.complex128(...)`), and that cast converts it.
         """
         argv:List[ast.expr] = list(node.args)
         if len(argv) not in (1, 2):
@@ -6056,35 +6095,35 @@ class FunctionTranslator:
             if is_ptr(t) or is_image(t) or is_vec(t):
                 self._error(
                     f"complex() components must be scalars, got {t}", node)
+        kind:str = self._python_complex_kind()
+        element:str = "double" if kind == "c128" else "float"
+        dtype:np.dtype = np.dtype(np.complex128 if kind == "c128" else np.complex64)
         if len(args) == 1:
             code, t = args[0]
             complex_dtype:Optional[np.dtype] = self._complex_dtype_of(t)
             if complex_dtype is not None:
-                # `complex(z)` is z: python answers the same value upcast to its own
-                # (double) type, so a complex64 operand is widened.
-                kind:str = self._complex_side(t, complex_dtype)
-                if kind == "c128":
-                    self._require_complex(np.dtype(np.complex128))
-                    return code, "c128"
-                self._require_complex(np.dtype(np.complex128))
-                self.complex_needs.update(complex_support.mixed_needs())
-                return f"c64_widen_c128({code})", "c128"
+                # `complex(z)` is z at the width a python complex travels as here: python
+                # answers its own (double) type, and the mapping stands in for that type, so a
+                # complex64 operand beside `float=` on a double is widened and a complex128 one
+                # under the 32-bit default is narrowed -- exactly as a python float argument is.
+                self._require_complex(dtype)
+                value_kind:str = self._complex_side(t, complex_dtype)
+                return self._convert_complex(code, value_kind, kind), kind
             if not is_float(t) and not is_int(t):
                 self._error(
                     f"complex({t}) has no device meaning: pass a real or a complex value,"
                     f" or use complex(re, im)", node)
             # A real value, widened: the imaginary part is zero.
-            self._require_complex(np.dtype(np.complex128))
-            element:str = "double"
-            return f"c128_from_real(({element})({code}))", "c128"
+            self._require_complex(dtype)
+            return f"{kind}_from_real(({element})({code}))", kind
 
         (real_code, real_t), (imag_code, imag_t) = args
         for code, t in args:
             if not is_float(t) and not is_int(t):
                 self._error(
                     f"complex(re, im) needs real components, got {t}", node)
-        self._require_complex(np.dtype(np.complex128))
-        return (f"c128_make((double)({real_code}), (double)({imag_code}))", "c128")
+        self._require_complex(dtype)
+        return (f"{kind}_make(({element})({real_code}), ({element})({imag_code}))", kind)
 
     def _emit_complex_compare(self, operator:str, left:str, lt:object, right:str,
                               rt:object) -> Optional[Translated]:
@@ -7599,7 +7638,7 @@ class FunctionTranslator:
         callee:FunctionTranslator = FunctionTranslator(
             raw_func, param_types, self.backend, _helper_globals(raw_func, self.resolve_global),
             self.device_cache, is_kernel=True, self_param="", self_attr_types={},
-            self_owner=None, launch_backend=self.launch_backend)
+            self_owner=None, launch_backend=self.launch_backend, type_map=self.type_map)
         callee.translate()
         self.nested_kernels.append(callee.render_kernel(c_name))
         for deeper in callee.nested_kernels:
@@ -9209,7 +9248,13 @@ class FunctionTranslator:
                                      else None),
                 self_struct_type=(self.self_struct_type
                                   if self_param and not receiver_as_argument else None),
-                receiver_as_argument=receiver_as_argument)
+                receiver_as_argument=receiver_as_argument,
+                # A device helper is translated *inside* the kernel's own translation unit, so
+                # it has to make the same width choices the kernel does: a python complex
+                # literal in a helper body follows the same `float=` mapping (see
+                # `_python_complex_kind`). Without this the helper silently answered the
+                # default while its caller was mapped to a double.
+                type_map=self.type_map)
             callee.translate()
             c_name:str = self._device_func_name(raw_func, param_types)
             # A helper that indexes a multi-dimensional array needs that array's extents, and
@@ -9332,7 +9377,19 @@ class FunctionTranslator:
                 base = f"{owner_name}_{func.__name__}"
         module_file:str = getattr(getattr(func, "__code__", None), "co_filename", "")
         module_mark:str = os.path.basename(module_file) if module_file else ""
-        return f"{base}_{short_hash(module_mark + '|' + type_sig(types))}"
+        signature:str = module_mark + '|' + type_sig(types)
+        # The `int=`/`float=` mapping belongs in the hash for the same reason it is part of the
+        # kernel's own C name: a python literal's width follows it, so one helper translated
+        # under two mappings is two device functions -- with different bodies, and for a
+        # complex value even a different return type. A source file carries every kernel that
+        # was written in it, so without the mapping the two definitions would land on one name
+        # and a C++ backend rejects them as "cannot overload functions distinguished by return
+        # type alone".
+        mapping_key:str = ",".join(f"{key}={self.type_map[key]}"
+                                   for key in sorted(self.type_map))
+        if mapping_key:
+            signature += '|' + mapping_key
+        return f"{base}_{short_hash(signature)}"
 
     def _device_qualifier(self)->str:
         """The storage qualifier a device function needs on this backend."""

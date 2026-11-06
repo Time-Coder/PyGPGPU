@@ -147,7 +147,7 @@ set_type_map(float=np.float64)            # 之后装饰的每个 kernel 都生�
 
 其他一律抛 `ValueError` —— `bool` 不是整数宽度, `half` 在 CUDA/HIP 上不支持, 字符串是**设备**类型名(`np.int8` 可用而 `"int8"` 不可用)。数值装不进所选宽度时同样拒绝: 无符号宽度收到负数会报错, 超出该宽度范围的值也一样, 而不是回绕。
 
-只有 `int` 和 `float` 可映射, 因为 numpy 标量自带宽度并保持不变(`np.uint32(x)` 仍是 `uint`)。Python `complex` 同样没有自己的宽度, 所以跟随 `float=`; `np.complex64`/`np.complex128` 保持自己的宽度。
+只有 `int` 和 `float` 可映射, 因为 numpy 标量自带宽度并保持不变(`np.uint32(x)` 仍是 `uint`)。Python `complex` 同样没有自己的宽度, 所以跟随 `float=` —— 默认的 32 位 `float` 对应 `complex64`, `float=np.float64` 对应 `complex128`; `np.complex64`/`np.complex128` 保持自己的宽度。这个选择覆盖 Python complex 进入函数体的每一种方式: 参数、字面量(`3 + 4j`), 以及 `complex(re, im)`。
 
 这个选择在装饰时确定 —— `set_type_map()` 不会改变已经存在的 kernel —— 并且是 kernel 身份的一部分, 所以两种映射绝不会共用同一个已编译二进制。
 
