@@ -4,7 +4,7 @@ from pygpgpu import kernel
 import matplotlib.pyplot as plt
 
 
-default_pixels_per_value = 100
+default_pixels_per_value = 200
 
 def escape_steps(c: complex, max_iter: int) -> float:
     zn = 0j
@@ -31,7 +31,7 @@ def draw_MandelbrotSet(image:NDArray[np.float32], view_center:complex, scale:flo
         view_center.real - 0.5*value_per_pixel*image.shape[1],
         view_center.imag + 0.5*value_per_pixel*image.shape[0]
     )
-    max_iter: int = np.log10(1 + scale) + 500
+    max_iter: int = np.log10(1 + scale) + 50
     for i, j in np.ndindex(image.shape[0], image.shape[1]):
         c = complex(
             left_top_complex.real + j*value_per_pixel,
@@ -41,7 +41,7 @@ def draw_MandelbrotSet(image:NDArray[np.float32], view_center:complex, scale:flo
         image[i, j] = steps/max_iter
 
 image = np.zeros((600, 800), dtype=np.float32)
-draw_MandelbrotSet(image, -0.74355+0.1268j, 20)
+draw_MandelbrotSet(image, 0j, 1)
 
 plt.rcParams['toolbar'] = 'None'
 fig = plt.figure()
