@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Dict, Union, Tuple, Optional, List
 from typing_extensions import override
 from ctypes import c_void_p
 from abc import abstractmethod
+import threading
 import time
 
 from ..driver import (
@@ -36,6 +37,11 @@ class MemObject(CLObject):
         self._host_ptr:HostPointer = host_ptr
         self._size:int = size
         self._using:bool = False
+        # Guards the claim above. A pooled buffer is handed out under the context's lock,
+        # but it is handed *back* from a driver callback, which holds no such lock -- and
+        # that callback can still be queued while the buffer has already been handed out
+        # again (see unuse).
+        self._claim_lock:threading.Lock = threading.Lock()
         self._dirty_on_device:bool = False
         self._dirty_on_host:bool = False
         self._device_dirty_time:float = 0.0
@@ -107,16 +113,24 @@ class MemObject(CLObject):
         self._dirty_on_host = dirty
     
     def use(self)->None:
-        if self._using:
-            raise RuntimeError("mem obj is still in using")
+        with self._claim_lock:
+            if self._using:
+                raise RuntimeError("mem obj is still in using")
 
-        self._using = True
+            self._using = True
 
     def unuse(self)->None:
-        if not self._using:
-            raise RuntimeError("mem obj is not in using")
+        with self._claim_lock:
+            if not self._using:
+                # A completion callback whose buffer was already handed back. Two paths
+                # release a buffer -- the argument's own `unuse()` after its read-back, and
+                # `on_release` for an argument that is not read back -- and both are
+                # registered on events whose order the driver decides. A rapid caller can
+                # hand the same pooled buffer out again while one of them is still queued,
+                # so the queued one fires after the new claim and must not raise about it.
+                return
 
-        self._using = False
+            self._using = False
     
     def __len__(self)->int:
         return self._size
