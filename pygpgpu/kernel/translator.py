@@ -6618,7 +6618,11 @@ class FunctionTranslator:
                 self._error("~ requires an integer operand", node)
             return f"(~{code})", t
         if name == "Not":
-            return f"(!{code})", "bool"
+            # The operand is parenthesised, or `not a == b` reaches C as `!a == b` -- a
+            # comparison against the negated left operand, which is not what python means
+            # (`not (a == b)`), and the OpenCL compiler says so with "logical not is only
+            # applied to the left hand side of this comparison".
+            return f"(!({code}))", "bool"
         self._error(f"unsupported unary operator: {name}", node)
 
     def _visit_compare(self, node:ast.Compare)->Translated:
@@ -6681,10 +6685,18 @@ class FunctionTranslator:
             # is refused here with the same explanation the arithmetic gets.
             if self._is_structure_operand(lt) or self._is_structure_operand(rt):
                 self._error(self._structure_operator_message(name, lt, rt, node), op)
-            parts.append(f"({left} {symbols[name]} {right})")
+            parts.append(f"{left} {symbols[name]} {right}")
             left = right
-        code = (" && ".join(parts)) if len(parts) > 1 else parts[0]
-        return f"({code})", "bool"
+        # A comparison is not wrapped here: an `if` adds the one pair C's syntax needs, and a
+        # second pair made it emit `if (((a == b)))` -- the middle one, which the OpenCL
+        # compiler reports as "equality comparison with extraneous parentheses" (and points
+        # at `=` as a "fix", which would silently change the meaning). An operand that needs
+        # grouping of its own -- a nested comparison, an arithmetic expression -- already
+        # carries parentheses from its own visitor. A chained comparison joins its parts with
+        # `&&`, and the `&&` expression gets the pair that groups it.
+        if len(parts) > 1:
+            return f"({' && '.join(parts)})", "bool"
+        return parts[0], "bool"
 
     def _visit_subscript(self, node:ast.Subscript)->Translated:
         value:ast.expr = node.value
