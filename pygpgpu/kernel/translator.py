@@ -11,7 +11,7 @@ import re
 import textwrap
 import types
 from typing import (Any, Callable, Dict, List, NoReturn, Optional, Sequence,
-                    Set, Tuple, Union)
+                    Set, Tuple, Union, cast)
 
 # TypedDict is 3.8+ in typing; this package supports 3.7, so it comes from the
 # backport the rest of the package already uses (see cparser/ts_parser.py).
@@ -1196,6 +1196,10 @@ COMPLEX_DEVICE_FUNCTIONS:Dict[str, str] = {
     "sinh": "sinh", "cosh": "cosh", "tanh": "tanh",
     "square": "square", "reciprocal": "reciprocal", "conjugate": "conjugate",
     "conj": "conjugate", "exp2": "exp2",
+    # `rint` answers a complex value in numpy (each part rounded to even), which is the same
+    # rule the real path spells `rint`; `round` is a builtin and is refused for a complex
+    # value (see COMPLEX_BUILTIN_REFUSALS), so a kernel writes `np.round(z)` for one.
+    "rint": "rint",
 }
 # A complex argument answering a *real*: numpy's own rule (`abs` is the magnitude, `np.angle`
 # the phase). An empty spelling means the plain real function of the magnitude.
@@ -1213,6 +1217,55 @@ COMPLEX_UNSUPPORTED_FUNCTIONS:Dict[str, str] = {
     "cbrt": "use `np.pow(z, 1 / 3)`",
     "ldexp": "use `z * 2 ** exponent`",
     "atan2": "use `np.angle(a / b)`, or `np.atan(a / b)`",
+}
+
+# The *builtin* spellings -- pygf's functions, re-exported from the package top level -- that
+# are a complex operation, and the header function each one calls. The interpreter answers
+# these for a complex value (they are pygf's functions, which route a complex scalar through
+# `cmath`), so the device answers them too: a kernel and its serial run have to agree. The
+# table exists because the builtin tables are keyed by *type* and a complex value has no entry
+# in them, which is how `sqrtf(z)` and `powf(z, w)` used to be emitted.
+COMPLEX_BUILTIN_FUNCTIONS:Dict[str, str] = {
+    "sqrt": "sqrt", "exp": "exp", "exp2": "exp2", "log": "log", "log2": "log2",
+    "log10": "log10", "sin": "sin", "cos": "cos", "tan": "tan",
+    "asin": "asin", "acos": "acos", "atan": "atan",
+    "sinh": "sinh", "cosh": "cosh", "tanh": "tanh",
+    "conjugate": "conjugate", "conj": "conjugate", "pow": "pow",
+    # `sign` answers a *complex* value (the direction on the unit circle), unlike `abs`,
+    # which answers the magnitude -- so it belongs here and not beside `abs`.
+    "sign": "sign",
+}
+
+# The builtin names that answer a *real* for a complex argument: the magnitude, which is
+# numpy's own rule for it.
+COMPLEX_BUILTIN_REAL_RESULTS:Dict[str, str] = {"abs": "abs"}
+
+# The builtin names numpy refuses for a complex value, and what to write instead. The
+# interpreter refuses them as well -- they reach `math.floor` and friends through pygf -- so
+# saying so is the only honest answer, and it keeps the device from emitting a call the
+# compiler cannot type. `round` is here rather than in the table above because *python's*
+# builtin refuses a complex value; numpy's `np.round` is the spelling that answers one.
+COMPLEX_BUILTIN_REFUSALS:Dict[str, str] = {
+    "floor": "there is none: a complex value has no ordering",
+    "ceil": "there is none: a complex value has no ordering",
+    "trunc": "there is none: a complex value has no ordering",
+    "round": "use `np.round(z)`: python's round() refuses a complex value",
+    "rint": "use `np.rint(z)`: this package's rint() rounds through python's round(), which"
+            " refuses a complex value",
+    "fract": "use `z - np.floor(z)`, which is a real-pair operation",
+    "fmod": "use `a - b * np.floor(a / b)`, or np.mod for a real pair",
+    "remainder": "there is none: numpy has no complex form for it",
+    "rsqrt": "use `1 / np.sqrt(z)`",
+    "cbrt": "use `np.power(z, 1 / 3)`",
+    "ldexp": "use `z * 2 ** exponent`",
+    "step": "there is none: a complex value has no ordering",
+    "smoothstep": "there is none: a complex value has no ordering",
+    "fdim": "there is none: numpy has no complex form for it",
+    "copysign": "there is none: numpy has no complex form for it",
+    "nextafter": "there is none: numpy has no complex form for it",
+    "degrees": "there is none: numpy has no complex form for it",
+    "radians": "there is none: numpy has no complex form for it",
+    "hypot": "use `np.abs(a - b)` on the difference",
 }
 
 # ---------- print() support ----------
@@ -7736,6 +7789,13 @@ class FunctionTranslator:
             f"{self._why_not_callable(kind, func.attr)}", node)
 
     def _emit_builtin(self, name:str, args:List[Translated], node:ast.Call)->Translated:
+        # Python's own builtins (`abs`, `pow`, `min`, `max`, `round`) take a complex value
+        # in the interpreter for some of these and refuse it for others, and the device has
+        # to agree with that rather than with a table keyed by type (see
+        # _emit_complex_builtin).
+        if any(self._complex_dtype_of(t) is not None for _, t in args):
+            return self._emit_complex_builtin(name, args, node)
+
         if name == "pow":
             # python's builtin, which differs from math.pow only in that integer arguments
             # stay exact; the device form is the same floating-point power.
@@ -7906,21 +7966,36 @@ class FunctionTranslator:
             value_code, value_t = self._visit_expression(node.args[0])
             if is_ptr(value_t) or is_image(value_t):
                 self._error_numpy_array_form("clip", node)
-            bounds:List[Optional[str]] = []
+            bounds:List[Optional[Translated]] = []
             for bound_node in node.args[1:]:
                 if isinstance(bound_node, ast.Constant) and bound_node.value is None:
                     bounds.append(None)
                     continue
-                code, t = self._visit_expression(bound_node)
-                if is_ptr(t) or is_image(t):
+                bound:Translated = self._visit_expression(bound_node)
+                if is_ptr(bound[1]) or is_image(bound[1]):
                     self._error("np.clip() bounds must be scalars, not arrays", bound_node)
-                bounds.append(code)
-            lo:Optional[str] = bounds[0] if bounds else None
-            hi:Optional[str] = bounds[1] if len(bounds) > 1 else None
+                bounds.append(bound)
+            lo:Optional[Translated] = bounds[0] if bounds else None
+            hi:Optional[Translated] = bounds[1] if len(bounds) > 1 else None
+            if self._complex_dtype_of(value_t) is not None:
+                # numpy's clip on a complex value is its lexicographic min/max, and a `None`
+                # bound means the operation on that side is simply absent. The bounds keep
+                # their own types, so a real one is widened to the complex value it stands
+                # for (`np.clip(z, 0, 1)`) rather than being handed to a complex function.
+                value:Translated = (value_code, value_t)
+                if lo is None and hi is None:
+                    return value
+                if hi is None:
+                    return self._emit_complex_builtin("max", [value, lo], node)
+                if lo is None:
+                    return self._emit_complex_builtin("min", [value, hi], node)
+                return self._emit_complex_builtin("clamp", [value, lo, hi], node)
             # np.clip keeps an integer input an integer, so the element type is not forced
             # to float: `np.clip(300, 0, 255)` is 255, not a float.
             result_t:object = value_t if is_int(value_t) else "float"
-            return self._emit_clip(value_code, result_t, lo, hi), result_t
+            return self._emit_clip(value_code, result_t,
+                                   lo[0] if lo is not None else None,
+                                   hi[0] if hi is not None else None), result_t
         if attr == "where":
             if len(node.args) == 1:
                 self._error(
@@ -8016,13 +8091,18 @@ class FunctionTranslator:
             if attr == "angle":
                 return f"{kind}_angle({code})", element
             if attr == "sign":
-                # numpy's complex `sign` is the direction on the unit circle, which is not
-                # the header's; a division by the magnitude is exactly that.
-                return (f"{kind}_scale_div({code}, {kind}_abs({code}))"), kind
+                # numpy's complex `sign` is the direction on the unit circle, and zero at
+                # zero: a header function, because the division alone is 0/0 there.
+                return f"{kind}_sign({code})", kind
             return f"{kind}_conjugate({code})", kind
         if attr == "minimum" or attr == "maximum":
             if len(args) != 2:
                 self._error(f"np.{attr}() takes exactly 2 arguments", node)
+            if any(self._complex_dtype_of(t) is not None for _, t in args):
+                # numpy gives a complex value a lexicographic order, so its minimum and
+                # maximum are defined; the header's comparison is what answers them.
+                return self._emit_complex_builtin(
+                    "min" if attr == "minimum" else "max", args, node)
             (lcode, lt), (rcode, rt) = args
             t:object = promote(lt, rt)
             pick:str = "min" if attr == "minimum" else "max"
@@ -8032,11 +8112,28 @@ class FunctionTranslator:
                 return f"{'fmin' if pick == 'min' else 'fmax'}(({t})({lcode}), ({t})({rcode}))", t
             return f"{pick}(({t})({lcode}), ({t})({rcode}))", t
         if attr in ("power", "arctan2"):
-            # Same operation as math.pow / math.atan2 under numpy's spelling.
+            # Same operation as math.pow / math.atan2 under numpy's spelling. A complex base
+            # or exponent is `np.power`'s own complex power, which is the header's `pow` --
+            # the unary table below could not express it, since it takes two operands.
+            if attr == "power" and any(self._complex_dtype_of(t) is not None
+                                       for _, t in args):
+                return self._emit_complex_builtin("pow", args, node)
             return self._emit_math_call({"power": "pow", "arctan2": "atan2"}[attr],
                                         args, node, module_name="np")
         if attr == "round":
-            # numpy rounds halfway cases to even, which is python's round too.
+            # numpy rounds halfway cases to even, which is python's round too. A complex
+            # value is rounded per part -- and the *builtin* `round(z)` is refused, because
+            # python's own round() has no complex form; `np.round(z)` is the spelling that
+            # answers one, which is why this branch came before the builtin's. The numpy
+            # spelling emits the header's function directly rather than going through the
+            # builtin table, where `rint` is a pygf name that rounds through python's
+            # `round()` and is therefore refused like it.
+            if any(self._complex_dtype_of(t) is not None for _, t in args):
+                code, t = args[0]
+                dtype:np.dtype = cast(np.dtype, self._complex_dtype_of(t))
+                kind:str = self._complex_side(t, dtype)
+                self._require_complex(dtype)
+                return f"{kind}_rint({code})", kind
             return self._emit_builtin("round", args, node)
         if attr == "where":
             return self._emit_where(args, node)
@@ -8124,6 +8221,15 @@ class FunctionTranslator:
         complex_dtypes:List[Optional[np.dtype]] = [self._complex_dtype_of(t) for _, t in args]
         if not any(dtype is not None for dtype in complex_dtypes):
             return None
+        if attr in ("isnan", "isinf", "isfinite"):
+            # numpy defines all three for a complex value: a NaN or an infinity in *either*
+            # part answers the first two, and `isfinite` needs both parts finite. The header
+            # holds the predicate, and the answer is the number python's bool stands for --
+            # the shape the real path below answers with as well.
+            code, t = args[0]
+            kind:str = self._complex_side(t, complex_dtypes[0])
+            self._require_complex(complex_dtypes[0])
+            return f"({kind}_{attr}({code}) != 0)", "bool"
         if attr in COMPLEX_ABS_FUNCTIONS:
             # A real result: `abs`, `np.abs`, `np.angle`, `xFabs` on a complex is the
             # magnitude or the phase, not a complex value.
@@ -8202,7 +8308,7 @@ class FunctionTranslator:
         if attr in ("isnan", "isinf", "isfinite"):
             # The predicate takes a float; casting it to the int result type is what made the
             # CUDA call ambiguous. The device answers 0/1, which is the number python's bool
-            # stands for.
+            # stands for. (A complex value answered this in _emit_complex_math, above.)
             return f"({attr}((float)({args[0][0]})) != 0)", "bool"
 
         if ret_override == "int" and attr in ("floor", "ceil", "trunc"):
@@ -8524,7 +8630,109 @@ class FunctionTranslator:
 
     # ---------- gpu.* device builtins ----------
 
+    def _emit_complex_builtin(self, name:str, args:List[Translated],
+                              node:ast.Call)->Translated:
+        """A builtin call with a complex argument: the header's function, or a refusal.
+
+        Both builtin dispatchers reach here first -- `_emit_gpu_builtin` for the package's own
+        vocabulary and `_emit_builtin` for python's builtins -- because their tables are keyed
+        by *type* and a complex value has no entry in any of them. That is what emitted
+        `sqrtf(z)`, `min((int)(z), (int)(w))`, `fminf(fmaxf(z, 0.0f), 1.0f)` and a `round(z)`
+        that returned the value unchanged: a call the compiler could not type, or one that
+        silently did nothing.
+
+        The split follows numpy, which is the authority the interpreter already runs: a name
+        numpy defines for a complex value is answered from the complex header, and a name it
+        refuses is refused here by name. Where the two sides disagree, the interpreter wins --
+        which is why `round(z)` is refused (python's builtin has no complex form) while
+        `np.round(z)` is answered.
+        """
+        for _code, t in args:
+            if is_ptr(t) or is_image(t) or is_vec(t):
+                self._error(
+                    f"{name}() mixes a complex value with a {t}: a complex value is a scalar, "
+                    f"and the device has no complex vector or array element", node)
+
+        dtypes:List[Optional[np.dtype]] = [self._complex_dtype_of(t) for _, t in args]
+        sides:List[Optional[str]] = [None if dtype is None else self._complex_side(t, dtype)
+                                     for (_, t), dtype in zip(args, dtypes)]
+        # A mixed pair (`min(c64, c128)`) is computed at the wider width, which is the rule
+        # the arithmetic follows: nothing is ever rounded down.
+        target:str = "c128" if "c128" in sides else "c64"
+        element:str = "double" if target == "c128" else "float"
+        codes:List[str] = []
+        for (code, _t), dtype, side in zip(args, dtypes, sides):
+            if dtype is None:
+                # A real operand: `pow(z, 2)` and `mix(z, w, 0.5)` both have one, and it is
+                # built into the complex value it stands for.
+                self._require_complex(np.dtype(np.complex128 if target == "c128"
+                                               else np.complex64))
+                codes.append(f"{target}_from_real(({element})({code}))")
+                continue
+            self._require_complex(dtype)
+            codes.append(code if side == target
+                         else self._convert_complex(code, cast(str, side), target))
+
+        if name in COMPLEX_BUILTIN_FUNCTIONS:
+            function:str = COMPLEX_BUILTIN_FUNCTIONS[name]
+            expected:int = 2 if function == "pow" else 1
+            if len(args) != expected:
+                self._error(f"{name}() takes exactly {expected} argument(s)", node)
+            return f"{target}_{function}({', '.join(codes)})", target
+
+        if name in COMPLEX_BUILTIN_REAL_RESULTS:
+            if len(args) != 1:
+                self._error(f"{name}() takes exactly 1 argument", node)
+            return f"{target}_{COMPLEX_BUILTIN_REAL_RESULTS[name]}({codes[0]})", element
+
+        if name in ("min", "max", "fmin", "fmax"):
+            if len(args) != 2:
+                self._error(f"{name}() takes exactly 2 arguments", node)
+            pick:str = "min" if name in ("min", "fmin") else "max"
+            return f"{target}_{pick}({codes[0]}, {codes[1]})", target
+
+        if name in ("clamp", "saturate"):
+            zero:str = f"{target}_from_real(({element})(0))"
+            one:str = f"{target}_from_real(({element})(1))"
+            if name == "saturate":
+                bounds:List[str] = [zero, one]
+            else:
+                if len(args) != 3:
+                    self._error("clamp(a, lo, hi) takes exactly 3 arguments", node)
+                bounds = codes[1:3]
+            return f"{target}_clamp({codes[0]}, {bounds[0]}, {bounds[1]})", target
+
+        if name == "mix":
+            if len(args) != 3:
+                self._error("mix(a, b, t) takes exactly 3 arguments", node)
+            # `x * (1 - a) + y * a`, the body pygf's `mix` computes: the blend factor is a
+            # complex value here like any other operand.
+            one_code:str = f"{target}_from_real(({element})(1))"
+            factor:str = f"{target}_sub({one_code}, {codes[2]})"
+            return (f"{target}_add({target}_mul({codes[0]}, {factor}),"
+                    f" {target}_mul({codes[1]}, {codes[2]}))"), target
+
+        if name == "mad":
+            if len(args) != 3:
+                self._error("mad(a, b, c) takes exactly 3 arguments", node)
+            return f"{target}_add({target}_mul({codes[0]}, {codes[1]}), {codes[2]})", target
+
+        reason:Optional[str] = COMPLEX_BUILTIN_REFUSALS.get(name)
+        functions:str = ", ".join(sorted(
+            set(COMPLEX_BUILTIN_FUNCTIONS) | set(COMPLEX_BUILTIN_REAL_RESULTS)
+            | {"min", "max", "clamp", "mix", "mad"}))
+        if reason is not None:
+            self._error(f"{name}() has no complex meaning ({reason})", node)
+        self._error(
+            f"{name}() is not defined for a complex value: the complex operations are "
+            f"{functions}", node)
+
     def _emit_gpu_builtin(self, name:str, args:List[Translated], node:ast.Call)->Translated:
+        # A complex argument is settled before any table is consulted: those tables are keyed
+        # by type, and a complex value has no entry in them (see _emit_complex_builtin).
+        if any(self._complex_dtype_of(t) is not None for _, t in args):
+            return self._emit_complex_builtin(name, args, node)
+
         if name in INDEX_BUILTINS:
             if len(args) != 1 or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, int):
                 self._error(f"gpu.{name}(dim) requires a constant integer dimension (0, 1 or 2)", node)

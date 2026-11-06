@@ -215,6 +215,67 @@ COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_conjugate(c64 a)
     return r;
 }
 
+/* Ordering: numpy gives a complex value one, and it is the real parts that decide, with the
+ * imaginary parts breaking a tie. `np.minimum`, `np.maximum` and `np.clip` are built on it,
+ * and so are the host's `min`/`max`/`clamp`, which is why the device needs it too. */
+COMPLEX_QUAL static COMPLEX_UNUSED int c64_less(c64 a, c64 b)
+{
+    return (a.re < b.re) || (a.re == b.re && a.im < b.im);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_min(c64 a, c64 b)
+{
+    return c64_less(a, b) ? a : b;
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_max(c64 a, c64 b)
+{
+    return c64_less(a, b) ? b : a;
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_clamp(c64 a, c64 lo, c64 hi)
+{
+    return c64_min(c64_max(a, lo), hi);
+}
+
+/* numpy's predicates on a complex value: a NaN or an infinity in *either* part answers the
+ * first two, and `isfinite` needs both parts finite. The infinities are compared against
+ * FLT_MAX rather than spelled INFINITY, which the CUDA headers do not define (see the
+ * translator's math constants); a NaN compares false to everything, so it is neither. */
+COMPLEX_QUAL static COMPLEX_UNUSED int c64_isnan(c64 a)
+{
+    return (a.re != a.re) || (a.im != a.im);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED int c64_isinf(c64 a)
+{
+    return (a.re > 3.4028234663852886e38f) || (a.re < -3.4028234663852886e38f)
+        || (a.im > 3.4028234663852886e38f) || (a.im < -3.4028234663852886e38f);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED int c64_isfinite(c64 a)
+{
+    return !c64_isnan(a) && !c64_isinf(a);
+}
+
+/* Rounding to the nearest even integer, per part: numpy's `np.round` and `np.rint` on a
+ * complex value, and the same rule the real path spells `rint`. */
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_rint(c64 a)
+{
+    c64 r;
+    r.re = rint(a.re);
+    r.im = rint(a.im);
+    return r;
+}
+
+/* numpy's `sign` for a complex value: the direction on the unit circle. Only zero answers
+ * zero -- `z / abs(z)` there is 0/0, a NaN numpy never answers. */
+COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sign(c64 a)
+{
+    float magnitude = c64_abs(a);
+    return (magnitude == 0.0f) ? c64_from_real(0.0f) : c64_scale_div(a, magnitude);
+}
+
 /* z * z and 1 / z. */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_square(c64 a)
 {
@@ -569,6 +630,59 @@ COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_conjugate(c128 a)
     r.re = a.re;
     r.im = -a.im;
     return r;
+}
+
+/* Ordering, the predicates, the rounding and the sign: the double-width copies of what the
+ * `c64` block declares above, and those comments say what each one is and why the device
+ * needs it (numpy gives a complex value an order, predicates and a rounding). */
+COMPLEX_QUAL static COMPLEX_UNUSED int c128_less(c128 a, c128 b)
+{
+    return (a.re < b.re) || (a.re == b.re && a.im < b.im);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_min(c128 a, c128 b)
+{
+    return c128_less(a, b) ? a : b;
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_max(c128 a, c128 b)
+{
+    return c128_less(a, b) ? b : a;
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_clamp(c128 a, c128 lo, c128 hi)
+{
+    return c128_min(c128_max(a, lo), hi);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED int c128_isnan(c128 a)
+{
+    return (a.re != a.re) || (a.im != a.im);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED int c128_isinf(c128 a)
+{
+    return (a.re > 1.7976931348623157e308) || (a.re < -1.7976931348623157e308)
+        || (a.im > 1.7976931348623157e308) || (a.im < -1.7976931348623157e308);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED int c128_isfinite(c128 a)
+{
+    return !c128_isnan(a) && !c128_isinf(a);
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_rint(c128 a)
+{
+    c128 r;
+    r.re = rint(a.re);
+    r.im = rint(a.im);
+    return r;
+}
+
+COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sign(c128 a)
+{
+    double magnitude = c128_abs(a);
+    return (magnitude == 0.0) ? c128_from_real(0.0) : c128_scale_div(a, magnitude);
 }
 
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_square(c128 a)

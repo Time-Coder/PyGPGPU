@@ -16,7 +16,8 @@ import numpy as np
 import pytest
 from pygf import conjugate
 
-from pygpgpu import kernel
+from pygpgpu import (clamp, exp, exp2, floor, fract, hypot, kernel, log, mad, mix, rint,
+                     rsqrt, saturate, sign, sin, sqrt, step)
 from pygpgpu.kernel import complex as complex_support
 
 
@@ -1020,3 +1021,253 @@ def test_a_helper_body_follows_the_kernel_it_is_translated_in(gpu_backend):
     calls_plain_helper[gpu_backend](a, out)
     assert out[0] == complex(np.complex64(0.2j))
     assert out[0] != 0.2j
+
+# ---------------------------------------------------------------------------
+# The builtin spellings that had no complex path
+# ---------------------------------------------------------------------------
+#
+# The builtin tables are keyed by *type*, and a complex value has no entry in any of them, so
+# every name below used to be emitted from a path that assumed a real: `sqrtf(z)`,
+# `min((int)(z), (int)(w))`, `fminf(fmaxf(z, 0.0f), 1.0f)` -- calls the compiler cannot type
+# -- and a `round(z)` that returned the value unchanged. The interpreter ran pygf's helper for
+# each of them and answered what numpy answers, so the device answers it too, from the complex
+# header. A name the interpreter refuses (python's `round`, and the real-only `floor`,
+# `rsqrt`, ...) is refused at translation time with the reason instead.
+
+
+@kernel
+def builtin_sign(z, out):
+    for i in range(out.shape[0]):
+        out[i] = sign(z)
+
+
+@kernel
+def numpy_sign(z, out):
+    for i in range(out.shape[0]):
+        out[i] = np.sign(z)
+
+
+@kernel
+def builtin_transcendental(z, out):
+    for i in range(out.shape[0]):
+        out[i] = sqrt(z) + exp(z) + log(z) + sin(z) + exp2(z)
+
+
+@kernel
+def numpy_transcendental(z, out):
+    for i in range(out.shape[0]):
+        out[i] = np.sqrt(z) + np.exp(z) + np.log(z) + np.sin(z) + np.exp2(z)
+
+
+@kernel
+def numpy_round(z, out):
+    for i in range(out.shape[0]):
+        out[i] = np.round(z)
+
+
+@kernel
+def numpy_rint(z, out):
+    for i in range(out.shape[0]):
+        out[i] = np.rint(z)
+
+
+@kernel
+def builtin_min_max(z, w, out):
+    for i in range(out.shape[0]):
+        out[i] = min(z, w) + max(z, w)
+
+
+@kernel
+def numpy_minimum_maximum(z, w, out):
+    for i in range(out.shape[0]):
+        out[i] = np.minimum(z, w) + np.maximum(z, w)
+
+
+@kernel
+def builtin_clamp_saturate(z, out):
+    for i in range(out.shape[0]):
+        out[i] = clamp(z, 0, 1) + saturate(z)
+
+
+@kernel
+def numpy_clip(z, out):
+    for i in range(out.shape[0]):
+        out[i] = np.clip(z, 0, 1) + np.clip(z, 0, 1)
+
+
+@kernel
+def builtin_mix_mad(z, w, v, out):
+    for i in range(out.shape[0]):
+        out[i] = mix(z, w, 0.5) + mad(z, w, v)
+
+
+@kernel
+def numpy_mix_mad(z, w, v, out):
+    for i in range(out.shape[0]):
+        out[i] = (z * (1 - 0.5) + w * 0.5) + (z * w + v)
+
+
+@kernel
+def numpy_predicates(z, flags):
+    """The three predicates as a bitmask, so one run can tell them apart."""
+    for i in range(flags.shape[0]):
+        flags[i] = np.isnan(z) * 4 + np.isinf(z) * 2 + np.isfinite(z)
+
+
+def _predicate_mask(value) -> int:
+    return int(np.isnan(value)) * 4 + int(np.isinf(value)) * 2 + int(np.isfinite(value))
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+def test_the_builtin_transcendentals_answer_complex(runner, dtype):
+    """`sqrt(z)` and its siblings are pygf's functions, so the device calls the header."""
+    z = dtype(1 + 2j)
+    out = np.zeros(2, dtype=dtype)
+    runner(builtin_transcendental, z, out)
+    expected = (np.sqrt(z) + np.exp(z) + np.log(z) + np.sin(z) + np.exp2(z)).astype(dtype)
+    np.testing.assert_allclose(out, expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+def test_sign_answers_the_unit_direction(runner, dtype):
+    """numpy's complex `sign`, under both spellings -- and zero at zero, not a NaN."""
+    out = np.zeros(1, dtype=dtype)
+    for value in (dtype(1 + 2j), dtype(-3 + 0.5j), dtype(0)):
+        runner(builtin_sign, value, out)
+        np.testing.assert_allclose(out[0], np.sign(value), rtol=1e-6, atol=1e-7)
+        runner(numpy_sign, value, out)
+        np.testing.assert_allclose(out[0], np.sign(value), rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+def test_rounding_a_complex_value_rounds_each_part(runner, dtype):
+    """`np.round(z)` and `np.rint(z)` round both parts to even.
+
+    Python's own `round(z)` and this package's `rint(z)` (which rounds through it) are
+    refused, because the interpreter refuses them as well.
+    """
+    out = np.zeros(1, dtype=dtype)
+    for value in (dtype(1.5 + 2.5j), dtype(2.5 - 3.5j), dtype(-1.5 + 0.5j)):
+        runner(numpy_round, value, out)
+        np.testing.assert_allclose(out[0], np.round(value))
+        runner(numpy_rint, value, out)
+        np.testing.assert_allclose(out[0], np.rint(value))
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+def test_minimum_and_maximum_are_lexicographic(runner, dtype):
+    """The real part decides and the imaginary one breaks the tie, as numpy does it."""
+    z = dtype(1 + 2j)
+    out = np.zeros(1, dtype=dtype)
+    for w in (dtype(3 - 1j), dtype(1 - 1j), dtype(3 + 0j)):
+        runner(builtin_min_max, z, w, out)
+        np.testing.assert_allclose(out[0], np.minimum(z, w) + np.maximum(z, w))
+        runner(numpy_minimum_maximum, z, w, out)
+        np.testing.assert_allclose(out[0], np.minimum(z, w) + np.maximum(z, w))
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+def test_clamp_and_clip_are_the_lexicographic_pair(runner, dtype):
+    """`clamp(z, 0, 1)`, `saturate(z)` and `np.clip(z, 0, 1)` are one operation."""
+    out = np.zeros(1, dtype=dtype)
+    for value in (dtype(1 + 2j), dtype(0.5 + 0.25j), dtype(4 - 3j), dtype(-1 + 0j)):
+        runner(builtin_clamp_saturate, value, out)
+        np.testing.assert_allclose(out[0], np.clip(value, 0, 1) * 2)
+        runner(numpy_clip, value, out)
+        np.testing.assert_allclose(out[0], np.clip(value, 0, 1) * 2)
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+def test_mix_and_mad_are_the_complex_arithmetic(runner, dtype):
+    """`mix(z, w, 0.5)` blends and `mad(z, w, v)` is a product plus a sum."""
+    z, w, v = dtype(1 + 2j), dtype(3 - 1j), dtype(0.5 + 0.5j)
+    out = np.zeros(1, dtype=dtype)
+    runner(builtin_mix_mad, z, w, v, out)
+    runner(numpy_mix_mad, z, w, v, out)
+    expected = (z * (1 - 0.5) + w * 0.5) + (z * w + v)
+    np.testing.assert_allclose(out[0], expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+def test_the_predicates_answer_for_either_part(runner, dtype):
+    """`np.isnan`/`isinf`/`isfinite` are defined on a complex value in numpy."""
+    out = np.zeros(1, dtype=np.float32)
+    for value in (complex(np.nan, 1.0), complex(1.0, np.inf), dtype(1 + 2j),
+                  complex(np.inf, np.nan)):
+        runner(numpy_predicates, dtype(value), out)
+        assert int(out[0]) == _predicate_mask(value), value
+
+
+# ------------------------------------------------------- refused by name, at translation
+#
+# python's `round` and the real-only functions have no complex form in the interpreter either,
+# so the translator refuses them and says what to write. These need no device: the refusal
+# happens while the body is translated, before anything is compiled.
+
+
+@kernel
+def refuses_round(z, out):
+    for i in range(out.shape[0]):
+        out[i] = round(z)
+
+
+@kernel
+def refuses_rsqrt(z, out):
+    for i in range(out.shape[0]):
+        out[i] = rsqrt(z)
+
+
+@kernel
+def refuses_rint(z, out):
+    for i in range(out.shape[0]):
+        out[i] = rint(z)
+
+
+@kernel
+def refuses_fract(z, out):
+    for i in range(out.shape[0]):
+        out[i] = fract(z)
+
+
+@kernel
+def refuses_step(z, w, out):
+    for i in range(out.shape[0]):
+        out[i] = step(z, w)
+
+
+@kernel
+def refuses_floor(z, out):
+    for i in range(out.shape[0]):
+        out[i] = floor(z)
+
+
+@kernel
+def refuses_hypot(z, w, out):
+    for i in range(out.shape[0]):
+        out[i] = hypot(z, w)
+
+
+@pytest.mark.parametrize("function, expected", [
+    (refuses_round, "use `np.round(z)`"),
+    (refuses_rint, "use `np.rint(z)`"),
+    (refuses_rsqrt, "use `1 / np.sqrt(z)`"),
+    (refuses_fract, "np.floor"),
+    (refuses_step, "no ordering"),
+    (refuses_floor, "no ordering"),
+    (refuses_hypot, "np.abs(a - b)"),
+], ids=["round", "rint", "rsqrt", "fract", "step", "floor", "hypot"])
+def test_a_real_only_builtin_is_refused_for_a_complex_value(function, expected):
+    """The refusal names the operation to write instead of a compiler's type error."""
+    from pygpgpu.kernel.decorator import infer_ctype
+    from pygpgpu.kernel.translator import FunctionTranslator
+
+    complex_scalar = infer_ctype(1 + 2j)
+    complex_array = infer_ctype(np.zeros(2, np.complex64))
+    parameters: int = len(function.raw_func.__code__.co_varnames[:function.raw_func.__code__.co_argcount])
+    types = [complex_scalar] * (parameters - 1) + [complex_array]
+    translator = FunctionTranslator(function.raw_func, types, "cuda",
+                                    lambda name: globals().get(name), {}, is_kernel=True)
+    with pytest.raises(SyntaxError) as caught:
+        translator.translate()
+    assert expected in str(caught.value)
+    assert "complex" in str(caught.value)
