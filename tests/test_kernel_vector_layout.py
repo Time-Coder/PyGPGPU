@@ -107,8 +107,11 @@ class _Vec4Member(ctypes.Structure):
 _NEEDS_REBUILD = [
     # 1. a member that is a 3-component vector
     pytest.param(_InnerVec3(), True, id="direct-vector"),
-    # a 2- or 4-component one is not padded, so it must not force a rebuild
-    pytest.param(_Vec2Member(), False, id="direct-vector2"),
+    # A 2-component vector is not padded itself, but OpenCL aligns it to 8 while ctypes
+    # aligns the class to 4 -- so `{float2 v; int k;}` is 16 bytes on the device and 12 on
+    # the host, and the value has to be re-laid or the driver refuses the short buffer.
+    pytest.param(_Vec2Member(), True, id="direct-vector2"),
+    # A 4-component vector is 16 bytes on both sides, so nothing is re-laid.
     pytest.param(_Vec4Member(), False, id="direct-vector4"),
     # 2. a member that is a structure which contains one, at any depth
     pytest.param(_MidVec3(), True, id="nested-structure"),

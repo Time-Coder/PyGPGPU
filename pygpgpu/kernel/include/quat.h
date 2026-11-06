@@ -27,6 +27,13 @@
 #ifndef QUAT_QUAL
 #define QUAT_QUAL
 #endif
+/* Every function below is static, so a kernel that uses one leaves the rest
+ * unreferenced and NVRTC reports #177-D: declared but never referenced for each. The
+ * attribute says that is expected; it is accepted by NVRTC, HIP's clang, OpenCL C and
+ * MSL alike, and mirrors the complex header's COMPLEX_UNUSED. */
+#ifndef QUAT_UNUSED
+#define QUAT_UNUSED __attribute__((unused))
+#endif
 
 /* The two quaternion structures a kernel can use, named as pygf names them. */
 typedef struct { float w; float x; float y; float z; } quatf;
@@ -38,7 +45,7 @@ typedef struct { double w; double x; double y; double z; } quatd;
 #ifdef QUAT_NEED_FLOAT
 
 /* q * r: compose two rotations. */
-QUAT_QUAL static quatf quatf_mul(quatf a, quatf b)
+QUAT_QUAL static QUAT_UNUSED quatf quatf_mul(quatf a, quatf b)
 {
     quatf r;
     r.w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z;
@@ -49,7 +56,7 @@ QUAT_QUAL static quatf quatf_mul(quatf a, quatf b)
 }
 
 /* q + r: component-wise, which is what the base class does. */
-QUAT_QUAL static quatf quatf_add(quatf a, quatf b)
+QUAT_QUAL static QUAT_UNUSED quatf quatf_add(quatf a, quatf b)
 {
     quatf r;
     r.w = a.w + b.w;
@@ -60,7 +67,7 @@ QUAT_QUAL static quatf quatf_add(quatf a, quatf b)
 }
 
 /* q - r: component-wise. */
-QUAT_QUAL static quatf quatf_sub(quatf a, quatf b)
+QUAT_QUAL static QUAT_UNUSED quatf quatf_sub(quatf a, quatf b)
 {
     quatf r;
     r.w = a.w - b.w;
@@ -71,7 +78,7 @@ QUAT_QUAL static quatf quatf_sub(quatf a, quatf b)
 }
 
 /* conjugate(q) */
-QUAT_QUAL static quatf quatf_conjugate(quatf a)
+QUAT_QUAL static QUAT_UNUSED quatf quatf_conjugate(quatf a)
 {
     quatf r;
     r.w = a.w;
@@ -82,7 +89,7 @@ QUAT_QUAL static quatf quatf_conjugate(quatf a)
 }
 
 /* q * scalar */
-QUAT_QUAL static quatf quatf_scale(quatf a, float s)
+QUAT_QUAL static QUAT_UNUSED quatf quatf_scale(quatf a, float s)
 {
     quatf r;
     r.w = a.w * s;
@@ -93,7 +100,7 @@ QUAT_QUAL static quatf quatf_scale(quatf a, float s)
 }
 
 /* q * v: rotate the vector, normalised by q's magnitude. */
-QUAT_QUAL static float3 quatf_rotate(quatf q, float3 v)
+QUAT_QUAL static QUAT_UNUSED float3 quatf_rotate(quatf q, float3 v)
 {
     float pw = 0.0f;
     float px = v.x, py = v.y, pz = v.z;
@@ -123,7 +130,7 @@ QUAT_QUAL static float3 quatf_rotate(quatf q, float3 v)
 #ifdef QUAT_NEED_DOUBLE
 
 /* q * r: compose two rotations. */
-QUAT_QUAL static quatd quatd_mul(quatd a, quatd b)
+QUAT_QUAL static QUAT_UNUSED quatd quatd_mul(quatd a, quatd b)
 {
     quatd r;
     r.w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z;
@@ -134,7 +141,7 @@ QUAT_QUAL static quatd quatd_mul(quatd a, quatd b)
 }
 
 /* q + r: component-wise, which is what the base class does. */
-QUAT_QUAL static quatd quatd_add(quatd a, quatd b)
+QUAT_QUAL static QUAT_UNUSED quatd quatd_add(quatd a, quatd b)
 {
     quatd r;
     r.w = a.w + b.w;
@@ -145,7 +152,7 @@ QUAT_QUAL static quatd quatd_add(quatd a, quatd b)
 }
 
 /* q - r: component-wise. */
-QUAT_QUAL static quatd quatd_sub(quatd a, quatd b)
+QUAT_QUAL static QUAT_UNUSED quatd quatd_sub(quatd a, quatd b)
 {
     quatd r;
     r.w = a.w - b.w;
@@ -156,7 +163,7 @@ QUAT_QUAL static quatd quatd_sub(quatd a, quatd b)
 }
 
 /* conjugate(q) */
-QUAT_QUAL static quatd quatd_conjugate(quatd a)
+QUAT_QUAL static QUAT_UNUSED quatd quatd_conjugate(quatd a)
 {
     quatd r;
     r.w = a.w;
@@ -167,7 +174,7 @@ QUAT_QUAL static quatd quatd_conjugate(quatd a)
 }
 
 /* q * scalar */
-QUAT_QUAL static quatd quatd_scale(quatd a, double s)
+QUAT_QUAL static QUAT_UNUSED quatd quatd_scale(quatd a, double s)
 {
     quatd r;
     r.w = a.w * s;
@@ -178,7 +185,7 @@ QUAT_QUAL static quatd quatd_scale(quatd a, double s)
 }
 
 /* q * v: rotate the vector, normalised by q's magnitude. */
-QUAT_QUAL static double3 quatd_rotate(quatd q, double3 v)
+QUAT_QUAL static QUAT_UNUSED double3 quatd_rotate(quatd q, double3 v)
 {
     double pw = 0.0;
     double px = v.x, py = v.y, pz = v.z;
@@ -215,14 +222,14 @@ QUAT_QUAL static double3 quatd_rotate(quatd q, double3 v)
 
 #if defined(QUAT_NEED_FLOAT) && defined(QUAT_NEED_DOUBLE)
 
-QUAT_QUAL static quatd quat_widen_quatf(quatf a)
+QUAT_QUAL static QUAT_UNUSED quatd quat_widen_quatf(quatf a)
 {
     quatd r;
     r.w = a.w; r.x = a.x; r.y = a.y; r.z = a.z;
     return r;
 }
 
-QUAT_QUAL static double3 quat_widen_float3(float3 v)
+QUAT_QUAL static QUAT_UNUSED double3 quat_widen_float3(float3 v)
 {
     double3 r;
     r.x = v.x; r.y = v.y; r.z = v.z;
@@ -230,43 +237,43 @@ QUAT_QUAL static double3 quat_widen_float3(float3 v)
 }
 
 /* float quaternion * double quaternion, either order. */
-QUAT_QUAL static quatd quatf_mul_quatd(quatf a, quatd b)
+QUAT_QUAL static QUAT_UNUSED quatd quatf_mul_quatd(quatf a, quatd b)
 {
     return quatd_mul(quat_widen_quatf(a), b);
 }
 
-QUAT_QUAL static quatd quatd_mul_quatf(quatd a, quatf b)
+QUAT_QUAL static QUAT_UNUSED quatd quatd_mul_quatf(quatd a, quatf b)
 {
     return quatd_mul(a, quat_widen_quatf(b));
 }
 
-QUAT_QUAL static quatd quatf_add_quatd(quatf a, quatd b)
+QUAT_QUAL static QUAT_UNUSED quatd quatf_add_quatd(quatf a, quatd b)
 {
     return quatd_add(quat_widen_quatf(a), b);
 }
 
-QUAT_QUAL static quatd quatd_add_quatf(quatd a, quatf b)
+QUAT_QUAL static QUAT_UNUSED quatd quatd_add_quatf(quatd a, quatf b)
 {
     return quatd_add(a, quat_widen_quatf(b));
 }
 
-QUAT_QUAL static quatd quatf_sub_quatd(quatf a, quatd b)
+QUAT_QUAL static QUAT_UNUSED quatd quatf_sub_quatd(quatf a, quatd b)
 {
     return quatd_sub(quat_widen_quatf(a), b);
 }
 
-QUAT_QUAL static quatd quatd_sub_quatf(quatd a, quatf b)
+QUAT_QUAL static QUAT_UNUSED quatd quatd_sub_quatf(quatd a, quatf b)
 {
     return quatd_sub(a, quat_widen_quatf(b));
 }
 
 /* float quaternion rotating a double3 widens; a quatd rotating a float3 answers a double3. */
-QUAT_QUAL static double3 quatf_rotate_double3(quatf q, double3 v)
+QUAT_QUAL static QUAT_UNUSED double3 quatf_rotate_double3(quatf q, double3 v)
 {
     return quatd_rotate(quat_widen_quatf(q), v);
 }
 
-QUAT_QUAL static double3 quatd_rotate_float3(quatd q, float3 v)
+QUAT_QUAL static QUAT_UNUSED double3 quatd_rotate_float3(quatd q, float3 v)
 {
     return quatd_rotate(q, quat_widen_float3(v));
 }

@@ -31,6 +31,7 @@ __all__ = [
     "is_quaternion",
     "quat_type_name",
     "needs",
+    "fixed_type_class",
     "HEADER_NAME",
     "HEADER_SOURCE",
     "header_source",
@@ -110,6 +111,26 @@ def needs(dtype:np.dtype)->Optional[str]:
     """The macro a generated source defines to compile this quaternion's block."""
     width:Optional[str] = _scalar_width(dtype)
     return _NEED_MACROS.get(width) if width is not None else None
+
+
+def fixed_type_class(name:object)->Optional[type]:
+    """The `ctypes` class a fixed C name (`quatf` / `quatd`) stores a value as, or None.
+
+    The class is pygf's own: a quaternion member is a `ctypes.Structure` the caller already
+    holds, so its class *is* the member's type. pygf is imported lazily because a source
+    being parsed need not use a quaternion at all.
+    """
+    if not isinstance(name, str):
+        return None
+    for width, type_name in _TYPE_NAMES.items():
+        if type_name != name:
+            continue
+        try:
+            import pygf  # noqa: PLC0415 (optional at parse time)
+        except ImportError:
+            return None
+        return getattr(pygf, type_name, None)
+    return None
 
 
 def mixed_needs()->tuple:

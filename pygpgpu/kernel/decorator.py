@@ -46,7 +46,8 @@ from .translator import (
     type_sig,
     validate_type_map,
 )
-from .objects import ObjectBinding, convert_object_arguments
+from .objects import (ObjectBinding, _complex_member_value,  # noqa: PLC2701 (shared
+                    _is_complex_member_class, convert_object_arguments)
 from . import source_paths
 
 
@@ -1551,7 +1552,12 @@ class PyKernel(_KernelBase[_P]):
                 # and the host copies the members home afterwards.
                 holder:object = self_struct()
                 for name in struct_attrs:
-                    setattr(holder, name, getattr(instance, name))
+                    member_value:object = getattr(instance, name)
+                    field_type:object = dict(self_struct._fields_).get(name)
+                    if _is_complex_member_class(field_type) \
+                            and not isinstance(member_value, field_type):
+                        member_value = _complex_member_value(member_value, field_type)
+                    setattr(holder, name, member_value)
                 self_attrs = array_attrs
                 self_types = [self_struct_type] + [
                     infer_ctype(getattr(instance, name), self._type_map)
@@ -2537,12 +2543,36 @@ class PyKernel(_KernelBase[_P]):
         # modules shared one structure, the same declaration twice in one file.
         typedefs:str = (structs.render_structures(structure_dtypes, translator.backend)
                         if structure_dtypes else "")
+        # A structure member whose type a fixed header declares needs that header even when
+        # the body never operates on the value: `struct S { c64 z; };` names `c64`, so the
+        # declaration has to be in scope. Walking the member dtypes here is what covers that
+        # case -- the translator only records a width when an operation uses one.
+        from . import complex as complex_support  # noqa: PLC0415 (import cycle)
+        from . import quaternion as quaternion_support  # noqa: PLC0415 (import cycle)
+
+        member_quaternion_needs:Set[str] = set()
+        member_complex_needs:Set[str] = set()
+        for dtype in structure_dtypes:
+            record:np.dtype = dtype if isinstance(dtype, np.dtype) else np.dtype(dtype)
+            for name in record.names or ():
+                field_dtype:np.dtype = np.dtype(record.fields[name][0])
+                if field_dtype.subdtype is not None:
+                    field_dtype = field_dtype.subdtype[0]
+                quat_need:Optional[str] = quaternion_support.needs(field_dtype)
+                if quat_need is not None:
+                    member_quaternion_needs.add(quat_need)
+                complex_need:Optional[str] = complex_support.needs(field_dtype)
+                if complex_need is not None:
+                    member_complex_needs.add(complex_need)
 
         # Quaternion structures and their arithmetic both come from a fixed header, copied
         # into the cache's include folder beside the generated source. The source needs only
         # the enable macros for the widths in use, then one include -- no declaration of its
         # own, because the header spells the two type names in advance.
         quaternion_needs:Set[str] = set(translator.quaternion_needs)
+        # A member declared by the fixed header needs it even when the body never
+        # operates on the value (see the walk above).
+        quaternion_needs.update(member_quaternion_needs)
         for entry in device_cache.values():
             quaternion_needs.update(entry.get("quaternion_needs") or ())
         include_lines:str = ""
@@ -2557,6 +2587,7 @@ class PyKernel(_KernelBase[_P]):
         # nothing else about a complex number. A helper's blocks travel with its cache entry,
         # exactly as a helper's quaternion widths do.
         complex_needs:Set[str] = set(translator.complex_needs)
+        complex_needs.update(member_complex_needs)
         for entry in device_cache.values():
             complex_needs.update(entry.get("complex_needs") or ())
         if complex_needs:
@@ -2619,10 +2650,13 @@ class PyKernel(_KernelBase[_P]):
             # needs -- and it must be first in the *file*, before any declaration.
             from .metal_codegen import prelude
             own_header.append(prelude())
+        if include_lines:
+            # The fixed headers come BEFORE the typedef block: a structure member can name
+            # `quatf` or `c64`, and that declaration has to be in scope when the structure
+            # is declared, not after it.
+            own_header.append(include_lines)
         if typedefs:
             own_header.append(typedefs)
-        if include_lines:
-            own_header.append(include_lines)
         if foreign_includes:
             own_header.append("\n".join(foreign_includes))
 

@@ -27,6 +27,7 @@ spelled on a device.
 """
 from __future__ import annotations
 
+import ctypes
 import os
 from typing import Dict, Optional
 
@@ -43,6 +44,16 @@ __all__ = [
     "wider_dtype",
     "member_names",
     "scalar_width",
+    "is_complex_record",
+    "record_complex_type_name",
+    "Complex64Record",
+    "Complex128Record",
+    "fixed_member_name",
+    "member_class_for_name",
+    "member_class",
+    "member_dtype",
+    "to_member",
+    "member_value",
     "HEADER_NAME",
     "HEADER_SOURCE",
     "header_source",
@@ -187,6 +198,117 @@ def scalar_width(dtype:object) -> Optional[str]:
     if not is_complex(dtype):
         return None
     return _REAL_NAMES[np.dtype(dtype).name]
+
+
+def is_complex_record(dtype:object) -> bool:
+    """True when a *record* dtype has a complex value's layout (`re`, `im`).
+
+    A structure member cannot be `np.complex64` itself: a `ctypes.Structure` field is a C
+    type, and C has no complex type here either. The member is therefore one of the fixed
+    records below -- two reals named the way numpy spells the parts -- and this is what
+    recognises that layout, so `struct_name` can answer `c64`/`c128` and the generated
+    declaration names the type the header declares instead of inventing a second structure
+    with the same bytes.
+    """
+    if not isinstance(dtype, np.dtype) or dtype.fields is None:
+        return False
+    if is_complex(dtype):
+        return False
+    if tuple(dtype.names or ()) != _MEMBERS:
+        return False
+    for name in _MEMBERS:
+        if np.dtype(dtype.fields[name][0]).name not in ("float32", "float64"):
+            return False
+    return True
+
+
+def _record_width(dtype:np.dtype) -> Optional[str]:
+    """The complex dtype name (`complex64` / `complex128`) a record's parts describe."""
+    width:str = np.dtype(dtype.fields[_MEMBERS[0]][0]).name
+    return {"float32": "complex64", "float64": "complex128"}.get(width)
+
+
+def record_complex_type_name(dtype:object) -> Optional[str]:
+    """The fixed C name for a complex-shaped *record* dtype, or None."""
+    if not is_complex_record(dtype):
+        return None
+    width:Optional[str] = _record_width(np.dtype(dtype))
+    return _TYPE_NAMES.get(width) if width is not None else None
+
+
+class Complex64Record(ctypes.Structure):
+    """One `c64` member's storage: two `float`s.
+
+    A value packed here is byte-identical to `np.complex64`, which is what lets the member
+    travel without a conversion at the ABI boundary.
+    """
+
+    _fields_ = [("re", ctypes.c_float), ("im", ctypes.c_float)]
+
+
+class Complex128Record(ctypes.Structure):
+    """One `c128` member's storage: two `double`s."""
+
+    _fields_ = [("re", ctypes.c_double), ("im", ctypes.c_double)]
+
+
+# The member class each fixed C name stands for.
+_MEMBER_CLASSES:Dict[str, type] = {"c64": Complex64Record, "c128": Complex128Record}
+
+
+def fixed_member_name(name:object) -> Optional[str]:
+    """The fixed C name when `name` is one of them (`c64` / `c128`), else None."""
+    return name if isinstance(name, str) and name in _MEMBER_CLASSES else None
+
+
+def member_class_for_name(name:object) -> Optional[type]:
+    """The `ctypes` class a fixed C type name (`c64` / `c128`) stores a value as."""
+    fixed:Optional[str] = fixed_member_name(name)
+    return _MEMBER_CLASSES[fixed] if fixed is not None else None
+
+
+def member_class(dtype:object) -> Optional[type]:
+    """The `ctypes` class a complex-typed structure member is stored as, or None.
+
+    The width follows `scalar_width`: a python `complex` member is widened to the double
+    form by the caller's `float=` mapping before it reaches here, so this accepts either the
+    numpy complex dtype or the record layout.
+    """
+    if is_complex(dtype):
+        return _MEMBER_CLASSES[_TYPE_NAMES[np.dtype(dtype).name]]
+    fixed:Optional[str] = record_complex_type_name(dtype)
+    return _MEMBER_CLASSES[fixed] if fixed is not None else None
+
+
+def member_dtype(dtype:object) -> Optional[np.dtype]:
+    """The numpy complex dtype a member of this class (or dtype) holds."""
+    if is_complex(dtype):
+        return np.dtype(dtype)
+    fixed:Optional[str] = record_complex_type_name(dtype)
+    if fixed is None:
+        return None
+    return _DTYPES["complex64" if fixed == "c64" else "complex128"]
+
+
+def to_member(value:object, cls:type) -> ctypes.Structure:
+    """One complex value as the member class's instance.
+
+    `ctypes` refuses a python `complex` for a two-float field, so the conversion is explicit:
+    the value is taken at the class's own width and split into its parts. A numpy complex
+    scalar already has the bytes, and `astype` keeps the rounding numpy's own rules give.
+    """
+    width:np.dtype = np.dtype(np.complex64 if cls is Complex64Record else np.complex128)
+    converted:np.ndarray = np.asarray(value).astype(width)
+    record:ctypes.Structure = cls()
+    record.re = float(converted.real)
+    record.im = float(converted.imag)
+    return record
+
+
+def member_value(record:ctypes.Structure) -> complex:
+    """The python complex a stored member holds."""
+    return complex(record.re, record.im)
+
 
 
 def _write_if_changed(path:str, text:str) -> None:

@@ -336,10 +336,17 @@ def _ctypes_align(field_type:type)->int:
     class itself is three floats plus padding. OpenCL C aligns a three- or four-component
     vector to 16, so a structure holding one is wider than ctypes computes -- and the driver
     rejects the short buffer ("Buffer size too small (40 instead of at least 64 bytes)").
+
+    A class the caller declared is aligned the way the *declaration* spells it, which is by
+    layout: `{float x; float y;}` and `float2` are one numpy dtype, the renderer spells the
+    member `float2`, and OpenCL aligns that to 8 where ctypes aligns the class to 4. Without
+    this branch the rebuilt structure was still 12 bytes and the driver kept refusing it.
     """
     if issubclass(field_type, ctypes.Array):
         return _ctypes_align(field_type._type_)
     name:Optional[str] = _is_vector_class(field_type)
+    if name is None and issubclass(field_type, ctypes.Structure):
+        name = _vector_dtype_name(np.dtype(field_type))
     if name is not None:
         size:int = ctypes.sizeof(_device_class(name, "opencl"))
         return 16 if size >= 16 else size
@@ -424,6 +431,17 @@ def _pack_structure(value:object, backend:str)->Packed:
             # must be a C type" for a structure whose only members are scalars.
             changed = changed or packed_write_back is not None
         members.append((field_name, device_type, field_type))
+
+    # The declaration and the host can disagree on the structure's *size* even when every
+    # member's size agrees: the renderer spells a member whose layout matches a vector as
+    # that vector, and OpenCL aligns a `float2` to 8 while `ctypes` aligns a two-float
+    # structure to 4 -- so `{float2 origin; float scale;}` is 16 bytes where the caller's
+    # class is 12, and the driver rejected the short buffer. Comparing the OpenCL layout
+    # against the host's is what decides whether the padded class is needed at all.
+    device_bytes:int = _opencl_record_layout(
+        [(name, np.dtype(device_type), ()) for name, device_type, _ in members]).itemsize
+    if device_bytes != ctypes.sizeof(source_type):
+        changed = True
 
     if not changed:
         return value, None

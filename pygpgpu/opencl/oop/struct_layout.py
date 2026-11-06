@@ -17,12 +17,19 @@ from typing import Tuple, List, Optional
 import numpy as np
 
 
-def np_alignment(dtype:object) -> int:
+def np_alignment(dtype:object, vector_layout:bool=True) -> int:
     """The OpenCL C alignment of a field type.
 
     A three- or four-component vector is 16-byte aligned (a padded vec3 occupies 16 bytes), a
     two-component vector 8, and a scalar its own size; a structure takes the largest
     alignment of its members.
+
+    `vector_layout` says whether the *vector* rule may be applied to a record. It must be
+    off for a member the source declared as a structure: `{float x; float y;}` and `float2`
+    are one numpy dtype, so the layout alone would align the structure to 8, round its
+    parent up to 16 bytes, and the driver then rejected the 12-byte value the host packed
+    ("Buffer size too small (12 instead of at least 16 bytes)"). The member's *class* is the
+    evidence, and `align_struct` passes it.
     """
     from ...vec_types.layout import _vector_dtype_name
 
@@ -34,16 +41,28 @@ def np_alignment(dtype:object) -> int:
         # holding it align to 32 instead of 16 -- which rounded the parent up a whole 16
         # bytes and the driver rejected the short buffer.
         base, _shape = field.subdtype
-        return np_alignment(np.dtype(base))
+        return np_alignment(np.dtype(base), vector_layout)
     if field.fields is not None:
-        vector:Optional[str] = _vector_dtype_name(field)
-        if vector is not None:
-            first:str = (field.names or ("x",))[0]
-            components:int = int(field.itemsize) // max(1, int(field[first].itemsize))
-            return 16 if components >= 3 else 8
-        return max([np_alignment(np.dtype(field.fields[name][0]))
+        if vector_layout:
+            vector:Optional[str] = _vector_dtype_name(field)
+            if vector is not None:
+                first:str = (field.names or ("x",))[0]
+                components:int = int(field.itemsize) // max(1, int(field[first].itemsize))
+                return 16 if components >= 3 else 8
+        return max([np_alignment(np.dtype(field.fields[name][0]), vector_layout)
                     for name in field.names or ()] or [1])
     return int(field.itemsize) or 1
+
+
+def _is_vector_field(ctype:object) -> bool:
+    """True when a parsed member's class really is one of the vector types.
+
+    By identity, not by layout: a caller's two-float structure answers the same numpy dtype
+    as `float2`, and only the class says which of the two the device declaration means.
+    """
+    from ...vec_types.layout import _is_vector_class
+
+    return isinstance(ctype, type) and _is_vector_class(ctype) is not None
 
 
 def align_struct(fields:List[Tuple[str, type]], spec:List[Tuple[object, ...]],
@@ -71,7 +90,7 @@ def align_struct(fields:List[Tuple[str, type]], spec:List[Tuple[object, ...]],
             count:int = 1
             for extent in shape or ():
                 count *= int(extent)
-            strictest = max(strictest, np_alignment(base))
+            strictest = max(strictest, np_alignment(base, _is_vector_field(ctype)))
             widest = max(widest, int(base.itemsize) * count)
             members.append((entry[0], ctype))
             names.append(entry[0])
@@ -90,7 +109,7 @@ def align_struct(fields:List[Tuple[str, type]], spec:List[Tuple[object, ...]],
     for (member_name, ctype), entry in zip(fields, spec):
         base:np.dtype = np.dtype(entry[1]) if len(entry) > 1 else np.dtype("u1")
         shape:Tuple[int, ...] = entry[2] if len(entry) > 2 else ()
-        element_align:int = np_alignment(base)
+        element_align:int = np_alignment(base, _is_vector_field(ctype))
         count:int = 1
         for extent in shape or ():
             count *= int(extent)

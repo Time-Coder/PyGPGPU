@@ -427,6 +427,13 @@ def _scan_function(func:object, tracked:Dict[str, str], scan:Scan)->None:
                 # members are vectors.
                 scan.note(current_path, attr)
                 break
+            if index < len(hops) - 1 and isinstance(value, (complex, np.complexfloating)):
+                # A complex member read through (`holder.center.real`): the member *is* the
+                # payload, with a device type of its own, so it is noted and the walk stops
+                # here. Opening a path inside it would treat the complex value as a nested
+                # structure, which it is not -- the same rule the vector branch above states.
+                scan.note(current_path, attr)
+                break
             if index < len(hops) - 1 and looks_like_object(value):
                 # An object member that is read *through*: its path opens and the walk
                 # continues inside it.
@@ -1271,9 +1278,27 @@ def member_type(value:object, attr:str,
     if isinstance(value, (type, Callable)):
         raise SyntaxError(
             f"'{attr}' is a function or a class, which has no device representation")
+    if isinstance(value, (complex, np.complexfloating)):
+        # A complex member is one of the fixed records the complex header declares (`c64` /
+        # `c128`), exactly as a quaternion member is one of the quaternion header's. A numpy
+        # complex scalar keeps its own width; a python `complex` has none, so it follows the
+        # `float=` mapping the same way a python `float` member does.
+        from .complex import member_class  # noqa: PLC0415 (import cycle)
+        from .translator import python_complex_type  # noqa: PLC0415 (import cycle)
+
+        if isinstance(value, np.complexfloating):
+            dtype:np.dtype = np.dtype(type(value))
+        else:
+            dtype = np.dtype(np.complex64 if python_complex_type(
+                (type_map or {}).get("float", "float")) == "c64" else np.complex128)
+        cls:Optional[type] = member_class(dtype)
+        if cls is None:
+            raise SyntaxError(
+                f"'{attr}' is a {np.dtype(dtype).name}, which has no device member type")
+        return cls
     raise SyntaxError(
         f"'{attr}' is a {type(value).__name__}, which cannot become a structure member yet "
-        f"(only numbers, booleans and vector values can)")
+        f"(only numbers, booleans, complex values and vector values can)")
 
 
 # ---------------------------------------------------------------------------
@@ -1404,13 +1429,68 @@ class ObjectBinding:
                     value:object = instance[0][member]
                 except (IndexError, ValueError):
                     continue
-                setattr(source, member, value.item() if hasattr(value, "item") else value)
+                setattr(source, member, _member_home_value(value))
                 continue
             try:
                 value:object = getattr(instance, member)
             except AttributeError:
                 continue
-            setattr(source, member, value)
+            setattr(source, member, _member_home_value(value))
+
+
+def _complex_member_value(value:object, kind:type)->ctypes.Structure:
+    """One complex value as the record `ctypes` can store for it."""
+    from .complex import to_member  # noqa: PLC0415 (import cycle)
+
+    return to_member(value, kind)
+
+
+def _is_complex_member_class(kind:object)->bool:
+    """True when a member's ctypes class stores a complex value's two parts."""
+    from .complex import Complex128Record, Complex64Record  # noqa: PLC0415 (import cycle)
+
+    return kind is Complex64Record or kind is Complex128Record
+
+
+def _member_home_value(value:object)->object:
+    """One member read back from the device, in the form the caller's object holds.
+
+    A complex member comes back either as the record `ctypes` stored or as the numpy record
+    the array view produced, and the caller's object holds a plain `complex`; any other
+    numpy scalar comes back as a 0-d value, so it is unwrapped the way it always was.
+    """
+    from .complex import (Complex64Record, Complex128Record,  # noqa: PLC0415 (import cycle)
+                          is_complex_record, member_value)
+
+    if isinstance(value, (Complex64Record, Complex128Record)):
+        return member_value(value)
+    if isinstance(value, np.void) and is_complex_record(value.dtype):
+        return complex(value["re"], value["im"])
+    return value.item() if hasattr(value, "item") else value
+
+
+def write_back(self)->None:
+        """Copy the final member values home, for every object the body wrote to."""
+        for description in self.written:
+            path, member = description.rsplit('.', 1)
+            instance:object = self.instances.get(path)
+            source:object = self.values.get(path)
+            if instance is None or source is None:
+                continue
+            if isinstance(instance, np.ndarray):
+                # The object travelled as a one-element record array; the device wrote its
+                # member stores there, and the host read the array back after the launch.
+                try:
+                    value:object = instance[0][member]
+                except (IndexError, ValueError):
+                    continue
+                setattr(source, member, _member_home_value(value))
+                continue
+            try:
+                value:object = getattr(instance, member)
+            except AttributeError:
+                continue
+            setattr(source, member, _member_home_value(value))
 
 
 def convert_object_arguments(func:object, args:Sequence[object],
@@ -1650,7 +1730,11 @@ def convert_object_arguments(func:object, args:Sequence[object],
                 values:Dict[str, object] = {}
                 for member, kind in chosen:
                     value:object = getattr(source, member)
-                    if (isinstance(kind, type) and issubclass(kind, ctypes.Structure)
+                    if _is_complex_member_class(kind) and not isinstance(value, kind):
+                        # `ctypes` has no complex field, so the value is split into the
+                        # record's two parts at the class's own width.
+                        value = _complex_member_value(value, kind)
+                    elif (isinstance(kind, type) and issubclass(kind, ctypes.Structure)
                             and not isinstance(value, kind)):
                         # A nested member is rebuilt in the synthesized type from the values
                         # the caller's object carries.
@@ -1680,8 +1764,14 @@ def convert_object_arguments(func:object, args:Sequence[object],
                 # travels as a pointer, so the stores land in device memory that the host
                 # reads back, and write_back then copies them onto the caller's object.
                 records:np.ndarray = np.zeros(1, dtype=np.dtype(structure))
-                for member, _ in structure._fields_:
+                for member, field_type in structure._fields_:
                     value:object = getattr(named[name], member)
+                    if _is_complex_member_class(field_type) \
+                            and not isinstance(value, field_type):
+                        # The record's field is the two-part storage, so a python complex is
+                        # split into it before numpy sees the assignment (numpy would raise
+                        # "float() argument must be ... not 'complex'").
+                        value = _complex_member_value(value, field_type)
                     if isinstance(value, ctypes.Structure):
                         value = np.array(value, dtype=np.dtype(type(value)))
                     records[0][member] = value

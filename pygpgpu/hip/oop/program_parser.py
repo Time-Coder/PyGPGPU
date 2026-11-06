@@ -20,8 +20,11 @@ from ..driver import (
 )
 
 from ...utils import md5sums, save_var, modify_time, load_var
+from ...kernel import structs as kernel_structs
 from .build_options import BuildOptions
 from .program_info import KernelInfo, ArgInfo, StructInfo, VarInfo
+
+import ctypes
 
 import numpy as np
 from ... import numpy as gnp
@@ -361,6 +364,23 @@ class Kernel_{kernel_name}(Kernel):
         return np.dtype({"names": names, "formats": formats,
                          "offsets": [0] * len(names), "itemsize": widest})
 
+
+    @staticmethod
+    def _member_numpy_dtype(base_type:object)->object:
+        """The numpy dtype describing one member's storage.
+
+        A class-level `dtype` is the answer only when it really is a dtype: a class that
+        declares `dtype` as a property (pygf's quaternion and complex records do) hands back
+        the descriptor on attribute access, and numpy rejects it. The ctypes class itself
+        describes the layout, so that is the fallback.
+        """
+        candidate:object = getattr(base_type, "dtype", None)
+        if isinstance(candidate, np.dtype):
+            return candidate
+        if isinstance(base_type, type) and issubclass(base_type, ctypes.Structure):
+            return np.dtype(base_type)
+        return base_type
+
     def _create_struct_type(self, struct_info:StructInfo)->type:
         struct_name:str = struct_info.name
         if struct_name in self._struct_types:
@@ -370,8 +390,21 @@ class Kernel_{kernel_name}(Kernel):
         dtype = []
         pointer_types = {}
         for member in struct_info.members.values():
-            if member.base_type_str in HIPInfo.basic_types:
+            fixed_class:Optional[type] = kernel_structs.fixed_member_class(
+                member.base_type_str)
+            if fixed_class is not None:
+                # A quaternion or a complex value: its declaration lives in a fixed header,
+                # so it is not one of the parsed structures and has no entry in the type
+                # tables -- the class the header's layout describes is the member's type.
+                base_type = fixed_class
+            elif member.base_type_str in HIPInfo.basic_types:
                 base_type = HIPInfo.basic_types[member.base_type_str]
+            elif member.base_type_str in self._struct_infos:
+                # A structure the source declared wins over a vector of the same
+                # layout: the dtypes are equal, but the alignments are not, and a
+                # padded structure no longer matches the host's packed bytes.
+                base_type = self._create_struct_type(
+                    self._struct_infos[member.base_type_str])
             elif member.base_type_str in HIPInfo.vec_types:
                 # A vector member is a type of its own, not a registered structure: its
                 # numpy dtype describes it for the host-side field list.
@@ -391,7 +424,7 @@ class Kernel_{kernel_name}(Kernel):
                 _fields_.append((member.name, member_type))
                 # A vector member contributes its structured dtype (a ctypes class has no
                 # numpy dtype of its own), so the record layout matches the C structure.
-                dtype.append((member.name, getattr(base_type, "dtype", base_type),
+                dtype.append((member.name, self._member_numpy_dtype(base_type),
                               member.array_shape))
 
         dtype = self._record_dtype(dtype, struct_info.is_union)

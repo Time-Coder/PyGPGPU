@@ -76,12 +76,20 @@ def struct_name(dtype:np.dtype)->str:
     hash cannot be written in advance. Two quaternion layouts exist, so two fixed names cover
     every case, and `render_structures` then leaves them out of its typedef block.
     """
+    from .complex import record_complex_type_name  # noqa: PLC0415 (import cycle)
     from .quaternion import quat_type_name  # noqa: PLC0415 (import cycle)
 
     dtype:np.dtype = np.dtype(dtype)
     fixed:Optional[str] = quat_type_name(dtype)
     if fixed is not None:
         return fixed
+    # A complex member has the same arrangement: `c64`/`c128` are declared by the complex
+    # header, so the member's declaration names that type rather than a second structure
+    # with the same bytes -- which is what keeps `z.real` a complex access rather than a
+    # field of an unrelated struct.
+    complex_fixed:Optional[str] = record_complex_type_name(dtype)
+    if complex_fixed is not None:
+        return complex_fixed
     # The name is fixed the first time it is asked for. A class can register after the
     # dtype has already been named (a value is converted before the kernel that uses it is
     # translated, and another module may register its own class later), and a name that
@@ -225,6 +233,7 @@ def declared_file(dtype:DTypeLike) -> str:
 
 def render_structures(dtypes:List[np.dtype], backend:str)->str:
     """The typedef block for every structure the kernel uses, members before containers."""
+    from .complex import record_complex_type_name  # noqa: PLC0415 (import cycle)
     from .quaternion import quat_type_name  # noqa: PLC0415 (import cycle)
 
     ordered:List[np.dtype] = []
@@ -238,9 +247,12 @@ def render_structures(dtypes:List[np.dtype], backend:str)->str:
     lines:List[str] = []
     for dtype in ordered:
         name:str = struct_name(dtype)
-        # A quaternion is declared by the fixed quaternion header, which a source using one
-        # always includes; emitting it here too would define the type twice, which C++ rejects.
+        # A quaternion or a complex value is declared by its fixed header, which a source
+        # using one always includes; emitting it here too would define the type twice, which
+        # C++ rejects.
         if quat_type_name(dtype) is not None:
+            continue
+        if record_complex_type_name(dtype) is not None:
             continue
         if lines:
             # One blank line between structure definitions.
@@ -632,6 +644,7 @@ def member_types(dtype:np.dtype, backend:str) -> Dict[str, object]:
     indexes it directly.
     """
     from ..vec_types.layout import _vector_dtype_name
+    from .complex import record_complex_type_name  # noqa: PLC0415 (import cycle)
 
     members:Dict[str, object] = {}
     for name in dtype.names or ():
@@ -641,8 +654,14 @@ def member_types(dtype:np.dtype, backend:str) -> Dict[str, object]:
             base_dtype, shape = field_dtype.subdtype
             field_dtype = base_dtype
         vector:Optional[str] = _vector_dtype_name(field_dtype)
-        if vector is not None:
-            kind:object = vector
+        complex_name:Optional[str] = record_complex_type_name(field_dtype)
+        if complex_name is not None:
+            # A complex member reads as a complex *value*, so `.real`, `.imag`, arithmetic
+            # and the transcendental functions all apply to it; treating it as a nested
+            # structure would hand the body a type with two fields and no complex meaning.
+            kind:object = complex_name
+        elif vector is not None:
+            kind = vector
         elif is_record(field_dtype):
             kind = register(field_dtype)
         else:
@@ -655,6 +674,21 @@ def member_types(dtype:np.dtype, backend:str) -> Dict[str, object]:
         else:
             members[name] = kind
     return members
+
+
+def fixed_member_class(name:object)->Optional[type]:
+    """The `ctypes` class a fixed header type name stands for, or None.
+
+    Two families of member carry a fixed C name instead of a content hash, because a header
+    declares them: a quaternion (`quatf` / `quatd`) and a complex value (`c64` / `c128`). A
+    backend that reads a generated structure back needs the class for the fields it finds,
+    and this is the one place that maps the name to it -- the three parsers are otherwise
+    copies of one another.
+    """
+    from .complex import member_class_for_name  # noqa: PLC0415 (import cycle)
+    from .quaternion import fixed_type_class  # noqa: PLC0415 (import cycle)
+
+    return member_class_for_name(name) or fixed_type_class(name)
 
 
 def dtype_of(value:object)->Optional[np.dtype]:

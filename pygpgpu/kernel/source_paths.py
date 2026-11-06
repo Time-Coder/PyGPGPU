@@ -579,12 +579,32 @@ def _canonical_header(header: List[str]) -> List[str]:
         widths: List[str] = [line for line in defines
                              if line.startswith(QUAT_DEFINE_PREFIX)]
         canonical.append("\n".join(qualifier + widths))
-    # The declarations come before the includes: a file this source includes can name a
-    # structure declared here (a helper in another module takes a `Ray` by pointer), and
-    # the compiler reads the included text after these lines.
+    # A *fixed* header declares types this file's own declarations may name -- a structure
+    # member spelled `quatf` or `c64` -- so those includes come first. A module include is
+    # different: the file it reaches can name a structure declared here (a helper in another
+    # module takes a `Ray` by pointer), so it stays after the declarations.
+    fixed_includes: List[str] = [line for line in includes
+                                 if _is_fixed_header_include(line)]
+    module_includes: List[str] = [line for line in includes
+                                  if not _is_fixed_header_include(line)]
+    canonical.extend(fixed_includes)
     canonical.extend(declarations)
-    canonical.extend(includes)
+    canonical.extend(module_includes)
     return canonical
+
+
+def _is_fixed_header_include(line: str) -> bool:
+    """True for the `#include` of a header this package installs into the cache.
+
+    Those live in the cache's `include/` folder (see `complex.include_line` /
+    `quaternion.include_line`), which is what the quoted path names.
+    """
+    return line.lstrip().startswith(f'#include "{INCLUDE_FOLDER}/')
+
+
+# The folder a cache keeps its device headers in; the same spelling `complex.py` and
+# `quaternion.py` use.
+INCLUDE_FOLDER: str = "include"
 
 
 def python_source_digest(source_python:str)->str:
