@@ -748,6 +748,21 @@ def _file_lock(path:str)->Iterator[None]:
                     f"to finish writing {path}; if no other process is compiling, delete "
                     f"{lock_path} and retry") from None
             time.sleep(_FILE_LOCK_POLL)
+        except PermissionError:
+            # The window between the holder's `os.close` and its `os.unlink` is the one race
+            # this file can lose: the lock file still exists but nobody owns it, and on
+            # Windows a create that lands inside that window fails with `PermissionError`
+            # (a sharing violation on the path being deleted) rather than
+            # `FileExistsError`. It is transient by construction -- the holder's unlink
+            # finishes in microseconds -- so waiting and retrying is the whole fix; treating
+            # it as fatal was the intermittent "Permission denied: ... .cl.lock" the
+            # four-process compile test caught about one run in twelve.
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"timed out after {_FILE_LOCK_TIMEOUT:.0f}s waiting for the lock file "
+                    f"{lock_path} to be released; if no other process is compiling, delete "
+                    f"{lock_path} and retry") from None
+            time.sleep(_FILE_LOCK_POLL)
     held.add(key)
     _file_lock_state.held = held
     try:
