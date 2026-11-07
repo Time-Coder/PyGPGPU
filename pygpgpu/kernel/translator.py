@@ -3746,7 +3746,12 @@ class FunctionTranslator:
                 self._emit_block(taken)
                 return
             cond:str = self._condition_code(node.test)
-            self._emit(f"if ({cond})")
+            # `_condition_code` already wraps the condition in the one pair C's syntax needs
+            # -- it has to, because the boolean join and the ternary below splice it into a
+            # larger expression. Emitting `if ({cond})` therefore produced `if ((n == k))`,
+            # and the OpenCL compiler reported the inner pair as an extraneous one around a
+            # comparison (with a `use '=' ...` hint that would change the meaning).
+            self._emit(f"if {cond}")
             self._emit("{")
             self._guard_conditions.append(node.test)
             try:
@@ -3762,7 +3767,8 @@ class FunctionTranslator:
             self._emit_blank()
         elif isinstance(node, ast.While):
             cond:str = self._condition_code(node.test)
-            self._emit(f"while ({cond})")
+            # Same as the `if` above: the condition arrives with its own pair.
+            self._emit(f"while {cond}")
             self._emit("{")
             self._push_scope_block(node.body, is_loop=True)
             self._emit("}")
