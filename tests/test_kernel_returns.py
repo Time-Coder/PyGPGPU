@@ -383,6 +383,28 @@ def test_array_or_value_by_branch(runner):
     assert runner(array_or_value_by_branch, x, out, True) is out
     assert float(runner(array_or_value_by_branch, x, out, False)) == 0.0
 
+@kernel
+def tail_return_under_a_condition(x: np.ndarray):
+    """A tail `return` nested in an `if`: the shape a module body cannot compile."""
+    for i in range(x.shape[0]):
+        x[i] = x[i] * 2.0
+    if x.shape[0] > 0:
+        return x[0]
+
+
+def test_a_tail_return_inside_an_if(gpu_backend, runner):
+    """The region's `return` may sit inside an `if`, not only at the top level.
+
+    A region's statements are exec'd one at a time as module bodies, and a `return` is a
+    syntax error in a module -- so only a top-level `return` used to work, while
+    `if n > 0: return x[0]` (the ordinary spelling of a tail answer) raised `'return'
+    outside function` at the gap. Both paths share this runner, so the shape is pinned
+    once here.
+    """
+    x = np.array([1.5, 2.0], dtype=np.float32)
+    assert float(runner(tail_return_under_a_condition, x)) == 3.0
+
+
 def test_return_after_the_magic_loop_is_rejected(gpu_backend, runner):
     """A per-work-item value cannot be returned after the loop; a shared one can.
 

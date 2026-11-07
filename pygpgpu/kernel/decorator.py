@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import concurrent.futures
+import copy
 import functools
 import inspect
 import os
@@ -1166,6 +1167,59 @@ class _BoundKernelMethod(_KernelBase[_P]):
                                     launch="async")
 
 
+# The name a host region's rewritten `return` raises, and the exception carrying its
+# value (see _TailReturnRewriter and PyKernel._run_host_region).
+_TAIL_RETURN_NAME:str = "_pygpgpu_tail_return"
+
+
+class _TailReturn(BaseException):
+    """Carries a host region's `return` out of the compiled statement that raised it.
+
+    A region's statements are exec'd as a module body, where a `return` is a compile-time
+    syntax error -- yet a `return` after the last magic loop is the ordinary way a body
+    answers a value, and it may sit inside an `if` (`if n > 0: return out[0]`), which is
+    exactly the shape that used to fail. Rewriting it as a raise keeps python's own
+    control flow instead of approximating it: the value is evaluated where the `return`
+    stands, an early return ends the enclosing loops, and a `finally` in the region still
+    runs.
+
+    It derives from `BaseException` rather than `Exception` on purpose: a region is user
+    code, and an `except Exception` in it must not swallow the transfer that stands for
+    its own `return`.
+    """
+
+    def __init__(self, value:object)->None:
+        super().__init__()
+        self.value:object = value
+
+
+class _TailReturnRewriter(ast.NodeTransformer):
+    """Rewrite every `return` of a host region into a `_TailReturn` raise.
+
+    A nested function definition is left alone: its `return`s belong to *it*, not to the
+    region, and rewriting them would turn a helper the region defines into one that
+    raises. Nothing else in a region has its own scope.
+    """
+
+    def visit_Return(self, node:ast.Return)->ast.stmt:
+        value:ast.expr = node.value if node.value is not None else ast.Constant(value=None)
+        raised:ast.stmt = ast.Raise(
+            exc=ast.Call(func=ast.Name(id=_TAIL_RETURN_NAME, ctx=ast.Load()),
+                         args=[value], keywords=[]),
+            cause=None)
+        # The synthesized nodes carry no position of their own, and `compile` refuses an
+        # expression without one: take the `return`'s own line so the region's traceback
+        # still points at the statement the user wrote.
+        ast.copy_location(raised, node)
+        return ast.fix_missing_locations(raised)
+
+    def visit_FunctionDef(self, node:ast.FunctionDef)->ast.AST:
+        return node
+
+    def visit_AsyncFunctionDef(self, node:ast.AsyncFunctionDef)->ast.AST:
+        return node
+
+
 class PyKernel(_KernelBase[_P]):
     """Implementation of the `@kernel` decorator: translates the python function into backend source at call time, then compiles and runs it.
 
@@ -1414,58 +1468,63 @@ class PyKernel(_KernelBase[_P]):
         for name, value in (created_objects or {}).items():
             localns[name] = value
 
+        # Every `return` in the region is rewritten into a raise before the statements are
+        # compiled (see _TailReturnRewriter): a module body cannot hold a `return` at all,
+        # and a region's `return` -- including one nested in an `if` -- is how a tail
+        # answers a value. The rewriter runs on a copy, because these statements come from
+        # the compiled cache and are shared by every call of the kernel.
+        localns[_TAIL_RETURN_NAME] = _TailReturn
+        rewriter:_TailReturnRewriter = _TailReturnRewriter()
+        exec_statements:List[ast.stmt] = [
+            rewriter.visit(copy.deepcopy(statement)) for statement in statements]
+
         touched:List[object] = []
-        for statement in statements:
-            for node in ast.walk(statement):
-                if isinstance(node, ast.Name) and node.id in localns:
-                    value:object = localns[node.id]
-                    if isinstance(value, gnp):
-                        value.to_host()
-                        if value not in touched:
-                            touched.append(value)
-            if isinstance(statement, ast.Return):
-                # A tail `return` is evaluated after every statement has run, not compiled
-                # as part of the exec body: a bare `return` is illegal outside a function.
-                continue
-            if isinstance(statement, ast.AugAssign):
-                # `count += 1` in a region updates the slot it names, the same way an
-                # assignment does; the shared helper does not answer for this spelling.
-                target_node:ast.expr = statement.target
-                target:Optional[str] = (target_node.id
-                                        if isinstance(target_node, ast.Name) else None)
-            else:
-                target:Optional[str] = _assigned_name_of(statement)
-            # compile() needs a Module node, and the statement is one entry of the body.
-            module:ast.Module = ast.Module(body=[statement], type_ignores=[])
-            exec(compile(module, "<kernel gap>", "exec"), globalns, localns)  # noqa: S102 - the kernel source itself
-            if target is not None and target in localns:
-                value:object = localns[target]
-                if isinstance(value, gnp) and value not in touched:
-                    touched.append(value)
-                elif isinstance(value, np.ndarray) and value.ndim > 0:
-                    # A creation the gap statement built: the object itself is what the next
-                    # pass receives, exactly as it does for a creation above the loops.
-                    (created_objects if created_objects is not None else {})[target] = value
-                elif not isinstance(value, gnp):
-                    # `or` cannot pick the slot: bool(np.array([0])) is False, which made a
-                    # zero-valued slot read as missing and silently skipped the write-back.
-                    slot:Optional[np.ndarray] = (gap_slots.get(target)
-                                                 if gap_slots.get(target) is not None
-                                                 else carried_slots.get(target))
-                    if slot is None:
-                        slot = (writable_outer or {}).get(target)
-                    if slot is not None:
-                        slot[0] = int(value)
-                        localns[target] = slot[0]
-        for value in touched:
-            value._set_host_dirty()
-        for statement in statements:
-            if isinstance(statement, ast.Return):
-                if statement.value is None:
-                    return None
-                return eval(  # noqa: S307 - the kernel source itself
-                    compile(ast.Expression(body=statement.value), "<kernel tail>", "eval"),
-                    globalns, localns)
+        try:
+            for statement, exec_statement in zip(statements, exec_statements):
+                for node in ast.walk(statement):
+                    if isinstance(node, ast.Name) and node.id in localns:
+                        value:object = localns[node.id]
+                        if isinstance(value, gnp):
+                            value.to_host()
+                            if value not in touched:
+                                touched.append(value)
+                if isinstance(statement, ast.AugAssign):
+                    # `count += 1` in a region updates the slot it names, the same way an
+                    # assignment does; the shared helper does not answer for this spelling.
+                    target_node:ast.expr = statement.target
+                    target:Optional[str] = (target_node.id
+                                            if isinstance(target_node, ast.Name) else None)
+                else:
+                    target:Optional[str] = _assigned_name_of(statement)
+                # compile() needs a Module node, and the statement is one entry of the body.
+                module:ast.Module = ast.Module(body=[exec_statement], type_ignores=[])
+                exec(compile(module, "<kernel gap>", "exec"), globalns, localns)  # noqa: S102 - the kernel source itself
+                if target is not None and target in localns:
+                    value:object = localns[target]
+                    if isinstance(value, gnp) and value not in touched:
+                        touched.append(value)
+                    elif isinstance(value, np.ndarray) and value.ndim > 0:
+                        # A creation the gap statement built: the object itself is what the next
+                        # pass receives, exactly as it does for a creation above the loops.
+                        (created_objects if created_objects is not None else {})[target] = value
+                    elif not isinstance(value, gnp):
+                        # `or` cannot pick the slot: bool(np.array([0])) is False, which made a
+                        # zero-valued slot read as missing and silently skipped the write-back.
+                        slot:Optional[np.ndarray] = (gap_slots.get(target)
+                                                     if gap_slots.get(target) is not None
+                                                     else carried_slots.get(target))
+                        if slot is None:
+                            slot = (writable_outer or {}).get(target)
+                        if slot is not None:
+                            slot[0] = int(value)
+                            localns[target] = slot[0]
+        except _TailReturn as answered:
+            return answered.value
+        finally:
+            # An array the region touched was pulled back to the host, so the next launch
+            # must push it again -- on the `return` path too.
+            for value in touched:
+                value._set_host_dirty()
         return None
 
     def _invoke_inner(self, instance:object, args:Tuple[object, ...],
@@ -1656,9 +1715,15 @@ class PyKernel(_KernelBase[_P]):
                                               arg_types + self_types)]
         # A carried scalar is one of the kernel's own parameters (declared before the shape
         # extents), so its slot joins full here rather than the trailing created values.
+        # The slot is the carried value's own width (`total = 0.0` is a float): the
+        # device parameter is a `float*` there, and an int32 host buffer under it
+        # truncated every contribution before the kernel even ran.
+        carried_types:Dict[str, object] = launch_meta.get("carried_types") or {}
         for name in launch_meta.get("carried") or []:
-            slot = np.zeros(1, dtype=np.int32)
-            slot[0] = int(_host_scalar_values(
+            slot_t:object = carried_types.get(name, "int")
+            dtype:np.dtype = np.dtype(np.float32 if slot_t == "float" else np.int32)
+            slot = np.zeros(1, dtype=dtype)
+            slot[0] = dtype.type(_host_scalar_values(
                 self.raw_func, [name], tuple(args), instance).get(name, 0))
             full.append(slot)
             carried_slots[name] = slot
@@ -2958,6 +3023,15 @@ class PyKernel(_KernelBase[_P]):
                 {"param_names": {position: name for name, position in param_index.items()},
                  # Every kernel this body produced, in launch order: one per magic loop.
                  "carried": list(translator.carried_scalars),
+                 # Each carried slot's element type: the host allocates and reads the
+                 # slot at this width (`total = 0.0` is a float slot, and an int32 host
+                 # buffer under a `float*` parameter truncated every answer).
+                 "carried_types": {name: t for name, t in
+                                   ((parameter_name, parameter_t[1])
+                                    for parameter_name, parameter_t in translator.params
+                                    if parameter_name in translator.carried_scalars
+                                    and isinstance(parameter_t, tuple)
+                                    and len(parameter_t) > 1)},
                  "gap_names": list(translator.gap_names),
                  # The extra parameters each phase declares beyond the shared prefix: a gap
                  # value belongs to the pass that reads it (see _translate_phase_kernels).
