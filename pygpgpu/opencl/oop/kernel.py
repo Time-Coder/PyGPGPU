@@ -427,16 +427,16 @@ class Kernel(CLObject):
 
     def __after_call(self, cmd_queue:CommandQueue, launch_event:Event, bound:Dict[str, object])->List[Event]:
 
-        def on_completed(arg_value:Union[np.ndarray, List[object]], mem_obj:MemObject, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
+        def on_completed(arg_value:Union[np.ndarray, List[object]], mem_obj:MemObject, claim_serial:int, arg_info:ArgInfo, event:Event, error_code:ErrorCode):
             if error_code == ErrorCode.CL_SUCCESS:
                 self.__copy_to_host(arg_value, mem_obj)
                 if CL.print_info:
                     print(f"copy data to host for argument '{arg_info.name}'")
 
-            mem_obj.unuse()
+            mem_obj.unuse(claim_serial)
 
-        def on_release(mem_obj:MemObject, event:Event, error_code:ErrorCode):
-            mem_obj.unuse()
+        def on_release(mem_obj:MemObject, claim_serial:int, event:Event, error_code:ErrorCode):
+            mem_obj.unuse(claim_serial)
 
         events:List[Event] = []
         for arg_info in self._args.values():
@@ -457,9 +457,13 @@ class Kernel(CLObject):
                     continue
 
             if not arg_info.need_read_back:
-                # read-only/write-only arguments must also return their buffer to the pool after the kernel completes, otherwise each call leaks one pooled object
+                # read-only/write-only arguments must also return their buffer to the pool after the kernel completes, otherwise each call leaks one pooled object.
+                # The release carries the claim's serial: if the driver fires this callback
+                # after the buffer has been handed out again, the serial no longer names
+                # the current holder and the release must not free it (see MemObject.unuse).
                 if mem_obj is not None:
-                    release_call = partial(on_release, mem_obj)
+                    claim_serial:int = mem_obj.claim_serial
+                    release_call = partial(on_release, mem_obj, claim_serial)
                     if launch_event.finished:
                         release_call(launch_event, launch_event.status)
                     else:
@@ -472,8 +476,9 @@ class Kernel(CLObject):
                 raise RuntimeError(
                     f"argument '{arg_info.name}' has no device buffer to read back")
 
+            claim_serial = mem_obj.claim_serial
             event:Event = mem_obj.read(cmd_queue)
-            call_back = partial(on_completed, arg_value, mem_obj, arg_info)
+            call_back = partial(on_completed, arg_value, mem_obj, claim_serial, arg_info)
             if event.finished:
                 call_back(event, event.status)
             else:
@@ -488,15 +493,17 @@ class Kernel(CLObject):
         for entry in readbacks:
             mem_obj:MemObject = entry["mem_obj"]
             if entry["need_read_back"]:
+                claim_serial = mem_obj.claim_serial
                 event:Event = mem_obj.read(cmd_queue)
-                call_back = partial(on_completed, entry["value"], mem_obj, entry["arg_info"])
+                call_back = partial(on_completed, entry["value"], mem_obj, claim_serial, entry["arg_info"])
                 if event.finished:
                     call_back(event, event.status)
                 else:
                     event.on_completed_callbacks.append(call_back)
                     events.append(event)
             else:
-                release_call = partial(on_release, mem_obj)
+                claim_serial = mem_obj.claim_serial
+                release_call = partial(on_release, mem_obj, claim_serial)
                 if launch_event.finished:
                     release_call(launch_event, launch_event.status)
                 else:

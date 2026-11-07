@@ -183,7 +183,12 @@ class Event(CLObject):
             else:
                 error_code = status
 
-            for on_completed in self.on_completed_callbacks:
+            # Snapshot before iterating: a callback that runs here may append to this
+            # very list (a read-back triggering another release), and a driver callback
+            # for another completion of this event can be appending concurrently.
+            # Mutating a list while iterating it skips entries; the snapshot makes
+            # every registered callback run exactly once per completion.
+            for on_completed in list(self.on_completed_callbacks):
                 on_completed(self, error_code)
 
         if (status == cl_command_execution_status.CL_COMPLETE or isinstance(status, ErrorCode)) and self in Event.__retained_events:
