@@ -40,6 +40,14 @@ def return_float(x: np.ndarray):
 
 
 @kernel
+def doubled(x: np.ndarray):
+    for i in range(x.shape[0]):
+        x[i] = x[i] * 2.0
+    if x.shape[0] > 0:
+        return x[0]
+
+
+@kernel
 def return_int(x: np.ndarray):
     for i in range(x.shape[0]):
         if i == 0:
@@ -319,6 +327,33 @@ def test_async_call_returns_the_value(backend):
 async def _await_launch(target, x):
     """Launch from inside the loop, which is how async_call is meant to be called."""
     return await target.async_call(x)
+
+
+def test_submit_honours_the_bracket_work_size(gpu_backend):
+    """A bracketed async launch states a grid, not the automatic one.
+
+    The async path used to launch the bare kernel, whose automatic size ignores the
+    bracket: on a backend whose automatic grid covers the array this read as
+    correct, but on Metal -- where "automatic" is one threadgroup of one thread --
+    a bracketed `submit` silently visited one work item of the whole domain. The
+    bracket has to reach the async launch the same way it reaches a call.
+    """
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=np.float32)
+    target = doubled[gpu_backend]
+    # The bracket is (blocks, threads); 2 blocks of 4 threads covers all 8 elements.
+    result = target[(2, 4)].submit(x).result(timeout=120)
+    # Only the work items the grid visits double their element; the launch covers
+    # the whole array, and the first element's doubled value is what the body returned.
+    assert float(result) == 2.0
+    assert x[7] == 16.0
+
+
+def test_async_call_honours_the_bracket_work_size(gpu_backend):
+    x = np.array([2.0, 4.0, 6.0, 8.0], dtype=np.float32)
+    target = doubled[gpu_backend]
+    result = asyncio.run(_await_launch(target[(2, 2)], x))
+    assert float(result) == 4.0
+    assert x[3] == 16.0
 
 
 def test_different_shapes_by_branch_are_supported(runner):

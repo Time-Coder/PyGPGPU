@@ -29,7 +29,7 @@ import numpy as np
 from typing_extensions import ParamSpec
 
 from ..vec_types.layout import pack
-from ..utils import local_size_for_global, detect_work_size, device_limits, blocks_to_global
+from ..utils import local_size_for_global, detect_work_size, device_limits, blocks_to_global, _current_loop
 from .python_backend import PythonKernel, analyse
 from . import structs
 from ..numpy import ndarray as gnp
@@ -1978,16 +1978,36 @@ class PyKernel(_KernelBase[_P]):
         # Every phase of the body gets the same geometry: they are passes over one domain.
         # Each is launched in turn on the stream this call owns, so the arrays that travel
         # between them stay on the device instead of going back to the host and returning.
-        if launch == "submit":
-            future = active_kernels[0].submit(*launch_args)
-            if return_state or outer_state["writable"]:
-                return self._with_returns(future, return_state, returns, full, outer_state, created)
-            return future
-        if launch == "async":
-            future = active_kernels[0].async_call(*launch_args)
-            if return_state or outer_state["writable"]:
-                return self._with_returns(future, return_state, returns, full, outer_state, created)
-            return future
+        # The asynchronous forms launch the first kernel only -- a multi-pass body is a
+        # sequence of dependent launches, and a future per pass is an interface this
+        # launch does not have -- so it is refused by name rather than silently running
+        # one pass of several. A single-phase body (the common case) launches whole.
+        if launch in ("submit", "async"):
+            if len(active_kernels) > 1:
+                raise ValueError(
+                    f"{self.__name__}(): submit()/async_call() cannot run a body of "
+                    f"{len(active_kernels)} passes -- each pass is its own launch and "
+                    f"they depend on each other. Call the kernel synchronously, or "
+                    f"split the body")
+            bound_async = (active_kernels[0][phase_geometry]
+                           if phase_geometry is not None else active_kernels[0])
+            future:object = (bound_async.submit(*launch_args) if launch == "submit"
+                             else bound_async.async_call(*launch_args))
+            # The statements after the loop are the host tail: a body whose answer is
+            # `return <expression>` after the loop has no claim word at all -- the
+            # translator withheld it because no work item ever claims -- so the value
+            # only exists once the tail has run. The synchronous path runs it inline
+            # below; the asynchronous path runs it when the future settles, exactly
+            # where its read-backs have landed. A body with no tail and nothing to
+            # write back settles with no extra work.
+            tail_statements:List[ast.stmt] = list(
+                launch_meta.get("body_tail") or launch_meta.get("phase_tail") or [])
+            if not tail_statements and not outer_state["writable"] and not return_state:
+                return future
+            return self._with_tail(
+                future, tail_statements, args, instance,
+                carried_slots, gap_slots, created_objects, outer_state,
+                outer_writable, return_state, returns, full, created)
         for position, phase_kernel in enumerate(active_kernels):
             if position:
                 # The previous pass wrote the shared slots on the device; the read-back is
@@ -2255,6 +2275,119 @@ class PyKernel(_KernelBase[_P]):
         else:
             future.add_done_callback(settle)
         return deliver
+
+    def _with_tail(self, future:object,
+                   tail_statements:List[ast.stmt],
+                   args:Tuple[object, ...], instance:object,
+                   carried_slots:Dict[str, object],
+                   gap_slots:Dict[str, object],
+                   created_objects:Dict[str, object],
+                   outer_state:OuterState,
+                   outer_writable:List[Dict[str, object]],
+                   return_state:Dict[str, object],
+                   returns:Optional[Dict[str, object]],
+                   full:List[object],
+                   created:Optional[Dict[str, object]]=None)->object:
+        """Wrap an asynchronous launch so its future resolves the way a call would.
+
+        The synchronous launch runs the host tail (the statements after the last
+        loop, whose `return` is often the answer) and writes the outer scalars back
+        after the read-backs land. The future must hand back the same thing: the
+        backend future resolves once every read-back has completed, so the settle
+        callback runs the tail there and finishes exactly as the inline path does.
+        A body with neither a tail nor a write-back (and no device claim) never
+        reaches this method. The backend future resolves from the driver's callback,
+        and the tail must not race it: the value is delivered through a fresh future
+        (a concurrent one, or one on the caller's loop for asyncio), settled only
+        after the tail has run.
+        """
+        tail_writable:Dict[str, np.ndarray] = {
+            entry["name"]: entry["buffer"] for entry in outer_writable}
+        is_asyncio:bool = isinstance(future, asyncio.Future)
+        try:
+            caller_loop:object = asyncio.get_running_loop()
+        except RuntimeError:
+            caller_loop = None
+        deliver:object = (caller_loop.create_future()
+                          if is_asyncio and caller_loop is not None
+                          else (asyncio.Future(loop=_current_loop())
+                                if is_asyncio else concurrent.futures.Future()))
+
+        def settle(*_args:object)->None:
+            error:Optional[BaseException] = None
+            try:
+                error = future.exception()
+            except BaseException as caught:  # cancelled, or never resolved
+                error = caught
+
+            def settle_error() -> None:
+                if not deliver.done():
+                    deliver.set_exception(error)
+
+            def apply() -> None:
+                if error is not None:
+                    if is_asyncio:
+                        try:
+                            future.get_loop().call_soon_threadsafe(settle_error)
+                        except RuntimeError:
+                            pass  # the loop was closed before the launch finished
+                    else:
+                        settle_error()
+                    return
+                try:
+                    tail_result:object = self._run_host_region(
+                        tail_statements, args, instance,
+                        carried_slots, gap_slots, created_objects=created_objects,
+                        outer_state=outer_state, writable_outer=tail_writable)
+                    self._write_back_outer(outer_state)
+                    if return_state and int(return_state["claim"][0]):
+                        # A work item reached an in-loop return first: python's
+                        # "first return wins".
+                        result:object = self._finish_returns(
+                            return_state, returns, full, created)
+                    elif tail_result is not None:
+                        result = tail_result
+                    else:
+                        result = (self._finish_returns(return_state, returns, full, created)
+                                  if return_state else None)
+                except BaseException as tail_error:
+                    if is_asyncio:
+                        try:
+                            future.get_loop().call_soon_threadsafe(
+                                self._deliver_error, deliver, tail_error)
+                        except RuntimeError:
+                            pass
+                    else:
+                        self._deliver_error(deliver, tail_error)
+                    return
+                if is_asyncio:
+                    try:
+                        future.get_loop().call_soon_threadsafe(
+                            self._deliver_result, deliver, result)
+                    except RuntimeError:
+                        pass  # the loop was closed before the launch finished
+                else:
+                    self._deliver_result(deliver, result)
+
+            apply()
+
+        if future.done():
+            settle()
+        else:
+            future.add_done_callback(settle)
+        return deliver
+
+    @staticmethod
+    def _deliver_result(future:object, result:object)->None:
+        """Complete a future with a value, unless something already settled it."""
+        if not future.done():
+            future.set_result(result)
+
+    @staticmethod
+    def _deliver_error(future:object, error:BaseException)->None:
+        """Complete a future with an exception, unless something already settled it."""
+        if not future.done():
+            future.set_exception(error)
 
     def _invoke_python(self, instance:object, args:Tuple[object, ...],
                        device_sel:Optional[str],
