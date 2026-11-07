@@ -4,8 +4,10 @@ import shutil
 import glob
 import os
 import threading
+
 from typing import Dict, Callable, List, Optional
 from ctypes import c_int, c_void_p, pointer, CDLL, addressof, _Pointer, Array
+from ...utils import initial_print_info
 
 from .nvrtcinfo import NVRTCInfo
 from .nvrtctypes import nvrtcResult
@@ -116,7 +118,7 @@ class MetaNVRTC(type):
 class NVRTC(metaclass=MetaNVRTC):
 
     print_call:bool = False
-    print_info:bool = True
+    print_info:bool = initial_print_info()
     check_error:bool = True
 
     class Func:

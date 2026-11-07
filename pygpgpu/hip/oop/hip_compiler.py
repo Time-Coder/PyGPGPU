@@ -14,13 +14,13 @@ import platform
 import subprocess
 from typing import Dict, List, Optional
 
-from ...utils import modify_time
+from ...utils import initial_print_info, modify_time
 from .program_parser import ProgramParser
 
 
 class HipCompiler:
 
-    print_info:bool = True
+    print_info:bool = initial_print_info()
     check_error:bool = True
 
     _include_dirs:Optional[List[str]] = None

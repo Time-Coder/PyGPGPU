@@ -2,8 +2,10 @@ from __future__ import annotations
 import os
 import platform
 import threading
+
 from typing import Dict, Callable, Optional
 from ctypes import c_int, c_void_p, CDLL, _Pointer, Array, addressof
+from ...utils import initial_print_info
 
 from .cuinfo import CUInfo
 from .cutypes import CUresult
@@ -88,7 +90,7 @@ class MetaCUDA(type):
 class CUDA(metaclass=MetaCUDA):
 
     print_call:bool = False
-    print_info:bool = True
+    print_info:bool = initial_print_info()
     check_error:bool = True
 
     class Func:

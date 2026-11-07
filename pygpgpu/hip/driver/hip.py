@@ -4,8 +4,10 @@ import glob
 import os
 import platform
 import threading
+
 from ctypes import CDLL, c_int
 from typing import Callable, Dict, List, Optional
+from ...utils import initial_print_info
 
 from .hipinfo import HIPInfo, func_signatures
 
@@ -179,7 +181,7 @@ class MetaHIP(type):
 class HIP(metaclass=MetaHIP):
 
     print_call:bool = False
-    print_info:bool = True
+    print_info:bool = initial_print_info()
     check_error:bool = True
 
     class Func:

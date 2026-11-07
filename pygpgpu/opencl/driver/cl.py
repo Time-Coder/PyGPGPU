@@ -2,8 +2,10 @@ from __future__ import annotations
 import os
 import platform
 import threading
+
 from typing import Dict, Callable, Optional
 from ctypes import c_int, c_void_p, c_uint, pointer, addressof, _Pointer, Array, CDLL
+from ...utils import initial_print_info
 
 from .clinfo import CLInfo
 from .cltypes import ErrorCode
@@ -95,7 +97,7 @@ class MetaCL(type):
 class CL(metaclass=MetaCL):
 
     print_call:bool = False
-    print_info:bool = True
+    print_info:bool = initial_print_info()
     check_error:bool = True
 
     class Func:

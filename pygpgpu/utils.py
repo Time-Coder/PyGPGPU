@@ -481,6 +481,23 @@ _PRINT_INFO_MODULES:Tuple[str, ...] = (
     "pygpgpu.hip.oop.hip_compiler",
 )
 
+# The process-wide default every backend's own flag starts from. A backend module is imported
+# lazily -- the call that first needs it is what pulls it in -- so flipping only the flags of
+# the modules already loaded left `set_print_info(False)` at the top of a script with no
+# effect: the class did not exist yet, and it then defaulted to verbose. Each module now takes
+# its initial value from here, which is what makes the order of the two calls irrelevant.
+_PRINT_INFO_ENABLED:bool = True
+
+
+def initial_print_info() -> bool:
+    """The process-wide default for a backend's own ``print_info`` flag.
+
+    A backend calls this where it declares the flag, so a module imported *after*
+    ``set_print_info(False)`` starts quiet. The flag stays an ordinary class attribute
+    afterwards; this only decides what it starts as.
+    """
+    return _PRINT_INFO_ENABLED
+
 
 def nvidia_package_libraries(names: List[str]) -> List[str]:
     """Libraries shipped by the pip ``nvidia-*-cu12`` packages, newest first.
@@ -623,25 +640,35 @@ def _current_loop() -> object:
 
 
 def set_print_info(enabled:bool) -> None:
-    """Turn the progress logging of every already-imported backend on or off.
+    """Turn the progress logging of every backend on or off, now and from now on.
 
-    Each backend keeps its own ``print_info`` flag (``CL``, ``CUDA``, ``NVRTC``,
-    ``HIP`` and ``HipCompiler``), all defaulting to ``True``, so a single kernel
-    call prints translation, compilation, copy and launch lines. This flips them
-    all in one call and only touches modules already in ``sys.modules``, so it
-    never pulls in a GPU runtime just to silence output::
+    Each backend keeps its own ``print_info`` flag (``CL``, ``CUDA``, ``NVRTC``, ``HIP`` and
+    ``HipCompiler``), all starting at ``True``, so a single kernel call prints translation,
+    compilation, copy and launch lines. This flips them all in one call and only touches
+    modules already in ``sys.modules``, so it never pulls in a GPU runtime just to silence
+    output::
 
         from pygpgpu import set_print_info
         set_print_info(False)      # quiet
         set_print_info(True)       # verbose again (the default)
 
-    A backend imported *after* this call starts out verbose, because its flag is a
-    class attribute that only exists once its module is loaded. To keep the whole
-    process quiet, call this after the backends you use have been imported -- or
-    silence one backend directly, e.g. ``pygpgpu.opencl.driver.CL.print_info = False``.
+    The call may be made before the backends are imported, which is the usual place for it:
+    it also records the value as the process-wide default, and a backend imported later takes
+    its flag's initial value from there. Only flipping the loaded modules would have left
+    ``set_print_info(False)`` at the top of a script with no effect at all, because the
+    backend is imported lazily by the first call that needs it and its class did not exist
+    yet -- the script then printed everything it asked to silence.
+
+    A single backend can still be silenced on its own with its own attribute, e.g.
+    ``pygpgpu.opencl.driver.CL.print_info = False``; that does not change the default for
+    backends imported later, unlike this call. The math-library binders under
+    ``pygpgpu/{cuda,hip}/libraries`` keep their own flag and are left alone: what they print
+    is a warning about a binding that failed, not progress logging.
     """
+    global _PRINT_INFO_ENABLED
     import sys
 
+    _PRINT_INFO_ENABLED = enabled
     for module_name in _PRINT_INFO_MODULES:
         module = sys.modules.get(module_name)
         if module is None:
