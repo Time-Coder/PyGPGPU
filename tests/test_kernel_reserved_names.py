@@ -24,7 +24,6 @@ import pytest
 from pygpgpu import kernel
 from pygpgpu.kernel.translator import RESERVED_DEVICE_NAMES, device_name
 
-
 # -----------------------------------------------------------------------------------------------------------------------------------------
 # The mapping itself
 # -----------------------------------------------------------------------------------------------------------------------------------------
@@ -224,8 +223,10 @@ def test_an_atomic_shared_store_works(runner):
     assert seen[0] == 6
 
 
-def test_a_shared_float_atomic_is_refused_by_name(gpu_backend, runner):
-    """A float target has no device atomic on OpenCL here, and the message says so."""
+def test_a_shared_float_atomic_is_exact(gpu_backend, runner):
+    """A float outer scalar used to be refused ("a float value has no device atomic
+    operation"); a float addition now runs through the portable CAS helper (see
+    device_builtins.float_atomic_add_source), so the sum is python's own."""
     total = 0.0
 
     @kernel
@@ -234,12 +235,8 @@ def test_a_shared_float_atomic_is_refused_by_name(gpu_backend, runner):
         for i in range(values.shape[0]):
             total += float(values[i])
 
-    with pytest.raises(SyntaxError) as caught:
-        runner(accumulate, np.array([1.0, 2.0], dtype=np.float32))
-    message = str(caught.value)
-    # The refusal names the missing atomic rather than the race, so the two messages stay
-    # distinguishable: this one is about the *element type*, not about sharing.
-    assert "atomic" in message
+    runner(accumulate, np.array([1.0, 2.0], dtype=np.float32))
+    assert float(total) == pytest.approx(3.0)
 
 
 def test_a_guarded_shared_store_is_accepted(runner):

@@ -41,6 +41,7 @@ from .device_builtins import (
     emit_atomic,
     emit_barrier,
     emit_index,
+    float_atomic_add_source,
     python_floor_name,
     python_floor_source,
 )
@@ -1076,18 +1077,26 @@ def _vec_field_names(cls_or_name:object)->List[str]:
 # vector types only have x/y/z/w, so the translator normalizes them for every backend.
 _VEC_COLOR_ALIASES:Dict[str, str] = {"r": "x", "g": "y", "b": "z", "a": "w"}
 
-def _math_device_name(attr:str, backend:str)->str:
+def _math_device_name(attr:str, backend:str, result_type:object=None)->str:
     """The device spelling of a `math.*` function.
 
     OpenCL's C dialect has float overloads under the plain name. CUDA has both the
     double and the `f`-suffixed float form, and asking for the plain name with a float
     argument is ambiguous whenever the argument's type is not exactly `float` -- which is
     how `floor` came to fail with "more than one instance of overloaded function".
+
+    The caller's *result* type decides which of the two CUDA forms to spell: `ret` is
+    already computed from the argument types (`_emit_math_call` widens it to `double`
+    when any argument is one), so a double-width call gets the plain name and the
+    compiler resolves the double overload. Spelling `sinf` with a double argument
+    silently cut a `float=np.float64` kernel's transcendentals back to float32.
     """
     if backend != "cuda":
         return attr
     # The three predicates are already type-generic in CUDA and take no `f` suffix.
     if attr in ("isnan", "isinf", "isfinite"):
+        return attr
+    if result_type == "double":
         return attr
     return attr if attr.endswith("f") else attr + "f"
 
@@ -2156,6 +2165,25 @@ class FunctionTranslator:
         self._tmp_counter:int = 0
         self.local_buffers:List[Tuple[str, str, int]] = []
         self.return_type:Optional[object] = None
+        # A device helper's `return a, b` (see _visit_return): the element types, in
+        # order. The call site appends one `T*` output parameter per element and passes
+        # the destinations it unpacks into; the helper stores through them.
+        self.tuple_return_types:Optional[List[object]] = None
+        # The element types read for the tuple call currently being unpacked (see
+        # _tuple_call_element_count, which stashes them for _emit_tuple_call_unpack).
+        self._pending_tuple_types:Optional[List[object]] = None
+        # (line index, name, initial type) for every local declaration `_visit_assign`
+        # emitted, so the renderer can rewrite one whose variable a later assignment
+        # widened (float -> double; see _define).
+        self._declaration_sites:List[Tuple[int, str, str]] = []
+        # A local bound to an array extent above the magic loop (`rows: int =
+        # out.shape[0]`): the name resolves to (array, dim), which is what an
+        # `np.ndindex(rows, ...)` bound needs to become the launch's extent parameter.
+        self._shape_aliases:Dict[str, Tuple[str, int]] = {}
+        # An ndenumerate index held as one name (`for index, v in ...`): the name stands
+        # for the coordinate tuple, and a constant-ordinal subscript reads the
+        # decomposition the head emitted (python's order, slowest first).
+        self._ndenumerate_index_names:Dict[str, List[str]] = {}
         # Kernel return values. A kernel runs once per work item, so it cannot have a C
         # return value; every returned position becomes a device parameter instead (a
         # one-element buffer for a value, the array parameter's own name for an array) and
@@ -2296,9 +2324,31 @@ class FunctionTranslator:
         or a block, and drops one where the scope simply ends (the next line dedents back
         to the parent), because there is nothing more in this scope to separate. Doubles
         collapse, and no blank may lead the body or survive at its end.
+
+        Before the separators are placed, every local declaration whose variable a later
+        assignment *widened* (`scale = 1.0` here, a double inside the loop) has its type
+        rewritten -- the declaration was spelled with the type the first assignment had,
+        and the C compiler rejects a store of the wider value into it.
         """
+        source:List[str] = (self.lines if lines is None else lines)
+        if self._declaration_sites:
+            source = list(source)
+            for line_index, name, initial_type in self._declaration_sites:
+                final_t:DeviceType = self._lookup(name)
+                final_type:str = (self._device_type(final_t)
+                                  if isinstance(final_t, str) and not is_ptr(final_t)
+                                  else "")
+                if final_type and final_type != initial_type:
+                    line:str = source[line_index]
+                    marker:str = f"{initial_type} {device_name(name)} = "
+                    stripped:str = line.lstrip()
+                    if stripped.startswith(marker):
+                        indent:str = line[:len(line) - len(stripped)]
+                        source[line_index] = (f"{indent}{final_type} "
+                                              f"{device_name(name)} = "
+                                              f"{stripped[len(marker):]}")
         rendered:List[str] = []
-        for line in (self.lines if lines is None else lines):
+        for line in source:
             if line == "" and (not rendered or rendered[-1] == ""):
                 continue
             rendered.append(line)
@@ -2365,6 +2415,14 @@ class FunctionTranslator:
             self.scopes[-1][name] = t
         elif existing != t:
             if is_int(existing) and is_float(t):
+                self.scopes[-1][name] = t
+            elif is_float(existing) and is_float(t):
+                # Widening only ever goes up (float -> double), the same rule the int ->
+                # float case above follows: a python variable is untyped, so `scale = 1.0`
+                # above the loop followed by `scale = x * 2.0` (a double under the
+                # mapping) refused with "changes type from float to double". The scope
+                # entry is what every later read and the declaration itself see, so
+                # re-pointing it widens the variable in place.
                 self.scopes[-1][name] = t
             else:
                 self._error(f"variable '{name}' changes type from {existing} to {t}", node)
@@ -2878,6 +2936,17 @@ class FunctionTranslator:
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
             # np.ndindex(2, 3): the iteration domain is stated outright.
             return "", int(node.value)
+        if isinstance(node, ast.Name):
+            # `rows: int = out.shape[0]` above the loop, then `np.ndindex(rows, columns)`.
+            # The name's *value* is the extent expression the assignment bound it to, so
+            # the bound resolves through the alias table instead of the variable itself
+            # (which travels as a plain C int, not as the array's extent parameter).
+            binding:Optional[Tuple[str, int]] = self._shape_aliases.get(node.id)
+            if binding is not None:
+                holder_type:DeviceType = self._lookup(binding[0])
+                if is_ptr(holder_type) or is_image(holder_type):
+                    return binding
+            return None
         if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and self.self_param and node.value.id == self.self_param):
             # A host-side integer attribute is a constant for this launch, like a literal:
@@ -3082,8 +3151,26 @@ class FunctionTranslator:
             declared:DeviceType = self._lookup(name)
             if declared is not None:
                 continue
+            # The slot is the carried value's own width: the initializer above the loop
+            # (`total = 0.0` is a float, `total = 0` an int) says what python answers,
+            # and the atomic below is typed the same way. The slot used to be `int` for
+            # every carrier, which made a float sum's `atomicAdd` an int atomic -- the
+            # contributions were truncated (`0.5 + 0.25` answered 0), and the
+            # interpreter, which runs python's own arithmetic, answered 0.75.
+            element_t:object = "int"
+            init_stmt:Optional[ast.stmt] = next(
+                (stmt for stmt in body[:_magic_loop_index(body)]
+                 if _assigned_name_of(stmt) == name), None)
+            if init_stmt is not None:
+                init_value:Optional[ast.expr] = _creation_target_of(init_stmt)
+                if isinstance(init_value, ast.Constant):
+                    if isinstance(init_value.value, float):
+                        element_t = self.type_map.get("float", "float")
+                    elif isinstance(init_value.value, int) \
+                            and not isinstance(init_value.value, bool):
+                        element_t = self.type_map.get("int", "int")
             self.carried_scalars.append(name)
-            self.params.append((name, (PTR, "int")))
+            self.params.append((name, (PTR, element_t)))
             self._define(name, ("carried", name), body[0])
 
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
@@ -3097,6 +3184,24 @@ class FunctionTranslator:
         # `zeros_per_group` declaration included -- into the host tail, where a device-only
         # builtin has no work item and fails.
         self.body_tail = list(body[_magic_loop_end(body):])
+        # `rows: int = out.shape[0]` above the loop: the local stands for the extent, and
+        # an `np.ndindex(rows, ...)` bound resolves through it. Scanned up front, because
+        # the loop *detection* below needs the table -- a bound held in a local is still
+        # the work-item domain, and missing it made the loop read as a "second magic
+        # loop" instead.
+        for stmt in body[:_magic_loop_index(body)]:
+            value:Optional[ast.expr] = _creation_target_of(stmt)
+            name:Optional[str] = _assigned_name_of(stmt)
+            if value is None or name is None:
+                continue
+            if isinstance(value, ast.Subscript) \
+                    and isinstance(value.slice, ast.Constant) \
+                    and isinstance(value.slice.value, int):
+                holder:Optional[str] = self._shape_holder_param(value.value)
+                if holder is not None:
+                    holder_t:DeviceType = self._lookup(holder)
+                    if is_ptr(holder_t) or is_image(holder_t):
+                        self._shape_aliases[name] = (holder, int(value.slice.value))
         magic_index:Optional[int] = None
         enumerate_form:Optional[Translated] = None
         nd_form:Optional[Tuple[str, str, str]] = None
@@ -3226,6 +3331,14 @@ class FunctionTranslator:
                 elem_t:object = arr_t[1]
                 self._define(value_name, elem_t, None)
                 self._emit(f"{elem_t} {value_name} = {param}[{self._nd_flat_index(names, param)}];")
+            if form == "ndenumerate" and isinstance(names_node, ast.Name):
+                # `for index, v in ndenumerate(arr)` holds the index as a *tuple* in
+                # python (`index == (i,)`, or `(i, j)` in 2-D), and a body may subscript
+                # it (`index[0]`) before unpacking it -- numpy's own protocol. The name
+                # below stands for that tuple: a constant ordinal reads the
+                # decomposition the head already emitted, in python's order (slowest
+                # first), which is the reverse of the head's fastest-last names.
+                self._ndenumerate_index_names[names_node.id] = list(reversed(names))
 
             self._visit_work_item_body(loop.body)
             # The launch sizes dimensions fastest-first, which is the reverse of the order
@@ -3360,6 +3473,26 @@ class FunctionTranslator:
     def _is_numpy_dtype_name(self, name:str)->bool:
         """True for a numpy scalar type (`np.float32`, `np.int32`, ...)."""
         return name in _NUMPY_DEVICE_TYPES or name in self.RETURN_SLOT_TYPES
+
+    def _is_numpy_constant_cast(self, node:ast.expr)->bool:
+        """True for `np.<dtype>(<constants>)`: one number, known at translation time.
+
+        The creation guard treats a constant dtype call as a creation (see
+        `_is_creation_expression`), and above the magic loop that is right -- the host
+        builds the value and it travels as a parameter. Below the loop the value is one
+        per work item, and a scalar is exactly that: the device cast computes the same
+        number python would, so folding it to a constant keeps the statement a plain
+        assignment instead of refusing a cast as if it allocated.
+        """
+        if not isinstance(node, ast.Call):
+            return False
+        func:ast.expr = node.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and self.resolve_global(func.value.id) is np):
+            return False
+        if not self._is_numpy_dtype_name(func.attr):
+            return False
+        return all(isinstance(arg, ast.Constant) for arg in node.args)
 
     def _is_creation_function(self, name:str)->bool:
         """A numpy function that only allocates or reshapes host data."""
@@ -3612,7 +3745,7 @@ class FunctionTranslator:
             if taken is not None:
                 self._emit_block(taken)
                 return
-            cond, _ = self._visit_expression(node.test)
+            cond:str = self._condition_code(node.test)
             self._emit(f"if ({cond})")
             self._emit("{")
             self._guard_conditions.append(node.test)
@@ -3628,7 +3761,7 @@ class FunctionTranslator:
             self._emit("}")
             self._emit_blank()
         elif isinstance(node, ast.While):
-            cond, _ = self._visit_expression(node.test)
+            cond:str = self._condition_code(node.test)
             self._emit(f"while ({cond})")
             self._emit("{")
             self._push_scope_block(node.body, is_loop=True)
@@ -4210,6 +4343,25 @@ class FunctionTranslator:
             self._emit("return;")
             return
 
+        # `return a, b` from a device helper: C has no tuple, so the elements become
+        # stores into the `T*` output parameters appended after the helper's own
+        # signature (see `tuple_return_types` and `_emit_device_call`, which appends
+        # them and passes the call site's destinations). `@kernel` supports a tuple
+        # return through its own claim machinery; this is the helper-scale form of the
+        # same feature, and the unpacking at the call site (`x, y = pair(...)`) is what
+        # python writes for it.
+        if isinstance(node.value, ast.Tuple):
+            elements:List[Translated] = [self._visit_expression(e) for e in node.value.elts]
+            for _code, t in elements:
+                if is_ptr(t):
+                    self._error("cannot return an array from a function", node)
+            self.tuple_return_types = [t for _code, t in elements]
+            for ordinal, (code, _t) in enumerate(elements):
+                self._emit(f"*_tuple_out{ordinal} = {code};")
+            self.return_type = "void"
+            self._emit("return;")
+            return
+
         code, t = self._visit_expression(node.value)
         if is_ptr(t):
             self._error("cannot return an array from a function", node)
@@ -4383,6 +4535,27 @@ class FunctionTranslator:
         # refused instead of being silently shared between work items.
         if (self.creation_below_loop and isinstance(target, ast.Name)
                 and self._is_creation_expression(node.value)):
+            # A *scalar* dtype cast with constant arguments (`two = np.float64(2.0)`) is
+            # not an allocation: python answers one number here, exactly as it does above
+            # the loop, where the same statement is lifted to the host and travels as a
+            # parameter. Emitting it as a device cast instead answers the same value with
+            # no launch machinery -- the cast spelling is a cast wherever it appears. The
+            # refusal used to trip on the dtype names sitting on the creation list, which
+            # made one spelling answer three ways depending on where it appeared.
+            if self._is_numpy_constant_cast(node.value):
+                # The device spelling is the cast itself (`(double)(2.0)`), which answers
+                # the same number python computes. Rebuilding the assignment would meet
+                # the same creation guard again, so the store is emitted directly.
+                func_attr:str = cast("str", node.value.func.attr)  # type: ignore[union-attr]
+                element_code:str = self._emit_numpy_cast(
+                    func_attr,
+                    [(self._visit_expression(a)[0], "int") for a in node.value.args],
+                    node.value)[0]
+                element_t:object = DTYPE_MAP[func_attr]
+                self._define(target.id, element_t, node)
+                self._emit(f"{self._device_type(element_t)} {device_name(target.id)}"
+                           f" = {element_code};")
+                return
             if self._emit_private_array(target.id, node):
                 return
             self._error(
@@ -4432,6 +4605,22 @@ class FunctionTranslator:
         # Tuple unpacking/swap: a, b = b, a -- also when an item is an array element,
         # as in the idiomatic swap a[i], b[i] = b[i], a[i].
         if isinstance(target, ast.Tuple):
+            # `x, y = pair(...)`, where the helper answers a tuple: python unpacks the
+            # pair, and the device does the same by passing the destinations as the
+            # helper's output parameters (see _visit_return's tuple branch, which
+            # stores through them). Any other non-tuple right-hand side stays refused.
+            if not isinstance(node.value, ast.Tuple):
+                if isinstance(node.value, ast.Call) \
+                        and self._tuple_call_element_count(node.value) is not None:
+                    count:int = cast(int, self._tuple_call_element_count(node.value))
+                    if len(target.elts) != count:
+                        self._error(
+                            f"the call answers {count} values, and the tuple assignment "
+                            f"unpacks {len(target.elts)} names -- the counts have to "
+                            f"match, as they do in python", node)
+                    self._emit_tuple_call_unpack(target.elts, node.value)
+                    return
+                self._error("tuple assignment requires matching tuples on both sides", node)
             if not isinstance(node.value, ast.Tuple) or len(target.elts) != len(node.value.elts):
                 self._error("tuple assignment requires matching tuples on both sides", node)
             if not all(isinstance(t, (ast.Name, ast.Subscript)) for t in target.elts):
@@ -4486,6 +4675,19 @@ class FunctionTranslator:
             if outer is not None:
                 self._emit(f"{device_name(target.id)}[0] = {code};")
                 return
+            # `rows = out.shape[0]`: the name stands for the array's extent, which is
+            # what an `np.ndindex(rows, ...)` bound resolves through (see
+            # _extent_source). Recorded before the visit of the loop, whose head reads
+            # the table.
+            if isinstance(node.value, ast.Subscript) \
+                    and isinstance(node.value.slice, ast.Constant) \
+                    and isinstance(node.value.slice.value, int):
+                holder:Optional[str] = self._shape_holder_param(node.value.value)
+                if holder is not None:
+                    holder_t:DeviceType = self._lookup(holder)
+                    if is_ptr(holder_t) or is_image(holder_t):
+                        self._shape_aliases[target.id] = (holder,
+                                                          int(node.value.slice.value))
             existing:DeviceType = self._lookup(target.id)
             if isinstance(existing, tuple) and len(existing) == 2 and existing[0] == "carried":
                 # One location for the whole launch: store through the pointer, exactly as
@@ -4513,6 +4715,10 @@ class FunctionTranslator:
                     decl = f"{const}{self._kernel_scalar_type(t[1])}* "
                 else:
                     decl = self._device_type(t) + " "
+                # A later widening (`scale = 1.0` here, a double inside the loop) has to
+                # rewrite this declaration's type -- see _render_body's fixup pass.
+                self._declaration_sites.append((len(self.lines), target.id,
+                                                self._device_type(t)))
             self._emit(f"{decl}{device_name(target.id)} = {code};")
         elif isinstance(target, ast.Subscript):
             # A string subscript on a structure value writes a member: `s["i"] = 1` becomes
@@ -5268,7 +5474,10 @@ class FunctionTranslator:
                             pointer_code:Optional[str]=None,
                             is_local:bool=False)->None:
         """The shared tail of an atomic `op=` on an array element or an outer scalar."""
-        if not is_int(element_t):
+        # A float slot is addable through the portable CAS helper (see
+        # float_atomic_add_source); every other non-integer element has no atomic at all.
+        float_add:bool = (element_t == "float" and op_name == "Add")
+        if not is_int(element_t) and not float_add:
             self._error(
                 f"'{self._augassign_symbol(op_name)}=' on this location may be written by "
                 f"several work items at once, and a {element_t} value has no device atomic "
@@ -5282,6 +5491,9 @@ class FunctionTranslator:
             self.atomic_targets.add(self._array_name(node.target.value))  # type: ignore[union-attr]
         else:
             self.atomic_targets.add(node.target.id)  # type: ignore[union-attr]
+        if float_add and float_atomic_add_source(self.backend) \
+                not in self.device_helpers:
+            self.device_helpers.append(float_atomic_add_source(self.backend))
         call:str = emit_atomic(atomic_name, array_code, index_code, value_code,
                                element_t, self.backend, pointer_code=pointer_code,
                                is_local=is_local)
@@ -5291,6 +5503,156 @@ class FunctionTranslator:
         return {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/", "FloorDiv": "//",
                 "Mod": "%", "Pow": "**", "LShift": "<<", "RShift": ">>",
                 "BitAnd": "&", "BitOr": "|", "BitXor": "^"}.get(op_name, op_name)
+
+    def _tuple_call_element_count(self, call:ast.Call)->Optional[int]:
+        """How many values a call answers, when it answers a tuple -- or None.
+
+        The answer is known only for a *helper* call whose body returns a tuple; the
+        interpreter backend runs the same call and python unpacks the pair there, so this
+        is the device side of one spelling. The count comes from the function's return
+        statements -- `return a, b` has a fixed arity, whatever the types turn out to be
+        at the call.
+        """
+        count:Optional[int] = self._tuple_call_return_info(call)[0]
+        if count is not None:
+            # The element types, read from the returns as well: each one is the device
+            # type the callee's own translation produces (a np.float64 cast is a double,
+            # a python float result is the mapping's width). They decide the
+            # destinations' declarations, so a plain name unpacks like an assignment.
+            types:List[object] = self._tuple_call_element_types(call)
+            if types is not None:
+                self._pending_tuple_types = types
+        return count
+
+    def _tuple_call_return_info(self, call:ast.Call)->Tuple[Optional[int],
+                                                             List[object]]:
+        """A tuple-returning helper's arity and element types (empty when unknown).
+
+        The arity comes from the function's return statements. The element types are the
+        ones a *first pass* of the call would produce: the cheapest reliable source is a
+        dry translation of the helper at this call's argument types, which is exactly
+        what `_emit_device_call` does -- so the caller unpacks after asking here, and the
+        types come back through the cache entry.
+        """
+        if not isinstance(call.func, ast.Name):
+            return None, []
+        target:object = self.resolve_global(call.func.id)
+        if not isinstance(target, types.FunctionType):
+            return None, []
+        counts:Set[int] = set()
+        try:
+            tree = ast.parse(textwrap.dedent(inspect.getsource(target)))
+        except (OSError, TypeError):
+            return None, []
+        for sub in ast.walk(tree):
+            if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Tuple):
+                counts.add(len(sub.value.elts))
+            elif isinstance(sub, ast.Return) and sub.value is not None:
+                return None, []
+        if len(counts) != 1:
+            return None, []
+        return counts.pop(), []
+
+    def _tuple_call_element_types(self, call:ast.Call)->Optional[List[object]]:
+        """The device type of each element a tuple-returning helper answers, or None.
+
+        Read from the helper's own returns: a `np.<dtype>(...)` cast names its width, a
+        python float result names the mapping's width, a python int result is an int.
+        Anything else (an argument's member, a call) is not statically known here, and
+        the caller refuses rather than guessing.
+        """
+        if not isinstance(call.func, ast.Name):
+            return None
+        target:object = self.resolve_global(call.func.id)
+        if not isinstance(target, types.FunctionType):
+            return None
+        try:
+            tree = ast.parse(textwrap.dedent(inspect.getsource(target)))
+        except (OSError, TypeError):
+            return None
+        python_float_kind:str = self.type_map.get("float", "float")
+        sites:List[List[object]] = []
+        for sub in ast.walk(tree):
+            if not (isinstance(sub, ast.Return) and isinstance(sub.value, ast.Tuple)):
+                continue
+            element_types:List[object] = []
+            for element in sub.value.elts:
+                if isinstance(element, ast.Call) \
+                        and isinstance(element.func, ast.Attribute) \
+                        and isinstance(element.func.value, ast.Name) \
+                        and self.resolve_global(element.func.value.id) is np:
+                    mapped:Optional[str] = DTYPE_MAP.get(element.func.attr)
+                    if mapped is None:
+                        return None
+                    element_types.append(mapped)
+                    continue
+                if isinstance(element, ast.BinOp) and isinstance(element.op, ast.Mult):
+                    # `2.0 * a` under a double mapping answers a double; the operand
+                    # kinds are what the kernel's own translation gives them.
+                    element_types.append(python_float_kind if python_float_kind == "double"
+                                         else "float")
+                    continue
+                if isinstance(element, ast.Constant) and isinstance(element.value, float):
+                    element_types.append(python_float_kind)
+                    continue
+                return None
+            sites.append(element_types)
+        if len({tuple(site) for site in sites}) != 1 or not sites:
+            return None
+        return sites[0]
+
+    def _emit_tuple_call_unpack(self, targets:List[ast.expr], call:ast.Call)->None:
+        """`x, y = pair(...)`: translate the call, passing the destinations as outputs.
+
+        The helper's signature ends in one `T*` output per element (see `_visit_return`'s
+        tuple branch and `render_device`), so the destinations travel by address and the
+        helper's stores land in them -- the device shape of python's unpacking. A plain
+        name is declared at its element type first, so the call site reads like the
+        assignment it is; the types come from the helper's own returns
+        (`_tuple_call_element_types`).
+        """
+        element_types:List[object] = (self._pending_tuple_types
+                                      or self._tuple_call_element_types(call) or [])
+        # The destinations are evaluated first, exactly as a tuple swap evaluates every
+        # right-hand side before storing: an element destination captures its own address.
+        address_codes:List[str] = []
+        for ordinal, target_item in enumerate(targets):
+            if isinstance(target_item, ast.Subscript):
+                base_code, _base_t = self._visit_array_target(target_item.value)
+                index_code, _ = self._visit_subscript_index(target_item)
+                if isinstance(target_item.value, ast.Name):
+                    self.atomic_targets.add(target_item.value.id)
+                address_codes.append(f"&({base_code}[{index_code}])")
+                continue
+            if not isinstance(target_item, ast.Name):
+                self._error(
+                    "a tuple-returning call unpacks into plain variables or array "
+                    "elements", target_item)
+            name:str = target_item.id
+            existing:DeviceType = self._lookup(name)
+            if existing is not None and is_ptr(existing):
+                self._error(f"cannot assign to array parameter '{name}'", target_item)
+            if existing is None:
+                if ordinal >= len(element_types):
+                    self._error(
+                        "cannot tell the type of the value this helper answers for "
+                        f"'{name}': its returns are not all `np.<dtype>(...)` casts, "
+                        f"float results, or the same shape -- declare the variable "
+                        f"yourself (`x: np.float64 = 0.0`) and unpack into it", target_item)
+                self._define(name, element_types[ordinal], target_item)
+                self._emit(f"{self._device_type(element_types[ordinal])} {name};")
+            address_codes.append(f"&({device_name(name)})")
+        self._pending_tuple_types = None
+        call_code, call_t = self._emit_device_call(
+            call.func.id, self.resolve_global(call.func.id),
+            [self._visit_expression(a) for a in call.args], call,
+            tuple_targets=address_codes)
+        if call_t != "void":
+            self._error("the call does not answer a tuple; unpack a tuple-returning "
+                        "helper", call)
+        # The call is a statement here: the helper's own body stores through the
+        # destinations, and the (void) answer carries nothing to assign.
+        self._emit(f"{call_code};")
 
     def _visit_augassign(self, node:ast.AugAssign)->None:
         # A racy `arr[i] op= v` must not compile into a plain read-modify-write: every work
@@ -5326,7 +5688,17 @@ class FunctionTranslator:
                     f"(see examples/09_reduction.py)", node)
             if carried:
                 # One location shared by every work item, updated through its own buffer.
-                self._emit_atomic_update(node, op_name, atomic_name, "int",
+                # The atomic is the slot's own width (see _bind_carried_scalars, which
+                # types the slot from the initializer): an int atomic handed a float
+                # value truncated every contribution. The carried marker's second entry
+                # is the *name*; the slot's type is the parameter's.
+                carried_t:object = "int"
+                for parameter_name, parameter_t in self.params:
+                    if parameter_name == node.target.id and isinstance(parameter_t, tuple) \
+                            and is_ptr(parameter_t):
+                        carried_t = parameter_t[1]
+                        break
+                self._emit_atomic_update(node, op_name, atomic_name, carried_t,
                                          array_code=node.target.id, index_code="0",
                                          pointer_code=node.target.id)
                 return
@@ -5336,6 +5708,22 @@ class FunctionTranslator:
 
         target_code, target_t = self._visit_target(node.target)
         value_code, value_t = self._visit_expression(node.value)
+
+        # A complex target has no C in-place operator either, but its arithmetic *does* have
+        # a device meaning: the header's function, exactly as `_emit_complex_binop` builds
+        # it for `z = z + c`. Python reads `z += c` as `z = z + c` when the class defines no
+        # `__iadd__` -- the header's record defines none -- so the store is the same call.
+        # Without this branch the plain C `+=` reached the compiler and was refused for a
+        # struct (`no operator "+=" matches these operands (c128 += c128)`).
+        if self._complex_dtype_of(target_t) is not None \
+                and op_name in ("Add", "Sub", "Mult", "Div", "Pow"):
+            operator_node:ast.BinOp = ast.BinOp(
+                left=node.target, op=node.op, right=node.value,
+                lineno=node.lineno, col_offset=node.col_offset)
+            stored:Translated = self._emit_complex_binop(
+                op_name, target_code, target_t, value_code, value_t, operator_node)
+            self._emit(f"{target_code} = {stored[0]};")
+            return
 
         # A structure target has no C in-place operator: `v += w` on a class is that
         # class's `__iadd__`, or its `__add__` when it defines no in-place form. The call
@@ -5645,12 +6033,15 @@ class FunctionTranslator:
         if isinstance(node, ast.Compare):
             return self._visit_compare(node)
         if isinstance(node, ast.BoolOp):
-            parts:List[str] = [self._visit_expression(v)[0] for v in node.values]
+            # Each operand is a *condition* in python (`and`/`or` read their operands as
+            # bools), so a complex operand reaches the truthiness rule instead of arriving
+            # at the compiler as a struct the operator cannot take.
+            parts:List[str] = [self._condition_code(v) for v in node.values]
             symbol:str = ("&&" if isinstance(node.op, ast.And) else "||")
             joined:str = f" {symbol} ".join(parts)
             return f"({joined})", "bool"
         if isinstance(node, ast.IfExp):
-            cond, _ = self._visit_expression(node.test)
+            cond:str = self._condition_code(node.test)
             then_code, tt = self._visit_expression(node.body)
             else_code, et = self._visit_expression(node.orelse)
             if tt != et:
@@ -5698,6 +6089,13 @@ class FunctionTranslator:
         if isinstance(value, int):
             return str(value), "int"
         if isinstance(value, float):
+            # A python float literal has no width of its own, so it takes the one the
+            # `float` mapping chooses -- the same rule a python complex literal follows
+            # (`1 + 2j` is a c128 under `float=np.float64`), and the same rule a python
+            # float *argument* follows. Spelling every literal with the `f` suffix cut a
+            # 17-digit constant down to float32 inside a double kernel.
+            if self.type_map.get("float", "float") == "double":
+                return self._real_literal(value, "double"), "double"
             text:str = repr(value)
             if not ("." in text or "e" in text or "E" in text or "inf" in text or "nan" in text):
                 text += ".0"
@@ -6007,6 +6405,24 @@ class FunctionTranslator:
             return f"(*{code})", dtype
         return code, dtype
 
+    def _condition_code(self, node:ast.expr)->str:
+        """A condition as C reads it: `(code)` for what is already a scalar test.
+
+        A complex value is truthy in python when either part is non-zero, so a condition
+        holding one (`if z:`, `while z and n < max:`) is rewritten as the comparison the
+        record itself cannot express -- the plain `if (z)` reached the compiler and was
+        refused with "expression must have bool type". A zero complex value means
+        `z.re == 0 && z.im == 0`, which is the negation of the header's own inequality
+        against the zero the constructor builds.
+        """
+        code, t = self._visit_expression(node)
+        dtype:Optional[np.dtype] = self._complex_dtype_of(t)
+        if dtype is None:
+            return f"({code})"
+        self._require_complex(dtype)
+        kind:str = self._complex_side(t, dtype)
+        return (f"({kind}_equal({code}, {kind}_from_real(0)) == 0)")
+
     def _complex_side(self, t:object, dtype:Optional[np.dtype])->str:
         """One operand's width, in the header's spelling: ``c64``/``c128``/``float``/``double``."""
         if dtype is not None:
@@ -6111,6 +6527,16 @@ class FunctionTranslator:
                         "c128" if mixed_scalar else kind)
         if operator == "Pow":
             if complex_is_left:
+                # `z ** 2` (the Mandelbrot iteration shape) is the direct product: the
+                # general power goes through exp(2 * log(z)), whose round trip loses the
+                # real part entirely at c64 (`(4-4j) ** 2` answered -1.4e-06 - 32j where
+                # numpy answers -32j). The real path special-cases a constant 2 into
+                # `x * x` (see _visit_binop); the complex path owes the same case. An
+                # integer exponent of 2 only -- python's `z ** 2.0` is a float power.
+                if isinstance(node.right, ast.Constant) \
+                        and isinstance(node.right.value, int) \
+                        and node.right.value == 2 and not isinstance(node.right.value, bool):
+                    return f"{kind}_mul({complex_code}, {complex_code})", kind
                 return scalar_call(f"{kind}_pow_real")
             return (f"{kind}_rpow({scalar_code}, {complex_code})" if not mixed_scalar
                     else f"{kind}_rpow_c128({scalar_code}, {complex_code})"), (
@@ -6178,6 +6604,17 @@ class FunctionTranslator:
             if not is_float(t) and not is_int(t):
                 self._error(
                     f"complex(re, im) needs real components, got {t}", node)
+        # A numpy scalar part keeps its own width, as it does everywhere else
+        # (`np.float64` arguments are narrowed deliberately, but a value that *travels*
+        # as a double carries its width into the result): numpy's own
+        # `complex(np.float64(1.0), np.float64(2.0))` answers a complex128. A *python*
+        # float part has no width of its own and follows the mapping, which is the rule
+        # `1 + 2j` already uses -- the mapping is what chose `kind` above.
+        parts_are_double:bool = real_t == "double" or imag_t == "double"
+        if parts_are_double:
+            kind = "c128"
+        element = "double" if kind == "c128" else "float"
+        dtype = np.dtype(np.complex128 if kind == "c128" else np.complex64)
         self._require_complex(dtype)
         return (f"{kind}_make(({element})({real_code}), ({element})({imag_code}))", kind)
 
@@ -6580,7 +7017,55 @@ class FunctionTranslator:
         symbol:str = {"Add": "+", "Sub": "-", "Mult": "*"}.get(name)
         if symbol is None:
             self._error(f"unsupported operator: {name}", node)
-        return f"({left} {symbol} {right})", promote(lt, rt)
+        result_t:object = promote(lt, rt)
+        if is_int(lt) and is_int(rt):
+            # Python's int is arbitrary precision and the device's is the mapped width, so a
+            # product of two literal ints used to wrap silently: `5000 * 1000000` answered
+            # 705032704 with a compiler warning nobody piped up. When both sides are literal
+            # arithmetic the host can compute the exact value and run the same width check a
+            # scalar *argument* gets (`_check_integer_fits`); a literal that does not fit is
+            # refused with the numpy spelling that carries it, not wrapped.
+            folded:Optional[int] = self._folded_int_value(node)
+            if folded is not None:
+                _check_integer_fits(folded, result_t if isinstance(result_t, str) else "int")
+        return f"({left} {symbol} {right})", result_t
+
+    def _folded_int_value(self, node:ast.BinOp)->Optional[int]:
+        """The exact value of a literal int BinOp, or None when it is not foldable.
+
+        A "literal" here is an expression built only from int constants, the arithmetic
+        operators python folds with (`+ - * / // % **`), and unary signs --
+        `5000000 * 1000000`, `2 ** 40`, `-7 // 2`. A name (a parameter or a local) is *not*
+        folded: its value is a launch-time fact, and the mapping `int=np.int64` is the
+        escape hatch for a runtime product that needs the wider device type.
+        """
+        operations:Dict[type, object] = {
+            ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
+            ast.Mult: lambda a, b: a * b, ast.FloorDiv: lambda a, b: a // b,
+            ast.Mod: lambda a, b: a % b, ast.Pow: lambda a, b: a ** b,
+        }
+
+        def evaluate(expr:ast.expr)->Optional[int]:
+            if isinstance(expr, ast.Constant) and isinstance(expr.value, int) \
+                    and not isinstance(expr.value, bool):
+                return int(expr.value)
+            if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, (ast.UAdd, ast.USub)):
+                inner:Optional[int] = evaluate(expr.operand)
+                if inner is None:
+                    return None
+                return -inner if isinstance(expr.op, ast.USub) else inner
+            if isinstance(expr, ast.BinOp) and type(expr.op) in operations:
+                left:Optional[int] = evaluate(expr.left)
+                right:Optional[int] = evaluate(expr.right)
+                if left is None or right is None:
+                    return None
+                try:
+                    return int(operations[type(expr.op)](left, right))
+                except (ZeroDivisionError, ValueError, OverflowError):
+                    return None
+            return None
+
+        return evaluate(node)
 
     def _visit_unaryop(self, node:ast.UnaryOp)->Translated:
         code, t = self._visit_expression(node.operand)
@@ -6700,6 +7185,21 @@ class FunctionTranslator:
 
     def _visit_subscript(self, node:ast.Subscript)->Translated:
         value:ast.expr = node.value
+        # `index[0]` on an ndenumerate index held as one name: python's index is a tuple
+        # of coordinates, and a constant ordinal reads one of them. The head already
+        # emitted the decomposition (see the ndenumerate branch of
+        # _translate_magic_loop), so the subscript is that coordinate's own name.
+        if isinstance(value, ast.Name) \
+                and value.id in self._ndenumerate_index_names \
+                and isinstance(node.slice, ast.Constant) \
+                and isinstance(node.slice.value, int):
+            coordinates:List[str] = self._ndenumerate_index_names[value.id]
+            ordinal:int = int(node.slice.value)
+            if 0 <= ordinal < len(coordinates):
+                return coordinates[ordinal], "int"
+            self._error(
+                f"the ndenumerate index has {len(coordinates)} coordinate(s); "
+                f"[{ordinal}] is outside it", node)
         if isinstance(value, ast.Attribute) and value.attr == "shape":
             array_name:str = self._array_name(value.value)
             t:DeviceType = self._lookup(array_name)
@@ -7813,12 +8313,20 @@ class FunctionTranslator:
 
         if name == "pow":
             # python's builtin, which differs from math.pow only in that integer arguments
-            # stay exact; the device form is the same floating-point power.
+            # stay exact; the device form is the same floating-point power. A pair of ints
+            # promotes to `int` above, and spelling `pow((int)2, (int)10)` is ambiguous in
+            # C++ -- NVRTC and OpenCL's clang refuse it ("more than one instance of
+            # overloaded function pow"), while HIP's <cmath> happens to resolve it, so the
+            # identical source answered on one backend and refused on the others. The `**`
+            # operator already promotes an integer power to float (see _visit_binop); the
+            # builtin follows the same rule.
             if len(args) != 2:
                 self._error("pow() takes exactly 2 arguments", node)
             (lcode, lt), (rcode, rt) = args
             t:object = promote(lt, rt)
-            c_func:str = _math_device_name("pow", self.backend) if is_float(t) else "pow"
+            if is_int(t):
+                t = "float"
+            c_func:str = _math_device_name("pow", self.backend, t)
             return f"{c_func}(({t})({lcode}), ({t})({rcode}))", t
 
         if name == "abs":
@@ -7839,13 +8347,23 @@ class FunctionTranslator:
             self._error("abs() requires a numeric argument", node)
 
         if name in ("min", "max"):
-            if len(args) != 2:
-                self._error(f"{name}() takes exactly 2 arguments", node)
-            (lcode, lt), (rcode, rt) = args
-            t:object = promote(lt, rt)
-            if is_float(t):
-                return f"{'fmin' if name == 'min' else 'fmax'}(({t})({lcode}), ({t})({rcode}))", t
-            return f"{'min' if name == 'min' else 'max'}(({t})({lcode}), ({t})({rcode}))", t
+            if len(args) < 2:
+                self._error(f"{name}() takes at least 2 arguments", node)
+            # python's builtin takes any arity and folds left to right
+            # (`min(a, b, c)` is `min(min(a, b), c)`), so the pairs chain. The mixed
+            # complex pair reaches _emit_complex_builtin before this branch.
+            pick:str = ("fmin" if name == "min" else "fmax") \
+                if is_float(promote(args[0][1], args[1][1])) \
+                else ("min" if name == "min" else "max")
+            left, lt = args[0]
+            for rcode, rt in args[1:]:
+                t:object = promote(lt, rt)
+                if is_float(t):
+                    left = f"{pick}(({t})({left}), ({t})({rcode}))"
+                else:
+                    left = f"{pick}(({t})({left}), ({t})({rcode}))"
+                lt = t
+            return left, lt
 
         if name == "round":
             if len(args) not in (1, 2):
@@ -8297,6 +8815,14 @@ class FunctionTranslator:
                 vec_arg = (vec_arg or t)
             if ret_override is None and t == "double":
                 ret = "double"
+        if ret == "float" and module_name == "np" \
+                and all(is_int(t) for _, t in args) and args:
+            # numpy computes every one of these in float64 for an *integer* input
+            # (`np.sqrt(2)` is a numpy float64), and the interpreter runs numpy -- so the
+            # device has to as well. Spelling `sqrtf((float)2)` answered 1.41421354 where
+            # numpy answers 1.4142135623730951. `math.*` keeps its own rule (python's
+            # math.sqrt(2) is exact at the call, and the answer rounds like a float).
+            ret = "double"
 
         if vec_arg is not None:
             # python semantics: math/np functions do not accept vector structs (np.sqrt(float4_value) raises TypeError).
@@ -8337,7 +8863,7 @@ class FunctionTranslator:
 
         for (code, t) in args:
             arg_codes.append(code if (t == ret or (is_float(t) and is_float(ret))) else f"(({ret})({code}))")
-        c_func:str = _math_device_name(attr, self.backend)
+        c_func:str = _math_device_name(attr, self.backend, ret)
         return f"{c_func}({', '.join(arg_codes)})", ret
 
     def _emit_numpy_cast(self, name:str, args:List[Translated],
@@ -9391,7 +9917,8 @@ class FunctionTranslator:
 
     def _emit_device_call(self, name:str, target:object, args:List[Translated], node:ast.Call,
                           self_param:str="",
-                          receiver_as_argument:bool=False)->Translated:
+                          receiver_as_argument:bool=False,
+                          tuple_targets:Optional[List[str]]=None)->Translated:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
         if is_kernel_ref:
@@ -9506,6 +10033,10 @@ class FunctionTranslator:
                 "status": "done",
                 "c_name": c_name,
                 "return_type": callee.return_type,
+                # A tuple return's element types: the call site appends one `T*`
+                # destination per element and passes it after every other argument
+                # (render_device appends the matching declarations).
+                "tuple_return_types": list(callee.tuple_return_types or []),
                 "needs_prologue": callee._needs_prologue_parameters(),
                 "code": callee.render_device(c_name, shape_params),
                 "shape_codes": shape_codes,
@@ -9543,6 +10074,10 @@ class FunctionTranslator:
             # a work-item index; the caller has them (it is a kernel, or a helper that
             # received them the same way) and forwards them here.
             argument_codes.extend(self._prologue_parameter_arguments())
+        if tuple_targets is not None:
+            # A tuple return: the destinations the call site unpacks into, appended in
+            # the helper's own order (see render_device, which declares them last).
+            argument_codes.extend(tuple_targets)
         return (f"{entry['c_name']}({', '.join(argument_codes)})", entry["return_type"])
 
     def _require_outer_parameter(self, name:str, outer:Dict[str, object], node:ast.AST)->None:
@@ -9753,6 +10288,10 @@ class FunctionTranslator:
             # Metal's work-item numbers are parameters, so a helper that reads one has to
             # receive them from its caller (see _needs_prologue_parameters).
             params.extend(self._prologue_parameter_declarations())
+        # A tuple return's output parameters, after everything else (the call site
+        # appends and passes them in the same order -- see _emit_device_call).
+        for ordinal, element_t in enumerate(self.tuple_return_types or []):
+            params.append(f"{self._device_type(element_t)}* _tuple_out{ordinal}")
         ret:str = (self.return_type or "void")
         header:str = f"{self._device_qualifier()}{self._device_type(ret)} {c_name}({', '.join(params)})"
         body:str = self._render_body()

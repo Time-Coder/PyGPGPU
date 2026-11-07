@@ -202,15 +202,18 @@ def racy_divide(x: np.ndarray, out: np.ndarray):
     return None
 
 
-def test_a_racy_float_accumulation_is_refused(gpu_backend, runner):
-    """There is no float atomic, so this cannot be made exact -- say so."""
+def test_a_racy_float_accumulation_is_exact(gpu_backend, runner):
+    """A float accumulation used to be refused ("no float atomic") and a plain
+    read-modify-write lost contributions; it now runs through the portable CAS helper
+    (see device_builtins.float_atomic_add_source), so every contribution lands.
+
+    A multiply and a divide still have no atomic and stay refused: the CAS loop is
+    written for addition, and widening it to every operator is not this change's claim.
+    """
     x = np.ones(4, dtype=np.float32)
     out = np.zeros(1, dtype=np.float32)
-    with pytest.raises(SyntaxError) as caught:
-        runner(racy_float_sum, x, out)
-    message: str = str(caught.value)
-    assert "atomic" in message
-    assert "reduce" in message
+    runner(racy_float_sum, x, out)
+    assert float(out[0]) == pytest.approx(4.0)
 
 
 def test_an_operator_without_an_atomic_is_refused(gpu_backend, runner):

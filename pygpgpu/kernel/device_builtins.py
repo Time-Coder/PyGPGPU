@@ -140,6 +140,10 @@ def emit_atomic(name:str, array_code:str, index_code:str, value_code:str,
     opencl_name, cuda_name = ATOMIC_BUILTINS[name]
     pointer:str = pointer_code if pointer_code is not None else f"&({array_code})[{index_code}]"
     arguments:str = value_code if compare_code is None else f"{compare_code}, {value_code}"
+    if elem_type == "float" and name == "atomic_add":
+        # No hardware float atomic in this package's set: the portable CAS loop answers
+        # for the carried-float shape (see float_atomic_add_source).
+        return f"__pygpgpu_atomic_add_f32({pointer}, {arguments})"
     if backend == "opencl":
         space:str = "__local" if is_local else "__global"
         return f"{opencl_name}((volatile {space} {elem_type} *)({pointer}), {arguments})"
@@ -516,6 +520,53 @@ def c_identifier_suffix(ctype:str)->str:
 def python_floor_name(operation:str, ctype:str)->str:
     """The normalized helper name for one operation and one C width."""
     return f"__pygpgpu_{operation}_{c_identifier_suffix(ctype)}"
+
+
+# The carrier of a float carried scalar (`total = 0.0` above the loop) is a float slot,
+# and no hardware in this package's set has a native float atomic add: CUDA's
+# `atomicAdd(float*)` exists but OpenCL C 1.2's `atomic_add` is integer-only. The
+# portable spelling is the classic bit-level CAS loop -- the float's bits ride in an
+# `unsigned int` (CUDA spells the conversions `__float_as_uint`/`__uint_as_float`,
+# OpenCL `as_uint`/`as_float`), and `atomicCAS`/`atomic_cmpxchg` on that unsigned slot
+# retries until one work item's addition lands. The helper is emitted once per source,
+# ahead of the kernels that call it (see device_helpers, the same channel the floor
+# helpers travel through).
+FLOAT_ATOMIC_ADD_SOURCES:Dict[str, str] = {
+    "cuda": """
+__device__ float __pygpgpu_atomic_add_f32(float* address, float value)
+{
+    unsigned int* slot = (unsigned int*)(address);
+    unsigned int old_bits = *slot;
+    unsigned int assumed;
+    do
+    {
+        assumed = old_bits;
+        float sum = __uint_as_float(assumed) + value;
+        old_bits = atomicCAS(slot, assumed, __float_as_uint(sum));
+    } while (assumed != old_bits);
+    return __uint_as_float(old_bits);
+}""",
+    "opencl": """
+float __pygpgpu_atomic_add_f32(volatile __global float* address, float value)
+{
+    volatile __global unsigned int* slot =
+        (volatile __global unsigned int*)(address);
+    unsigned int old_bits = *slot;
+    unsigned int assumed;
+    do
+    {
+        assumed = old_bits;
+        float sum = as_float(assumed) + value;
+        old_bits = atomic_cmpxchg(slot, assumed, as_uint(sum));
+    } while (assumed != old_bits);
+    return as_float(old_bits);
+}""",
+}
+
+
+def float_atomic_add_source(backend:str)->str:
+    """The float atomic-add helper for one backend, or "" where it is not spelled."""
+    return FLOAT_ATOMIC_ADD_SOURCES.get(backend, "")
 
 
 def python_floor_source(operation:str, ctype:str, backend:str)->str:
