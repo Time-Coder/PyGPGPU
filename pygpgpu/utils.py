@@ -584,6 +584,44 @@ def settle_future(future:object, error:Optional[BaseException]=None) -> None:
         future.set_exception(error)
 
 
+def _asyncio_future_of(asyncio_module:object) -> object:
+    """An ``asyncio.Future`` bound to a loop that exists, even off the loop's thread.
+
+    ``asyncio.Future()`` demands a running (or current) event loop, and a ``submit``-
+    style call may come from a thread that has neither -- the future is then meant for
+    a loop the caller awaits on later. The python backend solves this with
+    ``_current_loop`` (install a fresh loop when none is set); this is the same rule,
+    callable without importing asyncio in the caller. Kept private: it exists so a
+    backend's ``async_call`` can spell ``future_type()`` for both future kinds.
+    """
+    current_loop:object = _current_loop()
+    return asyncio_module.Future(loop=current_loop)
+
+
+def _current_loop() -> object:
+    """The running loop, else the thread's current loop, else a fresh installed one.
+
+    The same contract the python backend's own bridge states: ``async_call`` cannot
+    be awaited outside a loop anyway, but returning a future bound to an installed
+    loop still lets a caller drive it with ``loop.run_until_complete(future)``
+    instead of failing at creation time.
+    """
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    loop:Optional[asyncio.AbstractEventLoop] = None
+    try:
+        loop = asyncio.get_event_loop()
+    except Exception:
+        loop = None  # no loop is set on this thread (or reading it is no longer allowed)
+    if loop is not None and not loop.is_closed():
+        return loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop
+
+
 def set_print_info(enabled:bool) -> None:
     """Turn the progress logging of every already-imported backend on or off.
 

@@ -15,6 +15,7 @@ read/write flags decide which of those a launch performs.
 from __future__ import annotations
 
 import ctypes
+import threading
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import numpy as np
@@ -43,6 +44,11 @@ class Buffer(MTLObject):
         self._data:Union[bytes, bytearray, np.ndarray, None] = data
         self._host_ptr:Optional[int] = None
         self._using:bool = False
+        # The claim's serial and its lock: `use` hands one out, a release validates it
+        # (see unuse). The lock matters the moment an asynchronous launch releases
+        # from its poller thread while the caller's next launch claims here.
+        self._claim_lock:threading.Lock = threading.Lock()
+        self._claim_serial:int = 0
         self._dirty_on_device:bool = False
         self._dirty_on_host:bool = False
         self._device_dirty_time:float = 0.0
@@ -104,15 +110,39 @@ class Buffer(MTLObject):
     def using(self)->bool:
         return self._using
 
-    def use(self)->None:
-        if self._using:
-            raise RuntimeError("mem obj is still in using")
-        self._using = True
+    def use(self)->int:
+        """Claim the buffer and return the claim's serial for its release."""
+        with self._claim_lock:
+            if self._using:
+                raise RuntimeError("mem obj is still in using")
+            self._using = True
+            self._claim_serial += 1
+            return self._claim_serial
 
-    def unuse(self)->None:
-        if not self._using:
-            raise RuntimeError("mem obj is not in using")
-        self._using = False
+    def unuse(self, claim_serial:Optional[int]=None)->None:
+        """Return the claim made by `use`, identified by its serial.
+
+        The synchronous launch releases inline, but the asynchronous poller releases
+        from its own thread, and a caller can hand the buffer out again before that
+        runs. A release whose serial is not the current holder's belongs to an older
+        claim that has already been returned, so it must not free the new holder's
+        claim -- handing the buffer out twice. A mismatched (or absent) serial is a
+        no-op; the double claim itself still refuses, because two users of one buffer
+        is a real bug, while a stale release is an artifact of when the completion
+        work runs.
+        """
+        with self._claim_lock:
+            if not self._using:
+                return
+            if claim_serial is not None and claim_serial != self._claim_serial:
+                return
+            self._using = False
+
+    @property
+    def claim_serial(self)->int:
+        """The serial of the claim currently held, for a release that validates it."""
+        with self._claim_lock:
+            return self._claim_serial
 
     @property
     def dirty_on_device(self)->bool:

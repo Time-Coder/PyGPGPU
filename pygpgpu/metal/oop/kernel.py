@@ -1,10 +1,13 @@
 """One Metal entry point, and the launch made on it.
 
 A launch binds the argument buffers by index, sets the pipeline state, dispatches
-the threadgroups, commits the command buffer, and -- for the synchronous call this
-package makes -- waits for it. Metal's command queue is serial, so a multi-pass
-body's consecutive launches run in order with the arrays staying on the device
-between them, exactly as the other backends' streams do.
+the threadgroups, and commits the command buffer. The synchronous call waits for it
+(`waitUntilCompleted`) and copies the written arguments back inline; an asynchronous
+call (`submit`/`async_call`) returns a future at once, and a poller watches the
+command buffer's `status` until the work is done -- Metal reports completion through
+the command buffer's status, not through a separate event object. Metal's command
+queue is serial, so a multi-pass body's consecutive launches run in order with the
+arrays staying on the device between them, exactly as the other backends' streams do.
 
 The work size is CUDA's pair, `(blocks_per_grid, threads_per_block)`, as AGENTS.md
 requires of every backend: `blocks` is literally the threadgroup count and
@@ -32,12 +35,16 @@ Two bindings are Metal's own and are load-bearing:
 from __future__ import annotations
 
 import ctypes
-from typing import TYPE_CHECKING, Dict, List, NoReturn, Optional, Tuple, Union
+import concurrent.futures
+import threading
+import time
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from ..driver.metal import _wait_ready
 from ..driver.objc import ObjC
+from ...utils import settle_future
 
 if TYPE_CHECKING:
     from .buffer import Buffer
@@ -203,7 +210,19 @@ class MetalKernel:
         self.dispatch_parameters:List[str] = []
         self.type_checked:bool = False
         self._pipeline:Optional[int] = None
-        self._bound_entries:List[Tuple["Buffer", object, bool]] = []
+
+    def take_bound_entries(self)->List[Tuple["Buffer", object, object]]:
+        """The argument buffers the last `_bind_args` claimed, and consume the list.
+
+        A launch needs, after the device has finished, one copy-back and one claim
+        release per pointer argument. The entries travel with the launch rather than
+        living on the kernel: two launches of one kernel (two threads, or a caller
+        still reading a future while the next `submit()` starts) must not overwrite
+        each other's list.
+        """
+        entries = self._bound_entries
+        self._bound_entries = []
+        return entries
 
     def __repr__(self)->str:
         return f"MetalKernel({self._name})"
@@ -297,7 +316,7 @@ class MetalKernel:
                 f"{self._name}: the attribute parameter(s) {', '.join(overlap)} appear "
                 f"among the bindable arguments; they are filled in by the dispatch and "
                 f"must not be bound, so every buffer index after them would be wrong")
-        self._bound_entries = []
+        self._bound_entries:List[Tuple["Buffer", object, object]] = []
         bound:List[BoundEntry] = []
         for position, name in enumerate(names):
             index:int = list(self.args).index(name)
@@ -332,24 +351,18 @@ class MetalKernel:
     def __call__(self, *args:object, **kwargs:object)->None:
         self.__getitem__(None)(*args, **kwargs)
 
-    # `@kernel` offers `submit`/`async_call` on every backend, and a Metal kernel
-    # must answer them with a clear refusal rather than an AttributeError: the
-    # asynchronous form needs a completion handler on the command buffer, which is
-    # the one thing the synchronous launch here does not build. The message says
-    # what to use instead, which is what a user reaching for a future needs.
-    def submit(self, *args:object, **kwargs:object)->NoReturn:
-        raise NotImplementedError(
-            "asynchronous launches are not supported on the metal backend yet: the "
-            "launch path waits on its command buffer (`waitUntilCompleted`), and the "
-            "future-based form needs a completion handler. Call the kernel directly "
-            "(it is synchronous), or run it on the opencl or cuda backend")
+    def submit(self, *args:object, **kwargs:object)->concurrent.futures.Future:
+        """Launch without waiting, returning a ``concurrent.futures.Future``."""
+        return self.__getitem__(None)._launch_async(
+            args, kwargs, concurrent.futures.Future)
 
-    def async_call(self, *args:object, **kwargs:object)->NoReturn:
-        raise NotImplementedError(
-            "asynchronous launches are not supported on the metal backend yet: the "
-            "launch path waits on its command buffer (`waitUntilCompleted`), and the "
-            "asyncio form needs a completion handler. Call the kernel directly "
-            "(it is synchronous), or run it on the opencl or cuda backend")
+    def async_call(self, *args:object, **kwargs:object)->Any:
+        """Launch without waiting, returning an ``asyncio.Future`` to ``await``."""
+        import asyncio
+
+        from ...utils import _asyncio_future_of
+        return self.__getitem__(None)._launch_async(
+            args, kwargs, lambda: _asyncio_future_of(asyncio))
 
 
 class BoundKernel:
@@ -361,51 +374,129 @@ class BoundKernel:
         self._work_sizes = work_sizes
 
     def __call__(self, *args:object, **kwargs:object)->None:
+        """The synchronous launch: encode, commit, wait, copy back, release."""
         _wait_ready()
         kernel = self._kernel
         bound = kernel._bind_args(args, kwargs)
 
         command_buffer:int = kernel.program.context.command_queue.new_command_buffer()
         try:
-            encoder:int = ObjC.send_ptr(command_buffer, "computeCommandEncoder")
-            if not encoder:
-                raise RuntimeError("Metal could not create a compute command encoder")
-            ObjC.send(encoder, "setComputePipelineState:", (ctypes.c_void_p,),
-                      ctypes.c_void_p, kernel.pipeline)
-            # Only the host-bound indices are set: a dispatch-supplied parameter has
-            # nothing for the host to write (see the module docstring). A buffer takes
-            # `setBuffer:offset:atIndex:` and a scalar takes `setBytes:length:atIndex:`;
-            # binding a scalar as a buffer would present a pointer where MSL declared a
-            # value, and the pipeline rejects that launch.
-            for index, value, is_buffer in bound:
-                if is_buffer:
-                    ObjC.send(encoder, "setBuffer:offset:atIndex:",
-                              (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t),
-                              ctypes.c_void_p, value.id, 0, index)
-                else:
-                    payload:bytes = value
-                    # `setBytes:` reads from the pointer for the duration of the call
-                    # only, which is what the encoder copies from -- so a temporary
-                    # ctypes array is the right holder, not a buffer the launch must
-                    # keep alive.
-                    data = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
-                    ObjC.send(encoder, "setBytes:length:atIndex:",
-                              (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t),
-                              ctypes.c_void_p,
-                              ctypes.cast(data, ctypes.c_void_p), len(payload), index)
-            threadgroups, threads = self._dispatch_shape()
-            ObjC.send(encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
-                      (MTLSize, MTLSize), ctypes.c_void_p,
-                      _mtl_size(threadgroups), _mtl_size(threads))
-            ObjC.send(encoder, "endEncoding", (), ctypes.c_void_p)
+            self._encode(command_buffer, bound)
             ObjC.send(command_buffer, "commit", (), ctypes.c_void_p)
             ObjC.send(command_buffer, "waitUntilCompleted", (), ctypes.c_void_p)
             # The launch has waited, so the copies back can happen inline.
-            for buffer, host_value, need_read_back in kernel._bound_entries:
-                _finish_buffer(buffer, host_value, need_read_back)
-            return None
+            error_obj:int = ObjC.send_ptr(command_buffer, "error")
+            encode_error:Optional[BaseException] = None
+            if error_obj:
+                encode_error = RuntimeError(
+                    f"the metal launch failed: {ObjC.describe(error_obj)}")
+            for buffer, host_value, claim in self._claim_entries():
+                _finish_buffer(buffer, host_value, claim, encode_error)
         finally:
             ObjC.release(int(command_buffer))
+
+    def _launch_async(self, args:Tuple[object, ...],
+                      kwargs:Dict[str, object], future_type:type)->Any:
+        """Launch without waiting; the future settles when the work has finished.
+
+        Metal reports completion through the command buffer's `status`, so a poller
+        thread watches it and settles the future when the buffer completes -- the
+        shape the other backends' stream callbacks give them, reached through the
+        one completion mechanism this driver surface exposes without blocks. An
+        encode-time failure never starts a poller: it settles the future directly.
+        """
+        future:Any = future_type()
+        try:
+            command_buffer, entries = self._enqueue(args, kwargs)
+        except BaseException as encode_error:
+            settle_future(future, encode_error)
+            return future
+
+        def watch() -> None:
+            while ObjC.send_int(command_buffer, "status") \
+                    < _MTCOMMAND_BUFFER_STATUS_COMPLETED:
+                time.sleep(_POLL_INTERVAL)
+            error_obj:int = ObjC.send_ptr(command_buffer, "error")
+            if error_obj:
+                message:str = ObjC.describe(error_obj)
+                settle_future(future, RuntimeError(
+                    f"the metal launch failed: {message}"))
+                return
+            for buffer, host_value, claim in entries:
+                _finish_buffer(buffer, host_value, claim)
+            settle_future(future)
+            # The buffer's work is done and the launch holds nothing else against it.
+            ObjC.release(int(command_buffer))
+
+        threading.Thread(target=watch, name="pygpgpu-metal", daemon=True).start()
+        return future
+
+    def _enqueue(self, args:Tuple[object, ...],
+                 kwargs:Dict[str, object])->Tuple[int, List[Tuple["Buffer", object, int]]]:
+        """Bind, encode and commit without waiting; answer what completion needs.
+
+        `(command_buffer, entries)`: the buffer a completion waits on or polls, and
+        one `(buffer, host_value, claim_serial)` per pointer argument -- the serial
+        the release must carry so it cannot free a claim the buffer no longer holds
+        (see `Buffer.unuse`). An encode-time failure releases the buffer here and
+        re-raises, so a caller's `finally` never sees a half-encoded buffer.
+        """
+        _wait_ready()
+        kernel = self._kernel
+        bound = kernel._bind_args(args, kwargs)
+        command_buffer:int = kernel.program.context.command_queue.new_command_buffer()
+        try:
+            self._encode(command_buffer, bound)
+            ObjC.send(command_buffer, "commit", (), ctypes.c_void_p)
+        except BaseException:
+            ObjC.release(int(command_buffer))
+            raise
+        return command_buffer, self._claim_entries()
+
+    def _encode(self, command_buffer:int, bound:List[BoundEntry])->None:
+        """The encode half of a launch, shared by the synchronous and async paths."""
+        kernel = self._kernel
+        encoder:int = ObjC.send_ptr(command_buffer, "computeCommandEncoder")
+        if not encoder:
+            raise RuntimeError("Metal could not create a compute command encoder")
+        ObjC.send(encoder, "setComputePipelineState:", (ctypes.c_void_p,),
+                  ctypes.c_void_p, kernel.pipeline)
+        # Only the host-bound indices are set: a dispatch-supplied parameter has
+        # nothing for the host to write (see the module docstring). A buffer takes
+        # `setBuffer:offset:atIndex:` and a scalar takes `setBytes:length:atIndex:`;
+        # binding a scalar as a buffer would present a pointer where MSL declared a
+        # value, and the pipeline rejects that launch.
+        for index, value, is_buffer in bound:
+            if is_buffer:
+                ObjC.send(encoder, "setBuffer:offset:atIndex:",
+                          (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t),
+                          ctypes.c_void_p, value.id, 0, index)
+            else:
+                payload:bytes = value
+                # `setBytes:` reads from the pointer for the duration of the call
+                # only, which is what the encoder copies from -- so a temporary
+                # ctypes array is the right holder, not a buffer the launch must
+                # keep alive.
+                data = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
+                ObjC.send(encoder, "setBytes:length:atIndex:",
+                          (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t),
+                          ctypes.c_void_p,
+                          ctypes.cast(data, ctypes.c_void_p), len(payload), index)
+        threadgroups, threads = self._dispatch_shape()
+        ObjC.send(encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
+                  (MTLSize, MTLSize), ctypes.c_void_p,
+                  _mtl_size(threadgroups), _mtl_size(threads))
+        ObjC.send(encoder, "endEncoding", (), ctypes.c_void_p)
+
+    def _claim_entries(self)->List[Tuple["Buffer", object, int]]:
+        """One `(buffer, host_value, claim_serial)` per pointer argument.
+
+        The serial is captured now, at claim time: a release that fires after the
+        buffer was handed out again carries a stale serial and must not free the new
+        holder's claim.
+        """
+        return [(buffer, host_value, buffer.claim_serial)
+                for buffer, host_value, _need in self._kernel.take_bound_entries()]
 
     def _dispatch_shape(self)->Tuple[Tuple[int, ...], Tuple[int, ...]]:
         """The `(threadgroups, threads_per_threadgroup)` pair for this launch."""
@@ -438,31 +529,42 @@ class BoundKernel:
 
 
 def _finish_buffer(buffer:"Buffer", host_value:object,
-                   need_read_back:bool)->None:
+                   need_read_back:object, error:Optional[BaseException]=None)->None:
     """Copy a written buffer back into the caller's array and release its claim.
 
     `need_read_back` comes from the argument's `ArgInfo` -- the shared read/write
     analysis every backend consults -- rather than from a mask tested here, so a
     buffer the body never writes is not copied back and a written one always is.
+    The synchronous launch passes the read-back flag and no error; the asynchronous
+    poller passes the claim's serial instead, so the release cannot free a claim the
+    buffer no longer carries.
 
     StorageModeShared makes the device's bytes the host's bytes, so the read-back is
     a copy from the buffer's own contents.
     """
     try:
-        if need_read_back and host_value is not None and isinstance(
-                host_value, np.ndarray):
+        if need_read_back is True and error is None and host_value is not None and \
+                isinstance(host_value, np.ndarray):
             source = ctypes.string_at(buffer._contents(), buffer.size)
             host_value.reshape(-1).view(np.uint8)[:buffer.size] = np.frombuffer(
                 source, dtype=np.uint8)[:host_value.nbytes]
     finally:
-        # `unuse()` raises when the buffer was never claimed, and a raise here would
-        # replace whatever exception the read-back was already unwinding. The claim is
-        # released on every path; a buffer that was somehow not in use has nothing to
-        # release, so the failure is not worth shadowing the real one.
+        # The claim is released on every path; a release carrying a serial the buffer
+        # no longer holds is a no-op (see MemObject.unuse), so it never shadows the
+        # read-back's own error. A raise from the release itself (a buffer that never
+        # had a claim) is absorbed: the read-back's failure is the one worth seeing.
         try:
-            buffer.unuse()
+            buffer.unuse(need_read_back if isinstance(need_read_back, int) else None)
         except RuntimeError:
             pass
+
+# `MTLCommandBufferStatus`: the value `status` answers once every command in the
+# buffer has finished. The poller waits for the buffer to reach it.
+_MTCOMMAND_BUFFER_STATUS_COMPLETED:int = 3
+# How long the completion poller sleeps between status reads. A launch takes
+# microseconds to tens of milliseconds; this is short enough to feel immediate and
+# long enough that a sleeping poller costs nothing.
+_POLL_INTERVAL:float = 0.0002
 
 # The shared `oop` spelling for a launchable entry point. Every other backend's
 # `program`/`kernel` module publishes `Kernel`, and a caller that walks a backend's

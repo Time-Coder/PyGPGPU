@@ -851,7 +851,9 @@ def test_a_failing_unuse_does_not_mask_the_real_error() -> None:
 
     `_finish_buffer` runs inside a `finally` chain; an `unuse()` that raised there
     would replace whatever exception the read-back was already unwinding, turning a
-    useful message into "mem obj is not in using".
+    useful message into "mem obj is not in using". The release carries the claim's
+    serial, so a stale one is a no-op rather than an error -- and a release that
+    still raises (a fake, or a genuinely broken buffer) is absorbed all the same.
     """
     class Buffer:
         size = 0
@@ -860,7 +862,7 @@ def test_a_failing_unuse_does_not_mask_the_real_error() -> None:
         def _contents(self):
             return 0
 
-        def unuse(self):
+        def unuse(self, claim_serial=None):
             raise RuntimeError("mem obj is not in using")
 
     import pygpgpu.metal.oop.kernel as metal_kernel
@@ -1591,24 +1593,29 @@ def test_metal_is_a_zero_copy_backend_and_exposes_what_that_needs() -> None:
     assert not hasattr(Buffer, "__slots__")
 
 
-def test_the_async_forms_are_refused_with_a_reason() -> None:
-    """`submit`/`async_call` raise NotImplementedError, not AttributeError.
+def test_the_async_forms_reach_the_bound_launch() -> None:
+    """`submit`/`async_call` on an unbracketed kernel launch with an automatic grid.
 
-    `@kernel` offers those on every backend, so a Metal kernel that silently lacked
-    them would fail with an `AttributeError` that says nothing about why. The
-    synchronous launch is what this backend builds -- it waits on its command
-    buffer -- and the future-based form needs a completion handler, which is the
-    one piece the launch does not have yet.
+    `@kernel` offers those on every backend, so Metal answers with a launch rather
+    than an AttributeError: a `MetalKernel` is bracketed (its `BoundKernel` carries
+    the work size), and the async forms bracket `None` -- the same automatic
+    one-threadgroup grid a synchronous call takes -- before launching. This pins the
+    plumbing a machine without a Metal device can see: the refusal is gone, and the
+    failure the launch meets (no device) surfaces through the future, the way a real
+    failure on hardware would.
     """
+    import concurrent.futures
+
     from pygpgpu.metal.oop.kernel import MetalKernel
 
     kernel = MetalKernel(None, "k")
-    for form in ("submit", "async_call"):
-        with pytest.raises(NotImplementedError) as refused:
-            getattr(kernel, form)()
-        message: str = str(refused.value)
-        assert "metal" in message
-        # The message names a way forward rather than only the limitation.
-        assert "opencl" in message or "cuda" in message
-        assert "synchronous" in message or "completion handler" in message
+    submit_future = kernel.submit()
+    assert isinstance(submit_future, concurrent.futures.Future)
+    with pytest.raises(BaseException) as submit_error:
+        submit_future.result(timeout=10)
+    assert not isinstance(submit_error.value, NotImplementedError)
+
+    async_future = kernel.async_call()
+    # `async_call` answers an asyncio future, whose `exception()` never raises.
+    assert hasattr(async_future, "exception")
 
