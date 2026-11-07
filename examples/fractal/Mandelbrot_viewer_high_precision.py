@@ -23,6 +23,12 @@ set_type_map(float=np.float64)
 # MandelbrotViewer.reference_orbit).
 CAMERA_DIGITS = 400
 
+# Extra steps kept past `max_iter`. The budget grows with every wheel notch, and
+# rebuilding the reference every notch would make its rounding (and so the colour of
+# every pixel sitting on a band edge) jump while the view moves smoothly. With a
+# margin the same orbit serves the next few decades of zooming.
+REFERENCE_MARGIN = 512
+
 class MandelbrotViewer:
 
     def __init__(self, init_width:int=800, init_height:int=600):
@@ -39,6 +45,7 @@ class MandelbrotViewer:
         self.ref_escaped_at = 0
         self.ref_dx = 0.0
         self.ref_dy = 0.0
+        self.orbit_digits = 0
 
         self.is_left_pressed: bool = False
         self.left_pressed_pos: float2 = float2()
@@ -54,8 +61,10 @@ class MandelbrotViewer:
         self.value_per_pixel = 1 / (self.scale * self.default_pixels_per_value)
         self.max_iter: int = int(100 * np.log10(1 + self.scale) + 500)
         # One digit per decade of zoom, plus guard digits: the deltas are float64, so
-        # digits past that are what the *reference point* itself needs.
-        self.orbit_digits: int = max(20, int(np.log10(max(self.scale, 1.0))) + 20)
+        # digits past that are what the *reference point* itself needs. It only ever
+        # grows, so zooming back out does not change the rounding of a kept orbit.
+        needed: int = max(20, int(np.log10(max(self.scale, 1.0))) + 20)
+        self.orbit_digits: int = max(self.orbit_digits, needed)
         self.half_width = 0.5 * self.image.shape[1]
         self.half_height = 0.5 * self.image.shape[0]
 
@@ -77,14 +86,14 @@ class MandelbrotViewer:
         pixel is finer than a double (scale ~1e14). Only the *reference* orbit has to
         be accurate; the deltas stay in float64, where their relative accuracy
         (~1e-16) is what the pixel grid needs. Returns the orbit and the step count at
-        which it escaped (`max_iter` when it never does).
+        which it escaped (`max_iter + REFERENCE_MARGIN` when it never does).
         """
-        orbit = np.empty(self.max_iter + 1, dtype=np.complex128)
-        escaped_at = self.max_iter
+        orbit = np.empty(self.max_iter + REFERENCE_MARGIN + 1, dtype=np.complex128)
+        escaped_at = self.max_iter + REFERENCE_MARGIN
         with mp.workdps(self.orbit_digits):
             c = mp.mpc(c_re, c_im)
             z = mp.mpc(0)
-            for n in range(self.max_iter + 1):
+            for n in range(self.max_iter + REFERENCE_MARGIN + 1):
                 orbit[n] = complex(z)
                 z = z*z + c
                 if abs(z) > 2:
@@ -115,37 +124,44 @@ class MandelbrotViewer:
 
         The reference has to *outlive* the pixels it stands for: a pixel whose orbit
         outlasts the reference's is rendered from the wrong recurrence (the classic
-        perturbation glitch), so a reference that escapes inside the budget is
-        replaced by the longest-lived point of a 5x5 grid over the view. A reference
-        that survives is kept while it stays in view and the budget is unchanged --
-        re-picking it every frame would cost a high-precision orbit per candidate.
+        perturbation glitch). A reference that survives the budget is therefore kept --
+        across panning, and across zooming as long as the margin covers the grown budget
+        -- because changing the reference changes how every pixel near a band edge
+        rounds, which is visible as colours jumping while the view moves smoothly. When
+        one has to be picked, the point already in use is tried first, then a 5x5 grid
+        from the centre outwards, and the first survivor wins.
         """
-        in_view = max(abs(self.ref_dx), abs(self.ref_dy)) <= max(self.half_width,
-                                                                 self.half_height)
-        if (len(self.ref_z) == self.max_iter + 1 and self.ref_escaped_at >= self.max_iter
-                and in_view):
+        reach = 2.0 * max(self.half_width, self.half_height)
+        in_view = max(abs(self.ref_dx), abs(self.ref_dy)) <= reach
+        if (self.ref_escaped_at >= self.max_iter
+                and len(self.ref_z) >= self.max_iter + 1 and in_view):
             self.reference_offsets()
             return
 
-        best = None
-        for k in (-2, -1, 0, 1, 2):
-            for l in (-2, -1, 0, 1, 2):
-                px = 0.45*k*self.half_width
-                py = 0.45*l*self.half_height
-                with mp.workdps(CAMERA_DIGITS):
-                    c_re = self.center_re + mp.mpf(px)*mp.mpf(self.value_per_pixel)
-                    c_im = self.center_im + mp.mpf(py)*mp.mpf(self.value_per_pixel)
-                orbit, escaped_at = self.reference_orbit(c_re, c_im)
-                if best is None or escaped_at > best[1]:
-                    best = (orbit, escaped_at, c_re, c_im, px, py)
-                if escaped_at >= self.max_iter:
-                    break
-            else:
-                continue
-            break
+        points = []
+        if self.ref_escaped_at:                       # there is a point in use already
+            points.append((self.ref_re, self.ref_im))
+        for k, l in [(0, 0)] + [(k, l) for k in (-1, 1) for l in (-1, 1)] \
+                + [(k, 0) for k in (-1, 1)] + [(0, l) for l in (-1, 1)] \
+                + [(k, l) for k in (-2, 2) for l in (-2, 2)] \
+                + [(k, l) for k in (-2, 2) for l in (-1, 1)] \
+                + [(k, l) for k in (-1, 1) for l in (-2, 2)]:
+            px = 0.45*k*self.half_width
+            py = 0.45*l*self.half_height
+            with mp.workdps(CAMERA_DIGITS):
+                points.append((self.center_re + mp.mpf(px)*mp.mpf(self.value_per_pixel),
+                               self.center_im + mp.mpf(py)*mp.mpf(self.value_per_pixel)))
 
-        self.ref_z, self.ref_escaped_at, self.ref_re, self.ref_im, \
-            self.ref_dx, self.ref_dy = best
+        best = None
+        for c_re, c_im in points:
+            orbit, escaped_at = self.reference_orbit(c_re, c_im)
+            if best is None or escaped_at > best[1]:
+                best = (orbit, escaped_at, c_re, c_im)
+            if escaped_at >= self.max_iter:
+                break
+
+        self.ref_z, self.ref_escaped_at, self.ref_re, self.ref_im = best
+        self.reference_offsets()
 
     @staticmethod
     def escape_steps(dc: complex, ref_z: np.ndarray, max_iter: int) -> float:
