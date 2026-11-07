@@ -194,55 +194,45 @@ def test_the_error_names_the_kernel(backend):
 
 
 # ---------------------------------------------------------------------------
-# A wrong argument *type* must be reported at the call, not inside the kernel body
+# An annotation is never a constraint on the argument
 # ---------------------------------------------------------------------------
+#
+# The device type of an argument is decided by the *value* at call time (see
+# `infer_ctype`), so a parameter's annotation is inert: it is neither read to choose a
+# width nor checked against the argument. This used to be enforced for the two plain
+# spellings (`np.ndarray` / `int`), and the check made a value's acceptance depend on
+# which words the author happened to write: `k([1, 2, 3], out)` worked for an
+# unannotated parameter, was refused for an `np.ndarray` one, and was accepted again
+# under the `NDArray[np.float32]` spelling every example uses. A wrong value now fails
+# where its type is actually used -- the launch path or the kernel body -- which is one
+# rule for one value rather than three.
 
 
-def test_scalar_where_an_array_is_annotated(backend):
-    """The annotation says ndarray, so a scalar is refused by name at the call site."""
+def test_a_sequence_reaches_an_ndarray_annotated_parameter(gpu_backend):
+    """A list is an array argument whether or not the parameter says `np.ndarray`.
+
+    The conversion of a numeric sequence happens in the launch path, from the value; the
+    annotation used to reject the same list before it got there. (The interpreter backend
+    is excluded for an unrelated reason: it runs the body unchanged, so a list that the
+    body indexes with `.shape` fails there whatever the annotation says.)
+    """
     x = np.zeros(4, dtype=np.float32)
-    kern = _target(kernel_three, backend)
-    with pytest.raises(TypeError) as caught:
+    kern = _target(kernel_three, gpu_backend)
+    assert kern(x, [1.0, 2.0, 3.0, 4.0], x) is None
+
+
+def test_a_scalar_where_an_array_is_annotated_fails_at_the_launch(gpu_backend):
+    """The failure names the parameter where its type is actually used -- the kernel body.
+
+    This is the cost of ignoring annotations: a scalar passed for an array parameter is
+    caught by the translator ("'b' is not an array parameter of this kernel") rather than
+    by a call-site check that read the annotation.
+    """
+    x = np.zeros(4, dtype=np.float32)
+    kern = _target(kernel_three, gpu_backend)
+    with pytest.raises(SyntaxError) as caught:
         kern(x, 5, x)
-    message: str = str(caught.value)
-    assert message.startswith("kernel_three()")
-    assert "'b'" in message
-    assert "numpy array" in message
-    assert "int" in message
-
-
-def test_array_where_a_scalar_is_annotated(backend):
-    x = np.zeros(4, dtype=np.float32)
-    kern = _target(kernel_default, backend)
-    with pytest.raises(TypeError) as caught:
-        kern(x, x, x)
-    message: str = str(caught.value)
-    assert message.startswith("kernel_default()")
-    assert "'c'" in message
-    assert "scalar" in message
-
-
-def test_a_wrong_type_points_at_the_call_not_the_kernel_source(backend):
-    """The old failure surfaced as a device-body error naming the kernel's own line."""
-    x = np.zeros(4, dtype=np.float32)
-    kern = _target(kernel_three, backend)
-    with pytest.raises(TypeError) as caught:
-        kern(x, "text", x)
-    message: str = str(caught.value)
-    assert "not an array parameter of this kernel" not in message
-    assert "unsupported argument type" not in message
-
-
-def test_an_unannotated_parameter_is_not_type_checked(backend):
-    """No annotation means no opinion: the launch path still decides from the value."""
-    x = np.zeros(4, dtype=np.float32)
-    kern = _target(kernel_three, backend)
-    # b is annotated, so this proves the check is per parameter, not per call
-    with pytest.raises(TypeError):
-        kern(x, 5, x)
-    # a matching call runs normally
-    out = kern(x, x, x)
-    assert out is None
+    assert "not an array parameter" in str(caught.value)
 
 
 def test_submit_and_async_call_use_the_same_binding(backend):
@@ -292,14 +282,6 @@ def test_a_bad_call_has_no_library_frames(backend):
     x = np.zeros(4, dtype=np.float32)
     kern = _target(kernel_three, backend)
     error = _raise_misuse(lambda: kern(x, x, x, 4))
-    assert isinstance(error, TypeError)
-    assert _library_frames(error) == []
-
-
-def test_a_wrong_argument_type_has_no_library_frames(backend):
-    x = np.zeros(4, dtype=np.float32)
-    kern = _target(kernel_three, backend)
-    error = _raise_misuse(lambda: kern(x, 5, x))
     assert isinstance(error, TypeError)
     assert _library_frames(error) == []
 

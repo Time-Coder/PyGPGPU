@@ -560,15 +560,6 @@ def _bind_arguments(func:Callable, args:Tuple[object, ...],
     stub:Callable = _signature_stub(full_signature, func)
     bound:inspect.BoundArguments = _bind_and_reject(
         func, signature, stub, args, kwargs, skip_first)
-    qualname:str = _qualname_for_errors(func)
-    for name in bound.arguments:
-        if name == "self":
-            continue
-        try:
-            _check_annotated_argument(func, name, bound.arguments[name], qualname)
-        except ArgumentTypeError as error:
-            error.__traceback__ = None
-            raise
 
     ordered:List[object] = []
     for name, parameter in signature.parameters.items():
@@ -613,7 +604,7 @@ def _native_argument_errors(entry:Callable[_P, _R])->Callable[_P, _R]:
     def wrapper(*args:_P.args, **kwargs:_P.kwargs)->_R:
         try:
             return entry(*args, **kwargs)
-        except (ArgumentTypeError, TypeError) as error:
+        except TypeError as error:
             error.__traceback__ = None
             raise
         except Exception as error:
@@ -674,16 +665,6 @@ def _callable_signature(func:Callable, skip_first:bool)->Optional[inspect.Signat
 
 _STUB_SCACHE:Dict[str, Callable] = {}
 
-
-class ArgumentTypeError(TypeError):
-    """A TypeError raised by this module's argument checks.
-
-    Marked as its own class so the call boundary can trim the traceback to the caller for
-    the errors this module words itself, the same treatment the interpreter's own binding
-    errors get. Callers see a plain TypeError, exactly as they would from the undecorated
-    function.
-    """
-
 # Stands in for a method's receiver when CPython is asked to word an argument error.
 # Never reaches the kernel: it exists so the error counts the receiver like native python.
 _RECEIVER_PLACEHOLDER:object = object()
@@ -726,62 +707,6 @@ def _qualname_for_errors(func:Callable)->str:
     """The name CPython would print for this callable in an argument error."""
     qualname:str = getattr(func, "__qualname__", None) or getattr(func, "__name__", "kernel")
     return qualname
-
-
-# What a kernel parameter's annotation says the argument should be. Only the two kinds a
-# kernel can carry are recognised; an annotation that is absent or means something else
-# leaves the argument unchecked, so this never rejects a call the launch path accepts.
-_ARRAY_ANNOTATIONS:Set[str] = {"np.ndarray", "ndarray", "numpy.ndarray"}
-_SCALAR_ANNOTATIONS:Set[str] = {"int", "float", "bool", "np.int32", "np.int64", "np.float32",
-                                "np.float64", "np.bool_", "np.uint8", "np.uint32", "np.uint64"}
-
-
-def _annotation_kind(func:Callable, name:str)->str:
-    """'array', 'scalar' or '' for one parameter's annotation.
-
-    An annotation may arrive as a type object or (under ``from __future__ import
-    annotations``) as its source text, so both forms are recognised. Anything else means
-    "no opinion": a kernel is specialized per argument type at call time (see
-    infer_ctype), which is why the annotation is documentation rather than a constraint
-    the launch has to honour. Name matching is by text because resolving a forward
-    reference would import a module just to reject a call.
-    """
-    annotations:object = getattr(func, "__annotations__", None) or {}
-    annotation:object = annotations.get(name, None)
-    if annotation is None:
-        return ""
-    if isinstance(annotation, type):
-        if annotation is np.ndarray:
-            return "array"
-        return "scalar" if annotation in (bool, int, float) else ""
-    if isinstance(annotation, str):
-        text:str = annotation.strip().strip("'\"")
-        if text in _ARRAY_ANNOTATIONS:
-            return "array"
-        if text in _SCALAR_ANNOTATIONS:
-            return "scalar"
-        return ""
-    return ""
-
-
-def _check_annotated_argument(func:Callable, name:str, value:object, qualname:str) -> None:
-    """Reject an argument whose type contradicts the parameter's annotation.
-
-    This is the argument check a reader expects from the signature they wrote: passing a
-    scalar where an array is annotated used to surface much later as a confusing device
-    error about the kernel body, which pointed at the kernel source instead of the call.
-    """
-    kind:str = _annotation_kind(func, name)
-    if not kind:
-        return
-    if kind == "array" and not isinstance(value, np.ndarray):
-        raise ArgumentTypeError(
-            f"{qualname}() argument '{name}' must be a numpy array, not "
-            f"{type(value).__name__}")
-    if kind == "scalar" and isinstance(value, np.ndarray):
-        raise ArgumentTypeError(
-            f"{qualname}() argument '{name}' must be a scalar, not "
-            f"{type(value).__name__}")
 
 
 def _bind_and_reject(func:Callable, signature:inspect.Signature,

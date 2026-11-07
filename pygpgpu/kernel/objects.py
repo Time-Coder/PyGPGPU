@@ -621,10 +621,6 @@ def _constructs_a_class(func:object, resolve:Callable[[str], object],
             if not isinstance(receiver, ast.Name):
                 continue
             owner:object = resolve(receiver.id)
-            if owner is None:
-                # The receiver is a parameter, so the annotation is the only record of its
-                # class: `_argument_holder` answers the class itself, not an instance.
-                owner = _argument_holder(func, receiver.id)
             if not isinstance(owner, type):
                 continue
             method:object = getattr(owner, node.func.attr, None)
@@ -647,28 +643,6 @@ def _constructs_a_class(func:object, resolve:Callable[[str], object],
             return True
     return False
 
-
-def _argument_holder(func:Callable[..., object], name:str)->object:
-    """A placeholder value for a parameter, when its class can be read from the annotation.
-
-    A method call on an argument (`scene.ray_color(...)`) needs the receiver's class to find
-    the method, and the annotation is the only record of it before a launch supplies the real
-    object. The annotation is evaluated best-effort: an unresolvable name answers None.
-    """
-    try:
-        import inspect as _inspect  # noqa: PLC0415
-
-        parameters:object = _inspect.signature(func).parameters
-        annotation:object = parameters[name].annotation if name in parameters else None
-        if isinstance(annotation, type):
-            return annotation
-        if isinstance(annotation, str):
-            resolved:object = func.__globals__.get(annotation)
-            if isinstance(resolved, type):
-                return resolved
-    except (TypeError, ValueError, AttributeError):
-        return None
-    return None
 
 
 # The prefix an inline construction is lifted to. It never reaches the generated source --
