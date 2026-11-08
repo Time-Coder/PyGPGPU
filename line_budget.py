@@ -57,7 +57,7 @@ ALLOWLIST: Dict[str, Tuple[int, str]] = {
     "pygpgpu/cparser/ShaderBuiltins.py": (16874, "generated; delete-or-split decision pending (plan 5.6)"),
     "pygpgpu/cparser/cparser.py": (1200, "unreachable legacy chain (plan 5.6)"),
     "pygpgpu/kernel/translator/__init__.py": (906, "wave 2 done: the class is assembled from mixins; __init__ holds the class statement, __init__ and attributes (plan 5.1)"),
-    "pygpgpu/kernel/decorator.py": (4017, "phase 4 - mixin package (plan 5.2)"),
+    "pygpgpu/kernel/decorator/__init__.py": (2188, "phase 4 wave 1 done: module-level helpers split out; the PyKernel class methods are wave 2 (plan 5.2)"),
     "pygpgpu/kernel/sci_math.py": (663, "leave as is; under the ceiling, one vocabulary (plan 5.3)"),
     "pygpgpu/kernel/builtins.py": (581, "leave as is; AGENTS.md requires the dual-sided set here"),
     "pygpgpu/kernel/include/complex.h": (1064, "device header; split last (plan 5.3)"),

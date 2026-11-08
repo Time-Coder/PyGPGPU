@@ -60,8 +60,11 @@ def test_kernel_base_is_generic_where_a_checker_looks()->None:
     annotated branch still names ``Generic``, or a checker would see an ordinary class
     and lose the parameters again.
     """
-    module = _decorator_module()
-    source:str = inspect.getsource(module)
+    # The base is declared in `decorator._typing` since the split (the facade re-exports
+    # it, which is what the MRO check below reads); the annotated branch still names
+    # ``Generic`` there, or a checker would see an ordinary class.
+    typing_module = importlib.import_module("pygpgpu.kernel.decorator._typing")
+    source:str = inspect.getsource(typing_module)
     marker:str = "if TYPE_CHECKING:\n    class _KernelBase(Generic[_P]):"
     assert marker in source, "the TYPE_CHECKING branch must declare the generic base as a class"
 
