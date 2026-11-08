@@ -27,8 +27,11 @@ def _isolated(value:object)->object:
     applied twice (`x[0] = x[0] + 1`) shifted the caller's array before the first pass even
     started, so the discovery run works on copies of the arrays it can mutate.
     """
-    if isinstance(value, np.ndarray):
-        return value.copy()
+    try:
+        if isinstance(value, np.ndarray):
+            return value.copy()
+    except (TypeError, ValueError):
+        return value
     return value
 
 
