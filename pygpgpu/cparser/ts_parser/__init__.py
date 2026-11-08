@@ -114,6 +114,36 @@ def make_parser(language: Language) -> Parser:
 
 
 class TSParserMixin(_TsDeclarationsMixin, _TsAnalysisMixin, _TsBodyMixin, _TsExpressionsMixin):
+    """Shared tree-sitter based parser for GPU kernel sources (OpenCL / CUDA).
+
+    The host parser class supplies the state and factory methods declared below; this mixin
+    only implements the tree walking. Declaring them as class-level annotations keeps that
+    contract visible to a type checker instead of living only in this docstring.
+    """
+
+    _parser:Parser
+
+    _clean_code:str
+
+    _parse_code:str
+
+    _struct_infos:Dict[str, StructInfoLike]
+
+    _kernel_infos:Dict[str, KernelInfoLike]
+
+    _array_dim_pattern:re.Pattern = re.compile(r"\[\s*(\d+)\s*\]")
+
+    _address_qualifier_names:Dict[str, str] = {
+        "global": "global",
+        "constant": "constant",
+        "shared": "local",
+        "local": "local",
+        "private": "private"
+    }
+
+    _type_qualifier_names:Tuple[str, ...] = ("const", "volatile", "restrict", "pipe")
+
+    _cuda_function_qualifiers:Tuple[str, ...] = ("__global__", "__device__", "__host__", "__forceinline__")
 
     @staticmethod
     def _node_text(node:Node)->str:
@@ -123,7 +153,6 @@ class TSParserMixin(_TsDeclarationsMixin, _TsAnalysisMixin, _TsBodyMixin, _TsExp
         references its original tree), so callers must not decode it directly.
         """
         return (node.text or b"").decode()
-
 
     def _ts_parse(self)->None:
         self._function_infos:Dict[str, KernelInfoLike] = {}
