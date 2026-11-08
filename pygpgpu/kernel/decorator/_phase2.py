@@ -134,9 +134,16 @@ class _BuildLaunchMixin:
         # and its value may be anything a python name can hold.
         plan.host_scalar_names:Set[str] = set(plan.launch_meta.get("host_values") or [])
         plan.gap_slots:Dict[str, object] = {}
+        # A kernel argument is not a gap slot: assigning it in a host region updates the
+        # function-local parameter value the later passes receive (see _run_host_region),
+        # and a slot for it would shadow that update in the argument alignment.
+        plan.argument_names:List[str] = list(
+            _positional_argument_names(self.raw_func))[:len(plan.args)]
         for name, value in _host_scalar_values(
                 self.raw_func, [n for n in plan.gap_names
-                                if n not in plan.created_all and n not in plan.host_scalar_names],
+                                if n not in plan.created_all
+                                and n not in plan.host_scalar_names
+                                and n not in plan.argument_names],
                 tuple(plan.args), instance).items():
             plan.slot = np.zeros(1, dtype=np.int32)
             try:

@@ -5,6 +5,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     Tuple,
 )
 import numpy as np
@@ -32,6 +33,14 @@ class _RunLaunchMixin:
         """
         self._sync_device(plan.backend, plan.device_obj)
         plan.launch_args:List[object] = self._build_phase_args(plan, plan.shape_sources, None)
+        # A gap statement may assign a kernel argument (`n = n + 1` between two loops).
+        # A parameter is python's function-local, so a later pass must receive the updated
+        # value while the caller's own variable stays untouched. `plan.full` is the packed
+        # prefix and `prefix_names` is that order; a name handled as a slot (carried, gap,
+        # writable outer) never reaches the parameter branch.
+        plan.parameter_slots:Dict[str, int] = {
+            name: index for index, name in enumerate(plan.prefix_names)}
+        plan.written_parameters:Set[str] = set()
         # Vector values travel in the layout the backend's ABI defines: OpenCL pads a
         # 3-component vector to four slots, CUDA/HIP take the host's three. The host keeps
         # the three-component form everywhere, so each argument is converted here and its
@@ -260,7 +269,10 @@ class _RunLaunchMixin:
                                           plan.gap_namespaces[plan.position - 1][0],
                                           plan.gap_namespaces[plan.position - 1][1],
                                           plan.created_objects, plan.outer_state,
-                                          plan.region_writable)
+                                          plan.region_writable,
+                                          parameter_slots=plan.parameter_slots,
+                                          parameter_values=plan.full,
+                                          written_parameters=plan.written_parameters)
             # A phase kernel declares only the shapes *it* indexes, so its argument list is
             # rebuilt from the same sources with its own extents -- a later phase commonly
             # indexes an array the first one never named.
@@ -283,7 +295,8 @@ class _RunLaunchMixin:
                                      if plan.phase_param_names else [])
             if (plan.phase_shapes == plan.shape_sources
                     and plan.phase_created_names == list(plan.created)
-                    and plan.phase_names == plan.first_names):
+                    and plan.phase_names == plan.first_names
+                    and not plan.written_parameters):
                 plan.bound_kernel(*plan.launch_args)
             else:
                 plan.bound_kernel(*self._build_phase_args(plan, plan.phase_shapes, plan.phase_created_names, plan.position,

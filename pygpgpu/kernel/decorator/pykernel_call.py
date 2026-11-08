@@ -6,6 +6,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     Tuple,
 )
 import numpy as np
@@ -88,7 +89,10 @@ class _PykernelCallMixin:
                          localns:Optional[Dict[str, object]]=None,
                          created_objects:Optional[Dict[str, object]]=None,
                          outer_state:Optional[OuterState]=None,
-                         writable_outer:Optional[Dict[str, np.ndarray]]=None)->object:
+                         writable_outer:Optional[Dict[str, np.ndarray]]=None,
+                         parameter_slots:Optional[Dict[str, int]]=None,
+                         parameter_values:Optional[List[object]]=None,
+                         written_parameters:Optional[Set[str]]=None)->object:
         """Run one region of python statements on the host, and return a tail `return`.
 
         A region is the statements between two passes, or after the last one. A statement
@@ -184,6 +188,17 @@ class _PykernelCallMixin:
                         if slot is not None:
                             slot[0] = int(value)
                             localns[target] = slot[0]
+                        elif parameter_values is not None and parameter_slots is not None \
+                                and target in parameter_slots:
+                            # A kernel argument is python's function-local: a region's
+                            # assignment changes the value the later passes receive, and
+                            # the caller's own variable stays untouched (python's
+                            # parameters are locals). The next phase's arguments are
+                            # rebuilt from `parameter_values`, and marking the write
+                            # keeps the fast path from reusing the stale list.
+                            parameter_values[parameter_slots[target]] = value
+                            if written_parameters is not None:
+                                written_parameters.add(target)
         except _TailReturn as answered:
             return answered.value
         finally:

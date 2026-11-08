@@ -111,6 +111,29 @@ def test_a_host_value_between_two_passes(runner):
     np.testing.assert_allclose(second, np.arange(4) * 2.0 + 3)
 
 
+@kernel
+def param_updated_between_passes(out: np.ndarray, n: int):
+    """A host-region assignment to a kernel parameter, read by the next pass."""
+    for i in range(out.shape[0]):
+        out[i] = n
+    n = n + 1
+    for i in range(out.shape[0]):
+        out[i] = out[i] + n
+
+
+def test_a_parameter_assigned_between_two_passes_reaches_the_second(runner):
+    """A parameter is python's function-local: the region's `n = n + 1` must reach pass 2.
+
+    The region runs on the host, and the argument list of the next pass was built once, so
+    the assignment used to be dropped and the second pass re-read the caller's original
+    value (python answers 7, the device answered 6). A parameter is not a gap slot: the
+    update belongs to the launch arguments, and the caller's own variable is untouched.
+    """
+    out = np.zeros(2, np.float32)
+    runner(param_updated_between_passes, out, 3)
+    np.testing.assert_array_equal(out, np.array([7.0, 7.0], dtype=np.float32))
+
+
 def test_an_outer_scalar_is_written_by_the_device(runner):
     """`nonlocal held; held = fresh` travels through its own slot, and the device writes it.
 
