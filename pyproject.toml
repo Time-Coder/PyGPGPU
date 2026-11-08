@@ -96,6 +96,14 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["pygpgpu*"]
 
+# The feature tests import their shared support modules (`tests/_helpers/...`) by bare name, the
+# same way they already import `metal_syntax_check` and `known_failures`. Making that path
+# explicit means a new support module does not depend on pytest's default import mode to be
+# importable, and a type checker can resolve it too. `pythonpath` is a builtin ini option since
+# pytest 7; the dev extra pins pytest>=8.
+[tool.pytest.ini_options]
+pythonpath = ["tests"]
+
 [tool.setuptools.package-data]
 # The device headers are real files the translator copies into a kernel's cache folder
 # (`kernel/headers/pygpgpu_quat.h`), so they have to travel with the package or an installed
