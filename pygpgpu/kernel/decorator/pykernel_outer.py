@@ -6,6 +6,7 @@ from typing import (
 )
 import numpy as np
 from ..translator import (
+    OuterObjectEntry,
     is_ptr,
 )
 from .slots import (
@@ -20,7 +21,6 @@ from ._typing import (
 
 
 class _PykernelOuterMixin:
-
     def _bind_outer_values(self, outer_vars:Dict[str, object],
                            backend:str)->OuterState:
         """The launch arguments carrying this call's outer-scope values.
@@ -36,6 +36,7 @@ class _PykernelOuterMixin:
         args:List[object] = []
         full:List[object] = []
         writable:List[Dict[str, object]] = []
+        objects:List[Dict[str, object]] = []
         for name, outer in outer_vars.items():
             kind:str = outer["kind"]
             value:object = self._read_outer(name, kind, outer.get("scope"))
@@ -43,6 +44,18 @@ class _PykernelOuterMixin:
                 if value is None:
                     raise ValueError(
                         f"outer array '{name}' is undefined at launch time")
+                spec:Optional[OuterObjectEntry] = outer.get("object")
+                if spec is not None:
+                    # A plain python object travels as the structure the translator
+                    # synthesized; the members the body writes are copied home after the
+                    # launch through the same binding object arguments use.
+                    instance:object = _outer_object_instance(value, spec)
+                    args.append(instance)
+                    full.append(instance)
+                    objects.append({"name": name, "source": value,
+                                    "instance": instance,
+                                    "written": list(spec["written"])})
+                    continue
                 args.append(value)
                 full.append(value)
                 continue
@@ -57,7 +70,7 @@ class _PykernelOuterMixin:
             full.append(buffer)
             writable.append({"name": name, "kind": kind, "buffer": buffer,
                              "type": outer["type"]})
-        return {"args": args, "writable": writable, "full": full}
+        return {"args": args, "writable": writable, "full": full, "objects": objects}
 
 
     def _read_outer(self, name:str, kind:str,
@@ -100,3 +113,12 @@ class _PykernelOuterMixin:
                     return
             raise ValueError(f"outer variable '{name}' is not in the kernel's closure")
         self.raw_func.__globals__[name] = value
+
+
+def _outer_object_instance(source:object, spec:OuterObjectEntry)->object:
+    """The structure instance a launch hands the device for one outer python object."""
+    structure:type = spec["structure"]
+    values:Dict[str, object] = {}
+    for member in spec["members"]:
+        values[member] = getattr(source, member)
+    return structure(**values)

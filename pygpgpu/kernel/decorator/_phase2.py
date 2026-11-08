@@ -103,6 +103,13 @@ class _BuildLaunchMixin:
         # source can name an outer array, and `full` is indexed by the device parameter
         # order (see _build_launch_args), so the outer values have to be part of it.
         plan.outer_state:OuterState = self._bind_outer_values(plan.outer_vars, plan.backend)
+        # An outer python object travelled as the structure its kernel-argument twin gets;
+        # the members the body assigned are copied home through the same binding, after the
+        # launch, exactly like an object argument's writes.
+        for plan.outer_object in plan.outer_state.get("objects") or []:
+            plan.object_binding.values[plan.outer_object["name"]] = plan.outer_object["source"]
+            plan.object_binding.instances[plan.outer_object["name"]] = plan.outer_object["instance"]
+            plan.object_binding.written.extend(plan.outer_object["written"])
         # Objects the kernel body creates are built here, on every call, exactly as the
         # interpreter would at that point in the body. They travel as trailing parameters.
         # A method's creation may read `self` (`np.zeros((self.height, ...))`), so the

@@ -83,6 +83,7 @@ from .notation import (
     DeviceType,
     HostValueEntry,
     IMAGE,
+    OuterObjectEntry,
     OuterVarEntry,
     PTR,
     RESERVED_DEVICE_NAMES,

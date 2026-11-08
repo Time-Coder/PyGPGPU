@@ -133,6 +133,15 @@ class OuterVarEntry(TypedDict, total=False):
     writable: bool
     kind: str
     scope: Optional[types.ModuleType]
+    object: "OuterObjectEntry"
+
+# An outer name whose python object becomes a synthesized structure: the `ctypes` class the
+# host builds, the members the body reads (one per field, collected from every pass), and
+# the member paths the body writes, which the host copies back after the launch.
+class OuterObjectEntry(TypedDict):
+    structure: type
+    members: List[str]
+    written: List[str]
 
 # An object the body creates above the loop and the host therefore builds: the device
 # type, plus the expression the host evaluates to make it.

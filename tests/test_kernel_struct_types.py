@@ -274,3 +274,58 @@ def test_a_structure_array_can_be_created_in_the_body(gpu_backend, runner):
     created = runner(create_struct_array, out)
     assert float(out[0]) == 8.0
     assert created["i"][1] == 8
+
+
+# ---------------------------------------------------------------------------
+# 5. A plain python object in the enclosing scope
+# ---------------------------------------------------------------------------
+
+class OuterPoint:
+
+    def __init__(self) -> None:
+        self.x: float = 1.5
+        self.y: float = 2.5
+        self.z: float = 3.5
+
+
+OUTER_OBJECT: OuterPoint = OuterPoint()
+
+
+@kernel
+def read_outer_object_both_passes(out: np.ndarray):
+    """Two passes, each reading a different member of one outer object."""
+    for i in range(out.shape[0]):
+        out[i] = OUTER_OBJECT.x
+    for i in range(out.shape[0]):
+        out[i] = out[i] + OUTER_OBJECT.y + OUTER_OBJECT.z
+
+
+@kernel
+def write_outer_object_member(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = OUTER_OBJECT.x
+    for i in range(out.shape[0]):
+        if i == 0:
+            OUTER_OBJECT.y = OUTER_OBJECT.y + 10.0
+
+
+def test_an_outer_plain_object_is_a_structure(gpu_backend, runner):
+    """A module-level plain object becomes the same synthesized structure an argument does.
+
+    Its members are collected from the *whole* body, so two passes that read different
+    members still see one structure type (before this the name was refused as unknown).
+    """
+    out = np.zeros(2, dtype=np.float32)
+    runner(read_outer_object_both_passes, out)
+    np.testing.assert_array_equal(out, np.array([7.5, 7.5], dtype=np.float32))
+
+
+def test_a_device_write_to_an_outer_object_member_reaches_the_caller(
+        gpu_backend, runner, monkeypatch):
+    """The structure travels, so the member store is copied home like an argument's."""
+    monkeypatch.setattr("test_kernel_struct_types.OUTER_OBJECT", OuterPoint())
+    out = np.zeros(2, dtype=np.float32)
+    runner(write_outer_object_member, out)
+    import test_kernel_struct_types as scope
+
+    assert scope.OUTER_OBJECT.y == 12.5

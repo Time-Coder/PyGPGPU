@@ -1,9 +1,11 @@
 from __future__ import annotations
 import ast
 import types
-from typing import (Dict, List, Optional, Set)
+from typing import (Dict, List, Optional, Set, Tuple)
+import numpy as np
 from .notation import (
     DeviceType,
+    OuterObjectEntry,
     OuterVarEntry,
     PTR,
 )
@@ -68,7 +70,11 @@ class _OuterVarsMixin:
             value:object = self.resolve_global(name)
             if value is _UNRESOLVED:
                 continue
-            entry:Optional[OuterVarEntry] = self._outer_var_entry(name, value, code, declared)
+            object_entry:Optional[OuterVarEntry] = self._outer_object_entry(name, value)
+            if object_entry is not None:
+                entry:Optional[OuterVarEntry] = object_entry
+            else:
+                entry = self._outer_var_entry(name, value, code, declared)
             if entry is None:
                 continue
             # Which module's namespace the name came from. A helper imported from its own
@@ -80,6 +86,58 @@ class _OuterVarsMixin:
                 self.params.append((name, (PTR, entry["type"])))
             else:
                 self.params.append((name, entry["type"]))
+
+
+    def _outer_object_entry(self, name:str, value:object)->Optional[OuterVarEntry]:
+        """The device parameter for an outer python object, or None when it is not one.
+
+        A plain object referenced from the body is turned into the same synthesized
+        structure its kernel-argument twin gets. `scan_object` reads the function's *whole*
+        body, so a member any pass touches becomes a field and every pass sees one structure
+        type -- the same rule the receiver's attributes follow. The host builds an instance
+        per call and copies the members the body writes back into the caller's object.
+        """
+        if isinstance(value, (type, types.ModuleType)) or callable(value):
+            return None
+        from ..objects.scan import looks_like_object
+
+        if not looks_like_object(value):
+            return None
+        from ..objects.convert import scan_object
+        from ..objects.kinds import _prefer_class_name, _structure_for, member_type
+        from .. import structs
+
+        scan:object = scan_object(self.func, {name: value}, self.resolve_global, self.type_map)
+        members:List[str] = list(scan.members.get(name, []))
+        if not members:
+            return None
+        fields:List[Tuple[str, type]] = []
+        for member in members:
+            try:
+                attribute:object = getattr(value, member)
+                fields.append((member, member_type(attribute, member, self.type_map)))
+            except (SyntaxError, ValueError, AttributeError) as error:
+                raise SyntaxError(
+                    f"outer object '{name}' cannot be a structure: its member '{member}' "
+                    f"is not a value a field can hold ({error})") from None
+        structure:type = _structure_for(fields, scan.methods.get(name, []))
+        _prefer_class_name(structure, type(value))
+        dtype:np.dtype = np.dtype(structure)
+        instruction:OuterObjectEntry = {
+            "structure": structure,
+            "members": members,
+            "written": [path for path in scan.written if path.startswith(name + ".")],
+        }
+        code:object = getattr(self.func, "__code__", None)
+        entry:OuterVarEntry = {
+            "type": (PTR, structs.register(dtype)),
+            "writable": False,
+            "kind": ("closure" if code is not None and name in code.co_freevars
+                     else "global"),
+            "scope": getattr(self.resolve_global, "source_globals", None),
+            "object": instruction,
+        }
+        return entry
 
 
     def _outer_var_entry(self, name:str, value:object, code:object,

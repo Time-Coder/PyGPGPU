@@ -41,10 +41,19 @@ class WritableOuter(TypedDict):
     type: "DeviceType"
 
 
+class OuterObjectBinding(TypedDict):
+    """An outer python object that travelled as a structure and may be written back."""
+    name: str
+    source: object
+    instance: object
+    written: List[str]
+
+
 class OuterState(TypedDict):
     args: List[object]
     writable: List[WritableOuter]
     full: List[object]
+    objects: List[OuterObjectBinding]
 
 
 # The device-side slots a body's returns need: one buffer per value slot, plus the shared
