@@ -10,11 +10,26 @@ from typing import (
     Set,
     Tuple,
 )
+import numpy as np
 from ..python_backend import analyse
 from ..translator import (
     _assigned_name_of,
     infer_ctype,
 )
+
+
+
+def _isolated(value:object)->object:
+    """A copy for a discovery run: the real run happens between the passes.
+
+    `_host_region_values` executes the host-region statements only to learn which ones the
+    host can run; the launch runs them again at the moment python would. A subscript store
+    applied twice (`x[0] = x[0] + 1`) shifted the caller's array before the first pass even
+    started, so the discovery run works on copies of the arrays it can mutate.
+    """
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return value
 
 
 
@@ -181,15 +196,23 @@ def _host_region_values(func:object,
         return values, executed
 
     globalns:Dict[str, object] = dict(func.__globals__)
+    # A global array the region mutates must not be the module's own: the discovery run
+    # would apply the store, and the launch's own run would apply it again.
+    loaded:Set[str] = {node.id for statement in statements
+                       for node in ast.walk(statement)
+                       if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    for name in loaded:
+        if isinstance(globalns.get(name), np.ndarray):
+            globalns[name] = _isolated(globalns[name])
     localns:Dict[str, object] = {}
     for arg_name, value in zip(_positional_argument_names(func), args or ()):
-        localns[arg_name] = value
+        localns[arg_name] = _isolated(value)
     receiver:str = _receiver_name(func)
     if receiver and instance is not None:
         localns[receiver] = instance
     for name, cell in zip(func.__code__.co_freevars, func.__closure__ or ()):
         try:
-            localns[name] = cell.cell_contents
+            localns[name] = _isolated(cell.cell_contents)
         except ValueError:
             pass
 

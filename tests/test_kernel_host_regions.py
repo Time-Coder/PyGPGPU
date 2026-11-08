@@ -134,6 +134,50 @@ def test_a_parameter_assigned_between_two_passes_reaches_the_second(runner):
     np.testing.assert_array_equal(out, np.array([7.0, 7.0], dtype=np.float32))
 
 
+@kernel
+def array_written_between_passes(x: np.ndarray, out: np.ndarray):
+    """A region writes into an array argument, and the next pass reads it."""
+    for i in range(x.shape[0]):
+        x[i] = x[i] * 2.0
+    x[0] = x[0] + 1.0
+    for i in range(x.shape[0]):
+        out[i] = x[i] + 1.0
+
+
+def test_an_array_write_between_passes_happens_once(runner):
+    """The discovery pass runs on copies; the real run happens between the passes.
+
+    `_host_region_values` executes the region once at assembly time to learn which
+    statements the host can run, and the launch runs it again at the moment python would.
+    On the caller's array the store was therefore applied twice -- and once before the
+    first pass, which uploaded the shifted array (python answers [4, 5, 7], the device
+    answered [10, 7, 9]).
+    """
+    x = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    out = np.zeros(3, dtype=np.float32)
+    runner(array_written_between_passes, x, out)
+    np.testing.assert_array_equal(x, np.array([3.0, 4.0, 6.0], dtype=np.float32))
+    np.testing.assert_array_equal(out, np.array([4.0, 5.0, 7.0], dtype=np.float32))
+
+
+@kernel
+def gap_value_from_the_first_pass(x: np.ndarray, out: np.ndarray):
+    """A scalar the region computes from the previous pass's array."""
+    for i in range(x.shape[0]):
+        x[i] = x[i] * 2.0
+    shift = int(x[0])
+    for i in range(out.shape[0]):
+        out[i] = float(shift)
+
+
+def test_a_region_value_is_recomputed_after_the_previous_pass(runner):
+    """The discovery value and the launch-time value are both bound, and the later wins."""
+    x = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    out = np.zeros(3, dtype=np.float32)
+    runner(gap_value_from_the_first_pass, x, out)
+    np.testing.assert_array_equal(out, np.array([2.0, 2.0, 2.0], dtype=np.float32))
+
+
 def test_an_outer_scalar_is_written_by_the_device(runner):
     """`nonlocal held; held = fresh` travels through its own slot, and the device writes it.
 
