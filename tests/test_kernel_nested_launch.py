@@ -284,6 +284,40 @@ def repeated_phases(a: np.ndarray, b: np.ndarray):
         b[i] = a[i] + 1
 
 
+class PhaseMethod:
+
+    def __init__(self) -> None:
+        self.height: int = 2
+        self.width: int = 2
+        self.scale: float = 2.0
+        self.a = np.zeros((2, 2), dtype=np.float32)
+        self.b = np.zeros((2, 2), dtype=np.float32)
+
+    def scale_of(self, i: int, j: int) -> float:
+        return self.scale
+
+    @kernel
+    def draw(self):
+        for i, j in np.ndindex(self.height, self.width):
+            self.a[i, j] = float(i) + float(j)
+        for i, j in np.ndindex(self.height, self.width):
+            self.b[i, j] = self.a[i, j] * self.scale_of(i, j)
+
+
+def test_a_method_with_two_magic_loops_runs_both_passes(gpu_backend):
+    """A method's passes read the receiver structure and each other's fields.
+
+    The receiver travels as a structure parameter, and a multi-pass body is one kernel
+    per pass: before the phases shared the receiver signature, a method body with a second
+    loop failed the argument-count check, and the launch read the loop extents from the
+    wrong translator.
+    """
+    view = PhaseMethod()
+    view.draw[gpu_backend]()
+    np.testing.assert_array_equal(
+        view.b, np.array([[0.0, 2.0], [2.0, 4.0]], dtype=np.float32))
+
+
 def test_a_recompile_does_not_duplicate_the_later_passes(gpu_backend):
     """Re-rendering a multi-pass body must refresh its pieces, not append extra copies.
 

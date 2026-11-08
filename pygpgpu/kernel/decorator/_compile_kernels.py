@@ -204,7 +204,9 @@ class _CompileKernelsMixin:
                                 if plan.translator.phase_translators else []),
                  # The receiver-struct members whose values are loop extents, in the
                  # order the -3 markers appear in work_size_dims (see _invoke's -3 branch).
-                 "work_size_members": list(getattr(plan.translator, "work_size_members", [])),
+                 # A multi-loop body's loops belong to the phase translators, so the
+                 # members come from the same phase the extents came from.
+                 "work_size_members": list(getattr(plan.shapes_owner, "work_size_members", [])),
                  # The statements after the last magic loop of a single-phase body: the host
                  # runs them once, after the launch (see _run_host_region).
                  "body_tail": getattr(plan.translator, "body_tail", []),

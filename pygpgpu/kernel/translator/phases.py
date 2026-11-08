@@ -135,8 +135,12 @@ class _PhasesMixin:
                 self.device_cache, is_kernel=True, self_param=self.self_param,
                 self_attr_types=self.self_attr_types, self_owner=self.self_owner,
                 launch_backend=self.launch_backend,
+                self_struct_members=self.self_struct_members,
+                self_struct_type=self.self_struct_type,
+                struct_arg_classes=self.struct_arg_classes,
                 host_creation_values=self.host_creation_values,
-                host_executed_lines=sorted(self.host_statement_lines))
+                host_executed_lines=sorted(self.host_statement_lines),
+                type_map=self.type_map)
             # The tree is the same function, so the phase is visited by transplanting its
             # statements onto the phase translator's own tree.
             phase.tree.body = body
