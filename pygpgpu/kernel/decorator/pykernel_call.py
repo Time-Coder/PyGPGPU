@@ -92,7 +92,8 @@ class _PykernelCallMixin:
                          writable_outer:Optional[Dict[str, np.ndarray]]=None,
                          parameter_slots:Optional[Dict[str, int]]=None,
                          parameter_values:Optional[List[object]]=None,
-                         written_parameters:Optional[Set[str]]=None)->object:
+                         written_parameters:Optional[Set[str]]=None,
+                         region_values:Optional[Dict[str, object]]=None)->object:
         """Run one region of python statements on the host, and return a tail `return`.
 
         A region is the statements between two passes, or after the last one. A statement
@@ -171,6 +172,11 @@ class _PykernelCallMixin:
                 exec(compile(module, "<kernel gap>", "exec"), globalns, localns)  # noqa: S102 - the kernel source itself
                 if target is not None and target in localns:
                     value:object = localns[target]
+                    if region_values is not None and target in region_values:
+                        # A value the region computes is read by the later passes: the
+                        # discovery run read the arrays before the passes, so this one
+                        # (which runs at the moment python would) is the current answer.
+                        region_values[target] = value
                     if isinstance(value, gnp) and value not in touched:
                         touched.append(value)
                     elif isinstance(value, np.ndarray) and value.ndim > 0:

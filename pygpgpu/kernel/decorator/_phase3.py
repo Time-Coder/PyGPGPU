@@ -230,11 +230,10 @@ class _RunLaunchMixin:
         # one pass of several. A single-phase body (the common case) launches whole.
         if launch in ("submit", "async"):
             if len(plan.active_kernels) > 1:
-                raise ValueError(
-                    f"{self.__name__}(): submit()/async_call() cannot run a body of "
-                    f"{len(plan.active_kernels)} passes -- each pass is its own launch and "
-                    f"they depend on each other. Call the kernel synchronously, or "
-                    f"split the body")
+                # Dependent passes: each waits for the previous one's completion event,
+                # so the chain is driven by the backend's futures, not by a waiting
+                # thread (see _phase_async).
+                return self._launch_phases_async(plan, args, instance, launch)
             plan.bound_async = (plan.active_kernels[0][plan.phase_geometry]
                            if plan.phase_geometry is not None else plan.active_kernels[0])
             plan.future:object = (plan.bound_async.submit(*plan.launch_args) if launch == "submit"
@@ -272,7 +271,8 @@ class _RunLaunchMixin:
                                           plan.region_writable,
                                           parameter_slots=plan.parameter_slots,
                                           parameter_values=plan.full,
-                                          written_parameters=plan.written_parameters)
+                                          written_parameters=plan.written_parameters,
+                                          region_values=plan.host_region_values)
             # A phase kernel declares only the shapes *it* indexes, so its argument list is
             # rebuilt from the same sources with its own extents -- a later phase commonly
             # indexes an array the first one never named.

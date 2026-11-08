@@ -8,11 +8,13 @@ from .launch_plan import ANSWERED, LaunchPlan
 from ._phase1 import _PrepareLaunchMixin
 from ._phase2 import _BuildLaunchMixin
 from ._phase3 import _RunLaunchMixin
+from ._phase_async import _PhaseAsyncMixin
 from ._build_phase_args import _BuildPhaseArgsMixin
 
 
 class _PykernelInvokeMixin(
-        _PrepareLaunchMixin, _BuildLaunchMixin, _RunLaunchMixin, _BuildPhaseArgsMixin):
+        _PrepareLaunchMixin, _BuildLaunchMixin, _RunLaunchMixin,
+        _PhaseAsyncMixin, _BuildPhaseArgsMixin):
 
 
     def _invoke_inner(self, instance:object, args:Tuple[object, ...],
