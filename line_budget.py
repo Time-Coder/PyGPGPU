@@ -60,7 +60,6 @@ ALLOWLIST: Dict[str, Tuple[int, str]] = {
     "pygpgpu/kernel/decorator/pykernel_invoke.py": (719, "_invoke_inner is one continuous flow over ~20 locals; its signature and body are pinned by the launch tests (plan 5.2)"),
     "pygpgpu/kernel/decorator/pykernel_compile.py": (529, "_compile is one flow whose positional signature is pinned by nine test call sites (plan 5.2)"),
     "pygpgpu/kernel/decorator/__init__.py": (330, "wave 2 done: the class is assembled from subject mixins (plan 5.2)"),
-    "pygpgpu/kernel/sci_math.py": (663, "leave as is; under the ceiling, one vocabulary (plan 5.3)"),
     "pygpgpu/kernel/builtins.py": (581, "leave as is; AGENTS.md requires the dual-sided set here"),
     "pygpgpu/kernel/include/complex.h": (1064, "device header; split last (plan 5.3)"),
     "pygpgpu/opencl/driver/clinfo.py": (1940, "phase 5 - data modules (plan 5.4.1)"),
