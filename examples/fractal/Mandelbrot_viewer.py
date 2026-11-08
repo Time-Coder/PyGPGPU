@@ -81,8 +81,8 @@ class MandelbrotViewer:
         return math.exp(-0.5 * abs((s - k) * 2.5)**2)
 
     @kernel
-    def draw_fields(self):
-        # Pass 1: fill the scalar fields (escape count, interior stripe).
+    def draw(self):
+        # Pass 1: the per-pixel height field -- terraces outside, a dome inside.
         for i, j in np.ndindex(self.height, self.width):
             c = complex(
                 self.left_top_complex.real + j*self.vpp_field,
@@ -115,9 +115,9 @@ class MandelbrotViewer:
                 self.field_s[i, j] = dome*dome*math.sqrt(dome)
                 self.field_t[i, j] = 1.0
 
-    @kernel
-    def shade(self):
-        # Pass 2: shade the fields as a lit, embossed surface.
+        # Pass 2: shade the fields as a lit, embossed surface. Two magic loops in one
+        # body are two passes: the kernel is launched once per loop, in order, and the
+        # arrays between them stay on the device.
         for i, j in np.ndindex(self.height, self.width):
             t = self.field_t[i, j]
             i1 = i + 1 if i + 1 < self.height else i
@@ -184,14 +184,10 @@ class MandelbrotViewer:
         # of each bulb inside.
         return self.field_s[i, j]
 
-    def draw(self) -> None:
-        # Two @kernel methods rather than one two-loop body: the synced
-        # version's phase translators are built without the receiver
-        # structure (kernel/translator/phases.py), so every method body with
-        # more than one magic loop fails the argument-count check. Two
-        # single-loop kernels sidestep that and run in order here.
-        self.draw_fields["cuda"]()
-        self.shade["cuda"]()
+    def render(self) -> None:
+        # One kernel, two passes: the body has two magic loops, so it is launched once
+        # per loop and the fields stay on the device between them.
+        self.draw["cuda"]()
         # Box-downsample the supersampled render into the window image.
         ss: int = self.ss
         h: int = self.image.shape[0]
@@ -200,7 +196,7 @@ class MandelbrotViewer:
         self.image[:, :, :] = grouped.mean(axis=(1, 3)).astype(np.uint8)
 
     def show(self):
-        self.draw()
+        self.render()
         plt.rcParams['toolbar'] = 'None'
         
         self.figure = plt.figure()
@@ -224,7 +220,7 @@ class MandelbrotViewer:
         self.image = np.zeros((event.height, event.width, 3), dtype=np.uint8)
         self.update_params()
 
-        self.draw()
+        self.render()
         self.image_handle.set_data(self.image)
         self.text_handle.set_text(f"center: {self.view_center:.4f}, scale: {self.scale:.2g}")
         self.image_handle.set_extent([0, event.width, event.height, 0])
@@ -234,7 +230,7 @@ class MandelbrotViewer:
         self.figure.canvas.draw_idle()
 
     def redraw(self) -> None:
-        self.draw()
+        self.render()
         self.image_handle.set_data(self.image)
         self.text_handle.set_text(f"center: {self.view_center:.4f}, scale: {self.scale:.2g}")
         self.figure.canvas.draw_idle()
