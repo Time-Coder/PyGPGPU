@@ -56,7 +56,7 @@ EXEMPT_EXTENSIONS: Tuple[str, ...] = (".pyi",)
 ALLOWLIST: Dict[str, Tuple[int, str]] = {
     "pygpgpu/cparser/ShaderBuiltins.py": (16874, "generated; delete-or-split decision pending (plan 5.6)"),
     "pygpgpu/cparser/cparser.py": (1200, "unreachable legacy chain (plan 5.6)"),
-    "pygpgpu/kernel/translator.py": (11321, "phase 3 - mixin package (plan 5.1)"),
+    "pygpgpu/kernel/translator/__init__.py": (9532, "phase 3 wave 1 done: the module-level support code split out; the FunctionTranslator class itself is wave 2 (plan 5.1)"),
     "pygpgpu/kernel/decorator.py": (4017, "phase 4 - mixin package (plan 5.2)"),
     "pygpgpu/kernel/sci_math.py": (663, "leave as is; under the ceiling, one vocabulary (plan 5.3)"),
     "pygpgpu/kernel/builtins.py": (581, "leave as is; AGENTS.md requires the dual-sided set here"),

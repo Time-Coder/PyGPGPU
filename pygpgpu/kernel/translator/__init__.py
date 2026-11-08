@@ -1,5 +1,9 @@
+# This module is the facade of a split. The class below is the whole of
+# FunctionTranslator; the module-level helpers and tables moved to the part module
+# named after their subject, and every name they published stays importable from
+# here, which is what the rest of the package and the tests rely on.
 from __future__ import annotations
-
+from __future__ import annotations
 import ast
 import builtins
 import enum
@@ -12,18 +16,12 @@ import textwrap
 import types
 from typing import (Any, Callable, Dict, List, NoReturn, Optional, Sequence,
                     Set, Tuple, Union, cast)
-
-# TypedDict is 3.8+ in typing; this package supports 3.7, so it comes from the
-# backport the rest of the package already uses (see cparser/ts_parser.py).
-from typing_extensions import TypedDict
-
 import numpy as np
-
-from .builtin_registry import builtin_name_of
-from .device_library import library_function_name, library_functions
-from .structs import dtype_for as structs_dtype_for, member_types as structs_member_types
-from . import complex as complex_support
-from .device_builtins import (
+from ..builtin_registry import builtin_name_of
+from ..device_library import library_function_name, library_functions
+from ..structs import dtype_for as structs_dtype_for, member_types as structs_member_types
+from .. import complex as complex_support
+from ..device_builtins import (
     ATOMIC_BUILTINS,
     CUDA_ONLY_BUILTINS,
     CUDA_ONLY_CONVERSIONS,
@@ -46,1964 +44,171 @@ from .device_builtins import (
     python_floor_source,
 )
 
+from .source_text import (
+    _copy_ast,
+    _get_attr,
+    _has_device_return,
+    _normalize_ast_legacy_nodes,
+    _parse_kernel_source,
+    _returns_a_value,
+    _source_first_line,
+    _trimmed_source,
+    get_dedented_source,
+)
+
+from .errors import (
+    _position_error,
+    _syntax_error,
+    _unpack_count_message,
+    _unpacking_error,
+)
+
+from .type_map import (
+    COMPLEX_TYPE_NAMES,
+    CTYPES_SCALAR_TYPES,
+    DTYPE_MAP,
+    FLOAT_MAPPING_TARGETS,
+    FLOAT_TYPES,
+    INTEGER_MAPPING_TARGETS,
+    INT_TYPES,
+    NARROWED_SCALARS,
+    SCALAR_TYPES,
+    TYPE_MAP_KEYS,
+    UNSIGNED_INTEGER_TYPES,
+    _COMPLEX_WIDTH_PER_REAL,
+    _INTEGER_RANGES,
+    _check_integer_fits,
+    _ctypes_scalar_types,
+    _mapping_refusal,
+    check_integer_range,
+    ctypes_device_type_name,
+    python_complex_type,
+    resolve_device_type,
+    validate_type_map,
+)
+
+from .notation import (
+    DeviceType,
+    HostValueEntry,
+    IMAGE,
+    OuterVarEntry,
+    PTR,
+    RESERVED_DEVICE_NAMES,
+    RESERVED_PREFIX,
+    ReturnLayoutEntry,
+    ReturnPosition,
+    ReturnSiteLayout,
+    ReturnSitePosition,
+    SHARED_SLICE,
+    Translated,
+    _CUDA_TYPE_NAMES,
+    device_name,
+)
+
+from .receivers import (
+    BUILTIN_METHODS,
+    CALL_METHOD,
+    CONVERSION_METHODS,
+    MAGIC_COMPARE_REFLECTED,
+    MAGIC_INPLACE,
+    MAGIC_METHODS,
+    MAGIC_REFLECTED,
+    _MISSING,
+    _class_attr,
+    _collect_self_attrs,
+    _enum_member_value,
+    _helper_globals,
+    _magic_method_of,
+    _operator_name,
+    _property_accessor,
+    _property_carrier,
+    _property_of,
+    _receiver_param_of,
+    _self_member_call_kind,
+    scan_self_attrs,
+    self_attr_kind,
+    structs_name,
+    writes_receiver,
+)
+
+from .vectors import (
+    _C_FIELD_TYPES,
+    _VEC_COLOR_ALIASES,
+    _c_scalar_name,
+    _vec_component_name,
+    _vec_components,
+    _vec_field_names,
+    _vec_registry,
+    is_vec,
+)
+
+from .builtins import (
+    COMPLEX_ABS_FUNCTIONS,
+    COMPLEX_BUILTIN_FUNCTIONS,
+    COMPLEX_BUILTIN_REAL_RESULTS,
+    COMPLEX_BUILTIN_REFUSALS,
+    COMPLEX_DEVICE_FUNCTIONS,
+    COMPLEX_UNSUPPORTED_FUNCTIONS,
+    KERNEL_TRANSLATING_NAME,
+    KERNEL_TRANSLATING_VALUE,
+    PRINT_INT_CASTS,
+    PRINT_INT_FORMATS,
+    PRINT_MAX_LINES,
+    PRINT_REAL_BIG,
+    PRINT_REAL_DIGITS,
+    PRINT_REAL_PLAIN_MAX,
+    PRINT_REAL_SCI_HI,
+    PRINT_REAL_SCI_LO,
+    PRINT_REAL_SPECIAL_COUNT,
+    _MATH_CONSTS,
+    _MATH_FUNCS,
+    _math_device_name,
+    _translation_branch,
+    _translation_truth,
+)
+
+from .predicates import (
+    SURFACE_HANDLE_TYPES,
+    TEXTURE_HANDLE_TYPES,
+    _handle_device_type,
+    _is_device_handle,
+    image_channels,
+    image_scalar,
+    infer_ctype,
+    is_aggregate,
+    is_complex,
+    is_float,
+    is_image,
+    is_int,
+    is_ptr,
+    promote,
+)
+
+from .walk import (
+    _BUILTIN_NAMES,
+    _HOST_CREATION_FUNCTIONS,
+    _NUMPY_DEVICE_TYPES,
+    _UNRESOLVED,
+    _assigned_name_of,
+    _constant_int_of,
+    _creation_assignments,
+    _creation_target_of,
+    _declared_scope_names,
+    _is_creation_expression as _module_is_creation_expression,
+    _is_creation_shape,
+    _is_host_evaluable,
+    _is_magic_loop_stmt,
+    _is_shape_access,
+    _magic_loop_end,
+    _magic_loop_index,
+    _outer_scope_names,
+    _outside_loops,
+    short_hash,
+    type_sig,
+)
 
-def get_dedented_source(func:Callable)->str:
-    """Read the function source, drop decorator lines and dedent (class methods are indented; ast.parse needs a top-level def)."""
-    try:
-        source:str = inspect.getsource(func)
-    except OSError as e:
-        raise SyntaxError(f"cannot read source of {getattr(func, '__name__', '<function>')}: {e}") from e
-    lines:List[str] = source.split("\n")
-    start:int = next((i for i, line in enumerate(lines) if line.lstrip().startswith("def ")), 0)
-    return textwrap.dedent("\n".join(lines[start:]))
 
 
-def _trimmed_source(func:Callable)->str:
-    """The text the translator parses: decorators dropped, dedented."""
-    return get_dedented_source(func)
-
-
-def _source_first_line(func:Callable)->int:
-    """The file line the parsed copy's line 1 came from.
-
-    ``get_dedented_source`` keeps everything from the ``def`` line on and drops the
-    decorators above it, so the copy's line 1 is the ``def`` line. ``getsourcelines`` starts
-    at the first decorator, which can be several lines earlier, so the skipped decorator
-    lines have to be added back; using its number directly would report every error a few
-    lines too high.
-    """
-    try:
-        lines, first_decorator = inspect.getsourcelines(func)
-    except (OSError, TypeError):
-        return 1
-    offset = next((i for i, line in enumerate(lines)
-                   if line.lstrip().startswith("def ")), 0)
-    return int(first_decorator) + offset
-
-
-def _get_attr(obj:object, name:str, default:object=None)->object:
-    """Attribute read that falls back to a default instead of raising."""
-    return getattr(obj, name, default)
-
-
-def _copy_ast(node:ast.AST, cls:type, fields:Dict[str, object])->ast.AST:
-    """Build a node of ``cls`` from a field dict shared with a 3.7-era node."""
-    obj:ast.AST = cls()
-    for _f in getattr(cls, "_fields", ()):
-        try:
-            setattr(obj, _f, fields.get(_f))
-        except Exception:
-            pass
-    try:
-        ast.fix_missing_locations(obj)
-    except Exception:
-        pass
-    return obj
-
-
-def _normalize_ast_legacy_nodes(tree:ast.AST)->ast.AST:
-    """Fold Python 3.7/3.8-only AST node shapes into the post-3.8 form.
-
-    CPython 3.9 removed several AST node classes that 3.7/3.8 still emitted: the
-    ``ast.Index`` slice wrapper (``Subscript(slice=Index(value=...))``) and the
-    ``ast.Num`` / ``ast.Str`` / ``ast.Bytes`` / ``ast.NameConstant`` constant
-    aliases, plus the ``ast.Ellipsis`` singleton, all replaced by ``ast.Constant``.
-    The translator only inspects the tree structurally, so rewriting these legacy
-    forms to their modern equivalents lets the same code run unchanged on 3.7 and
-    3.9+. On 3.9+ the legacy classes no longer exist and ``ast.parse`` already
-    returns the modern shape, so this is a no-op.
-
-    The legacy class names are looked up dynamically (``getattr``) rather than
-    referenced statically so type checkers do not flag their deprecation on new
-    CPython versions.
-    """
-    if not hasattr(ast, "Num"):
-        # CPython 3.9+: the constant aliases no longer exist and ast.parse
-        # already returns the modern form, so no rewriting is needed.
-        return tree
-    _ast_index = getattr(ast, "Index", None)
-    if _ast_index is not None and isinstance(tree, _ast_index):
-        return _normalize_ast_legacy_nodes(tree.value)
-    _ast_num = getattr(ast, "Num", None)
-    if _ast_num is not None and isinstance(tree, _ast_num):
-        return _copy_ast(tree, ast.Constant, {"value": _get_attr(tree, "n"), "kind": None})
-    _ast_str = getattr(ast, "Str", None)
-    if _ast_str is not None and isinstance(tree, _ast_str):
-        return _copy_ast(tree, ast.Constant, {"value": _get_attr(tree, "s"), "kind": None})
-    _ast_bytes = getattr(ast, "Bytes", None)
-    if _ast_bytes is not None and isinstance(tree, _ast_bytes):
-        return _copy_ast(tree, ast.Constant, {"value": _get_attr(tree, "s"), "kind": None})
-    _ast_name_constant = getattr(ast, "NameConstant", None)
-    if _ast_name_constant is not None and isinstance(tree, _ast_name_constant):
-        return _copy_ast(tree, ast.Constant, {"value": _get_attr(tree, "value"), "kind": None})
-    _ast_ellipsis = getattr(ast, "Ellipsis", None)
-    if _ast_ellipsis is not None and isinstance(tree, _ast_ellipsis):
-        return _copy_ast(tree, ast.Constant, {"value": Ellipsis, "kind": None})
-    for _field, _value in ast.iter_fields(tree):
-        if isinstance(_value, list):
-            # A field list can hold plain strings as well as nodes (`Global.names` is
-            # `list[str]`), and only nodes can be rewritten -- recursing into a string
-            # made `ast.iter_fields` fail with "'str' object has no attribute '_fields'".
-            _value[:] = [_normalize_ast_legacy_nodes(v) if isinstance(v, ast.AST) else v
-                         for v in _value]
-        elif isinstance(_value, ast.AST):
-            setattr(tree, _field, _normalize_ast_legacy_nodes(_value))
-    return tree
-
-
-def _returns_a_value(body:List[ast.stmt])->bool:
-    """True when some `return` of this body carries a value (and not just None)."""
-    for node in ast.walk(ast.Module(body=list(body), type_ignores=[])):
-        if not isinstance(node, ast.Return):
-            continue
-        if node.value is None:
-            continue
-        if isinstance(node.value, ast.Constant) and node.value.value is None:
-            continue
-        return True
-    return False
-
-
-def _has_device_return(body:List[ast.stmt])->bool:
-    """True when some `return` of this body is emitted into the generated kernel.
-
-    A body's statements fall into three regions (see PyKernel._run_host_region): the ones
-    above the first magic loop and the ones after the last run on the host, so their
-    `return`s never reach the device. A `return` inside a magic loop's body -- nested `if`
-    blocks and serial loops included -- *is* device code, and it claims the result.
-
-    A bare `return` counts: it claims with None, which is how python's "the first work item
-    to leave decides" rule survives a value-returning site elsewhere in the body. A
-    gid-style body has no host regions at all, so every statement of it is device code.
-    """
-    loops:List[ast.For] = [stmt for stmt in body
-                           if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt)]
-    if not loops:
-        regions:List[ast.AST] = list(body)
-    else:
-        # Only the loop bodies: a statement between two loops is a gap the host runs, and a
-        # `return` there answers on the host like the tail's does.
-        regions = [ast.Module(body=list(loop.body), type_ignores=[]) for loop in loops]
-    for region in regions:
-        for node in ast.walk(region):
-            if isinstance(node, ast.Return):
-                return True
-    return False
-
-
-def _parse_kernel_source(source:str)->ast.Module:
-    """Parse a kernel source string into an AST normalized across Python versions."""
-    return _normalize_ast_legacy_nodes(ast.parse(source, mode="exec"))
-
-
-def _class_attr(owner:Optional[type], name:str)->object:
-    """The raw class-dictionary entry for ``owner.name``, or ``_MISSING`` when absent.
-
-    Static methods never appear in an instance dictionary, so the raw entry is the only
-    way to tell a ``staticmethod`` from the plain function it unwraps to on access.
-    """
-    if owner is None:
-        return _MISSING
-    for klass in getattr(owner, "__mro__", ()):
-        if name in getattr(klass, "__dict__", {}):
-            return klass.__dict__[name]
-    return _MISSING
-
-
-_MISSING:object = object()
-
-
-def _helper_globals(func:Callable, fallback:Callable[[str], Any])->Callable[[str], Any]:
-    """The name resolver a device helper is translated with.
-
-    A helper is an ordinary python function, so a name it reads resolves in *its own* module
-    first -- `ray.py`'s `hit_sphere` sees the `dot` that `ray.py` imported. Falling back to
-    the caller's resolver is what keeps outer-scope variables working: a helper that reads a
-    global of the *kernel's* module, or a name from the enclosing scope, still finds it and
-    has it forwarded as a parameter at the call site.
-
-    Resolving everything against the kernel's module instead used to work only because
-    helpers lived beside the kernel; a method defined in the structure's own module is the
-    first case where they do not.
-    """
-    own:Dict[str, object] = getattr(func, "__globals__", None) or {}
-
-    def resolve(name:str)->object:
-        if name in own:
-            return own[name]
-        return fallback(name)
-
-    # The host has to read an outer value from the same place this resolver found it, or a
-    # name that lives in the helper's module reads back as None at launch. Recorded on the
-    # resolver rather than in a signature so `_bind_outer_variables` can pass it along.
-    setattr(resolve, "source_globals", own)
-    return resolve
-
-
-def self_attr_kind(owner:Optional[type], name:str)->Translated:
-    """Classify what ``self.name`` refers to on the kernel's own class.
-
-    Returns ``(kind, target)`` where kind is one of:
-
-    - ``"method"``: a plain function defined on the class, i.e. a device helper that
-      also receives the kernel's self attributes (as extra parameters);
-    - ``"staticmethod"``: a staticmethod, i.e. a plain device function with no receiver;
-    - ``"classmethod"``: rejected, ``cls`` semantics do not exist on a device;
-    - ``"kernel"``: a ``@kernel``-decorated method, rejected (kernels are launched from
-      the host, never called from device code);
-    - ``"data"``: an instance or class data attribute (array, scalar, property, ...).
-
-    ``owner`` is None at decoration time, before the class exists; every member is then
-    reported as data, which matches the decoration-time body scan that reads members as
-    values.
-    """
-    if owner is None:
-        return "data", None
-    raw:object = _class_attr(owner, name)
-    if isinstance(raw, staticmethod):
-        func:object = raw.__func__
-        return ("kernel" if getattr(func, "is_pykernel", False) else "staticmethod"), func
-    if isinstance(raw, classmethod):
-        return "classmethod", raw.__func__
-    if getattr(raw, "is_pykernel", False):
-        return "kernel", raw
-    if inspect.isfunction(raw):
-        return "method", raw
-    return "data", (None if raw is _MISSING else raw)
-
-
-def _property_of(cls:type, name:str)->Optional[object]:
-    """The `property` descriptor a class defines for `name`, or None.
-
-    A property is a member the class computes: `box.doubled` is a call to its getter, not a
-    field read. Only a descriptor written in the class body counts, for the same reason a
-    magic method is read from `__dict__` -- an inherited one belongs to another class.
-    """
-    own:object = getattr(cls, "__dict__", {}).get(name)
-    return own if isinstance(own, property) else None
-
-
-def _property_carrier(classes:Optional[Sequence[type]],
-                     name:str)->Optional[object]:
-    """The descriptor for `name` from the first of `classes` that defines one.
-
-    One dtype can stand for several classes -- two classes with one layout share it -- so
-    the property has to be looked for in every class the layout carries, not just the one
-    registered first. Without this, the second class's `box.total` compiled the first
-    class's getter and answered its value.
-    """
-    for cls in classes or []:
-        descriptor:Optional[object] = _property_of(cls, name)
-        if descriptor is not None:
-            return descriptor
-    return None
-
-
-def _property_accessor(descriptor:property, writer:bool)->Optional[Callable]:
-    """The getter (or setter) of a property, or None when it defines no such half."""
-    accessor:object = descriptor.fset if writer else descriptor.fget
-    return accessor if callable(accessor) else None
-
-
-def _receiver_param_of(method:object)->str:
-    """The parameter name a method binds its receiver to."""
-    return (method.__code__.co_varnames[0]
-            if getattr(method, "__code__", None) else "self")
-
-
-def _enum_member_value(value:object)->Optional[Tuple[Any, Any]]:
-    """The constant an `enum.Enum`/`enum.IntEnum` member stands for, or None.
-
-    An enum is a *named constant* in python, not a type a device can hold: `Kind.B` in a
-    kernel body means the number `B` was given, and every use of it (a comparison, an
-    arithmetic expression, an argument to `np.full`) wants that number. So the member is
-    replaced by its value at translation time rather than carried as a parameter.
-
-    Returns (value, member) so a caller can name the member in an error, or None when the
-    value is not an enum member. `enum.IntEnum` is a plain `int` subclass, which is why this
-    is asked *before* the ordinary int/float constant branch -- otherwise an `IntEnum`
-    member silently became the integer, which is the answer for an `IntEnum` but not for an
-    `Enum`, whose value may be any type.
-    """
-    if not isinstance(value, enum.Enum):
-        return None
-    member:object = value
-    payload:object = member.value
-    if isinstance(payload, enum.Enum):
-        # An alias chain (`A = B` in the class body) resolves to the member that holds the
-        # actual value; python's own `_.value` stops at the first level.
-        payload = payload.value
-    return payload, member
-
-
-def _operator_name(magic:str)->str:
-    """The `ast` operator name a magic method belongs to."""
-    for name, candidate in MAGIC_METHODS.items():
-        if candidate == magic:
-            return name
-    return ""
-
-
-def _magic_method_of(cls:type, name:str)->Optional[Callable]:
-    """The device method a class defines for `name`, or None.
-
-    Only a method written out in the class body qualifies. `__eq__` exists on `object`
-    (and on `ctypes.Structure`) as a synthesised identity comparison, which has no device
-    meaning and would silently turn `a == b` into a pointer compare, so the lookup walks the
-    class's own `__dict__` rather than its `__mro__`.
-    """
-    own:object = getattr(cls, "__dict__", {}).get(name)
-    if own is None:
-        return None
-    if isinstance(own, (staticmethod, classmethod)):
-        return None
-    function:object = getattr(own, "__func__", own)
-    # The member-name subscript a structure gets (`s["i"]`) is the translation's own
-    # spelling, not a method the caller wrote: `s[i]` must stay an array index.
-    if getattr(function, "__pygpgpu_member_subscript__", False):
-        return None
-    return function if callable(function) else None
-
-
-def _self_member_call_kind(owner:Optional[type], name:str)->Translated:
-    """Classify ``self.name(...)``: what the attribute read yields, then called.
-
-    A staticmethod read through an instance is a plain function, so a call site has to
-    reach the underlying function; a plain function the instance carries (assigned in
-    __init__) is reached through the instance too, and both are receiver-less device
-    calls.
-    """
-    kind:str
-    target:object
-    kind, target = self_attr_kind(owner, name)
-    if kind == "data" and owner is not None:
-        attribute:object = inspect.getattr_static(owner, name, _MISSING)
-        if isinstance(attribute, staticmethod):
-            func:object = attribute.__func__
-            return ("kernel" if getattr(func, "is_pykernel", False) else "staticmethod"), func
-        if inspect.isfunction(attribute):
-            return "method", attribute
-    return kind, target
-
-
-def structs_name(dtype:object)->str:
-    """The device type name of a structure dtype, registered on the way."""
-    from .structs import register  # noqa: PLC0415
-
-    return register(dtype)
-
-
-def writes_receiver(func:Callable, self_param:str)->bool:
-    """Whether a method body assigns to a member of its receiver (`self.x = ...`).
-
-    A method that does has to receive its receiver *by pointer*: a by-value structure is a
-    copy, so the store lands in the callee's local and never reaches the caller's value.
-    `HitRecord.set_face_normal` writes `self.front_face` and `self.normal`, and with a
-    by-value receiver every hit record's normal stayed zero -- a uniformly grey image on the
-    GPU while the interpreter was right, because it runs the method unchanged.
-    """
-    if not self_param:
-        return False
-    try:
-        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
-    except Exception:
-        return False
-    for node in ast.walk(tree):
-        targets:List[ast.AST] = []
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-            targets = [node.target]
-        for target in targets:
-            if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
-                    and target.value.id == self_param):
-                return True
-            if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Attribute)
-                    and isinstance(target.value.value, ast.Name)
-                    and target.value.value.id == self_param):
-                return True
-    return False
-
-
-def scan_self_attrs(func:Callable, self_param:str, owner:Optional[type]=None,
-                    host_lines:Optional[Set[int]]=None)->List[str]:
-    """Collect the self.xxx data attribute names the method (and its helpers) reference.
-
-    A member read as a value becomes a kernel argument. With ``owner`` given, a method
-    called as ``self.helper(...)`` is followed instead: the helper's own ``self.xxx``
-    references then count too, recursively, so nested helpers keep working and every
-    attribute they need is uploaded with the kernel. ``owner`` is None at decoration
-    time (the class does not exist yet), where only the decorated body itself is read.
-
-    ``host_lines`` are the statements the interpreter already ran (see
-    `_host_region_values`): their calls are host work, so a helper reached only from there
-    contributes no arguments.
-    """
-    if not self_param:
-        return []
-    attrs:List[str] = []
-    _collect_self_attrs(func, self_param, owner, attrs, set(), host_lines or set())
-    return attrs
-
-
-def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
-                        attrs:List[str], visited:Set[object],
-                        host_lines:Optional[Set[int]]=None)->None:
-    """Walk one method body, recursing into the self-methods it calls.
-
-    A call that sits on a line the interpreter already executed (`host_lines`) is host
-    work: it ran on the host, together with everything it touched, so nothing it reads is
-    a kernel argument. Skipping it is what lets a host-only helper take an
-    arbitrary-precision value (`def refresh(self): self.scale * 3`) without the value
-    becoming a device member.
-    """
-    if func in visited:
-        return
-    visited.add(func)
-    tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
-    called:Set[str] = {node.func.attr for node in ast.walk(tree)
-                       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                       and isinstance(node.func.value, ast.Name)
-                       and node.func.value.id == self_param
-                       and not (host_lines and int(getattr(node, "lineno", 0) or 0) in host_lines)}
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                and node.value.id == self_param):
-            continue
-        if host_lines and int(getattr(node, "lineno", 0) or 0) in host_lines:
-            # The whole statement is host work, so nothing it names is a device member --
-            # including a call it makes (`self.refresh()` above the loop).
-            continue
-        kind:str
-        target:object
-        kind, target = _self_member_call_kind(owner, node.attr)
-        if node.attr in called:
-            # A member that is called is not data, so it needs no kernel argument. An
-            # instance method's own self.xxx reads do, so follow it; anything else
-            # (a staticmethod, a @kernel method, a classmethod) is decided at the
-            # call site, where a clear error can name the reason.
-            if kind == "method":
-                _collect_self_attrs(target, self_param, owner, attrs, visited, host_lines)
-            continue
-        if node.attr not in attrs:
-            attrs.append(node.attr)
-
-
-def _syntax_error(message:str, node:Optional[ast.AST]=None,
-                  filename:str="<kernel>",
-                  source:Optional[str]=None,
-                  first_line:int=1)->SyntaxError:
-    """Build a plain :class:`SyntaxError` positioned at kernel source the backend rejects.
-
-    Callers ``raise`` the result ``from None``, so the traceback shows only the user's own
-    frame and CPython's familiar rendering: the file, the line number, the offending source
-    line and a caret under the column.
-
-    The translator parses a *dedented copy* of the function with its decorator line removed,
-    so an AST ``lineno`` counts from that copy. ``first_line`` converts it back to the line
-    in the user's file; the copy's line 1 is the decorator line.
-    """
-    lineno:int = getattr(node, "lineno", 0) if node is not None else 0
-    column:int = getattr(node, "col_offset", 0) if node is not None else 0
-    end_column:Optional[int] = getattr(node, "end_col_offset", None) if node is not None else None
-
-    # lineno in the parsed copy -> line in the user's file (the copy starts at the decorator).
-    file_lineno:Optional[int] = (first_line + lineno - 1) if lineno else None
-
-    text:Optional[str] = None
-    # Prefer the user's own file: the parsed copy is dedented and has no decorator, so its
-    # line text would show the wrong indentation and the caret would sit off by that much.
-    if filename and filename not in ("<kernel>", "<string>"):
-        try:
-            with open(filename, encoding="utf-8") as handle:
-                file_lines = handle.read().splitlines()
-        except OSError:
-            file_lines = []
-    else:
-        file_lines = []
-
-    if file_lines:
-        if file_lineno is not None and 0 < file_lineno <= len(file_lines):
-            text = file_lines[file_lineno - 1]
-            # Columns come from the dedented copy; add back the indentation it removed. The
-            # same shift applies to the node's end column.
-            if source and lineno and 0 < lineno <= len(source.splitlines()):
-                shift = max(len(text) - len(source.splitlines()[lineno - 1]), 0)
-                column += shift
-                if end_column is not None:
-                    end_column += shift
-    elif source and lineno:
-        lines = source.splitlines()
-        if 0 < lineno <= len(lines):
-            text = lines[lineno - 1]
-
-    details:Tuple[object, ...] = (
-        filename if filename else "<kernel>",
-        file_lineno,
-        (column + 1) if text is not None else None,
-        text,
-    )
-    error = SyntaxError(message, details)
-    if end_column is not None and text is not None:
-        # A column range makes CPython underline the whole span instead of one caret.
-        error.end_lineno = file_lineno
-        error.end_offset = end_column + 1
-    return error
-
-
-def _unpack_count_message(names:int, values:int)->str:
-    """What python itself says when a loop's names do not match the number of values.
-
-    `for i, j in np.ndindex(arr.shape[0])` is an ordinary unpacking error in python -- the
-    loop asks for more names than the iterator yields -- and a kernel body should say the
-    same thing, in the same words, so the two spellings of one mistake read alike. CPython
-    has two messages and picks by direction: too few values is "not enough values to
-    unpack", too many is "too many values to unpack", both with "(expected N, got M)".
-    """
-    if values < names:
-        return (f"not enough values to unpack (expected {names}, got {values})")
-    return (f"too many values to unpack (expected {names}, got {values})")
-
-
-def _unpacking_error(message:str, node:Optional[ast.AST], filename:str,
-                     source:Optional[str]=None, first_line:int=1)->ValueError:
-    """An unpacking :class:`ValueError`, positioned at the loop that raises it.
-
-    ``ValueError`` has no ``filename``/``lineno`` of its own, so the position travels in the
-    message exactly as the interpreter's does -- and the traceback is trimmed to the user's
-    frame by the launch (see ``PyKernel._invoke``). The source line and caret come from the
-    same helper a translation error uses, so the two render alike.
-    """
-    error:ValueError = ValueError(message)
-    _position_error(error, node, filename, source, first_line)
-    return error
-
-
-def _position_error(error:BaseException, node:Optional[ast.AST], filename:str,
-                    source:Optional[str]=None, first_line:int=1)->BaseException:
-    """Attach file/line/column to an exception raised *about* a span of the user's source."""
-    if node is None:
-        return error
-    lineno:int = getattr(node, "lineno", 0)
-    file_lineno:Optional[int] = (first_line + lineno - 1) if lineno else None
-    error.filename = filename  # type: ignore[attr-defined]
-    error.lineno = file_lineno  # type: ignore[attr-defined]
-    return error
-
-
-INT_TYPES:Set[str] = {"bool", "char", "uchar", "short", "ushort", "int", "uint", "long", "ulong"}
-FLOAT_TYPES:Set[str] = {"float", "double"}
-SCALAR_TYPES:Set[str] = INT_TYPES | FLOAT_TYPES
-
-DTYPE_MAP:Dict[str, str] = {
-    "bool": "bool",
-    "int8": "char", "int16": "short", "int32": "int", "int64": "long",
-    "uint8": "uchar", "uint16": "ushort", "uint32": "uint", "uint64": "ulong",
-    "float16": "half", "float32": "float", "float64": "double",
-    # A complex value is one of the fixed structures the complex header declares, not a
-    # scalar: the entry here is the type *name* a signature and a subscript use, exactly as
-    # a structure name is. `is_complex_type` is what tells the two apart.
-    "complex64": "c64", "complex128": "c128",
-}
-
-# The ctypes scalar classes a caller may name for a python `int`/`float`, and the device type
-# each stands for. The package already reads ctypes classes this way for a vector component
-# (`_c_scalar_name`), so this is the same mapping given a caller-facing name: `_c_scalar_name`
-# is the vector component's *name*, and this is the advice of what a scalar argument becomes.
-CTYPES_SCALAR_TYPES:Dict[object, str] = {}
-
-# The python type a width is requested for, and the only names a `type_map` may carry. Two
-# names only, because these are the two python builtins whose width is chosen rather than
-# carried: every numpy scalar already names its own width (`np.int64`, `np.float64`), so a
-# mapping for those would be a way to override what the caller spelled, which is a different
-# (and much larger) feature.
-TYPE_MAP_KEYS:Set[str] = {"int", "float"}
-
-# What `int=` may name: the eight integer widths, signed and unsigned, 8 through 64 bits. `bool`
-# is not among them -- it is not an integer width a caller would pick for a counter -- and
-# neither is `half`, which the device has no scalar for on CUDA and HIP.
-INTEGER_MAPPING_TARGETS:Set[str] = {
-    "char", "uchar", "short", "ushort", "int", "uint", "long", "ulong",
-}
-
-# What `float=` may name: the two floating-point widths. `half` is deliberately absent
-# (`DTYPE_MAP` has an entry for it, but NVRTC on this machine cannot resolve `cuda_fp16.h`
-# and the CUDA/HIP path refuses it), so the mapping would only move the failure later.
-FLOAT_MAPPING_TARGETS:Set[str] = {"float", "double"}
-
-# The integer widths that cannot hold a negative value. A python `int` mapped to one of these
-# is refused when it is negative, instead of wrapping to a huge positive number.
-UNSIGNED_INTEGER_TYPES:Set[str] = {"uchar", "ushort", "uint", "ulong"}
-
-
-def _ctypes_scalar_types()->Dict[object, str]:
-    """Build the ctypes class table once: the scalar classes a caller may name."""
-    global CTYPES_SCALAR_TYPES
-    if CTYPES_SCALAR_TYPES:
-        return CTYPES_SCALAR_TYPES
-    import ctypes as _ctypes
-
-    CTYPES_SCALAR_TYPES = {
-        _ctypes.c_bool: "bool",
-        _ctypes.c_int8: "char", _ctypes.c_int16: "short",
-        _ctypes.c_int32: "int", _ctypes.c_int64: "long",
-        _ctypes.c_uint8: "uchar", _ctypes.c_uint16: "ushort",
-        _ctypes.c_uint32: "uint", _ctypes.c_uint64: "ulong",
-        _ctypes.c_float: "float", _ctypes.c_double: "double",
-    }
-    return CTYPES_SCALAR_TYPES
-
-
-def ctypes_device_type_name(expected:object)->Optional[str]:
-    """The device type name a backend's scalar ctypes class stands for, or None.
-
-    `kernel_import` parses a handwritten source and gets each parameter as the backend's own
-    `ctypes` class; to range-check a value against it, the class has to name the device type
-    the same way a `@kernel` argument does. Only scalar classes answer; an array, a structure
-    or an unknown class answers None, and the caller then falls back to its own test.
-    """
-    import ctypes as _ctypes
-
-    if not isinstance(expected, type) or not issubclass(expected, _ctypes._SimpleCData):
-        return None                  # noqa: SLF001 (the documented base)
-    return _ctypes_scalar_types().get(expected)
-
-
-def resolve_device_type(value:object, key:str)->str:
-    """The device type name a caller's type object stands for, for the given mapping key.
-
-    A `@kernel(int=..., float=...)` mapping is given with a **type object**, because that is
-    the spelling a reader of numpy already knows and it carries its width and signedness in
-    the name rather than in a string this package would have to parse:
-
-    * a numpy dtype or scalar type -- `np.int64`, `np.dtype("uint32")`, `np.dtype(np.float64)`;
-    * a ctypes scalar class -- `ctypes.c_int64`, `ctypes.c_double`;
-    * the device type name itself -- `"long"`, `"double"`.
-
-    **The choice is a closed set, and it is not the same set for each key.** `int` may be
-    any of the eight integer widths (signed and unsigned, 8 through 64 bits); `float` may be
-    `float32` or `float64` and nothing else. The alternative -- accepting whatever the device
-    happens to have -- was wrong in both directions: `bool` is not an integer width at all,
-    and `float16` (`half`) is out of scope on CUDA and HIP, so a kernel broadened to one of
-    them would fail to compile instead of failing here with a reason.
-
-    A string is accepted only when it names one of those widths, so `"int8"` is refused while
-    `"char"` is accepted: a string is the *device* type name, and the numpy spelling exists
-    because `np.int8` is the spelling a caller actually writes. Every refusal is a
-    `ValueError`: a wrong type is a wrong value for this argument, not a syntax error.
-    """
-    import ctypes as _ctypes
-
-    allowed:Dict[str, Set[str]] = INTEGER_MAPPING_TARGETS if key == "int" else FLOAT_MAPPING_TARGETS
-
-    # A numpy dtype or scalar type, given as the type (`np.int64`) or a dtype (`np.dtype("int8")`).
-    if isinstance(value, np.dtype) or (isinstance(value, type)
-                                       and issubclass(value, np.generic)):
-        dtype:np.dtype = np.dtype(value)
-        # A numpy scalar names a width; map it to the device spelling and then to the boards
-        # of the closed set, so `np.int8` is accepted only when `char` is (it is).
-        device_name:Optional[str] = DTYPE_MAP.get(dtype.name)
-        if device_name is None or device_name not in allowed:
-            raise ValueError(_mapping_refusal(key, value)) from None
-        return device_name
-
-    # A ctypes scalar class.
-    if isinstance(value, type) and issubclass(value, _ctypes._SimpleCData):
-        device_name = _ctypes_scalar_types().get(value)
-        if device_name is not None and device_name in allowed:
-            return device_name
-        raise ValueError(_mapping_refusal(key, value)) from None
-
-    # A device type name, spelled the way a signature spells it.
-    if isinstance(value, str):
-        if value in allowed:
-            return value
-        raise ValueError(_mapping_refusal(key, value)) from None
-
-    raise ValueError(_mapping_refusal(key, value)) from None
-
-
-def _mapping_refusal(key:str, value:object)->str:
-    """The message for a type the mapping key does not accept."""
-    if key == "int":
-        np_names:str = ("np.int8, np.int16, np.int32, np.int64, "
-                        "np.uint8, np.uint16, np.uint32, np.uint64")
-        others:str = "A bool, a float and a complex value are not integer widths."
-        widths:str = ("char (int8), short (int16), int (int32), long (int64), "
-                      "uchar (uint8), ushort (uint16), uint (uint32), ulong (uint64)")
-    else:
-        np_names = "np.float32, np.float64"
-        others = "An integer is not a floating-point width, and `half` is out of scope."
-        widths = "float (float32), double (float64)"
-    return (f"`{key}=` cannot be {value!r}: a python {key} travels as one of "
-            f"{widths} -- written as {np_names}, or as the matching ctypes type. {others}")
-
-
-def validate_type_map(type_map:Optional[Dict[str, object]])->Dict[str, str]:
-    """Normalize a caller's `int=`/`float=` mapping to device type names.
-
-    The keys are the two python builtins whose width is otherwise chosen here, and every
-    entry is resolved through `resolve_device_type`, so the decorator and the global setter
-    accept exactly the same spellings and reject exactly the same mistakes. Every refusal
-    here is a `ValueError`, because a mapping is a value the caller supplied.
-    """
-    if not type_map:
-        return {}
-    resolved:Dict[str, str] = {}
-    for key, value in type_map.items():
-        if key not in TYPE_MAP_KEYS:
-            raise ValueError(
-                f"unknown type-mapping key: {key!r}; only 'int' and 'float' can be mapped "
-                f"(a numpy scalar already names its own width)") from None
-        resolved[key] = resolve_device_type(value, key)
-    return resolved
-
-
-# The device type names that are complex values rather than structures. Unlike a structure
-# they travel by value, their arithmetic is generated (not refused), and their two members
-# are read with the header's own accessors.
-COMPLEX_TYPE_NAMES:Set[str] = {"c64", "c128"}
-
-# A python `complex` has no width of its own, so its width follows the `float` mapping: a
-# kernel that asks for 64-bit reals asks for 64-bit complex values beside them, and the
-# default 32-bit real pairs with the single-precision complex. The two widths are the only
-# ones a complex value has, so the table is written out for both of the mapping's own names
-# and anything else is read as the single-precision pair.
-_COMPLEX_WIDTH_PER_REAL:Dict[str, str] = {"float": "c64", "double": "c128"}
-
-
-def python_complex_type(float_type:str)->str:
-    """The complex width a python `complex` travels as beside a real of this width.
-
-    A python `complex` has no width of its own -- the same rule a python `float` follows --
-    so the two are always chosen together: `float=` naming a double gives `c128`, and the
-    32-bit default (`float`, or no mapping at all) gives `c64`. This is the single place that
-    decides it, which is what keeps a python complex value from being the one value in a body
-    whose width disagrees with the reals beside it: the scalar path (`infer_ctype`), a body
-    literal and `complex(re, im)` all read their width from here, so a `float=` mapping moves
-    all three together.
-    """
-    return _COMPLEX_WIDTH_PER_REAL.get(float_type, "c64")
-
-# The range of every integer the device can hold, as (minimum, maximum). A python `int` is
-# arbitrary precision, so a value outside the width it is about to travel as used to wrap
-# silently: `k(2 ** 31 + 5, out)` reached the device as -2147483648, and the kernel then
-# computed with a number the caller never wrote. Refusing it is the only honest answer, and
-# the message names the spelling that carries the width the caller actually needs.
-_INTEGER_RANGES:Dict[str, Tuple[int, int]] = {
-    "char": (-(2 ** 7), 2 ** 7 - 1),
-    "uchar": (0, 2 ** 8 - 1),
-    "short": (-(2 ** 15), 2 ** 15 - 1),
-    "ushort": (0, 2 ** 16 - 1),
-    "int": (-(2 ** 31), 2 ** 31 - 1),
-    "uint": (0, 2 ** 32 - 1),
-    "long": (-(2 ** 63), 2 ** 63 - 1),
-    "ulong": (0, 2 ** 64 - 1),
-}
-
-
-def check_integer_range(value:int, device_type:str, where:str='')->None:
-    """Public entry point for the width check, shared by every path that chooses a type.
-
-    A scalar argument, a structure member, and an imported kernel's declared parameter all
-    have to agree on what "does not fit" means. `where` names the member when the caller has
-    one, so the message points at it rather than at the kernel as a whole.
-    """
-    _check_integer_fits(value, device_type, where)
-
-
-def _check_integer_fits(value:int, device_type:str, where:str='')->None:
-    """Refuse a python `int` the device type it travels as cannot represent."""
-    bounds:Optional[Tuple[int, int]] = _INTEGER_RANGES.get(device_type)
-    if bounds is None:
-        return                      # `bool`: python bools are not ints for this rule
-    low, high = bounds
-    if low <= value <= high:
-        return
-    # The suggestion is the numpy spelling that holds this value, and only when one does: an
-    # integer beyond 64 bits has no device type at all, so pointing at `np.int64` there would
-    # be pointing at a second failure.
-    if 0 <= value <= 2 ** 64 - 1 and value > 2 ** 63 - 1:
-        suggestion = f" Pass it as `np.uint64({value})` to keep that width."
-    elif -(2 ** 63) <= value <= 2 ** 63 - 1:
-        suggestion = (f" Pass it as `np.int64({value})` to keep that width."
-                      if value < 0 else
-                      f" Pass it as `np.int64({value})` or `np.uint64({value})` "
-                      f"to keep that width.")
-    else:
-        suggestion = " The device has no integer type that wide."
-    raise ValueError(
-        f"{where + ': ' if where else ''}the integer {value} does not fit the device "
-        f"type '{device_type}' "
-        f"({low}..{high}); a python int has no width of its own, so it travels as the "
-        f"width this kernel chose for `int`.{suggestion}") from None
-
-# The numpy scalars whose device type is the *narrow* one, as it always was: an 8- or
-# 16-bit value is an `int` on the device, and a float64 is a `float`. A caller who wants
-# a width of its own says so (`np.uint32`, `np.int64`), and that width is kept.
-NARROWED_SCALARS:Dict[str, str] = {
-    "int8": "int", "int16": "int", "uint8": "int", "uint16": "int",
-    "float16": "float", "float64": "float",
-}
-
-PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string means a scalar
-
-# A zeros_per_group() slice: that group's storage, plus the shape it was declared with.
-SHARED_SLICE = "shared_slice"
-
-# Names a kernel body may use that C, C++ or OpenCL C reserves. A parameter or local called
-# `new` is legal python and illegal in every one of those languages -- CUDA and HIP compile
-# as C++, so `void f(c64 new, ...)` fails with a bare `expected a ")"` that names nothing the
-# user wrote. The mapping is the prefix `_pyg_` plus the name, which is the one spelling that
-# cannot collide with a user's own identifier (a python name cannot contain the prefix
-# without also being mapped, so the two never meet).
-#
-# The set is the union of C89/C99/C11 keywords, C++ keywords as far as CUDA C++ accepts
-# them, and OpenCL C's address-space and function qualifiers (`__global`, `__kernel`, ...),
-# because one generated body is compiled by all three.
-RESERVED_DEVICE_NAMES:Set[str] = {
-    # C and C++ keywords
-    "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
-    "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
-    "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct",
-    "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
-    "bool", "catch", "class", "constexpr", "const_cast", "delete", "dynamic_cast",
-    "explicit", "export", "false", "friend", "mutable", "namespace", "new", "noexcept",
-    "nullptr", "operator", "private", "protected", "public", "reinterpret_cast",
-    "static_cast", "template", "this", "throw", "true", "try", "typeid", "typename",
-    "using", "virtual", "wchar_t",
-    # C++20 spellings CUDA/HIP toolchains accept
-    "concept", "constinit", "consteval", "co_await", "co_return", "co_yield",
-    "requires", "char8_t", "char16_t", "char32_t",
-    # OpenCL C qualifiers and types
-    "__global", "__local", "__constant", "__private", "__kernel", "__read_only",
-    "__write_only", "__read_write", "__generic", "__attribute__", "__kernel_exec",
-}
-
-RESERVED_PREFIX:str = "_pyg_"
-
-
-def device_name(name:str)->str:
-    """The C identifier a python name is emitted as.
-
-    A name the device language reserves is spelled with the `_pyg_` prefix, so a kernel
-    parameter called `new`, `register`, `float`, `global` or `kernel` compiles. Everything
-    else is emitted unchanged, so the generated source still reads like the python it came
-    from. The two spellings are disjoint by construction: `_pyg_new` is only produced for
-    `new`, and a python identifier `_pyg_new` is itself prefixed (`_pyg__pyg_new`).
-    """
-    return f"{RESERVED_PREFIX}{name}" if name in RESERVED_DEVICE_NAMES else name
-
-
-# The internal type names use OpenCL's spellings, because one generator serves every backend.
-# CUDA C does not define uchar/ushort/uint/ulong (NVRTC rejects them; char/short/int/long
-# and the full unsigned forms are fine), so the CUDA path writes those out in full. HIP
-# compiles through CUDA generation too and its clang accepts the same full spellings.
-_CUDA_TYPE_NAMES:Dict[str, str] = {
-    "uchar": "unsigned char",
-    "ushort": "unsigned short",
-    "uint": "unsigned int",
-    # `long` is 32-bit in CUDA C on Windows (where NVRTC and HIP are used here), so the
-    # 64-bit spelling has to be written out: leaving it as `long` made an int64 array a
-    # 4-byte-stride buffer, which silently produced wrong values for every element.
-    "long": "long long",
-    "ulong": "unsigned long long",
-}
-
-# An image parameter is ("image", channels, scalar type): its storage is opaque to
-# the kernel, which only ever samples or stores through it.
-IMAGE = "image"
-
-# The type of a translated expression. A device type is one of a closed set of shapes:
-#
-# * a **scalar or vector name** -- `"int"`, `"float3"`, `"quatf"`, a struct name;
-# * a **pointer** -- `("*", base)`, an array parameter;
-# * an **image** -- `("image", channels, scalar)`, opaque storage the body samples;
-# * a **shared slice** -- `("shared_slice", ...)`, one group's zeros_per_group buffer;
-#
-# `is_ptr` / `is_vec` / `is_image` / `is_int` decide which, so the union says exactly what
-# those predicates accept. It used to be spelled `Any` at every one of these sites, which
-# threw away the one piece of type information the translator carries around most.
-DeviceType = Union[str, Tuple[object, ...]]
-
-# A translated expression is its C text plus the type above -- the pair every `_visit_*`
-# returns and every emitter consumes.
-Translated = Tuple[str, DeviceType]
-
-# One value slot a `return` fills: the C type the launch declares for it, and the device
-# type the body produced. Two return sites whose values share a C type share the slot.
-class ReturnLayoutEntry(TypedDict):
-    ctype: str
-    type: DeviceType
-
-# One position of one `return` statement, as `_visit_kernel_return` sees it. A `value`
-# position travels as a one-element buffer (`code` is how the body reads it back) and an
-# `array` position travels as the array parameter itself, named by `name`. `ordinal` and
-# `slot` appear once the slot map has assigned them.
-class ReturnPosition(TypedDict, total=False):
-    kind: str
-    type: DeviceType
-    code: str
-    name: str
-    ordinal: int
-    slot: int
-    slot_parameter: str
-
-# One entry of `return_site_layout`: the positions a site hands back, in return order, and
-# whether it returned a tuple (which the host unpacks rather than passes through).
-class ReturnSiteLayout(TypedDict):
-    positions: List[ReturnSitePosition]
-    is_tuple: bool
-
-# One host-facing rebuild entry: a `value` names the slot it reads (or, when the value
-# already lives in a parameter, the parameter itself through `reused`), and an `array`
-# names the parameter to hand back.
-class ReturnSitePosition(TypedDict, total=False):
-    kind: str
-    ordinal: int
-    slot: int
-    name: str
-    reused: str
-
-# An outer-scope name the body reads: the device type it travels as, whether the body
-# writes it (which makes it a one-element buffer), and how the host reaches it -- a
-# closure cell, the kernel's module globals, or a helper's own module (`scope`).
-class OuterVarEntry(TypedDict, total=False):
-    type: DeviceType
-    writable: bool
-    kind: str
-    scope: Optional[types.ModuleType]
-
-# An object the body creates above the loop and the host therefore builds: the device
-# type, plus the expression the host evaluates to make it.
-class HostValueEntry(TypedDict):
-    expr: str
-    type: DeviceType
-
-# A python class can give an operator a meaning of its own, and device code has to keep
-# it: `a + b` on a class that defines `__add__` is that method, exactly as `ray.at(t)` is
-# `Ray_at`. The keys are the `ast` operator class names the dispatchers already use, so one
-# table serves the binary, unary and comparison paths.
-MAGIC_METHODS:Dict[str, str] = {
-    "Add": "__add__", "Sub": "__sub__", "Mult": "__mul__", "Div": "__truediv__",
-    "FloorDiv": "__floordiv__", "Mod": "__mod__", "Pow": "__pow__",
-    "LShift": "__lshift__", "RShift": "__rshift__",
-    "BitOr": "__or__", "BitXor": "__xor__", "BitAnd": "__and__",
-    "MatMult": "__matmul__",
-    "Lt": "__lt__", "LtE": "__le__", "Gt": "__gt__", "GtE": "__ge__",
-    "Eq": "__eq__", "NotEq": "__ne__",
-    # `x in box` asks box.__contains__(x): the receiver is the RIGHT operand, which is why
-    # the dispatch for these two reverses the pair.
-    "In": "__contains__", "NotIn": "__contains__",
-    "USub": "__neg__", "UAdd": "__pos__", "Invert": "__invert__",
-}
-# The reflected spelling is tried on the right operand when the left one has no method.
-# A conversion the class defines: `int(box)` is `box.__int__()`. `bool` is here too, but a
-# class that defines no `__bool__` still answers through the ordinary truth test, so it is
-# tried first rather than instead.
-CONVERSION_METHODS:Dict[str, str] = {
-    "int": "__int__", "float": "__float__", "bool": "__bool__",
-}
-# A single-argument builtin whose device meaning is the class's own method.
-BUILTIN_METHODS:Dict[str, str] = {"abs": "__abs__", "round": "__round__"}
-# `box(args)` is `box.__call__(args)`.
-CALL_METHOD:str = "__call__"
-
-# `v += w` asks `v.__iadd__(w)` first, and falls back to `v.__add__(w)` when the class
-# defines no in-place form -- python's own rule, and the reason a class that only knows
-# `__add__` still supports `+=`.
-MAGIC_INPLACE:Dict[str, str] = {
-    "Add": "__iadd__", "Sub": "__isub__", "Mult": "__imul__", "Div": "__itruediv__",
-    "FloorDiv": "__ifloordiv__", "Mod": "__imod__", "Pow": "__ipow__",
-    "LShift": "__ilshift__", "RShift": "__irshift__",
-    "BitOr": "__ior__", "BitXor": "__ixor__", "BitAnd": "__iand__",
-    "MatMult": "__imatmul__",
-}
-
-MAGIC_REFLECTED:Dict[str, str] = {
-    "Add": "__radd__", "Sub": "__rsub__", "Mult": "__rmul__", "Div": "__rtruediv__",
-    "FloorDiv": "__rfloordiv__", "Mod": "__rmod__", "Pow": "__rpow__",
-    "LShift": "__rlshift__", "RShift": "__rrshift__",
-    "BitOr": "__ror__", "BitXor": "__rxor__", "BitAnd": "__rand__",
-    "MatMult": "__rmatmul__",
-}
-# A comparison has its own reflected form, and python reads `a < b` as `a.__lt__` first.
-MAGIC_COMPARE_REFLECTED:Dict[str, str] = {
-    "Lt": "__gt__", "LtE": "__ge__", "Gt": "__lt__", "GtE": "__le__",
-    "Eq": "__eq__", "NotEq": "__ne__",
-}
-
-_C_FIELD_TYPES:Dict[object, str] = {}
-
-# Declared here (and filled on first use) because importing the driver tables eagerly would
-# load a GPU runtime at `import pygpgpu` time.
-_VEC_REGISTRY:Dict[str, object]
-
-def _vec_registry()->Dict[str, object]:
-    """vec type name -> ctypes class (e.g. float4), built lazily."""
-    global _VEC_REGISTRY
-    try:
-        return _VEC_REGISTRY
-    except NameError:
-        pass
-    from ..opencl.driver import CLInfo
-    from . import structs
-
-    _VEC_REGISTRY = dict(CLInfo.vec_types)
-    for name, cls in _VEC_REGISTRY.items():
-        for field_name, field_type in cls._fields_:
-            _C_FIELD_TYPES[(name, field_name)] = _c_scalar_name(field_type)
-        # A vector is a `ctypes.Structure` with an aligned dtype, which is the evidence
-        # `is_declared_structure` uses for a structure; claiming the dtype first keeps the
-        # vector reading when a caller's class happens to have the same layout.
-        try:
-            structs.claim_vector_dtype(np.dtype(cls._fields_))
-        except Exception:
-            pass
-    return _VEC_REGISTRY
-
-def _c_scalar_name(ctypes_type:object)->str:
-    import ctypes as _ctypes
-    sizes = {_ctypes.c_float: "float", _ctypes.c_double: "double",
-             _ctypes.c_int8: "char", _ctypes.c_int16: "short", _ctypes.c_int32: "int",
-             _ctypes.c_int64: "long", _ctypes.c_uint8: "uchar", _ctypes.c_uint16: "ushort",
-             _ctypes.c_uint32: "uint", _ctypes.c_uint64: "ulong"}
-    return sizes.get(ctypes_type, "float")
-
-def is_vec(t:object)->bool:
-    return isinstance(t, str) and t in _vec_registry()
-
-# A 3-component vector is padded to 16 bytes for the device ABI, so its ctypes struct carries
-# a trailing `_` field that is not a component. Everything that names components counts them
-# through this helper, so the padding never reaches a constructor, a swizzle or a print.
-def _vec_components(vec:str)->List[Translated]:
-    """The real (field name, ctypes type) components of a vector type, in order."""
-    return [field for field in _vec_registry()[vec]._fields_ if field[0] != "_"]
-
-def _vec_field_names(cls_or_name:object)->List[str]:
-    """The component names of a vector type, given the class or its name.
-
-    Everything that expands a vector into per-component code goes through this, so the
-    padding field of a 3-component vector never becomes a member the device does not have.
-    """
-    fields:Tuple[Tuple[str, type], ...] = (cls_or_name._fields_
-                  if isinstance(cls_or_name, type)
-                  else _vec_registry()[cls_or_name]._fields_)
-    return [name for name, _ in fields if name != "_"]
-
-# Colour-style component names, as in `color.rgb`. OpenCL C accepts them natively but CUDA's
-# vector types only have x/y/z/w, so the translator normalizes them for every backend.
-_VEC_COLOR_ALIASES:Dict[str, str] = {"r": "x", "g": "y", "b": "z", "a": "w"}
-
-def _math_device_name(attr:str, backend:str, result_type:object=None)->str:
-    """The device spelling of a `math.*` function.
-
-    OpenCL's C dialect has float overloads under the plain name. CUDA has both the
-    double and the `f`-suffixed float form, and asking for the plain name with a float
-    argument is ambiguous whenever the argument's type is not exactly `float` -- which is
-    how `floor` came to fail with "more than one instance of overloaded function".
-
-    The caller's *result* type decides which of the two CUDA forms to spell: `ret` is
-    already computed from the argument types (`_emit_math_call` widens it to `double`
-    when any argument is one), so a double-width call gets the plain name and the
-    compiler resolves the double overload. Spelling `sinf` with a double argument
-    silently cut a `float=np.float64` kernel's transcendentals back to float32.
-    """
-    if backend != "cuda":
-        return attr
-    # The three predicates are already type-generic in CUDA and take no `f` suffix.
-    if attr in ("isnan", "isinf", "isfinite"):
-        return attr
-    if result_type == "double":
-        return attr
-    return attr if attr.endswith("f") else attr + "f"
-
-
-# The name of the compile-time switch (see `builtins.KERNEL_TRANSLATING`), and the value a
-# translation sees. Python resolves the same name to False, which is what lets one body run
-# differently on each side without the translator guessing at it.
-KERNEL_TRANSLATING_NAME:str = "KERNEL_TRANSLATING"
-KERNEL_TRANSLATING_VALUE:bool = True
-
-
-def _translation_branch(node:ast.expr, body:List[ast.stmt],
-                        orelse:List[ast.stmt])->Optional[List[ast.stmt]]:
-    """The branch a translation keeps for an ``if`` about ``KERNEL_TRANSLATING``.
-
-    Returns None when the condition says nothing about translation (an ordinary device
-    ``if``), and otherwise the statements the device side should contain -- an empty list
-    when the condition is false, so the whole ``if`` disappears.
-    """
-    truth:Optional[bool] = _translation_truth(node)
-    if truth is None:
-        return None
-    return list(body) if truth else list(orelse)
-
-
-def _translation_truth(node:ast.expr)->Optional[bool]:
-    """The compile-time truth of a condition about `KERNEL_TRANSLATING`, or None.
-
-    None means the condition says nothing about translation, so it is left to the device.
-
-    **The trigger is the name, not the object it resolves to.** A body that declares its own
-    `KERNEL_TRANSLATING` -- a module global, a local, anything that reads as that name --
-    gets the same conditional translation, because a kernel author writing that name is
-    asking for exactly this and requiring an import would only make the spelling longer. It
-    is also why this works on source text rather than on a resolved value: the translator
-    never has to import anything to decide the branch.
-
-    The constant is False in python and True while translating, so a condition is decidable
-    when it is built from that name with `not`, `and`, `or` and boolean literals --
-    each of which python evaluates with short-circuiting. `if KERNEL_TRANSLATING:` is
-    therefore the device branch and `if not KERNEL_TRANSLATING:` is python's.
-    """
-    if isinstance(node, ast.Name) and node.id == KERNEL_TRANSLATING_NAME:
-        return KERNEL_TRANSLATING_VALUE
-    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
-        # A boolean literal says the same thing on both sides, so it is decided here and a
-        # branch around it collapses (KERNEL_TRANSLATING and True is just the constant).
-        return node.value
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        inner:Optional[bool] = _translation_truth(node.operand)
-        return None if inner is None else not inner
-    if isinstance(node, ast.BoolOp):
-        values:List[Optional[bool]] = [_translation_truth(value) for value in node.values]
-        if any(value is None for value in values):
-            return None
-        if isinstance(node.op, ast.And):
-            return all(values)
-        if isinstance(node.op, ast.Or):
-            return any(values)
-        return None
-    return None
-
-
-def _vec_component_name(text:str)->str:
-    """`rgb` -> `xyz`: the device spelling of a component or swizzle."""
-    return "".join(_VEC_COLOR_ALIASES.get(char, char) for char in text)
-
-
-_MATH_FUNCS:Dict[str, Optional[str]] = {
-    "sqrt": None, "exp": None, "log": None, "log2": None, "log10": None,
-    "sin": None, "cos": None, "tan": None, "asin": None, "acos": None,
-    "atan": None, "atan2": None, "sinh": None, "cosh": None, "tanh": None,
-    "fabs": None, "pow": None, "hypot": None, "erf": None,
-    "log1p": None, "expm1": None, "fmod": None, "cbrt": None,
-    "copysign": None, "ldexp": None, "degrees": None, "radians": None,
-    # python returns an int here; the *argument* stays a float (see _emit_math_call, where
-    # casting the argument made `ceil(2.1)` answer 2).
-    "floor": "int", "ceil": "int", "trunc": "int",
-    # python returns a bool; the device answers 0/1, which is the same number.
-    "isnan": "int", "isinf": "int", "isfinite": "int",
-}
-
-_MATH_CONSTS:Dict[str, str] = {
-    "pi": "3.14159265358979323846f",
-    "e": "2.71828182845904523536f",
-    "tau": "6.28318530717958647692f",
-    # A literal rather than the INFINITY macro: NVRTC's default headers do not define it,
-    # so the CUDA translation unit failed with "identifier INFINITY is undefined". A float
-    # literal is the same value on every backend and needs no header.
-    "inf": "(1.0f / 0.0f)",
-}
-
-# ---------- the complex vocabulary ----------
-
-# Which of the math vocabulary's names map to which of the complex header's functions, which
-# answer a *real* (the magnitude and the phase), and which have no complex meaning at all.
-# numpy is the authority here: it defines exactly this split, the interpreter backend runs
-# numpy, and the device has to agree with it rather than inventing an answer.
-COMPLEX_DEVICE_FUNCTIONS:Dict[str, str] = {
-    "sqrt": "sqrt", "exp": "exp", "log": "log", "log2": "log2", "log10": "log10",
-    "sin": "sin", "cos": "cos", "tan": "tan",
-    # numpy spells the inverse trig `arcsin`/`arccos`/`arctan`, and its `np.sin`-shaped
-    # aliases (`np.asin`, ...) exist too; both spellings mean the same function here.
-    "asin": "asin", "acos": "acos", "atan": "atan",
-    "arcsin": "asin", "arccos": "acos", "arctan": "atan",
-    "sinh": "sinh", "cosh": "cosh", "tanh": "tanh",
-    "square": "square", "reciprocal": "reciprocal", "conjugate": "conjugate",
-    "conj": "conjugate", "exp2": "exp2",
-    # `rint` answers a complex value in numpy (each part rounded to even), which is the same
-    # rule the real path spells `rint`; `round` is a builtin and is refused for a complex
-    # value (see COMPLEX_BUILTIN_REFUSALS), so a kernel writes `np.round(z)` for one.
-    "rint": "rint",
-}
-# A complex argument answering a *real*: numpy's own rule (`abs` is the magnitude, `np.angle`
-# the phase). An empty spelling means the plain real function of the magnitude.
-COMPLEX_ABS_FUNCTIONS:Dict[str, str] = {
-    "absolute": "abs", "abs": "abs", "angle": "angle", "sign": "",
-}
-# The real-only names, which numpy refuses for a complex input -- with the complex spelling
-# that is the right counterpart, or the fact that there is none.
-COMPLEX_UNSUPPORTED_FUNCTIONS:Dict[str, str] = {
-    "floor": "there is none: a complex value has no ordering",
-    "ceil": "there is none: a complex value has no ordering",
-    "trunc": "there is none: a complex value has no ordering",
-    "fmod": "use `a - b * floor(a / b)`, or np.mod for a real pair",
-    "hypot": "use `np.abs(a - b)` on the difference",
-    "cbrt": "use `np.pow(z, 1 / 3)`",
-    "ldexp": "use `z * 2 ** exponent`",
-    "atan2": "use `np.angle(a / b)`, or `np.atan(a / b)`",
-}
-
-# The *builtin* spellings -- pygf's functions, re-exported from the package top level -- that
-# are a complex operation, and the header function each one calls. The interpreter answers
-# these for a complex value (they are pygf's functions, which route a complex scalar through
-# `cmath`), so the device answers them too: a kernel and its serial run have to agree. The
-# table exists because the builtin tables are keyed by *type* and a complex value has no entry
-# in them, which is how `sqrtf(z)` and `powf(z, w)` used to be emitted.
-COMPLEX_BUILTIN_FUNCTIONS:Dict[str, str] = {
-    "sqrt": "sqrt", "exp": "exp", "exp2": "exp2", "log": "log", "log2": "log2",
-    "log10": "log10", "sin": "sin", "cos": "cos", "tan": "tan",
-    "asin": "asin", "acos": "acos", "atan": "atan",
-    "sinh": "sinh", "cosh": "cosh", "tanh": "tanh",
-    "conjugate": "conjugate", "conj": "conjugate", "pow": "pow",
-    # `sign` answers a *complex* value (the direction on the unit circle), unlike `abs`,
-    # which answers the magnitude -- so it belongs here and not beside `abs`.
-    "sign": "sign",
-    # `rint` rounds each part to even. This package's own host body answers that now
-    # (sci_math rounds the two parts with python's `round`), which is what makes the device
-    # allowed to: python's builtin `round` still refuses a complex value, and that is a
-    # different name.
-    "rint": "rint",
-}
-
-# The builtin names that answer a *real* for a complex argument: the magnitude, which is
-# numpy's own rule for it.
-COMPLEX_BUILTIN_REAL_RESULTS:Dict[str, str] = {"abs": "abs"}
-
-# The builtin names numpy refuses for a complex value, and what to write instead. The
-# interpreter refuses them as well -- they reach `math.floor` and friends through pygf -- so
-# saying so is the only honest answer, and it keeps the device from emitting a call the
-# compiler cannot type. `round` is here rather than in the table above because *python's*
-# builtin refuses a complex value; numpy's `np.round` is the spelling that answers one.
-COMPLEX_BUILTIN_REFUSALS:Dict[str, str] = {
-    "floor": "there is none: a complex value has no ordering",
-    "ceil": "there is none: a complex value has no ordering",
-    "trunc": "there is none: a complex value has no ordering",
-    "round": "use `np.round(z)`: python's round() refuses a complex value",
-    "fract": "use `z - np.floor(z)`, which is a real-pair operation",
-    "fmod": "use `a - b * np.floor(a / b)`, or np.mod for a real pair",
-    "remainder": "there is none: numpy has no complex form for it",
-    "rsqrt": "use `1 / np.sqrt(z)`",
-    "cbrt": "use `np.power(z, 1 / 3)`",
-    "ldexp": "use `z * 2 ** exponent`",
-    "step": "there is none: a complex value has no ordering",
-    "smoothstep": "there is none: a complex value has no ordering",
-    "fdim": "there is none: numpy has no complex form for it",
-    "copysign": "there is none: numpy has no complex form for it",
-    "nextafter": "there is none: numpy has no complex form for it",
-    "degrees": "there is none: numpy has no complex form for it",
-    "radians": "there is none: numpy has no complex form for it",
-    "hypot": "use `np.abs(a - b)` on the difference",
-}
-
-# ---------- print() support ----------
-
-# print() is a host builtin, so the name means nothing on a device. The translator rewrites
-# a print(...) statement into device printf calls that produce the same text: arguments
-# separated by one space, a trailing newline, and every value rendered as str() renders it
-# (True/False, decimal integers, python's shortest round-trip floats, float4(...) vectors).
-#
-# Two device facts shape the generated code:
-#   * printf's format string must be a literal on OpenCL (a computed one is rejected);
-#   * each printf call site has its own output buffer, and the buffers are drained call
-#     site by call site, so a line split over several printf calls comes out reordered.
-# A line is therefore emitted as one printf per leaf of its branches, with the whole line
-# text repeated in each leaf, so all of its parts stay together.
-
-# printf specifier and argument cast per integer type. Two things differ between the
-# backends: what a `long` is (64-bit in OpenCL C, but only 32-bit in CUDA/HIP on Windows)
-# and which 64-bit conversions the device printf implements (AMD's OpenCL printf refuses
-# "%lld", so OpenCL uses "%ld" with a long cast, which is exactly as wide there).
-PRINT_INT_FORMATS:Dict[str, Dict[str, str]] = {
-    "opencl": {
-        "char": "d", "short": "d", "int": "d",
-        "uchar": "u", "ushort": "u", "uint": "u",
-        "long": "ld", "ulong": "lu",
-    },
-    "cuda": {
-        "char": "d", "short": "d", "int": "d",
-        "uchar": "u", "ushort": "u", "uint": "u",
-        "long": "lld", "ulong": "llu",
-    },
-}
-
-PRINT_INT_CASTS:Dict[str, Dict[str, str]] = {
-    "opencl": {
-        "char": "int", "short": "int", "int": "int",
-        "uchar": "unsigned int", "ushort": "unsigned int", "uint": "unsigned int",
-        "long": "long", "ulong": "unsigned long",
-    },
-    "cuda": {
-        "char": "int", "short": "int", "int": "int",
-        "uchar": "unsigned int", "ushort": "unsigned int", "uint": "unsigned int",
-        "long": "long long", "ulong": "unsigned long long",
-    },
-}
-
-# Python prints a float with the fewest significant digits that still read back as the same
-# value. numpy's str() of a float32 switches to the exponent form from 1e6 up, and python's
-# repr of a double from 1e16 up; both switch down to it below 1e-4 (0.0001 stays fixed,
-# 0.00001 becomes 1e-05, i.e. from decimal exponent -5).
-PRINT_REAL_SCI_HI:Dict[bool, int] = {True: 6, False: 16}
-PRINT_REAL_SCI_LO:Dict[bool, int] = {True: -5, False: -5}
-
-# Significant digits to try for a real: 9 round-trips every float32, 17 every double.
-PRINT_REAL_DIGITS:Dict[bool, int] = {True: 9, False: 17}
-
-# The largest magnitude the exponent form is needed for, per precision: a float32 that big
-# is already close to its range, a double's is the top of its range.
-PRINT_REAL_BIG:Dict[bool, str] = {True: "3.4028235e38", False: "1.7976931348623157e308"}
-
-# Whole values below this magnitude print with a trailing ".0" rather than in the exponent
-# form, matching python: numpy's str() of a float32 switches to the exponent form at 1e6, so
-# a whole value from there up is written "1e+06" rather than "1000000.0".
-PRINT_REAL_PLAIN_MAX:Dict[bool, str] = {True: "1e6", False: "1e16"}
-
-# The five values python spells out rather than through a conversion: nan, inf, -inf, 0.0
-# and -0.0. They own the first leaves of a real's layout (see _print_real_conversion).
-PRINT_REAL_SPECIAL_COUNT:int = 5
-
-# How many printf leaves one print() may expand into. Each bool argument doubles the count
-# and each real multiplies it by its digit budget, so the cap keeps a single line from
-# growing without bound. Ordinary lines stay far below it; one that trips it should be
-# split into several print() calls. Keep this small: a huge switch of printf call sites is
-# also a lot of device code for a debug facility, and some drivers handle it badly.
-PRINT_MAX_LINES:int = 512
-
-
-def is_int(t:object)->bool:
-    return isinstance(t, str) and t in INT_TYPES
-
-def is_float(t:object)->bool:
-    return isinstance(t, str) and t in FLOAT_TYPES
-
-def is_complex(t:object)->bool:
-    """True for a device type that is a complex value (`c64` / `c128`).
-
-    A complex value is a *value* like a scalar -- it is passed by value, returned in a slot,
-    and stored in a local -- but its arithmetic is generated rather than a C operator, and
-    its two members are read through the header's accessors. So the predicates that ask
-    "can this take part in an ordinary scalar operator" must answer False for it, and the
-    predicates that ask "is this a pointer/aggregate" must answer False as well.
-    """
-    return isinstance(t, str) and t in COMPLEX_TYPE_NAMES
-
-def is_aggregate(t:object)->bool:
-    """True for a value the device carries as a *structure* (`c64`/`c128` included).
-
-    The difference from `structs_dtype_for` is that this answers from the type name alone,
-    without the registry: a complex type is a structure on the device even though it is not
-    a numpy record dtype here.
-    """
-    return isinstance(t, str) and (t in COMPLEX_TYPE_NAMES
-                                   or structs_dtype_for(t) is not None)
-
-def is_ptr(t:object)->bool:
-    return isinstance(t, tuple) and len(t) == 2 and t[0] == PTR
-
-def is_image(t:object)->bool:
-    """True for the marker a backend-neutral Image argument gets."""
-    return isinstance(t, tuple) and len(t) == 3 and t[0] == IMAGE
-
-def image_channels(t:object)->int:
-    return int(t[1])
-
-def image_scalar(t:object)->str:
-    """The C scalar type of one image channel."""
-    return t[2]
-
-def promote(t1:DeviceType, t2:DeviceType)->DeviceType:
-    if is_ptr(t1) or is_ptr(t2):
-        raise SyntaxError("cannot mix arrays with scalars in arithmetic") from None
-    if is_vec(t1) or is_vec(t2):
-        raise SyntaxError("vector arithmetic is handled separately") from None
-    if "double" in (t1, t2):
-        return "double"
-    if is_float(t1) or is_float(t2):
-        return "float"
-    rank:List[str] = ["bool", "char", "uchar", "short", "ushort", "int", "uint", "long", "ulong"]
-    if t1 in rank and t2 in rank:
-        return t1 if rank.index(t1) >= rank.index(t2) else t2
-    return "int"
-
-def infer_ctype(value:object, type_map:Optional[Dict[str, str]]=None)->DeviceType:
-    """Actual call argument -> C type.
-
-    `type_map` is the caller's `int=`/`float=` override (already normalized to device type
-    names by `validate_type_map`): a python `int`/`float` has no width of its own, so the
-    decorator chooses one here. It applies to **nothing else** -- a numpy scalar names its own
-    width and keeps it, which is what makes the mapping an override of the two builtins
-    rather than a second, competing type system.
-    """
-    from ..vec_types.layout import _vector_dtype_name
-    from . import structs
-
-    registry:Dict[str, object] = _vec_registry()
-    mapping:Dict[str, str] = type_map or {}
-    int_type:str = mapping.get("int", "int")
-    float_type:str = mapping.get("float", "float")
-
-    # A backend-neutral Image is opaque storage: the kernel only samples or stores
-    # through it, so the parameter carries its channel count and scalar type.
-    from ..image import Image
-    if isinstance(value, Image):
-        channel_type = DTYPE_MAP.get(value.dtype.name)
-        if channel_type is None:
-            raise SyntaxError(
-                "Image of dtype %s cannot be sampled: unsupported element type"
-                % value.dtype.name) from None
-        return (IMAGE, value.channels, channel_type)
-
-    # A `ctypes.Structure` the caller declared is a structure value, before any of the
-    # vector lookups: its dtype compares equal to a vector of the same layout
-    # (`{float x; float y;}` *is* `float2`), and only the dtype object's alignment flag says
-    # which one the caller meant.
-    declared:Optional[np.dtype] = structs.structure_dtype_of(value)
-    if declared is not None and not isinstance(value, np.ndarray):
-        from ..vec_types.layout import _vector_dtype_name, _host_classes
-
-        declared_class:type = type(value)
-        is_vector_value:bool = (
-            _vector_dtype_name(declared) is not None
-            and (declared_class in _host_classes().values()
-                 or any(issubclass(declared_class, host)
-                        for host in _host_classes().values())))
-        if is_vector_value:
-            # A vector type is a ctypes.Structure with a vector layout: it travels by
-            # value, because the device reads its components directly. A caller-declared
-            # class with a vector-identical layout (Vec2Like) is NOT one of the package's
-            # vectors, so it keeps the structure treatment.
-            return structs.register(declared)
-        if isinstance(value, type):
-            # The class itself (a spelling for the layout, not a value): it names the
-            # structure, and travels by value like any type.
-            return structs.register(declared)
-        # A structure argument always travels as a pointer: copying a struct per launch is
-        # work the device never needs, a write through it reaches the caller's object, and
-        # one spelling covers both read-only (the signature adds `const`) and written.
-        return (PTR, structs.register(declared))
-
-    if isinstance(value, np.void):
-        # A structured scalar is either a vector element or a structure value: both are
-        # described completely by the dtype, so both become a device type.
-        if structs.is_declared_structure(value.dtype):
-            # An element of a ctypes-declared array reaches here as a record, and the
-            # declaration wins over the coincidental vector layout.
-            return (PTR, structs.register(value.dtype))
-        vec_name:Optional[str] = _vector_dtype_name(value.dtype)
-        if vec_name is not None:
-            return vec_name
-        if structs.is_record(value.dtype):
-            return (PTR, structs.register(value.dtype))
-        raise SyntaxError(f"unsupported numpy structured scalar: {value.dtype}") from None
-
-    for vec_name, cls in registry.items():
-        if isinstance(value, cls):
-            return vec_name
-
-    # A vector instance from the host library (`pygf`) is not one of the driver's classes,
-    # but its bases name the same device type: `point3f` -> `float3`, `color3d` -> `double3`.
-    # A numpy scalar is never a vector, even where the class name collides: `np.int8` is
-    # `numpy.int8`, while the registry has an eight-component `int8` vector, and a scalar
-    # reaching that lookup became a vector parameter the device could not bind.
-    if not isinstance(value, np.generic):
-        for base in type(value).__mro__:
-            if base.__name__ in registry:
-                return base.__name__
-
-    if isinstance(value, np.ndarray):
-        if value.dtype.fields is not None:
-            if structs.is_declared_structure(value.dtype):
-                # An array of a caller's `ctypes.Structure`: structured, whatever layout.
-                return (PTR, structs.register(value.dtype))
-            vec_name = _vector_dtype_name(value.dtype)
-            if vec_name is not None:
-                return (PTR, vec_name)
-            if structs.is_record(value.dtype):
-                return (PTR, structs.register(value.dtype))
-            raise SyntaxError(f"unsupported numpy structured dtype: {value.dtype}") from None
-        if value.dtype.name not in DTYPE_MAP:
-            raise SyntaxError(f"unsupported numpy dtype: {value.dtype.name}") from None
-        return (PTR, DTYPE_MAP[value.dtype.name])
-    if isinstance(value, (bool, np.bool_)):
-        return "bool"
-    # A numpy scalar carries its own width and signedness, and `np.uint32(x)` is how a
-    # caller says "unsigned 32-bit" without an annotation the translator would ignore.
-    # Collapsing every integer to `int` made an unsigned mix (`x * 0x9E3779B9`, `x >> 16`)
-    # signed, so the multiply overflowed and the shift filled with ones.
-    #
-    # The narrow widths keep their old answer: an 8- or 16-bit numpy scalar is `int` on the
-    # device, as it always was (see tests/test_kernel_narrow_arguments.py), and a float64
-    # is `float`. The widths a caller reaches for *deliberately* -- `np.uint32` for an
-    # unsigned mix, `np.int64`/`np.uint64` for a wide counter -- are kept as they are,
-    # because there would be no reason to spell them otherwise. A python `int` has no
-    # width of its own and stays `int`.
-    if isinstance(value, np.integer):
-        dtype_name:str = np.dtype(type(value)).name
-        if dtype_name in NARROWED_SCALARS:
-            return NARROWED_SCALARS[dtype_name]
-        if dtype_name in DTYPE_MAP:
-            return DTYPE_MAP[dtype_name]
-        return int_type
-    if isinstance(value, int):
-        _check_integer_fits(value, int_type)
-        return int_type
-    if isinstance(value, np.floating):
-        dtype_name = np.dtype(type(value)).name
-        if dtype_name in NARROWED_SCALARS:
-            return NARROWED_SCALARS[dtype_name]
-        if dtype_name in DTYPE_MAP:
-            return DTYPE_MAP[dtype_name]
-        return float_type
-    if isinstance(value, float):
-        return float_type
-    # A complex scalar. `np.complex64` and `np.complex128` are numpy scalars (they are
-    # `np.complexfloating`, not `np.floating`), and a python `complex` has no width of its
-    # own -- the same rule a python `float` follows, which is why the two widths are chosen
-    # together rather than one of them staying fixed: a kernel that maps `float` to a double
-    # is asking for 64-bit real arithmetic, and a python complex beside it should not be the
-    # single value in the body that silently lost half its precision. The default is the
-    # other way round and just as important: a python float travels as `float`, so a python
-    # complex beside it travels as `c64`. A python complex is never one of the numpy scalars,
-    # so `isinstance(complex(1, 2), complex)` is checked on its own.
-    if isinstance(value, np.complexfloating):
-        dtype_name = np.dtype(type(value)).name
-        return DTYPE_MAP.get(dtype_name, "c128")
-    if isinstance(value, complex):
-        return python_complex_type(float_type)
-    if _is_device_handle(value):
-        # A texture or surface reaches the device as an opaque 64-bit handle, which
-        # the kernel reads through tex2D or writes through surf2Dwrite.
-        return _handle_device_type(value)
-    raise SyntaxError(f"unsupported argument type: {type(value).__name__} (only numpy arrays, int/float/bool/complex scalars and texture handles are supported)") from None
-
-
-TEXTURE_HANDLE_TYPES = ("TextureObject", "cudaTextureObject_t")
-SURFACE_HANDLE_TYPES = ("SurfaceObject", "cudaSurfaceObject_t")
-
-
-def _is_device_handle(value:object)->bool:
-    """True for the objects a kernel receives as an opaque texture or surface handle."""
-    return type(value).__name__ in TEXTURE_HANDLE_TYPES + SURFACE_HANDLE_TYPES
-
-
-def _handle_device_type(value:object)->str:
-    """The device-side type name a handle argument takes in a kernel signature."""
-    if type(value).__name__ in SURFACE_HANDLE_TYPES:
-        return "cudaSurfaceObject_t"
-    return "cudaTextureObject_t"
-
-# numpy names a kernel body may use as a type in a creation statement (`dtype=np.float32`).
-_NUMPY_DEVICE_TYPES:Set[str] = {
-    "float16", "float32", "float64", "int8", "int16", "int32", "int64",
-    "uint8", "uint16", "uint32", "uint64", "bool_", "complex64", "complex128",
-}
-
-# numpy functions that build or transform host data, and can therefore be executed by the
-# interpreter instead of translated (see _creation_assignments). This is the whole family
-# of array constructors and shape/layout transforms: any of them may appear on the
-# right-hand side of a statement above the magic loop. Device-side arithmetic on the
-# result is not part of a creation statement, which is why only these names are listed --
-# a `np.sum(...)` or `np.dot(...)` there is a computation the kernel itself should do.
-_HOST_CREATION_FUNCTIONS:Set[str] = {
-    # constructors
-    "zeros", "ones", "empty", "full", "zeros_like", "ones_like", "empty_like",
-    "full_like", "arange", "linspace", "logspace", "geomspace",
-    "identity", "eye", "tri", "tril", "triu", "diag", "diagflat", "vander",
-    "indices", "meshgrid", "fromfunction", "frombuffer", "fromiter", "fromfile",
-    "array", "asarray", "asanyarray", "ascontiguousarray", "asfortranarray",
-    "copy", "copyto", "filled",
-    # shape and layout transforms
-    "reshape", "ravel", "flatten", "transpose", "swapaxes", "moveaxis",
-    "flip", "fliplr", "flipud", "roll", "rot90", "squeeze", "expand_dims",
-    "broadcast_to", "broadcast_arrays", "atleast_1d", "atleast_2d", "atleast_3d",
-    "repeat", "tile", "resize", "pad", "take", "compress", "trim_zeros",
-    # combining and splitting
-    "concatenate", "stack", "hstack", "vstack", "dstack", "column_stack",
-    "row_stack", "block", "split", "hsplit", "vsplit", "dsplit", "append",
-    "insert", "delete", "unique",
-    # element-wise or ordering helpers that only reshape the data
-    "where", "clip", "round", "around", "sort", "argsort", "lexsort", "cumsum",
-    "cumprod", "nan_to_num", "real", "imag", "conj", "angle",
-    # dtype constructors (np.float32(x) and friends)
-    "float16", "float32", "float64", "int8", "int16", "int32", "int64",
-    "uint8", "uint16", "uint32", "uint64", "bool_",
-}
-
-# The statements a kernel body may execute on the host: assignments above the magic loop
-# whose right-hand side only builds data.
-def _magic_loop_end(statements:List[ast.stmt])->int:
-    """The index just past the statements that belong to the magic loop's body.
-
-    A phase is `[header..., for-loop, after...]`, so everything from the loop onwards except
-    its own body is the *gap* before the next phase -- the statements a body places between
-    two magic loops.
-    """
-    for index, stmt in enumerate(statements):
-        if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt):
-            return index + 1
-    return len(statements)
-
-
-def _outside_loops(body:List[ast.stmt])->List[ast.stmt]:
-    """The top-level statements a body runs on the host, outside its work-item dispatch.
-
-    A single-loop body places all of them before the loop, but a body with several loops
-    may also place one *between* two of them (`mid = np.zeros(4)` in a two-pass body), and
-    the pass that reads such a value needs it bound on the host just the same.
-
-    Only statements whose meaning is *host* work belong here. A serial `for` loop and an
-    `if` block are per-work-item code that the device must run (every work item iterates
-    its own slice, or tests its own lane), so they are left to the translator; returning
-    them to the host would execute device-only builtins there -- `zeros_per_group` used
-    under such a loop reported "only available inside a @kernel function body" for a body
-    that plainly was one.
-    """
-    loops:List[int] = [
-        index for index, stmt in enumerate(body)
-        if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt)]
-    # A statement is host work only if the host can *execute* it. The body's serial loops and
-    # its `if` blocks are per-work-item code: every work item iterates its own slice or tests
-    # its own lane, so handing them to the host would run device-only builtins there --
-    # `zeros_per_group` under such a loop reported "only available inside a @kernel function
-    # body" for a body that plainly was one. A bare `for` / `If` is therefore never host code,
-    # with or without a dispatch loop; everything else (a creation, a plain assignment) is,
-    # because its value has to exist before the launch.
-    per_item = (ast.For, ast.Return, ast.If)
-    if not loops:
-        # A gid-style body: all of it is per-work-item code, except the creations the host
-        # still has to build (see _creation_assignments), which stay in the list.
-        return [stmt for stmt in body if not isinstance(stmt, per_item)]
-    # Everything before the first loop, plus the gap between consecutive loops: those are
-    # the statements a body places outside its work-item dispatch, and a value bound there
-    # (a created array, a scalar) is read by a later pass. Statements *after* the last loop
-    # are excluded -- `return out` lives there and must keep its device meaning.
-    outside:List[ast.stmt] = [stmt for stmt in body[:loops[0]]
-                              if not isinstance(stmt, per_item)]
-    for start, end in zip(loops, loops[1:]):
-        outside.extend(stmt for stmt in body[start + 1:end]
-                       if not isinstance(stmt, per_item))
-    return outside
-
-
-def _creation_assignments(func:Callable)->List[ast.stmt]:
-    """The statements the host runs before the launch, in body order.
-
-    Two kinds are lifted out, both from **above** the magic loop:
-
-    * a **creation** (`arr = np.zeros(n)`) -- the object has to exist with the shape and
-      dtype numpy gives it, and a device has no way to make one;
-    * a plain **assignment** that a later creation reads (`n = 5` feeding `np.zeros(n)`) --
-      the host has to have the name in scope when it evaluates the creation.
-
-    The second kind is *also* still emitted as device code, because a work item reads it
-    too; the host evaluation is an extra, not a replacement. Everything else above the loop
-    is device code only. A magic loop is what defines "above" here: an assignment below it
-    would run once per work item, so it is not lifted out (the translator refuses a creation
-    there).
-    """
-    source:str = get_dedented_source(func)
-    tree:ast.Module = _parse_kernel_source(source)
-    if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
-        return []
-    body:List[ast.stmt] = tree.body[0].body
-    magic_index:Optional[int] = next(
-        (index for index, stmt in enumerate(body) if _is_magic_loop_stmt(stmt)), None)
-    # A gid-style body has no magic loop, so its whole body is "above the work item": it is
-    # the per-work-item code, and a top-level creation statement there still runs once per
-    # launch on the host, which is what python means.
-    if magic_index is None:
-        magic_index = len(body)
-
-    import builtins as _builtins
-
-    globalns:Dict[str, object] = getattr(func, "__globals__", {})
-
-    def is_numpy(node:ast.expr)->bool:
-        return (isinstance(node, ast.Name) and globalns.get(node.id) is np)
-
-    def is_creation(node:ast.expr)->bool:
-        return _is_creation_shape(node, is_numpy)
-
-    del _builtins
-    # Which plain assignments a creation needs: the names a creation statement reads that
-    # are bound above the loop but are not themselves creations. Only those are lifted, so
-    # the host does not run unrelated device code -- and everything lifted here is still
-    # emitted for the work items as well.
-    creations:List[ast.stmt] = [
-        stmt for stmt in _outside_loops(body)
-        if _creation_target_of(stmt) is not None and is_creation(_creation_target_of(stmt))]
-    needed:set = set()
-    for stmt in creations:
-        for node in ast.walk(stmt.value):
-            if isinstance(node, ast.Name):
-                needed.add(node.id)
-
-    bound_above:Dict[str, ast.stmt] = {}
-    for stmt in _outside_loops(body):
-        name:Optional[str] = _assigned_name_of(stmt)
-        if name is not None:
-            bound_above.setdefault(name, stmt)
-
-    creation_names:set = {_assigned_name_of(stmt) for stmt in creations}
-    # A fixed point, because a lifted assignment can depend on another lifted one:
-    # `a = 2; b = a * 2; c = np.zeros(b)` needs all three, and one pass over the creation's
-    # own names would stop at `b` and leave `a` undefined when the host runs it.
-    fitting:set = set()
-    changed:bool = True
-    while changed:
-        changed = False
-        for name in list(needed):
-            if name in fitting or name in creation_names:
-                continue
-            stmt:Optional[ast.stmt] = bound_above.get(name)
-            if stmt is None or stmt not in _outside_loops(body):
-                continue
-            if not _is_host_evaluable(stmt.value if stmt.value is not None else stmt):
-                continue
-            fitting.add(name)
-            for node in ast.walk(stmt):
-                if isinstance(node, ast.Name) and node.id not in fitting:
-                    needed.add(node.id)
-            changed = True
-
-    chosen:List[ast.stmt] = []
-    for stmt in _outside_loops(body):
-        value:Optional[ast.expr] = _creation_target_of(stmt)
-        name:Optional[str] = _assigned_name_of(stmt)
-        if value is not None and is_creation(value):
-            chosen.append(stmt)
-        elif name is not None and name in fitting and name not in creation_names:
-            chosen.append(stmt)
-    return chosen
-
-
-def _is_host_evaluable(node:ast.expr)->bool:
-    """Whether a right-hand side can be computed by the interpreter, for a creation's need.
-
-    Only the forms that carry no device-only meaning: a literal, a plain name, attribute
-    access, and arithmetic over those. A call is excluded because it may name a device
-    helper whose body the host cannot run -- lifting it would either fail or, worse, run
-    something different from what the device computes.
-    """
-    if isinstance(node, ast.Constant):
-        return True
-    if isinstance(node, ast.Name):
-        return True
-    if isinstance(node, ast.Attribute):
-        return isinstance(node.value, (ast.Name, ast.Attribute))
-    if isinstance(node, ast.BinOp):
-        return _is_host_evaluable(node.left) and _is_host_evaluable(node.right)
-    if isinstance(node, ast.UnaryOp):
-        return _is_host_evaluable(node.operand)
-    if isinstance(node, ast.Subscript):
-        return _is_host_evaluable(node.value) and _is_host_evaluable(node.slice)
-    if isinstance(node, ast.Tuple):
-        return all(_is_host_evaluable(element) for element in node.elts)
-    return False
-
-
-def _is_creation_shape(node:ast.expr, is_numpy:Callable[[ast.expr], bool])->bool:
-    """True when this expression only *builds* data (and cannot run on the device).
-
-    The device has no numpy, so a constructor that allocates is host-only by definition.
-    A scalar-type call (`np.float32(...)`) is a creation only when its arguments are pure
-    constants, because `np.float32(x[i])` is a device cast instead.
-    """
-    if isinstance(node, ast.Constant):
-        return False
-    if isinstance(node, ast.Name):
-        return False
-    if isinstance(node, ast.Attribute):
-        return is_numpy(node.value)
-    if isinstance(node, ast.Call):
-        func_node:ast.expr = node.func
-        if not (isinstance(func_node, ast.Attribute) and is_numpy(func_node.value)):
-            return False
-        name:str = func_node.attr
-        if name in _NUMPY_DEVICE_TYPES or name in FunctionTranslator.RETURN_SLOT_TYPES:
-            return all(isinstance(arg, ast.Constant) for arg in node.args)
-        if name not in _HOST_CREATION_FUNCTIONS and not name.endswith("_like"):
-            return False
-        # The arguments may be ordinary values (a shape, a count, an input array); what
-        # makes the statement host-only is the numpy constructor itself. Only a dtype
-        # argument has to be a type name, which is why it is not evaluated on the device.
-        return True
-    return False
-
-
-def _is_creation_expression(node:ast.expr, func:Callable)->bool:
-    """Whether a right-hand side is a creation, answering for one expression alone.
-
-    The launcher needs this to tell a creation from a plain assignment it lifted for a
-    creation's sake: only the creation travels to the device as a parameter.
-    """
-    globalns:Dict[str, object] = getattr(func, "__globals__", {})
-    return _is_creation_shape(
-        node, lambda candidate: isinstance(candidate, ast.Name)
-        and globalns.get(candidate.id) is np)
-
-
-def _creation_target_of(stmt:ast.stmt)->Optional[ast.expr]:
-    """The right-hand side of `name = expr` / `name: T = expr`, when the target is a plain name.
-
-    An annotated assignment is the same statement to python -- the annotation is only a
-    hint for readers and type checkers -- so `x: np.ndarray = np.zeros_like(y)` creates an
-    array exactly like `x = np.zeros_like(y)`. Recognising only the unannotated form made
-    the annotated one fall through to the device code, which has no numpy.
-    """
-    if isinstance(stmt, ast.Assign):
-        if len(stmt.targets) != 1:
-            return None
-        target:ast.expr = stmt.targets[0]
-        return stmt.value if isinstance(target, ast.Name) else None
-    if isinstance(stmt, ast.AnnAssign):
-        if stmt.value is None:
-            return None  # `x: np.ndarray` declares nothing, so there is nothing to create
-        return stmt.value if isinstance(stmt.target, ast.Name) else None
-    return None
-
-
-def _constant_int_of(node:ast.expr)->Optional[int]:
-    """The integer an expression is a literal for, or None.
-
-    `-1` reaches the translator as `UnaryOp(USub, Constant(1))`, not as a negative
-    constant -- the parser does not fold it -- so a rule written against `ast.Constant`
-    alone silently misses every negative literal. That is exactly where it matters: a
-    negative index and a reversed slice are both written that way.
-    """
-    if isinstance(node, ast.Constant) and isinstance(node.value, int) \
-            and not isinstance(node.value, bool):
-        return int(node.value)
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-        inner:Optional[int] = _constant_int_of(node.operand)
-        return None if inner is None else -inner
-    return None
-
-
-def _assigned_name_of(stmt:ast.stmt)->Optional[str]:
-    """The plain name an assignment binds, for either assignment spelling."""
-    if isinstance(stmt, ast.Assign):
-        if len(stmt.targets) != 1:
-            return None
-        target:ast.expr = stmt.targets[0]
-        return target.id if isinstance(target, ast.Name) else None
-    if isinstance(stmt, ast.AnnAssign):
-        return stmt.target.id if isinstance(stmt.target, ast.Name) else None
-    return None
-
-
-def _magic_loop_index(body:List[ast.stmt])->int:
-    """The index of the outermost loop that becomes work-item dispatch, or len(body).
-
-    The same detection the translator uses, reduced to "where does the body's host region
-    end": statements before it run once, everything from it on runs per work item.
-    """
-    for index, stmt in enumerate(body):
-        if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt):
-            return index
-    return len(body)
-
-
-def _is_shape_access(node:ast.expr)->bool:
-    """True for `<X>.shape[0]`, the only bound a work-item dispatch may take.
-
-    This is the same shape `_shape0_range_param` insists on when it decides the loop
-    is the dispatch: a plain count, a start/step, or any other expression describes a
-    *serial* loop the work item runs itself, and is not the iteration domain.
-    """
-    return (isinstance(node, ast.Subscript)
-            and isinstance(node.value, ast.Attribute) and node.value.attr == "shape"
-            and isinstance(node.slice, ast.Constant) and node.slice.value == 0)
-
-
-def _is_magic_loop_stmt(stmt:ast.stmt)->bool:
-    """True for a loop *shaped* like the work-item dispatch.
-
-    The test has to be as strict as the dispatch itself, because its other callers
-    (`_outside_loops`, `magic_loop_phases`, `_translate_phase_kernels`) use it to decide
-    which statements are host code. `for j in range(lane * 4, lane * 4 + 4)` is an ordinary
-    serial loop over four elements, but it used to count as the dispatch -- which pushed
-    every statement above it into the host region, where a device-only builtin such as
-    `zeros_per_group` cannot run (it reported "only available inside a @kernel function
-    body" for a body that plainly was one). `_is_secondary_magic_loop` already told a
-    literal `range(8)` apart from a real domain; this predicate has to agree with it.
-    """
-    if not isinstance(stmt, ast.For):
-        return False
-    iterator:ast.expr = stmt.iter
-    if not isinstance(iterator, ast.Call):
-        return False
-    func:ast.expr = iterator.func
-    if isinstance(func, ast.Name) and func.id == "range":
-        # One argument, and it addresses an array's first dimension: the dispatch form.
-        return (len(iterator.args) == 1 and not iterator.keywords
-                and _is_shape_access(iterator.args[0]))
-    if isinstance(func, ast.Name) and func.id == "enumerate":
-        # `enumerate([1.0, 2.0])` is a dispatch too: the domain is a literal list, whose
-        # length and elements are compile-time constants.
-        if len(iterator.args) == 1 and not iterator.keywords:
-            argument:ast.expr = iterator.args[0]
-            if isinstance(argument, (ast.List, ast.Tuple)):
-                return all(isinstance(e, ast.Constant) and isinstance(e.value, (int, float))
-                           and not isinstance(e.value, bool) for e in argument.elts)
-        return len(iterator.args) == 1 and not iterator.keywords
-    if (isinstance(func, ast.Attribute) and func.attr in ("ndindex", "ndenumerate")
-            and isinstance(func.value, ast.Name)):
-        return True
-    return False
-
-
-_UNRESOLVED:object = object()
-
-# Python builtins are never kernel parameters: they resolve through the translator's own
-# dispatch (print, len, range, ...) or are rejected with a message of their own.
-_BUILTIN_NAMES:Set[str] = set(dir(builtins))
-
-
-def _declared_scope_names(tree:ast.AST)->Set[str]:
-    """Names the function declares with `nonlocal`/`global`.
-
-    Python requires such a declaration before a nested function may assign to an outer
-    name, so the declarations are exactly the writable outer variables. Both statements
-    are otherwise unsupported in a kernel body, which is why this scan happens before the
-    body is visited instead of in the statement dispatch.
-    """
-    names:Set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Nonlocal):
-            names.update(node.names)
-        elif isinstance(node, ast.Global):
-            names.update(node.names)
-    return names
-
-
-def _outer_scope_names(func:object)->Set[str]:
-    """The names this function's body declares `nonlocal`/`global`.
-
-    Those travel through the outer scope's own device slot: the *device* writes them, so
-    the host must not run the statement that assigns them (see `_host_region_values`).
-    """
-    try:
-        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
-    except SyntaxError:
-        return set()
-    if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
-        return set()
-    return _declared_scope_names(tree.body[0])
-
-
-def type_sig(types:List[object])->str:
-    parts:List[str] = []
-    for t in types:
-        parts.append((t[1] + "[]") if is_ptr(t) else str(t))
-    return "_".join(parts) or "void"
-
-
-def short_hash(text:str)->str:
-    return hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
 
 
 class FunctionTranslator:
@@ -2630,7 +835,7 @@ class FunctionTranslator:
         if not (isinstance(binding, tuple) and is_ptr(binding)
                 and isinstance(binding[1], str)):
             return False
-        from . import structs as _structs_module  # noqa: PLC0415
+        from .. import structs as _structs_module  # noqa: PLC0415
 
         if _structs_module.dtype_for(binding[1]) is None:
             return False
@@ -3318,7 +1523,7 @@ class FunctionTranslator:
                 # member through the pointer (the -3 marker in _nd_bound_code, and the
                 # member name in work_size_members for the host).
                 member:str = self.self_struct_members[node.attr]
-                from . import structs as _structs_module  # noqa: PLC0415
+                from .. import structs as _structs_module  # noqa: PLC0415
 
                 struct_dtype:Optional[np.dtype] = _structs_module.dtype_for(
                     self.self_struct_type[1])
@@ -4768,7 +2973,7 @@ class FunctionTranslator:
 
     def _return_param_type(self, t:object)->str:
         """The C element type of a value slot."""
-        from . import structs
+        from .. import structs
 
         if is_vec(t):
             return t
@@ -4788,8 +2993,8 @@ class FunctionTranslator:
         `pygpgpu.vec_types.layout.pack` re-lays it out for the backend that needs padding,
         the same way it does for vector arguments.
         """
-        from ..vec_types.layout import _host_classes
-        from . import structs
+        from ...vec_types.layout import _host_classes
+        from .. import structs
 
         entry:ReturnLayoutEntry = (self.return_layout or [])[index]
         if is_vec(entry["type"]):
@@ -4935,7 +3140,7 @@ class FunctionTranslator:
 
     def _private_element_type(self, dtype_value:object)->Optional[Translated]:
         """(C element type, translator type) for a private array's element, or None."""
-        from . import structs
+        from .. import structs
 
         if dtype_value is None:
             dtype_value = np.float64
@@ -4943,7 +3148,7 @@ class FunctionTranslator:
             dtype:np.dtype = np.dtype(dtype_value)
         except TypeError:
             return None
-        from ..vec_types.layout import _vector_dtype_name
+        from ...vec_types.layout import _vector_dtype_name
 
         vector:Optional[str] = _vector_dtype_name(dtype)
         if vector is not None:
@@ -5082,7 +3287,7 @@ class FunctionTranslator:
         if isinstance(target, ast.Attribute):
             base_code, base_t = self._visit_expression(target.value)
             if isinstance(base_t, tuple) and is_ptr(base_t):
-                from . import structs as _structs_module  # noqa: PLC0415
+                from .. import structs as _structs_module  # noqa: PLC0415
 
                 dtype:Optional[np.dtype] = _structs_module.dtype_for(base_t[1])
                 if dtype is not None and self._emit_property_write(
@@ -5133,7 +3338,7 @@ class FunctionTranslator:
         # own state) is still refused: device code has nowhere to write it back from.
         if (self.self_param and isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
                 and target.value.id == self.self_param):
-            from . import structs as _structs_module  # noqa: PLC0415
+            from .. import structs as _structs_module  # noqa: PLC0415
 
             member:str = self.self_struct_members.get(target.attr, target.attr)
             receiver_t:DeviceType = self._lookup(self.self_param)
@@ -5219,7 +3424,7 @@ class FunctionTranslator:
                 self._emit(f"{decl}{name} = {tmp};")
             return
         code, t = self._visit_expression(node.value)
-        from . import structs as _structs_module
+        from .. import structs as _structs_module
 
         if is_ptr(t) and not (isinstance(t, tuple) and _structs_module.dtype_for(t[1]) is not None):
             # A pointer to a *structure* is an aliasable handle (`q = item; q.a` counts as a
@@ -6538,7 +4743,7 @@ class FunctionTranslator:
 
     def _target_is_bool_member(self, target:ast.expr, target_t:object, value_t:object)->bool:
         """Whether a member store lands in a bool-typed field while holding a wider type."""
-        from . import structs  # noqa: PLC0415
+        from .. import structs  # noqa: PLC0415
 
         if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)):
             return False
@@ -7027,7 +5232,7 @@ class FunctionTranslator:
         `quatd * float3` is a `double3`. Widening only ever goes that way, so nothing is
         rounded down; each mixed combination has its own function in the header.
         """
-        from . import quaternion  # noqa: PLC0415
+        from .. import quaternion  # noqa: PLC0415
 
         # A structure operand travels as a pointer, so a quaternion variable is `quatf*`:
         # unwrap it for the type, and dereference it in the emitted expression.
@@ -7588,7 +5793,7 @@ class FunctionTranslator:
         `Ray_at`. Returns None when the operand carries no such method, which leaves the
         ordinary operator path (a scalar or a vector operation) to answer.
         """
-        from . import structs as _structs_module  # noqa: PLC0415
+        from .. import structs as _structs_module  # noqa: PLC0415
 
         base:str = t[1] if isinstance(t, tuple) and is_ptr(t) else t
         if not isinstance(base, str):
@@ -7626,7 +5831,7 @@ class FunctionTranslator:
     def _structure_operator_message(self, operator:str, lt:object, rt:object,
                                     node:ast.AST)->str:
         """Why a structure cannot take part in an operator, and what to write instead."""
-        from . import structs  # noqa: PLC0415
+        from .. import structs  # noqa: PLC0415
 
         operand:object = lt if self._is_structure_operand(lt) else rt
         dtype:object = structs.dtype_for(operand)
@@ -8163,7 +6368,7 @@ class FunctionTranslator:
         A string subscript is numpy's spelling for a record field, and it works for a vector
         too (`v["x"]`). Both are member access in C, so both are emitted the same way.
         """
-        from . import structs
+        from .. import structs
 
         index:ast.expr = node.slice
         if not (isinstance(index, ast.Constant) and isinstance(index.value, str)):
@@ -8436,7 +6641,7 @@ class FunctionTranslator:
                 # The receiver may be a structure pointer instead of a field set
                 # (`def hit(self, ...)` called with a Scene): its scalar members are
                 # fields of that pointer.
-                from . import structs as _structs_module  # noqa: PLC0415
+                from .. import structs as _structs_module  # noqa: PLC0415
 
                 pointer_t:DeviceType = self._lookup(self.self_param)
                 if isinstance(pointer_t, tuple) and is_ptr(pointer_t):
@@ -8449,7 +6654,7 @@ class FunctionTranslator:
                             return (f"({self.self_param})->{node.attr}",
                                     pointer_members[node.attr])
             if node.attr in self.self_struct_members:
-                from . import structs as _structs_module  # noqa: PLC0415
+                from .. import structs as _structs_module  # noqa: PLC0415
 
                 member:str = self.self_struct_members[node.attr]
                 struct_dtype:Optional[np.dtype] = _structs_module.dtype_for(
@@ -8471,7 +6676,7 @@ class FunctionTranslator:
                 # structure parameter.
                 receiver_t:DeviceType = self._lookup(self.self_param)
                 if isinstance(receiver_t, tuple) and is_ptr(receiver_t):
-                    from . import structs as _structs_module  # noqa: PLC0415
+                    from .. import structs as _structs_module  # noqa: PLC0415
 
                     dtype:Optional[np.dtype] = _structs_module.dtype_for(receiver_t[1])
                     if dtype is not None:
@@ -8560,7 +6765,7 @@ class FunctionTranslator:
         # A structure member, read with python's attribute spelling. It cannot be confused
         # with a vector component: the branch above has already claimed every base that is a
         # vector, so a name reaching here is only a member if the base is a structure.
-        from . import structs
+        from .. import structs
 
         if isinstance(base_t, tuple) and is_ptr(base_t):
             # `p.x` on a structure pointer: a structure argument always travels as one, so
@@ -8612,7 +6817,7 @@ class FunctionTranslator:
         One header serves both widths; what the compile step needs to know is which blocks to
         enable, because a `double` block does not compile on a device without fp64.
         """
-        from . import quaternion  # noqa: PLC0415
+        from .. import quaternion  # noqa: PLC0415
 
         need:Optional[str] = quaternion.needs(dtype)
         if need is not None:
@@ -8626,7 +6831,7 @@ class FunctionTranslator:
         class a kernel has no meaning for. The quaternion meaning is what the call is after,
         so it maps onto the generated `{type}_conjugate` instead.
         """
-        from . import quaternion  # noqa: PLC0415
+        from .. import quaternion  # noqa: PLC0415
 
         def called_name(expr:ast.expr)->Optional[str]:
             if isinstance(expr, ast.Name):
@@ -8791,7 +6996,7 @@ class FunctionTranslator:
                 # layout, and a device type is generated from it, so `Ray(origin, direction)`
                 # is a structure value -- a compound literal keyed by member name. Every
                 # other class stays refused: there is nothing on the device to instantiate.
-                from . import structs
+                from .. import structs
 
                 structure:Optional[np.dtype] = structs.structure_dtype_of(target)
                 if structure is not None:
@@ -8825,7 +7030,7 @@ class FunctionTranslator:
                 # kernel's own class: inside `Camera.render`, `scene.ray_color(...)` reaches
                 # a Scene method, and a helper bound to a Scene receiver calls Scene's own
                 # methods through `self.`. The receiver's dtype names that class.
-                from . import structs as _structs_module  # noqa: PLC0415
+                from .. import structs as _structs_module  # noqa: PLC0415
 
                 receiver_t:DeviceType = self._lookup(self.self_param)
                 receiver_owner:Optional[type] = None
@@ -8966,7 +7171,7 @@ class FunctionTranslator:
         if known is not None:
             return known
         param_types:List[object] = [self._visit_expression(a)[1] for a in node.args]
-        from .decorator import _positional_argument_names
+        from ..decorator import _positional_argument_names
 
         expected:int = len(_positional_argument_names(raw_func))
         if len(param_types) != expected:
@@ -8988,7 +7193,7 @@ class FunctionTranslator:
         for deeper in callee.nested_kernels:
             if deeper not in self.nested_kernels:
                 self.nested_kernels.append(deeper)
-        from .decorator import _dependency_order
+        from ..decorator import _dependency_order
 
         for entry in _dependency_order(self.device_cache):
             code:str = entry["code"]
@@ -9009,7 +7214,7 @@ class FunctionTranslator:
         qualifies: a bare record dtype has no methods, and two classes with one layout share
         a dtype, so the dtype alone cannot say whose methods to compile.
         """
-        from . import structs
+        from .. import structs
 
         base_code, base_t = self._visit_expression(func.value)
         # A complex value's methods are numpy's, and the device header spells the same
@@ -9725,7 +7930,7 @@ class FunctionTranslator:
         once, before the translator runs, in the same scan that handles an object argument;
         this only looks the answer up.
         """
-        from . import objects  # noqa: PLC0415
+        from .. import objects  # noqa: PLC0415
 
         dtype:Optional[np.dtype] = objects.constructed_structure(target)
         if dtype is None:
@@ -9734,7 +7939,7 @@ class FunctionTranslator:
 
     def _is_structure_class(self, candidate:object)->bool:
         """Whether a global name is a `ctypes.Structure` subclass with a device layout."""
-        from . import structs  # noqa: PLC0415
+        from .. import structs  # noqa: PLC0415
 
         return structs.structure_dtype_of(candidate) is not None
 
@@ -9751,7 +7956,7 @@ class FunctionTranslator:
         constructor parameters, not the field order: the fields are sorted by name, so the
         first argument is not necessarily the first field.
         """
-        from . import objects, structs  # noqa: PLC0415
+        from .. import objects, structs  # noqa: PLC0415
 
         parameters:List[str] = []
         if isinstance(candidate, np.dtype):
@@ -9803,7 +8008,7 @@ class FunctionTranslator:
         are positional in declaration order, which is also the order python's
         `ctypes.Structure.__init__` assigns them.
         """
-        from . import structs
+        from .. import structs
 
         if dtype not in self.private_structs:
             # The typedef has to be emitted even when the structure never appears in the
@@ -9823,7 +8028,7 @@ class FunctionTranslator:
             if dtype in self.plain_class_dtypes:
                 owner:Optional[type] = structs.declared_class(dtype)
                 if owner is not None:
-                    from . import objects  # noqa: PLC0415
+                    from .. import objects  # noqa: PLC0415
 
                     parameters = objects.constructed_parameters(owner) or order
                 if len(args) > len(parameters):
@@ -9861,7 +8066,7 @@ class FunctionTranslator:
 
     def _zero_value(self, member_type:object)->str:
         """The zero of a member's device type, for an omitted constructor argument."""
-        from . import structs
+        from .. import structs
 
         if is_ptr(member_type):
             return "0"
@@ -9878,7 +8083,7 @@ class FunctionTranslator:
     def _structure_member_value(self, struct_name:str, member:str, member_type:object,
                                 code:str, t:object, node:ast.expr)->str:
         """Coerce one constructor argument to the member's own device type."""
-        from . import structs
+        from .. import structs
 
         if is_ptr(member_type):
             self._error(
@@ -9906,7 +8111,7 @@ class FunctionTranslator:
 
     def _member_is_bool(self, struct_name:str, member:str)->bool:
         """Whether a structure member's layout type is a bool."""
-        from . import structs  # noqa: PLC0415
+        from .. import structs  # noqa: PLC0415
 
         dtype:object = structs.dtype_for(struct_name)
         if dtype is None or member not in (dtype.names or ()):
@@ -10067,7 +8272,7 @@ class FunctionTranslator:
             if args:
                 self._error("gpu.barrier() takes no arguments", node)
             if self._metal_syntax:
-                from .metal_codegen import barrier
+                from ..metal_codegen import barrier
                 return barrier(), "void"
             return emit_barrier(self.backend), "void"
 
@@ -10983,12 +9188,12 @@ class FunctionTranslator:
 
     def _prologue_parameter_declarations(self)->List[str]:
         """`uint3 _mtl_thread_position [[thread_position_in_grid]]`, one per axis."""
-        from .metal_codegen import prologue_parameters
+        from ..metal_codegen import prologue_parameters
         return prologue_parameters()
 
     def _prologue_parameter_arguments(self)->List[str]:
         """The names a call site forwards for the six prologue parameters."""
-        from .metal_codegen import PROLOGUE_PARAMETERS
+        from ..metal_codegen import PROLOGUE_PARAMETERS
         return [name for _t, name, _a in PROLOGUE_PARAMETERS]
 
     def render_device(self, c_name:str,
@@ -11007,7 +9212,7 @@ class FunctionTranslator:
             if is_ptr(t):
                 # Every structure parameter is a pointer, and one whose members the body
                 # never writes is `const` -- the same rule the kernel signature follows.
-                from . import structs as _structs_module  # noqa: PLC0415
+                from .. import structs as _structs_module  # noqa: PLC0415
 
                 is_struct:bool = (_structs_module.dtype_for(t[1]) is not None
                                   if isinstance(t[1], str) else False)
@@ -11045,7 +9250,7 @@ class FunctionTranslator:
                 params.append(f"{self._device_type(t)} {device_name(name)}")
         # A structure in the signature needs its typedef emitted too, and this helper's own
         # `private_structs` is what the caller collects.
-        from . import structs
+        from .. import structs
 
         for candidate in [t[1] if is_ptr(t) else t for _, t in self.params]:
             dtype:object = structs.dtype_for(candidate) if isinstance(candidate, str) else None
@@ -11165,7 +9370,7 @@ class FunctionTranslator:
                 # A structure parameter is a pointer, and one the body never writes is
                 # `const`: it says the member reads are all the callee does, which is the
                 # information a reader of the generated source needs.
-                from . import structs as _structs_module  # noqa: PLC0415
+                from .. import structs as _structs_module  # noqa: PLC0415
 
                 is_struct:bool = (_structs_module.dtype_for(t[1]) is not None
                                   if isinstance(t[1], str) else False)
@@ -11210,7 +9415,7 @@ class FunctionTranslator:
         # fills the attributes in. The names are the ones the prelude's macros expand
         # onto, so a body keeps its OpenCL spelling.
         if self._metal_syntax:
-            from .metal_codegen import prologue_parameters
+            from ..metal_codegen import prologue_parameters
             params.extend(prologue_parameters())
         return params
 
@@ -11227,7 +9432,7 @@ class FunctionTranslator:
         params:List[str] = self.parameter_declarations()
 
         if self._metal_syntax:
-            from .metal_codegen import kernel_prefix
+            from ..metal_codegen import kernel_prefix
             prefix:str = kernel_prefix() + " "   # "kernel void ", the return type included
         else:
             prefix = "__kernel " if self._opencl_syntax else "__global__ "
@@ -11277,7 +9482,7 @@ class FunctionTranslator:
         The caller emits one typedef block for the whole source, so the kernel and each
         helper contribute their own set and duplicates are dropped.
         """
-        from . import structs
+        from .. import structs
 
         dtypes:List[object] = []
         for name, t in list(self.params):
@@ -11302,7 +9507,7 @@ class FunctionTranslator:
         than declared by the user. Nested structures come first (`render_structures` orders
         them), and a member that is a vector already has its device spelling.
         """
-        from . import structs
+        from .. import structs
 
         dtypes:List[object] = []
         for name, t in list(self.params):
@@ -11319,3 +9524,9 @@ class FunctionTranslator:
             if dtype is not None and dtype not in dtypes:
                 dtypes.append(dtype)
         return structs.render_structures(dtypes, self.backend)
+
+
+# The module-level creation check is re-bound here under the name it always had: the
+# class carries a *method* of the same name (one argument fewer, bound to self), and the
+# import above aliased the function so the two could share the class body's namespace.
+_is_creation_expression = _module_is_creation_expression
