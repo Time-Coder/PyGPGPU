@@ -130,6 +130,11 @@ class _CompileWriteMixin:
         # exactly as a helper's quaternion widths do.
         plan.complex_needs:Set[str] = set(plan.translator.complex_needs)
         plan.complex_needs.update(plan.member_complex_needs)
+        # A multi-loop body's device code lives on its phase translators: the main one
+        # never visits a loop, so its own needs are empty while the passes that compute
+        # with complex values live on the phases. Their blocks have to travel too.
+        for phase in getattr(plan.translator, "phase_translators", ()):
+            plan.complex_needs.update(phase.complex_needs)
         for entry in plan.device_cache.values():
             plan.complex_needs.update(entry.get("complex_needs") or ())
         if plan.complex_needs:
