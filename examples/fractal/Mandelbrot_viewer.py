@@ -2,9 +2,14 @@
 
 Every pixel iterates its own `c = left_top + j*value_per_pixel` in float64, so the
 picture stops resolving once one pixel is finer than a double's 1e-16, which at
-200 pixels per unit is a scale of about 1e14. `Mandelbrot_viewer.py` is the same
-viewer with a reference orbit and float64 deltas, which goes far deeper; this file
-is what that one is compared against.
+200 pixels per unit is a scale of about 1e14. `Mandelbrot_viewer_high_precision.py`
+is the same viewer with a reference orbit and float64 deltas, which goes far
+deeper; this file is what that one is compared against.
+
+The coloring is a relief style instead of a flat palette: the first pass renders
+the smooth escape count and an interior stripe field into buffers, and the second
+pass lights them like surfaces -- the exterior becomes dark embossed terraces,
+one smooth valley per escape step, and the interior becomes polished blue metal.
 """
 
 from typing import Optional
@@ -12,8 +17,8 @@ from typing import Optional
 import numpy as np
 import math
 
-from pygpgpu import kernel, set_print_info, set_type_map
-from pygf import float2, color3f
+from pygpgpu import kernel, normalize, set_print_info, set_type_map
+from pygf import float2, float3
 
 import matplotlib.pyplot as plt
 from matplotlib.backend_bases import MouseButton, MouseEvent, ResizeEvent
@@ -39,56 +44,163 @@ class MandelbrotViewer:
         self.figure: Optional[Figure] = None
         self.image_handle: Optional[AxesImage] = None
         self.text_handle = None
+        # Light direction (x: left-to-right, y: top-to-bottom, z: toward the
+        # viewer), pre-normalized. A vector member travels as one structure
+        # member on both sides, so the kernel reads it per component.
+        self.light_dir: float3 = normalize(float3(-0.35, -0.45, 0.82))
 
         self.update_params()
 
     def update_params(self):
+        # The fields are rendered on an ss-times finer grid than the window
+        # and the shaded result is box-downsampled into `image`: that is the
+        # anti-aliasing, and it is what keeps the boundary speckle-free.
+        self.ss: int = 2
         self.value_per_pixel = 1 / (self.scale * self.default_pixels_per_value)
+        self.height: int = int(self.image.shape[0]) * self.ss
+        self.width: int = int(self.image.shape[1]) * self.ss
+        self.vpp_field: float = self.value_per_pixel / self.ss
         self.left_top_complex = complex(
-            self.view_center.real - 0.5*self.value_per_pixel*self.image.shape[1],
-            self.view_center.imag + 0.5*self.value_per_pixel*self.image.shape[0]
+            self.view_center.real - 0.5*self.vpp_field*self.width,
+            self.view_center.imag + 0.5*self.vpp_field*self.height
         )
         self.max_iter: int = int(100 * np.log10(1 + self.scale) + 500)
+        # Per-pixel fields filled by the first pass of `draw` and shaded by the
+        # second: `field_s` already holds the *height* (exterior terraces,
+        # interior domes) and `field_t` only marks the interior (1.0) against
+        # the exterior (-1.0) so the shading picks the material.
+        self.field_s = np.zeros((self.height, self.width), dtype=np.float64)
+        self.field_t = np.zeros((self.height, self.width), dtype=np.float64)
+        self.image_f = np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
     @staticmethod
-    def escape_steps(c: complex, max_iter: int) -> float:
-        zn = 0j
-        abs_zn = abs(zn)
-        n: int = 0
-        while abs_zn <= 2 and n < max_iter:
-            zn = zn**2 + c
-            abs_zn = abs(zn)
-            n += 1
-
-        if n == max_iter or abs_zn <= 1.0:
-            return float(n)
-
-        smooth = n + 1 - np.log2(np.log2(abs_zn))
-        return smooth
-
-    @staticmethod
-    def smooth_jet_colormap(x: float)->color3f:
-        return color3f(
-            math.exp( - 60 * abs(x-3/4)**3.2 ),
-            math.exp( - 60 * abs(x-2/4)**3.2 ),
-            math.exp( - 60 * abs(x-1/4)**3.2 )
-        )
+    def valley_floor(s: float) -> float:
+        # Depth of one escape-step terrace: a smooth valley bottoming at the
+        # integer step count, so successive counts form matching terraces.
+        k: float = math.floor(s + 0.5)
+        return math.exp(-0.5 * abs((s - k) * 2.5)**2)
 
     @kernel
-    def draw(self):
-        for i, j in np.ndindex(self.image.shape[0], self.image.shape[1]):
+    def draw_fields(self):
+        # Pass 1: fill the scalar fields (escape count, interior stripe).
+        for i, j in np.ndindex(self.height, self.width):
             c = complex(
-                self.left_top_complex.real + j*self.value_per_pixel,
-                self.left_top_complex.imag - i*self.value_per_pixel
+                self.left_top_complex.real + j*self.vpp_field,
+                self.left_top_complex.imag - i*self.vpp_field
             )
-            steps = self.escape_steps(c, self.max_iter)
-            color = self.smooth_jet_colormap(steps/self.max_iter)
-            self.image[i, j, 0] = 255 * color.r
-            self.image[i, j, 1] = 255 * color.g
-            self.image[i, j, 2] = 255 * color.b
+            zn = 0j
+            abs_zn = abs(zn)
+            n: int = 0
+            sum_r: float = 0.0
+            while abs_zn <= 2 and n < self.max_iter:
+                zn = zn**2 + c
+                abs_zn = abs(zn)
+                n += 1
+                sum_r += abs_zn
+            if n < self.max_iter:
+                # Exterior: the terrace height itself -- one smooth valley
+                # per escape step, fading with the count into a calm plain.
+                s: float = float(n) + 1 - np.log2(np.log2(abs_zn))
+                self.field_s[i, j] = (0.30 + 0.70*self.valley_floor(s))*math.exp(-0.03*s)
+                self.field_t[i, j] = -1.0
+            else:
+                # Interior: the dome -- mean orbit radius, a smooth
+                # functional of a normal family, squared and scaled (0.01
+                # deep inside to 0.5 at the rim, calibrated) and finally
+                # raised to 1.5 so the attracting center sits in a flat
+                # spoon instead of a pinched cone. `field_t` only marks
+                # the interior; the dome carries all of the shading.
+                mean_r: float = sum_r / float(self.max_iter)
+                dome: float = min(1.0, 2.0*mean_r*mean_r)
+                self.field_s[i, j] = dome*dome*math.sqrt(dome)
+                self.field_t[i, j] = 1.0
+
+    @kernel
+    def shade(self):
+        # Pass 2: shade the fields as a lit, embossed surface.
+        for i, j in np.ndindex(self.height, self.width):
+            t = self.field_t[i, j]
+            i1 = i + 1 if i + 1 < self.height else i
+            i0 = i - 1 if i > 0 else i
+            j1 = j + 1 if j + 1 < self.width else j
+            j0 = j - 1 if j > 0 else j
+            # Central-difference normal of the height field, then the Blinn
+            # terms in scalar components. The soft z flattens the slopes:
+            # wide, calm highlights instead of hard chrome ripples. The
+            # interior dome varies over hundreds of pixels, so its raw
+            # per-pixel gradient is nearly flat -- it gets a boost to read
+            # as an inflated cushion.
+            dx = self.height_at(i, j1) - self.height_at(i, j0)
+            dy = self.height_at(i1, j) - self.height_at(i0, j)
+            boost: float = 1.0
+            if t >= 0.0:
+                boost = 22.0
+            dx = boost*dx
+            dy = boost*dy
+            nz = 0.55
+            inv_len = 1 / math.sqrt(dx*dx + dy*dy + nz*nz)
+            nx: float = -2.0*dx*inv_len
+            ny: float = 2.0*dy*inv_len
+            shade = self.light_dir.x*nx + self.light_dir.y*ny + self.light_dir.z*nz*inv_len
+            if shade < 0.0:
+                shade = 0.0
+            # Half vector: the view direction is the +z axis, so it is the
+            # normalized (light + view) sum.
+            hx: float = self.light_dir.x
+            hy: float = self.light_dir.y
+            hz: float = self.light_dir.z + 1.0
+            h_inv = 1 / math.sqrt(hx*hx + hy*hy + hz*hz)
+            h_dot = (nx*hx + ny*hy + nz*inv_len*hz) * h_inv
+            if h_dot < 0.0:
+                h_dot = 0.0
+            # Exterior: dark charcoal terraces. The material constants are
+            # declared before the branch and only assigned inside it: a name
+            # first bound inside a block does not survive it.
+            mr: float = 0.10
+            mg: float = 0.11
+            mb: float = 0.13
+            spec: float = 3.0
+            shininess: float = 32.0
+            if t >= 0.0:
+                # Interior: deep sapphire. The dome shape carries the light:
+                # the rim turns away from the head light, so every bulb gets
+                # a bright crest on its upper-left flank and falls into deep
+                # blue around the far side, with one soft highlight.
+                mr = 0.07
+                mg = 0.30
+                mb = 0.75
+                spec = 3.5
+                shininess = 16.0
+            glow = spec * h_dot**shininess
+            color_r = mr*(0.30 + 0.80*shade) + mr*glow
+            color_g = mg*(0.30 + 0.80*shade) + mg*glow
+            color_b = mb*(0.30 + 0.80*shade) + mb*glow
+            self.image_f[i, j, 0] = 255 * min(1.0, color_r)
+            self.image_f[i, j, 1] = 255 * min(1.0, color_g)
+            self.image_f[i, j, 2] = 255 * min(1.0, color_b)
+
+    def height_at(self, i: int, j: int) -> float:
+        # Pass 1 already wrote the height: terrace relief outside, the dome
+        # of each bulb inside.
+        return self.field_s[i, j]
+
+    def draw(self) -> None:
+        # Two @kernel methods rather than one two-loop body: the synced
+        # version's phase translators are built without the receiver
+        # structure (kernel/translator/phases.py), so every method body with
+        # more than one magic loop fails the argument-count check. Two
+        # single-loop kernels sidestep that and run in order here.
+        self.draw_fields["cuda"]()
+        self.shade["cuda"]()
+        # Box-downsample the supersampled render into the window image.
+        ss: int = self.ss
+        h: int = self.image.shape[0]
+        w: int = self.image.shape[1]
+        grouped = self.image_f.reshape(h, ss, w, ss, 3).astype(np.float64)
+        self.image[:, :, :] = grouped.mean(axis=(1, 3)).astype(np.uint8)
 
     def show(self):
-        self.draw["cuda"]()
+        self.draw()
         plt.rcParams['toolbar'] = 'None'
         
         self.figure = plt.figure()
@@ -112,7 +224,7 @@ class MandelbrotViewer:
         self.image = np.zeros((event.height, event.width, 3), dtype=np.uint8)
         self.update_params()
 
-        self.draw["cuda"]()
+        self.draw()
         self.image_handle.set_data(self.image)
         self.text_handle.set_text(f"center: {self.view_center:.4f}, scale: {self.scale:.2g}")
         self.image_handle.set_extent([0, event.width, event.height, 0])
@@ -122,7 +234,7 @@ class MandelbrotViewer:
         self.figure.canvas.draw_idle()
 
     def redraw(self) -> None:
-        self.draw["cuda"]()
+        self.draw()
         self.image_handle.set_data(self.image)
         self.text_handle.set_text(f"center: {self.view_center:.4f}, scale: {self.scale:.2g}")
         self.figure.canvas.draw_idle()
