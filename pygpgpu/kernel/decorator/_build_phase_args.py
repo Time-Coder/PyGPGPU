@@ -37,6 +37,14 @@ class _BuildPhaseArgsMixin:
             # values to the signature rather than assuming the prefix matches it.
             prefix_values:List[object] = list(plan.full[:plan.own_count])
             by_name:Dict[str, object] = dict(zip(plan.prefix_names, prefix_values))
+            # An array no host region touches stays on the device between passes: bound
+            # through the deferred-read-back view, its bytes are not copied home and back
+            # for a pass that only reads them on the GPU (see _phase_readback).
+            deferred:Dict[str, object] = getattr(plan, "deferred_arrays", None) or {}
+            for name, view in deferred.items():
+                if name in by_name:
+                    by_name[name] = view
+                    prefix_values[plan.prefix_names.index(name)] = view
             # Only the names declared *before* the shape extents participate in the aligned
             # prefix: outer-scope values and host-created objects are declared after them and
             # the blocks below append those, so including them here would shift the extents.

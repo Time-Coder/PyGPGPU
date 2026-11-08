@@ -12,6 +12,8 @@ import concurrent.futures
 import ast
 from typing import Dict, List, Optional, Tuple
 
+from ._phase_readback import flush_deferred
+
 
 # Shared by every multi-pass submission of the process: the continuation work is small
 # (a host region and one enqueue), so a few workers serve every chain, and no thread is
@@ -59,6 +61,9 @@ class _PhaseAsyncMixin:
         def finish() -> None:
             """The tail: it runs once the last pass's read-backs have landed."""
             try:
+                # A deferred array's bytes are still on the device: bring them home before
+                # the tail (or the caller) reads the array.
+                flush_deferred(getattr(plan, "deferred_arrays", None) or {})
                 tail_result: object = self._run_host_region(
                     list(plan.launch_meta.get("body_tail")
                          or plan.launch_meta.get("phase_tail") or []),

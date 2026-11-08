@@ -14,6 +14,7 @@ from ...utils import local_size_for_global, detect_work_size
 from ..translator import (
     _unpack_count_message,
 )
+from ._phase_readback import deferred_arrays, deferred_view, flush_deferred
 
 
 class _RunLaunchMixin:
@@ -32,7 +33,6 @@ class _RunLaunchMixin:
         the host and returning.
         """
         self._sync_device(plan.backend, plan.device_obj)
-        plan.launch_args:List[object] = self._build_phase_args(plan, plan.shape_sources, None)
         # A gap statement may assign a kernel argument (`n = n + 1` between two loops).
         # A parameter is python's function-local, so a later pass must receive the updated
         # value while the caller's own variable stays untouched. `plan.full` is the packed
@@ -41,6 +41,19 @@ class _RunLaunchMixin:
         plan.parameter_slots:Dict[str, int] = {
             name: index for index, name in enumerate(plan.prefix_names)}
         plan.written_parameters:Set[str] = set()
+        # Arrays no host region touches stay on the device between the passes (see
+        # _phase_readback); their bytes come home once, after the last pass. This runs
+        # before the argument lists are built, because a deferred array is bound through
+        # its deferred view rather than the caller's own array.
+        plan.deferred_arrays:Dict[str, object] = {}
+        if len(plan.active_kernels) > 1:
+            for plan.deferred_name, plan.deferred_value in deferred_arrays(plan).items():
+                plan.deferred_view = deferred_view(plan.deferred_value)
+                if plan.deferred_view is not None:
+                    plan.deferred_arrays[plan.deferred_name] = plan.deferred_view
+                    if plan.deferred_name in plan.parameter_slots:
+                        plan.full[plan.parameter_slots[plan.deferred_name]] = plan.deferred_view
+        plan.launch_args:List[object] = self._build_phase_args(plan, plan.shape_sources, None)
         # Vector values travel in the layout the backend's ABI defines: OpenCL pads a
         # 3-component vector to four slots, CUDA/HIP take the host's three. The host keeps
         # the three-component form everywhere, so each argument is converted here and its
@@ -312,6 +325,9 @@ class _RunLaunchMixin:
             args, instance,
             plan.carried_slots, plan.gap_slots, created_objects=plan.created_objects,
             outer_state=plan.outer_state, writable_outer=plan.tail_writable)
+        # The deferred arrays were only ever copied to the device; their bytes come home
+        # now, after the last pass (one copy each, instead of one per pass boundary).
+        flush_deferred(getattr(plan, "deferred_arrays", None) or {})
         for plan.packed_value, plan.unpack in plan.unpackers:
             plan.unpack(plan.packed_value)
         if plan.return_state and int(plan.return_state["claim"][0]):
