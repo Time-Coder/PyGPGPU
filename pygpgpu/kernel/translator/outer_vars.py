@@ -59,11 +59,24 @@ class _OuterVarsMixin:
         # but `co_names` still lists it for the global case, hence the `referenced` filter.
         referenced:Set[str] = self._referenced_names()
 
+        # The work-item queries and CUDA's index vectors are *names the translator resolves
+        # itself* (`_visit_name` reads them from their tables), so they are never outer
+        # values: `threadIdx` is a `_IndexVector` object at import time, and treating it as
+        # a plain object would try to synthesize a structure out of its axes.
+        from ..device_builtins.index import (
+            INDEX_BUILTINS,
+            INDEX_VECTOR_BUILTINS,
+            INDEX_VECTOR_OPENCL,
+        )
+
+        resolved_names:Set[str] = (set(INDEX_BUILTINS) | set(INDEX_VECTOR_BUILTINS)
+                                   | set(INDEX_VECTOR_OPENCL))
+
         candidates:List[str] = []
         for name in sorted(declared | cell_names | referenced | set(code.co_names)):
             if name in bound or name in self.outer_vars:
                 continue
-            if name in _BUILTIN_NAMES:
+            if name in _BUILTIN_NAMES or name in resolved_names:
                 continue
             candidates.append(name)
         for name in candidates:
@@ -107,7 +120,14 @@ class _OuterVarsMixin:
         from ..objects.kinds import _prefer_class_name, _structure_for, member_type
         from .. import structs
 
-        scan:object = scan_object(self.func, {name: value}, self.resolve_global, self.type_map)
+        # A scan that cannot describe the object is not an error here: the ordinary
+        # outer-variable path below reports its own refusal when the body really reads the
+        # name as a value, and a name that is not one (a handle, a helper) stays untouched.
+        try:
+            scan:object = scan_object(self.func, {name: value}, self.resolve_global,
+                                      self.type_map)
+        except (SyntaxError, ValueError, TypeError, AttributeError):
+            return None
         members:List[str] = list(scan.members.get(name, []))
         if not members:
             return None
