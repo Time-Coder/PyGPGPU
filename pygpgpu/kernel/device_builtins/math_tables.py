@@ -71,6 +71,11 @@ MATH_BUILTINS:Dict[str, Tuple[str, str]] = {
     "cbrt": ("cbrt", "cbrtf"),
 }
 
+# The scalar math intrinsics are part of the same namespace: a body that
+# writes `sqrt(z)` resolves through GENERIC_BUILTINS like `dot(a, b)`
+# does, so the merged table is what the registry reads.
+GENERIC_BUILTINS.update(MATH_BUILTINS)
+
 
 
 # The scalar math functions OpenCL C 1.2 has and CUDA spells with an `f` suffix. Both

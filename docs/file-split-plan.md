@@ -1,12 +1,16 @@
 # File split plan
 
 The repository has grown files that are far too large to review, diff or reason about:
-`cparser/ShaderBuiltins.py` is 16,874 lines, `kernel/translator.py` is 11,302, and 37 more
-first-party files are over 500 lines. This document is the plan for splitting them, in the
+`cparser/ShaderBuiltins.py` was 16,874 lines, `kernel/translator.py` was 11,302, and 37 more
+first-party files were over 500 lines. This document is the plan for splitting them, in the
 order the work should be done, with the mechanism for each move and the checks that keep the
 behaviour identical.
 
-It is a plan, not a record of work already done. Nothing here has been executed.
+**This plan has been executed.** Every first-party source file is now under the 500-line
+ceiling, and `line_budget.py` enforces it: it fails when a file crosses the ceiling, and it
+carries no allowlist, because there is nothing left to allow. The sections below are the
+plan as it was written; where the work turned out differently from the plan, the outcome is
+recorded in §9.
 
 ## 1. Size policy
 
@@ -59,7 +63,7 @@ dead-code decision above (§5.6).
 ## 2. Where the repository stands today
 
 Measured over first-party sources only (`.py`, `.cl`, `.cu`, `.hip`, `.metal`, `.h`, no
-`.pyi`, no `pcpp/`, no cache folders):
+`.pyi`, no `pcpp/`, no cache folders), **before** the work:
 
 - 391 files, 104,998 lines in total.
 - 11 files over 1,000 lines, 39 over 500, 68 over 300, 116 over 200.
@@ -74,6 +78,10 @@ Measured over first-party sources only (`.py`, `.cl`, `.cu`, `.hip`, `.metal`, `
 
 The concentration is the point: `kernel/translator.py` plus `kernel/decorator.py` alone are
 15,295 lines - 15% of the first-party tree - in two files.
+
+**After** the work (§9), the tree carries more files and fewer long ones: the same
+first-party sources now number about 640 files, and **none** is over 500 lines. The largest
+is `pygpgpu/opencl/oop/program_parser/__init__.py` at 496.
 
 ## 3. Split mechanisms
 
@@ -871,6 +879,52 @@ size: `opencl/oop/context.py`, `opencl/oop/program.py`, `cuda/libraries/cublas.p
 | Work is spent on code that cannot run | `cparser` | The legacy chain cannot be imported at all (`GLInfo` is missing). Decide delete-vs-keep before planning anything there (§5.6) |
 | The plan document itself goes stale | this file | Section 7's checker regenerates the numbers; the tables in §5 are the intent, and each phase's commit updates the row it finished |
 | A prose reference to a moved file survives the move | `AGENTS.md`, `docs/generated-source.md`, the READMEs | Update them in the split commit (§6 item 7); a facade fixes imports, not text |
+
+## 9. What was done
+
+The plan was executed in the order §4 gives. Every split is a move behind a re-export
+facade, and the verification baseline stayed green throughout. What follows is what the
+work actually produced, and where it differed from the plan.
+
+**The backlog is empty.** No first-party source file is over 500 lines. `line_budget.py`
+enforces the ceiling on every check, and it carries no allowlist: the plan's allowlist was
+the remaining backlog, and there is none. The largest file in the tree is
+`pygpgpu/opencl/oop/program_parser/__init__.py` at 496 lines.
+
+**What differed from the plan.**
+
+- **§5.6, the legacy `cparser` chain: deleted, not split.** The plan's option 0 was
+  recommended and chosen. `ShaderBuiltins.py` (16,874), `cparser.py` (1,200), `ctokens.py`
+  (319), `csyntaxtree.py` (88) and `minifyc.py` (311) could not be imported by anything --
+  `cparser.py` needs `pygpgpu.GLInfo`, which does not exist, and `ShaderBuiltins.py` needs
+  OpenGL, which is not a dependency -- so 18,792 lines of unreachable code went, along with
+  their five ruff and ty exclude entries. That is a quarter of the original backlog.
+- **§5.2.2, `decorator.py`: the two long methods were decomposed, not just moved.**
+  `_invoke_inner` (667 lines) became three phase methods sharing a `LaunchPlan`, and
+  `_compile` (496 lines) became three parts sharing a `CompilePlan`. The plan had recorded
+  both as "stated exceptions"; they were split after all, because the phases divide by
+  subject and the state they share travels in one record.
+- **§5.6, `ts_parser.py`: split by the walk's own groups.** The plan's five-file layout
+  became four mixin modules plus `node_kinds.py` for the node-type tuples the groups share.
+  The type policy -- the four Protocols and the two TypedDicts -- stayed in the facade, as
+  `AGENTS.md` requires.
+- **§5.7, the test files: the support module became a package.** The plan proposed
+  `tests/_<area>_support.py`; what the work needed was `tests/_helpers/` holding one module
+  per split area, because the helpers a group shares with another group cannot live in the
+  group. A pytest fixture has to live in a `conftest.py` to be found, so the fixtures moved
+  to each package's own `conftest.py`.
+- **§5.6, `kernel/include/complex.h`: split by the guards it already had.** The preamble
+  keeps the include guard, the qualifier and the two structures, and includes the float
+  block, the double block and the mixed block -- three files, one per `#ifdef`.
+
+**The check that keeps the ceiling.** `line_budget.py` walks the first-party sources and
+fails when a file crosses 500 lines. It skips the vendored runtime headers, the vendored
+preprocessor, the generated stubs and the compile caches, and it walks `.py`, `.cl`, `.cu`,
+`.hip`, `.metal` and `.h`. It runs as the third step of `check.py`, after ruff and ty.
+
+**The verification baseline.** ruff is clean; `ty` reports 74 diagnostics, one fewer than
+the 75 before the work (the `redundant-condition` that `pykernel_invoke.py:700` carried
+moved with the code and is no longer reported); and the whole suite passes.
 
 ## 10. What this plan does not do
 

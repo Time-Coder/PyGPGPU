@@ -7,9 +7,6 @@ from typing import (
     Tuple,
 )
 from .. import source_paths
-from .factory import (
-    kernel,
-)
 
 
 class _CompileKernelsMixin:
@@ -155,7 +152,7 @@ class _CompileKernelsMixin:
             "sites": plan.translator.return_site_layout(),
             "arg_indices": {plan.name: position for plan.name, position in plan.param_index.items()},
         }
-        return (kernel, plan.shape_sources, plan.work_size_dims, plan.local_sizes,
+        return (plan.launch, plan.shape_sources, plan.work_size_dims, plan.local_sizes,
                 plan.shapes_owner.uses_global_id, plan.image_samplers,
                 plan.returns if plan.translator.has_returns else None,
                 plan.translator.outer_vars,
