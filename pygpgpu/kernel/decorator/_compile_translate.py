@@ -100,5 +100,4 @@ class _CompileTranslateMixin:
         # One kernel per magic loop: a body with several renders several, launched in order
         # so the arrays stay on the device between them.
         plan.rendered:List[Tuple[str, str]] = plan.translator.render_kernels(plan.c_name)
-        plan.kernel_code:str = "\n\n".join(source for plan._, source in plan.rendered)
 

@@ -158,8 +158,13 @@ class _CompileWriteMixin:
         # Every top-level definition is separated by one blank line: helper from helper,
         # helper from kernel. A trailing blank on each piece makes the join produce exactly
         # one, and the final trim drops the one after the last definition.
+        # One piece per rendered kernel: the merge identifies a definition by its first
+        # signature line, so a multi-phase body joined into a single piece would replace
+        # only the first phase's group and leave the file's later phases in place -- the
+        # file then held those phases twice and the next compile refused them ("already
+        # been defined").
         plan.pieces:List[str] = [piece.rstrip("\n") for piece in plan.device_prefix]
-        plan.pieces.append(plan.kernel_code.rstrip("\n"))
+        plan.pieces.extend(source.rstrip("\n") for _, source in plan.rendered)
 
         plan.own_path:str = module_of({"source_file": plan.kernel_source_file})
         # The includes come first: a callee from another module is a declaration this file

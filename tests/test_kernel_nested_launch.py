@@ -273,3 +273,34 @@ def test_a_nested_launch_cannot_pick_a_backend():
     with pytest.raises(SyntaxError) as caught:
         picks_a_backend["cuda"](np.zeros(4, dtype=np.int32))
     assert "cannot be chosen" in str(caught.value)
+
+
+@kernel
+def repeated_phases(a: np.ndarray, b: np.ndarray):
+    """Two passes, so the generated file holds two kernels of this body."""
+    for i in range(a.shape[0]):
+        a[i] = a[i] * 2
+    for i in range(a.shape[0]):
+        b[i] = a[i] + 1
+
+
+def test_a_recompile_does_not_duplicate_the_later_passes(gpu_backend):
+    """Re-rendering a multi-pass body must refresh its pieces, not append extra copies.
+
+    The source writer merges one piece per definition, keyed by the signature line, so a
+    multi-phase body has to be written as one piece per pass. Joining the passes into one
+    piece made the merge replace only the first pass's group and leave the file's later
+    passes in place; the file then held those passes twice and the next compile refused it
+    ("function ... has already been defined"), which is what a second run of this test file
+    used to hit.
+    """
+    values = np.arange(4, dtype=np.float32)
+    result = np.zeros(4, dtype=np.float32)
+    repeated_phases[gpu_backend](values, result)
+    np.testing.assert_array_equal(result, np.array([1.0, 3.0, 5.0, 7.0], dtype=np.float32))
+
+    repeated_phases._cache.clear()  # force a full re-render of both passes
+    values = np.arange(4, dtype=np.float32)
+    result = np.zeros(4, dtype=np.float32)
+    repeated_phases[gpu_backend](values, result)
+    np.testing.assert_array_equal(result, np.array([1.0, 3.0, 5.0, 7.0], dtype=np.float32))
