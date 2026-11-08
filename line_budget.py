@@ -64,7 +64,6 @@ ALLOWLIST: Dict[str, Tuple[int, str]] = {
     "tests/test_metal_launch_path.py": (1621, "phase 8 - test split (plan 5.7)"),
     "tests/test_metal_codegen.py": (1502, "phase 8 - test split (plan 5.7)"),
     "tests/test_kernel_complex.py": (1385, "phase 8 - test split (plan 5.7)"),
-    "tests/test_kernel_object_arguments.py": (529, "phase 8 - test split (plan 5.7)"),
 }
 
 
