@@ -17,15 +17,12 @@ Holder = Tuple[str, str]
 _MAGIC_RANGE = "range"
 
 
-_MAGIC_RANGE = "range"
 _MAGIC_ENUMERATE = "enumerate"
 
 
-_MAGIC_ENUMERATE = "enumerate"
 _MAGIC_NDINDEX = "ndindex"
 
 
-_MAGIC_NDINDEX = "ndindex"
 _MAGIC_NDENUMERATE = "ndenumerate"
 
 

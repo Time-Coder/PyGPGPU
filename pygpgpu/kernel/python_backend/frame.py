@@ -28,7 +28,6 @@ class PythonFrame:
 _POOL_LOCK = threading.Lock()
 
 
-_POOL_LOCK = threading.Lock()
 _POOL: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
 

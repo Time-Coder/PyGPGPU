@@ -26,24 +26,20 @@ from typing import Dict, Iterator, Optional
 _WRITE_LOCKS: Dict[str, threading.RLock] = {}
 
 
-_WRITE_LOCKS: Dict[str, threading.RLock] = {}
 _WRITE_LOCKS_GUARD = threading.Lock()
 
 
-_WRITE_LOCKS_GUARD = threading.Lock()
 # The files whose lock *this thread* already holds, so `_file_lock` can re-enter rather
 # than wait on itself. Thread-local by construction: a second thread must wait, and only
 # the owner re-enters.
 _file_lock_state = threading.local()
 
 
-_file_lock_state = threading.local()
 # How long a write waits for another process, and how long one attempt of the lock file
 # lasts. A compile is seconds at worst; ten minutes is "hang detection", not a budget.
 _FILE_LOCK_TIMEOUT: float = 600.0
 
 
-_FILE_LOCK_TIMEOUT: float = 600.0
 _FILE_LOCK_POLL: float = 0.05
 
 
@@ -55,13 +51,10 @@ _MKDIR_ATTEMPTS: int = 8
 _SOURCE_WRITE_TIMEOUT: float = 5.0
 
 
-_SOURCE_WRITE_TIMEOUT: float = 5.0
 _SOURCE_WRITE_POLL: float = 0.05
 
 
-_FILE_LOCK_POLL: float = 0.05
 # How many times `_ensure_directory` retries a create another writer is racing.
-_MKDIR_ATTEMPTS: int = 8
 
 
 
