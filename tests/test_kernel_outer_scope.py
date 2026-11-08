@@ -152,6 +152,35 @@ def test_global_write_reaches_the_module(runner, monkeypatch):
     assert scope.TOTAL == 17
 
 
+@kernel
+def bump_total_between_passes(out: np.ndarray):
+    """A writable global updated between two passes, then read by the second."""
+    global TOTAL
+    for i in range(out.shape[0]):
+        out[i] = TOTAL
+    TOTAL = TOTAL + 5
+    for i in range(out.shape[0]):
+        out[i] = out[i] + TOTAL
+
+
+def test_a_global_written_between_passes_reaches_the_second(runner, monkeypatch):
+    """The region updates the one writable slot the later pass reads.
+
+    The host supplies every outer-scope value to every pass, so the phase translators must
+    share the main translator's binding: a later slice that read `TOTAL` without the
+    `global` statement used to declare it read-only while the launch handed it the writable
+    slot, and the pass failed to bind the argument. The region's own write also had to land
+    in that slot rather than in a second gap slot for the same name.
+    """
+    monkeypatch.setattr("test_kernel_outer_scope.TOTAL", 0)
+    out = np.zeros(2, dtype=np.float32)
+    runner(bump_total_between_passes, out)
+    np.testing.assert_array_equal(out, np.array([5.0, 5.0], dtype=np.float32))
+    import test_kernel_outer_scope as scope
+
+    assert scope.TOTAL == 5
+
+
 def test_an_unguarded_shared_store_is_refused(gpu_backend, runner):
     """A plain store to an outer scalar from every work item is a race, not a feature.
 

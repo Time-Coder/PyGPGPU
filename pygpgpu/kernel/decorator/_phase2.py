@@ -136,14 +136,17 @@ class _BuildLaunchMixin:
         plan.gap_slots:Dict[str, object] = {}
         # A kernel argument is not a gap slot: assigning it in a host region updates the
         # function-local parameter value the later passes receive (see _run_host_region),
-        # and a slot for it would shadow that update in the argument alignment.
+        # and a slot for it would shadow that update in the argument alignment. An outer
+        # name is not one either: its own writable slot is what the device reads and what
+        # the region's write-back fills, so a second slot would keep the launch's value.
         plan.argument_names:List[str] = list(
             _positional_argument_names(self.raw_func))[:len(plan.args)]
         for name, value in _host_scalar_values(
                 self.raw_func, [n for n in plan.gap_names
                                 if n not in plan.created_all
                                 and n not in plan.host_scalar_names
-                                and n not in plan.argument_names],
+                                and n not in plan.argument_names
+                                and n not in plan.outer_vars],
                 tuple(plan.args), instance).items():
             plan.slot = np.zeros(1, dtype=np.int32)
             try:

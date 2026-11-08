@@ -149,6 +149,11 @@ class _PhasesMixin:
             # shared slot in the writing phase (see _carried_scalars).
             phase.phase_gap = list(self.phases[index][_magic_loop_end(self.phases[index]):])
             phase._bind_outer_variables()
+            # The host supplies the whole outer-scope block to every pass, so a phase's
+            # declaration order and writable flags have to be the main translator's -- a
+            # slice that reads `total` without the `global` statement would otherwise
+            # declare it read-only while the launch passes its slot.
+            phase.outer_vars = dict(self.outer_vars)
             phase.phase_carried_hint = list(self.carried_scalars)
             # A phase skips the main translate() walk, so the shared-slot binding has to run
             # here: without it, a scalar the loop accumulates compiles as per-item scratch
