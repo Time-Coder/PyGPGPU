@@ -46,7 +46,7 @@ from .shape import (
     _spatial_shape,
 )
 
-from typing import Any, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 import numpy as np
 from numpy.typing import DTypeLike
 
@@ -245,7 +245,7 @@ class Image:
             return self._read_texel(position)
         return self._blend(taps)
 
-    def _taps(self, coords:Tuple[float, ...])->list:
+    def _taps(self, coords:Tuple[float, ...])->List[Tuple[float, Tuple[int, ...]]]:
         """The (weight, texel) pairs one sample reads.
 
         Coordinates live in texel space: texel ``i`` covers ``[i, i+1)`` and its centre
@@ -273,9 +273,9 @@ class Image:
             ])
 
         # Cartesian product across axes.
-        taps:list = [(1.0, ())]
+        taps:List[Tuple[float, Tuple[int, ...]]] = [(1.0, ())]
         for axis_pairs in per_axis:
-            expanded = []
+            expanded:List[Tuple[float, Tuple[int, ...]]] = []
             for weight, positions in taps:
                 for tap_weight, texel in axis_pairs:
                     expanded.append((weight * tap_weight, positions + (texel,)))
@@ -302,7 +302,7 @@ class Image:
             return np.asarray(self._data[index])
         return np.asarray(self._data[index])
 
-    def _blend(self, taps:list)->"np.ndarray[Any, Any]":
+    def _blend(self, taps:List[Tuple[float, Tuple[int, ...]]])->"np.ndarray[Any, Any]":
         total = None
         for weight, texel in taps:
             value = self._read_texel(texel) * weight
