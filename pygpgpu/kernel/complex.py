@@ -67,6 +67,11 @@ _MEMBERS:tuple = ("re", "im")
 
 HEADER_NAME:str = "complex.h"
 
+# The header is four files: this one, the preamble, and the three blocks it
+# includes -- the float block, the double block and the mixed block. Each block
+# is behind the macro that enables it, so the same guard still selects it.
+HEADER_PARTS:tuple = ("complex_float.h", "complex_double.h", "complex_mixed.h")
+
 # The header is a real file beside the quaternion one, so it can be read and edited like any
 # other source. `install_header` copies it into the cache's include folder, because a quoted
 # `#include` resolves relative to the including file.
@@ -339,6 +344,9 @@ def include_directory(source_directory:str) -> str:
 def install_header(source_directory:str) -> str:
     """Put the header in the cache's `include/` folder and return its path.
 
+    The three blocks the preamble includes are copied beside it, because the preamble
+    reaches them by name and a cache with only the preamble would not compile.
+
     Refreshed whenever the package copy changed, so editing the header and re-running a
     kernel picks the new text up instead of compiling a stale one.
     """
@@ -346,6 +354,11 @@ def install_header(source_directory:str) -> str:
     os.makedirs(target, exist_ok=True)
     path:str = os.path.join(target, HEADER_NAME)
     _write_if_changed(path, header_source())
+    for part in HEADER_PARTS:
+        with open(os.path.join(os.path.dirname(HEADER_SOURCE), part), "r",
+                  encoding="utf-8") as file:
+            text:str = file.read()
+        _write_if_changed(os.path.join(target, part), text)
     return path
 
 
