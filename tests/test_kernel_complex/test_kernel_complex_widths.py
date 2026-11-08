@@ -4,7 +4,7 @@ The subject is widths.
 """
 from __future__ import annotations
 
-from _helpers.test_kernel_complex_helpers import (
+from _helpers.test_kernel_complex import (
     DOUBLE,
     FLOAT,
     _generated_source,

@@ -61,7 +61,6 @@ ALLOWLIST: Dict[str, Tuple[int, str]] = {
     "pygpgpu/cuda/oop/program_parser/struct_builder.py": (280, "phase 5 - struct-builder mixin (plan 5.4.2)"),
     "pygpgpu/hip/oop/program_parser/struct_builder.py": (280, "phase 5 - struct-builder mixin (plan 5.4.2)"),
     "pygpgpu/opencl/oop/program_parser/struct_builder.py": (266, "phase 5 - struct-builder mixin (plan 5.4.2)"),
-    "tests/test_kernel_complex.py": (1385, "phase 8 - test split (plan 5.7)"),
 }
 
 

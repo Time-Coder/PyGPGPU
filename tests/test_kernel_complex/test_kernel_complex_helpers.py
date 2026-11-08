@@ -4,7 +4,7 @@ The subject is helpers.
 """
 from __future__ import annotations
 
-from _helpers.test_kernel_complex_helpers import (
+from _helpers.test_kernel_complex import (
     calls_double_helper,
     calls_plain_helper,
 )

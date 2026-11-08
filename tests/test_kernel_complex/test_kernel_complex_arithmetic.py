@@ -4,8 +4,8 @@ The subject is arithmetic.
 """
 from __future__ import annotations
 
-from _helpers import test_kernel_complex_helpers as _HELPERS
-from _helpers.test_kernel_complex_helpers import (
+from _helpers import test_kernel_complex as _HELPERS
+from _helpers.test_kernel_complex import (
     DOUBLE,
     FLOAT,
     FLOAT_SCALAR_FORMS,

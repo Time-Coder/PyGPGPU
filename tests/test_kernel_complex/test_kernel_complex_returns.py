@@ -4,7 +4,7 @@ The subject is returns.
 """
 from __future__ import annotations
 
-from _helpers.test_kernel_complex_helpers import (
+from _helpers.test_kernel_complex import (
     make_scope_rebinder,
     multiply_by_scope,
     passed_scalar,

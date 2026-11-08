@@ -4,8 +4,8 @@ The subject is builtins.
 """
 from __future__ import annotations
 
-from _helpers import test_kernel_complex_helpers as _HELPERS
-from _helpers.test_kernel_complex_helpers import (
+from _helpers.test_kernel_complex import complex_builtins as _BUILTINS
+from _helpers.test_kernel_complex import (
     DOUBLE,
     FLOAT,
     _predicate_mask,
@@ -157,7 +157,7 @@ def test_a_real_only_builtin_is_refused_for_a_complex_value(function, expected):
     parameters: int = len(function.raw_func.__code__.co_varnames[:function.raw_func.__code__.co_argcount])
     types = [complex_scalar] * (parameters - 1) + [complex_array]
     translator = FunctionTranslator(function.raw_func, types, "cuda",
-                                    lambda name: getattr(_HELPERS, name, None), {}, is_kernel=True)
+                                    lambda name: getattr(_BUILTINS, name, None), {}, is_kernel=True)
     with pytest.raises(SyntaxError) as caught:
         translator.translate()
     assert expected in str(caught.value)

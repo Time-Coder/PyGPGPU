@@ -4,7 +4,7 @@ The subject is creation.
 """
 from __future__ import annotations
 
-from _helpers.test_kernel_complex_helpers import (
+from _helpers.test_kernel_complex import (
     constructed_from_args,
     constructed_from_complex,
     constructed_from_constants,
