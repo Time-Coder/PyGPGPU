@@ -127,12 +127,6 @@ extend-exclude = [
     "**/*.pyi",
     # vendored third-party preprocessor
     "pygpgpu/cparser/pcpp",
-    # legacy cparser: not imported at runtime (cparser.csyntaxtree/ctokens/ShaderBuiltins, ...)
-    "pygpgpu/cparser/cparser.py",
-    "pygpgpu/cparser/minifyc.py",
-    "pygpgpu/cparser/csyntaxtree.py",
-    "pygpgpu/cparser/ctokens.py",
-    "pygpgpu/cparser/ShaderBuiltins.py",
 ]
 
 [tool.ruff.lint]
@@ -187,12 +181,6 @@ src.exclude = [
     "**/*.pyi",
     # vendored third-party preprocessor
     "pygpgpu/cparser/pcpp/**",
-    # legacy cparser sources, not imported at runtime
-    "pygpgpu/cparser/cparser.py",
-    "pygpgpu/cparser/minifyc.py",
-    "pygpgpu/cparser/csyntaxtree.py",
-    "pygpgpu/cparser/ctokens.py",
-    "pygpgpu/cparser/ShaderBuiltins.py",
     # one-off development script (no module imports it): it fetches the vendor headers over the
     # network via requests/bs4 to regenerate the atom-type tables. Not part of the runtime, and
     # its third-party deps are deliberately not required by this package.

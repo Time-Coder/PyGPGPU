@@ -54,8 +54,6 @@ EXEMPT_EXTENSIONS: Tuple[str, ...] = (".pyi",)
 # The backlog: file -> (recorded line count, why it is still over the ceiling).
 # Removing an entry is the act of finishing that split.
 ALLOWLIST: Dict[str, Tuple[int, str]] = {
-    "pygpgpu/cparser/ShaderBuiltins.py": (16874, "generated; delete-or-split decision pending (plan 5.6)"),
-    "pygpgpu/cparser/cparser.py": (1200, "unreachable legacy chain (plan 5.6)"),
     "pygpgpu/kernel/decorator/__init__.py": (330, "wave 2 done: the class is assembled from subject mixins (plan 5.2)"),
     "pygpgpu/kernel/include/complex.h": (1064, "device header; split last (plan 5.3)"),
     "pygpgpu/opencl/driver/clinfo.py": (1940, "phase 5 - data modules (plan 5.4.1)"),
