@@ -26,89 +26,30 @@ sampled exactly), while a fractional subscript addresses a position between texe
   distance.
 
 Those are the same rules the device applies, which is what keeps the host path and
-the GPU paths in agreement.
-"""
+the GPU paths in agreement."""
+# This module is the facade of a split: the filter/enumeration types and the shape
+# maths moved to the module named after their subject, and the Image class stays
+# here -- it is the one name the kernels and the decorator import.
 from __future__ import annotations
+from .enums import (
+    ADDRESS_MODES,
+    FILTERS,
+    ImageAddress,
+    ImageFilter,
+    ImageIndex,
+    SampleValue,
+    StrEnum,
+)
+from .shape import (
+    _extents,
+    _normalise_channels,
+    _spatial_shape,
+)
 
-from enum import Enum
 from typing import Any, Optional, Tuple, Union
-
 import numpy as np
 from numpy.typing import DTypeLike
 
-# What a subscript into an image may be: one number, or one per axis. The device accepts
-# any of these spellings too, so the host must not narrow it further.
-ImageIndex = Union[int, float, "np.integer[Any]", "np.floating[Any]", Tuple[object, ...]]
-
-# One sampled value or one value stored: a scalar for a 1-channel image, a vector for
-# 2 or 4 channels. numpy supplies both, and the dtype decides which -- so it is a numpy
-# scalar or array rather than a fixed python type.
-SampleValue = Union["np.generic[Any]", "np.ndarray[Any, Any]"]
-
-
-class StrEnum(str, Enum):
-    """A string-valued enum (the stdlib one is 3.11+, and this package supports 3.7).
-
-    Subclassing str keeps the members comparable with plain strings, so an existing
-    ``filter="linear"`` call site keeps working alongside ``filter=ImageFilter.LINEAR``.
-    """
-
-    def __str__(self)->str:
-        return str(self.value)
-
-    @classmethod
-    def parse(cls, value:object, what:str)->"StrEnum":
-        """Accept a member, its value, or its name (case-insensitive)."""
-        if isinstance(value, cls):
-            return value
-        if isinstance(value, str):
-            try:
-                return cls(value)
-            except ValueError:
-                pass
-            try:
-                return cls[value.strip().upper()]
-            except KeyError:
-                pass
-        options:str = ", ".join(member.value for member in cls)
-        raise ValueError("%s must be one of %s, got %r" % (what, options, value))
-
-
-# Sampling rules are enums so the class stays backend-neutral while the choices stay
-# discoverable. The names are the neutral ones: CUDA spells the filters POINT/LINEAR and
-# OpenCL spells them NEAREST/LINEAR, and the address modes differ just as much
-# (CLAMP_TO_EDGE vs CLAMP, REPEAT vs WRAP), so neither backend's vocabulary is used here.
-class ImageFilter(StrEnum):
-    """How a sample is computed from the texels around its coordinate."""
-
-    POINT = "point"      # the one texel the coordinate falls in
-    LINEAR = "linear"    # the neighbouring texel centres, blended by distance
-
-
-class ImageAddress(StrEnum):
-    """What a coordinate outside the image reads.
-
-    Only CLAMP is portable today. WRAP and MIRROR are implemented on the python backend
-    and have device objects that request them, but the GPU sampling paths read the edge
-    texel instead of wrapping: with texel-space coordinates the drivers ignore
-    CL_ADDRESS_REPEAT / CL_ADDRESS_MIRRORED_REPEAT and CU_TR_ADDRESS_MODE_WRAP /
-    _MIRROR (measured on the NVIDIA and AMD OpenCL devices and the CUDA device available
-    while developing this). Launching such an image on a GPU backend raises rather than
-    returning different numbers from the same kernel on the python backend.
-    """
-
-    CLAMP = "clamp"      # the nearest edge texel
-    WRAP = "wrap"        # continue from the opposite edge (python backend only)
-    MIRROR = "mirror"    # reflect back inside the image (python backend only)
-
-
-FILTERS:Tuple[str, ...] = tuple(member.value for member in ImageFilter)
-ADDRESS_MODES:Tuple[str, ...] = tuple(member.value for member in ImageAddress)
-
-# Channel counts an image may have. The device formats a sample can carry are 1, 2 or 4
-# wide; 3-channel data is rejected explicitly (see _normalise_channels) rather than being
-# guessed at, because no hardware format matches it without padding.
-CHANNELS:Tuple[int, ...] = (1, 2, 4)
 
 
 class Image:
@@ -397,11 +338,11 @@ class Image:
         if binding is not None:
             return binding
 
-        from .cuda.oop.context import Context
-        from .cuda.oop.devices import Devices
-        from .cuda.oop.array import Array
-        from .cuda.oop.surface import SurfaceObject
-        from .cuda.driver import CUaddress_mode, CUfilter_mode
+        from ..cuda.oop.context import Context
+        from ..cuda.oop.devices import Devices
+        from ..cuda.oop.array import Array
+        from ..cuda.oop.surface import SurfaceObject
+        from ..cuda.driver import CUaddress_mode, CUfilter_mode
 
         context = Context.current()
         if context is None:
@@ -501,62 +442,3 @@ class Image:
             size, self._channels, self._dtype, self._filter, self._address)
 
     __str__ = __repr__
-
-
-def _normalise_channels(channels:object)->int:
-    """Validate a requested channel count."""
-    if isinstance(channels, bool) or not isinstance(channels, int):
-        raise TypeError(
-            "channels must be %s, got %s"
-            % (" or ".join(str(v) for v in CHANNELS), type(channels).__name__))
-    if channels == 3:
-        # No device image format is 3 channels wide: a sample is returned as a 1, 2 or 4
-        # component value, so RGB data has to be padded. Saying that is more useful than
-        # letting the caller discover it from a driver error.
-        raise ValueError(
-            "channels=3 is not a device image format: samples are 1, 2 or 4 components "
-            "wide. Pad the data to 4 channels and pass channels=4")
-    if channels not in CHANNELS:
-        raise ValueError(
-            "channels must be %s, got %d" % (" or ".join(str(v) for v in CHANNELS),
-                                             channels))
-    return channels
-
-
-def _spatial_shape(shape:Tuple[int, ...], channels:Optional[int], what:str)->Tuple[int, ...]:
-    """Strip the trailing channel axis when channels was given, and validate the rank.
-
-    The channel count is never inferred: a trailing axis is a spatial extent unless the
-    caller says the array carries channel data. That is what keeps (4, 4) a 4x4 grey
-    image instead of a 4-pixel RGBA row, and (8, 16, 3) an RGB image instead of a volume.
-
-    ``channels=None`` means "not given": every axis is spatial. Passing any explicit value
-    -- including 1 -- makes the trailing axis the channel axis, so the two forms never
-    disagree about what a shape means.
-    """
-    if channels is not None:
-        if not shape or shape[-1] != channels:
-            raise ValueError(
-                "Image %s %s does not end with the %d channel(s) it was given; pass "
-                "channels=%d only for data whose last axis is the channel axis"
-                % (what, shape, channels, channels))
-        shape = shape[:-1]
-
-    if len(shape) not in (1, 2, 3):
-        raise ValueError(
-            "Image %s must have 1, 2 or 3 spatial dimensions%s, got %s"
-            % (what, " plus an optional channel axis" if channels is not None else "",
-               tuple(shape)))
-    if any(int(v) <= 0 for v in shape):
-        raise ValueError("Image %s must have positive extents, got %s"
-                         % (what, tuple(shape)))
-    return tuple(int(v) for v in shape)
-
-
-def _extents(spatial:Tuple[int, ...])->Tuple[int, int, int]:
-    """Host spatial shape -> (width, height, depth); missing axes are 1."""
-    if len(spatial) == 1:
-        return int(spatial[0]), 1, 1
-    if len(spatial) == 2:
-        return int(spatial[1]), int(spatial[0]), 1
-    return int(spatial[2]), int(spatial[1]), int(spatial[0])
