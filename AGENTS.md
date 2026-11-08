@@ -44,6 +44,69 @@ PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP,
 
 - **Metal carries the whole shared science vocabulary, and refuses the CUDA-only one by name.** `SHARED_MATH_BUILTINS` and `SHARED_MATH_TEMPLATES` are keyed by backend, so every entry now has a `metal` spelling: MSL declines the `f`-suffixed CUDA forms and spells the fast approximations `fast::` (`fast::sin`, ...) rather than OpenCL's `native_`. Two entries are deliberately not direct translations. (1) **`native_recip` is a template, not a callee**: MSL has no reciprocal intrinsic at all, so it is written as the division it is (`(1.0f / (x))`), which is why it lives in `SHARED_MATH_TEMPLATES` -- putting an expression in a table of function names would emit `1.0f / (x)(...)`. (2) **The CUDA-only families stay CUDA/HIP-only**: `fast_exp`/`exact_recip` and the conversions are not spelled for Metal, and `_emit_cuda_only_builtin` now refuses them by backend name instead of indexing the table. Both lookups that read a spelling are written as a table lookup plus an explicit `self._error` when the backend is missing -- never a bare `[self.launch_backend]`, which raised a `KeyError` from inside the translation. `tests/test_metal_launch_path.py` pins all of it: every shared entry has a metal spelling, the two tables stay disjoint, and no CUDA-only entry claims one.
 
+## File size policy (hard rule)
+
+**A first-party source file must stay under 500 lines, and a file that grows past 200 lines is a
+signal to look at splitting it.** Every session that touches this repository holds to these two
+numbers, not just the one that does the splitting.
+
+| Band | Rule |
+| --- | --- |
+| <= 200 lines | The target. A file here needs no justification. |
+| 201 - 350 | The watch band. Allowed, but adding to a file in this band should make you think about whether the new code belongs somewhere else. |
+| 351 - 500 | The warning band. Split it before you add to it, or say why not. |
+| > 500 | **The red line. Not allowed.** A first-party source file never crosses it. |
+
+The ceiling applies to first-party `.py`, `.cl`, `.cu`, `.hip`, `.metal` and device-header
+(`kernel/include/*.h`) sources. Four kinds of file are exempt, and the exemptions are stated
+here so they are not argued again per file:
+
+1. **Vendored runtime headers** - `pygpgpu/{cuda,opencl}/driver/include/*.h` (`cuda.h` is
+   25,029 lines, `cl_ext.h` 3,621, `cl.h` 1,939). These are the vendor SDK headers, copied
+   verbatim so the ctypes layer can be built without the SDK installed. They are never
+   hand-edited.
+2. **Vendored third-party source** - `pygpgpu/cparser/pcpp/**` (the bundled C preprocessor,
+   ~30,000 lines including `ply/yacc.py`). Already excluded from ruff and from ty. Not ours
+   to restructure.
+3. **Generated Python stubs** - `**/*.pyi`. The `pygpgpu/vec_types/*.pyi` stubs are written by
+   `vec_types/helper.py:write_clmath_pyi()` from the `genVecN.pyi.in` templates and are
+   around 3,650 lines each because one declares 1,020 swizzle property getters and 192
+   setters; a stub describes one class and cannot be assembled from parts. They are excluded
+   from ruff and ty and shipped through `package-data`.
+4. **Generated compile caches** - `tests/__clcache__/`, `__cucache__/`, `__hipcache__/`,
+   `__metalcache__/`. Already in `.gitignore` and not tracked by git. These must not be split;
+   they must be ignored.
+
+**`line_budget.py` enforces the red line**, and it runs as the third step of `check.py` (after
+ruff and ty). It walks the first-party sources, counts the lines, and fails when a file
+crosses 500. It carries no allowlist: there is nothing over the line to allow. Run it after
+any change that adds a file or grows one substantially.
+
+**How to split, when a file does need it.** The rule is **by subject, never by line count**:
+logic that belongs together stays in one file, logic that belongs to a different subject goes
+to a different file. "It reached 500 lines, cut it here" is the wrong reason to cut, and a cut
+made for that reason usually leaves two half-related modules instead of two related ones. The
+mechanisms that work, in the order of preference:
+
+1. **A package facade.** Turn `foo.py` into `foo/` whose `__init__.py` re-exports every name
+   the module used to publish. Every existing import site keeps working unchanged.
+2. **A mixin extraction**, for one large class. The class becomes several mixin classes in
+   separate modules, combined by one class statement. `self` remains one object, so every
+   `self._visit_*` call and every attribute the outside world reads keeps working.
+3. **A data-module extraction**, for a class that is mostly constant tables. The tables move
+   to sibling modules the class imports and assigns.
+4. **A support package**, for a test file: the tests go into modules named after their
+   subject, the helpers they share go to `tests/_helpers/`, and a pytest fixture goes to the
+   package's `conftest.py` (a fixture has to live there to be found).
+
+Two things to check on every split, because they are the ones that break silently: a member
+defined twice in a class (a property and its setter, an overload stub and the real method)
+must move **both** definitions, and a name the outside world reads by string -- a `globals()`
+lookup, a `getattr` with a computed name, a test that reads a module's source text -- has to
+follow the move.
+
+`docs/file-split-plan.md` is the full plan, with the per-area layouts and the risk register.
+
 ## Layout and ownership
 
 - `pygpgpu/kernel/`: `@kernel` decorator (`decorator.py`), Python-to-device AST translator (`translator.py`), and the device builtins (`builtins.py`). Backend-neutral except that HIP reuses CUDA generation. `python_backend.py` is the interpreter backend: it translates nothing and executes the body serially, so it is not a fourth code generator — keep it that way (no AST translation there, only the source scan that tells a magic loop from a gid-style body).
