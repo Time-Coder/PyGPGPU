@@ -398,6 +398,7 @@ class _AssignMixin(_PrivateArrayMixin):
                 "zeros_per_group() shape must be a constant positive integer or a tuple of "
                 "them: the buffer is a fixed-size __shared__/__local array, so a launch-time "
                 "shape cannot size it", shape_node)
+            raise AssertionError("unreachable: _error raises")  # narrows `extents` for the checker
 
         dtype_node:ast.expr = call.args[1]
         dtype_name:str = ""
