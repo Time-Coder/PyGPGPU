@@ -257,17 +257,28 @@ def test_assigning_an_outer_name_locally_shadows_it_like_python(runner, monkeypa
 
 
 @kernel
-def local_array_binding(x: np.ndarray):
-    """A local cannot hold an array on the device: a pointer has no owner there."""
+def local_array_binding(x: np.ndarray, out: np.ndarray):
+    """A local *does* hold an array on the device: it holds the pointer.
+
+    Without a `global` declaration python makes this name a local, so the module-level
+    array is untouched -- and a device pointer local (`float* REBIND_TARGET = x;`) is
+    exactly that: one more name for the caller's buffer. It used to be refused, which made
+    the ordinary `src = a` spelling unusable.
+    """
     for i in range(x.shape[0]):
-        if i == 0:
-            REBIND_TARGET = x  # noqa: F841 - the device refuses a local array binding
+        REBIND_TARGET = x  # noqa: F841 - a pointer local, shadowing the module name
+        out[i] = REBIND_TARGET[i]
 
 
-def test_a_local_cannot_bind_an_array(gpu_backend, runner):
-    with pytest.raises(SyntaxError) as caught:
-        runner(local_array_binding, np.arange(4, dtype=np.float32))
-    assert "array to a variable" in str(caught.value)
+def test_a_local_can_bind_an_array_as_a_pointer(gpu_backend, runner, monkeypatch):
+    """The device binds a second name to the buffer; the module-level array is untouched."""
+    original = np.zeros(4, dtype=np.float32)
+    monkeypatch.setattr("test_kernel_outer_scope.REBIND_TARGET", original)
+    x = np.arange(4, dtype=np.float32)
+    out = np.zeros(4, dtype=np.float32)
+    runner(local_array_binding, x, out)
+    np.testing.assert_allclose(out, x)
+    np.testing.assert_allclose(original, np.zeros(4, dtype=np.float32))
 
 
 @kernel

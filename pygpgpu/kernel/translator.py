@@ -425,7 +425,8 @@ def writes_receiver(func:Callable, self_param:str)->bool:
     return False
 
 
-def scan_self_attrs(func:Callable, self_param:str, owner:Optional[type]=None)->List[str]:
+def scan_self_attrs(func:Callable, self_param:str, owner:Optional[type]=None,
+                    host_lines:Optional[Set[int]]=None)->List[str]:
     """Collect the self.xxx data attribute names the method (and its helpers) reference.
 
     A member read as a value becomes a kernel argument. With ``owner`` given, a method
@@ -433,17 +434,29 @@ def scan_self_attrs(func:Callable, self_param:str, owner:Optional[type]=None)->L
     references then count too, recursively, so nested helpers keep working and every
     attribute they need is uploaded with the kernel. ``owner`` is None at decoration
     time (the class does not exist yet), where only the decorated body itself is read.
+
+    ``host_lines`` are the statements the interpreter already ran (see
+    `_host_region_values`): their calls are host work, so a helper reached only from there
+    contributes no arguments.
     """
     if not self_param:
         return []
     attrs:List[str] = []
-    _collect_self_attrs(func, self_param, owner, attrs, set())
+    _collect_self_attrs(func, self_param, owner, attrs, set(), host_lines or set())
     return attrs
 
 
 def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
-                        attrs:List[str], visited:Set[object])->None:
-    """Walk one method body, recursing into the self-methods it calls."""
+                        attrs:List[str], visited:Set[object],
+                        host_lines:Optional[Set[int]]=None)->None:
+    """Walk one method body, recursing into the self-methods it calls.
+
+    A call that sits on a line the interpreter already executed (`host_lines`) is host
+    work: it ran on the host, together with everything it touched, so nothing it reads is
+    a kernel argument. Skipping it is what lets a host-only helper take an
+    arbitrary-precision value (`def refresh(self): self.scale * 3`) without the value
+    becoming a device member.
+    """
     if func in visited:
         return
     visited.add(func)
@@ -451,10 +464,15 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
     called:Set[str] = {node.func.attr for node in ast.walk(tree)
                        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                        and isinstance(node.func.value, ast.Name)
-                       and node.func.value.id == self_param}
+                       and node.func.value.id == self_param
+                       and not (host_lines and int(getattr(node, "lineno", 0) or 0) in host_lines)}
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and node.value.id == self_param):
+            continue
+        if host_lines and int(getattr(node, "lineno", 0) or 0) in host_lines:
+            # The whole statement is host work, so nothing it names is a device member --
+            # including a call it makes (`self.refresh()` above the loop).
             continue
         kind:str
         target:object
@@ -465,7 +483,7 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
             # (a staticmethod, a @kernel method, a classmethod) is decided at the
             # call site, where a clear error can name the reason.
             if kind == "method":
-                _collect_self_attrs(target, self_param, owner, attrs, visited)
+                _collect_self_attrs(target, self_param, owner, attrs, visited, host_lines)
             continue
         if node.attr not in attrs:
             attrs.append(node.attr)
@@ -1848,6 +1866,23 @@ def _creation_target_of(stmt:ast.stmt)->Optional[ast.expr]:
     return None
 
 
+def _constant_int_of(node:ast.expr)->Optional[int]:
+    """The integer an expression is a literal for, or None.
+
+    `-1` reaches the translator as `UnaryOp(USub, Constant(1))`, not as a negative
+    constant -- the parser does not fold it -- so a rule written against `ast.Constant`
+    alone silently misses every negative literal. That is exactly where it matters: a
+    negative index and a reversed slice are both written that way.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) \
+            and not isinstance(node.value, bool):
+        return int(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner:Optional[int] = _constant_int_of(node.operand)
+        return None if inner is None else -inner
+    return None
+
+
 def _assigned_name_of(stmt:ast.stmt)->Optional[str]:
     """The plain name an assignment binds, for either assignment spelling."""
     if isinstance(stmt, ast.Assign):
@@ -1907,6 +1942,13 @@ def _is_magic_loop_stmt(stmt:ast.stmt)->bool:
         return (len(iterator.args) == 1 and not iterator.keywords
                 and _is_shape_access(iterator.args[0]))
     if isinstance(func, ast.Name) and func.id == "enumerate":
+        # `enumerate([1.0, 2.0])` is a dispatch too: the domain is a literal list, whose
+        # length and elements are compile-time constants.
+        if len(iterator.args) == 1 and not iterator.keywords:
+            argument:ast.expr = iterator.args[0]
+            if isinstance(argument, (ast.List, ast.Tuple)):
+                return all(isinstance(e, ast.Constant) and isinstance(e.value, (int, float))
+                           and not isinstance(e.value, bool) for e in argument.elts)
         return len(iterator.args) == 1 and not iterator.keywords
     if (isinstance(func, ast.Attribute) and func.attr in ("ndindex", "ndenumerate")
             and isinstance(func.value, ast.Name)):
@@ -1936,6 +1978,21 @@ def _declared_scope_names(tree:ast.AST)->Set[str]:
         elif isinstance(node, ast.Global):
             names.update(node.names)
     return names
+
+
+def _outer_scope_names(func:object)->Set[str]:
+    """The names this function's body declares `nonlocal`/`global`.
+
+    Those travel through the outer scope's own device slot: the *device* writes them, so
+    the host must not run the statement that assigns them (see `_host_region_values`).
+    """
+    try:
+        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+    except SyntaxError:
+        return set()
+    if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
+        return set()
+    return _declared_scope_names(tree.body[0])
 
 
 def type_sig(types:List[object])->str:
@@ -1971,6 +2028,7 @@ class FunctionTranslator:
                  self_attr_types:Optional[Dict[str, object]]=None,
                  self_owner:Optional[type]=None, launch_backend:Optional[str]=None,
                  host_creation_values:Optional[Dict[str, object]]=None,
+                 host_executed_lines:Optional[List[int]]=None,
                  self_struct_members:Optional[Dict[str, str]]=None,
                  self_struct_type:object=None,
                  struct_arg_classes:Optional[Dict[str, type]]=None,
@@ -2039,6 +2097,23 @@ class FunctionTranslator:
         self.promoted_parameters:Set[str] = set()
         # The promoted parameters a return site lands in, so no slot is allocated for them.
         self.promoted_returns:Set[str] = set()
+        # Local names that are only another name for an array (`src = a`). The device reads
+        # the same pointer, so the alias asks for its target's extents (see _shape_var).
+        self._array_pointer_sources:Dict[str, str] = {}
+        # A local bound to a slice (`part = a[lo:hi]`) keeps the length here: it is a
+        # pointer into the same buffer plus an offset, and `part.shape[0]` answers this.
+        self._array_slice_extents:Dict[str, str] = {}
+        # The array parameters a local was sliced from (`part = a[lo:hi]`). A slice is a
+        # pointer at an offset, which matches python's view only on a 1-D array, so the
+        # launch checks the rank of each of these (see PyKernel._compile's sliced_arrays).
+        self.sliced_arrays:List[str] = []
+        # `enumerate([1.0, 2.0, ...])`: a literal list is a compile-time table, so its
+        # elements are recorded here and the dispatch reads them (see the enumerate branch).
+        self._enumerate_constants:List[float] = []
+        # A name bound to a literal list that a loop enumerates (`weights = [1.0, 2.0]`):
+        # the loop reads the elements themselves, so the binding is not device code.
+        self._constant_list_names:Set[str] = set()
+        self._constant_lists:Dict[str, List[float]] = {}
         self.phase_translators:List["FunctionTranslator"] = []
         self.self_param:str = self_param
         self.self_attr_types:Dict[str, object] = dict(self_attr_types or {})
@@ -2064,6 +2139,16 @@ class FunctionTranslator:
         # Objects the host already built for statements above the magic loop, keyed by the
         # name the body assigns them to (see _host_created_assignment).
         self.host_creation_values:Dict[str, object] = dict(host_creation_values or {})
+        # The values every *host region* bound, created or not, keyed the same way, and the
+        # line numbers of the statements the interpreter actually ran. A statement in that
+        # set is host work -- it runs once, on the host, before the launch -- so the device
+        # must not run it too (see _host_statement_lines and _bind_host_statement).
+        self.host_region_values:Dict[str, object] = dict(host_creation_values or {})
+        # The plain values a host-region statement bound, by name -> device type (see
+        # _bind_host_statement). They are parameters like any other, but they are not
+        # *creations*, so the launch must not treat them as objects.
+        self.host_scalars:Dict[str, DeviceType] = {}
+        self.host_statement_lines:Set[int] = set(host_executed_lines or [])
         # The width a python `int`/`float` travels as (device type names, already resolved).
         # Every type query the translator makes on a *host* value -- a creation above the
         # loop, a constant it lifts -- goes through it, so a kernel and the objects it builds
@@ -2393,6 +2478,9 @@ class FunctionTranslator:
         host:Optional[HostValueEntry] = self.host_values.get(name)
         if host is not None:
             return host["type"]
+        host_scalar:Optional[DeviceType] = self.host_scalars.get(name)
+        if host_scalar is not None:
+            return host_scalar
         for scope in reversed(self.scopes):
             if name in scope:
                 declared:object = scope[name]
@@ -2406,6 +2494,112 @@ class FunctionTranslator:
                 return (PTR, outer["type"])
             return outer["type"]
         return None
+
+    def _emit_array_slice(self, name:str, node:ast.Assign)->bool:
+        """Emit `local = array[lo:hi]` as a pointer into the buffer, and record its length.
+
+        Python's slice is a *view*: it shares the buffer and adds an offset and a length.
+        The device has no view type, so the same thing is spelled with a pointer it already
+        has -- `T* part = a + lo;` -- and the length is kept in `_array_slice_extents`, which
+        is what `part.shape[0]` reads. `a[n // 2:]` works the same way: the bound is an
+        expression, and the emitted pointer just carries it.
+
+        Two facts make the pointer arithmetic compose. The offset is added to the **base's
+        own translated code**, so a slice of a slice (`inner = part[1:3]`) starts from
+        `part`, not from the array the chain began with. And an omitted upper bound is the
+        **immediate** base's length, so `part[1:]` is `len(part) - 1` rather than the whole
+        array's extent minus one.
+
+        A step other than 1 needs a real view (a work item cannot walk a buffer backwards),
+        and a *rank* above one is refused at the call, where the shape is known: on a 2-D
+        array `grid[0:2]` is two rows, which one offset cannot express.
+        """
+        subscript:ast.Subscript = cast(ast.Subscript, node.value)
+        slice_node:ast.Slice = cast(ast.Slice, subscript.slice)
+        base:ast.expr = subscript.value
+        immediate:str = self._array_name(base)
+        root:str = self._array_pointer_root(immediate)
+        base_code, base_t = self._visit_expression(base)
+        if not is_ptr(base_t):
+            return False
+        step:Optional[ast.expr] = slice_node.step
+        if step is not None and _constant_int_of(step) != 1:
+            if _constant_int_of(step) == -1:
+                self._error(
+                    "a reversed slice (`a[::-1]`) is not a device pointer: a work item "
+                    "cannot walk backwards through a buffer with one, so read the elements "
+                    "with an explicit index instead (`a[n - 1 - i]`)", step)
+            self._error("a slice step must be the constant 1", step)
+        lower:Optional[ast.expr] = slice_node.lower
+        upper:Optional[ast.expr] = slice_node.upper
+        start:str = "0" if lower is None else self._visit_expression(lower)[0]
+        # An omitted upper bound is the length of what is being sliced -- the array's extent
+        # for a parameter, the parent slice's own length for a slice of a slice.
+        stop:str = (self._shape_var(immediate, 0) if upper is None
+                    else self._visit_expression(upper)[0])
+        self._define(name, base_t, node)
+        self._emit(f"{self._device_type(base_t[1])}* {device_name(name)} = "
+                   f"{base_code} + ({start});")
+        # Two different questions are answered by two tables here, which is why both are
+        # written. (1) The *length* is the slice's own, so `part.shape[0]` reads it -- that
+        # is the loop's bounds guard. (2) The *launch size* has to come from a parameter,
+        # and a slice is not one, so the sizing resolves to the array the chain began with:
+        # the grid then covers more work items than the slice has, and the guard above skips
+        # the excess. That is exactly how a rounded-up automatic work size already works.
+        self._array_slice_extents[name] = f"(({stop}) - ({start}))"
+        self._array_pointer_sources[name] = root
+        if root not in self.sliced_arrays:
+            self.sliced_arrays.append(root)
+        return True
+
+    def _loop_domain_name(self, attr_node:ast.expr)->Optional[str]:
+        """The name `X` in `X.shape[0]`, exactly as the body wrote it.
+
+        No alias or slice resolution happens here: the caller needs to know *which local*
+        the bound was read from, because a slice's extent is its own length while its
+        launch size is the array's.
+        """
+        if not (isinstance(attr_node, ast.Attribute) and attr_node.attr == "shape"):
+            return None
+        base:ast.expr = attr_node.value
+        if isinstance(base, ast.Name):
+            return base.id
+        if (self.self_param and isinstance(base, ast.Attribute)
+                and isinstance(base.value, ast.Name) and base.value.id == self.self_param):
+            return f"_self_{base.attr}"
+        return None
+
+    def _pointer_source_name(self, value:ast.expr)->Optional[str]:
+        """The array a pointer assignment copies from, when the right-hand side is one.
+
+        Only a bare name (`src = a`, resolved through the alias chain) or a receiver member
+        (`buf = self.data`) counts. Every other attribute is a *value* -- `lane =
+        threadIdx.x` is the usual one -- and asking `_array_name` about it would refuse a
+        statement that has nothing to do with arrays.
+        """
+        if isinstance(value, ast.Name):
+            return self._array_pointer_root(value.id)
+        if (self.self_param and isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name) and value.value.id == self.self_param):
+            return f"_self_{value.attr}"
+        return None
+
+    def _record_element_write(self, base:ast.expr)->None:
+        """A store into an element makes the *array it came from* writable.
+
+        The read/write analysis reads the generated source, where a local pointer
+        (`double* part = a + 1;`) is not the parameter -- so a store through the local would
+        leave `a` marked read-only and the host would drop the write silently. The name is
+        followed to the array the local points at, and that name is the force-writable
+        channel the member-store path already uses (see `atomic_targets`).
+        """
+        try:
+            name:str = self._array_name(base)
+        except SyntaxError:
+            return
+        root:str = self._array_pointer_root(name)
+        if is_ptr(self._lookup(root)):
+            self.atomic_targets.add(root)
 
     def _define(self, name:str, t:DeviceType, node:Optional[ast.AST])->None:
         """Record a variable's type; node is optional because some declarations have no
@@ -2463,6 +2657,15 @@ class FunctionTranslator:
                 self.member_writes.add(alias[1])
 
     def _shape_var(self, array_name:str, dim:int)->str:
+        # A local pointer (`src = a`) is a *device variable*, but it has no extent parameter
+        # of its own: the extent lives on the array it was assigned from, because that is
+        # what the launch passes. Resolving here is what makes `src.shape[0]` compile -- and
+        # it is the single place that decides it, because every extent parameter is built by
+        # this call.
+        # A slice (`part = a[lo:hi]`) has a length of its own, recorded when it was bound.
+        if dim == 0 and array_name in self._array_slice_extents:
+            return f"({self._array_slice_extents[array_name]})"
+        array_name = self._array_pointer_root(array_name)
         # A private array created in the work-item body has a constant shape, so its extents
         # are compile-time numbers rather than launch parameters.
         binding:DeviceType = self._lookup(array_name)
@@ -2479,6 +2682,44 @@ class FunctionTranslator:
         # parameter is built by this call.
         return f"_{device_name(array_name)}_shape{dim}"
 
+    def _array_pointer_root(self, name:str)->str:
+        """The array a local pointer variable was assigned from, or the name itself.
+
+        An array parameter reaches the device as `T*`, and `src = a` declares one more
+        pointer (`T* src = a;`) rather than copying anything. The pointer itself has no
+        extent, though: extents are launch parameters named after the *array*, so a shape
+        read through the local has to resolve to the array it was assigned from. A chain
+        (`x = src`) follows to the first name, bounded so a malformed pair cannot loop.
+
+        The table is filled ahead of the walk (see `_collect_array_pointers`), because the
+        *loop detection* asks about `enumerate(src)` before any statement is translated.
+        """
+        seen:Set[str] = set()
+        while name in self._array_pointer_sources and name not in seen:
+            seen.add(name)
+            name = self._array_pointer_sources[name]
+        return name
+
+    def _collect_array_pointers(self, body:List[ast.stmt])->None:
+        """Record every `local = <array>` in the body before it is walked.
+
+        A pointer local is a fact about the body, and the magic-loop scan needs it before
+        the statement that creates it is reached: `enumerate(src)` is only the dispatch when
+        `src` is known to be an array. The sources are recorded with their own name here and
+        resolved through `_array_pointer_root`, so a chain (`two = one`) works too.
+        """
+        for statement in body:
+            if not (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)):
+                continue
+            target_name:str = statement.targets[0].id
+            source:ast.expr = statement.value
+            if isinstance(source, ast.Name):
+                self._array_pointer_sources.setdefault(target_name, source.id)
+            elif isinstance(source, ast.Attribute) and isinstance(source.value, ast.Name) \
+                    and self.self_param and source.value.id == self.self_param:
+                self._array_pointer_sources.setdefault(target_name, f"_self_{source.attr}")
+
     def _trim_source(self)->str:
         return get_dedented_source(self.func)
 
@@ -2491,6 +2732,13 @@ class FunctionTranslator:
 
     def translate(self)->None:
         body:List[ast.stmt] = self.tree.body
+        # A local pointer (`src = a`) is known before the body is walked: the magic-loop
+        # scan asks about `enumerate(src)` before that statement is reached (see
+        # _collect_array_pointers).
+        self._collect_array_pointers(body)
+        # `weights = [1.0, 2.0]` feeding a loop is a compile-time table, recorded before the
+        # walk so the binding emits no device code and the loop can read it.
+        self._collect_constant_lists(body)
         # Outer-scope names and host-created objects must be known before the body is
         # visited: every use of them compiles against the parameter that will carry them,
         # and the magic-loop scan asks which arrays exist before any statement is reached
@@ -2555,6 +2803,16 @@ class FunctionTranslator:
                 # Every gap statement runs on the host: python executes it once, between the
                 # two passes. A creation is bound by _bind_host_values, which already runs on
                 # the host; anything else is a value the next pass receives as a parameter.
+                #
+                # A statement the interpreter *already ran* (its line is in
+                # host_statement_lines) is not copied into the header: copying it made
+                # every phase emit device code for it under the same function name, and
+                # the two definitions then collided. Its value travels as a host scalar
+                # instead (see _bind_host_statement), which is what the next pass needs.
+                if (int(getattr(stmt, "lineno", 0) or 0) in self.host_statement_lines
+                        and _assigned_name_of(stmt) is not None):
+                    carried.append(stmt)
+                    continue
                 header.append(stmt)
                 if not self._is_device_creation(stmt) and _assigned_name_of(stmt) is not None:
                     carried.append(stmt)
@@ -2584,7 +2842,8 @@ class FunctionTranslator:
                 self.device_cache, is_kernel=True, self_param=self.self_param,
                 self_attr_types=self.self_attr_types, self_owner=self.self_owner,
                 launch_backend=self.launch_backend,
-                host_creation_values=self.host_creation_values)
+                host_creation_values=self.host_creation_values,
+                host_executed_lines=sorted(self.host_statement_lines))
             # The tree is the same function, so the phase is visited by transplanting its
             # statements onto the phase translator's own tree.
             phase.tree.body = body
@@ -2615,6 +2874,12 @@ class FunctionTranslator:
             # *after* the body is visited: the shape extents are appended while translating,
             # and inserting a parameter ahead of them shifts every later argument.
             for name in gap_values:
+                # A value the interpreter bound between the passes (a host-region statement)
+                # travels as a host scalar of its *own* type (see _bind_host_statement):
+                # declaring it here as a carried `int*` slot as well made the launch pass
+                # the string it was computed from into an int parameter.
+                if name in phase.host_scalars:
+                    continue
                 if name in used and name not in phase.scopes[-1]:
                     phase.scopes[-1][name] = ("carried", name)
             phase.has_returns = _returns_a_value(body)
@@ -2632,6 +2897,8 @@ class FunctionTranslator:
             # answered None.
             phase.body_tail = list(body[_magic_loop_end(body):])
             for name in gap_values:
+                if name in phase.host_scalars:
+                    continue
                 if name in used and name not in dict(phase.params):
                     phase.params.append((name, (PTR, "int")))
                     phase.carried_scalars.append(name)
@@ -2774,12 +3041,16 @@ class FunctionTranslator:
         return names
 
     def _shape_holder_param(self, attr_node:ast.expr)->Optional[str]:
-        """When X in `X.shape` is an array parameter, return its parameter name (plain name or _self_ attribute parameter)."""
+        """When X in `X.shape` is an array parameter, return its parameter name.
+
+        A local alias of an array (`src = a`) resolves to the array it names: the extent is
+        the same one, and the loop over `src.shape[0]` is the same dispatch.
+        """
         if not (isinstance(attr_node, ast.Attribute) and attr_node.attr == "shape"):
             return None
         base:ast.expr = attr_node.value
         if isinstance(base, ast.Name):
-            return base.id
+            return self._array_pointer_root(base.id)
         if (self.self_param and isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
                 and base.value.id == self.self_param):
             return f"_self_{base.attr}"
@@ -2798,14 +3069,33 @@ class FunctionTranslator:
         return (self._shape0_range_param(iter_node) is not None)
 
     def _enumerate_magic_target(self, iter_node:ast.expr)->Optional[Translated]:
-        """Resolve the array parameter of `for i, x in enumerate(arr)`, returning (parameter name, pointer type)."""
+        """Resolve the array of `for i, x in enumerate(arr)`, returning (name, pointer type).
+
+        The domain may also be a **literal list** (`enumerate([1.0, 2.0, 3.0])`): numpy
+        accepts it, its length is a compile-time number, and the elements are constants the
+        work item can read directly. That form has no array parameter, so it is reported
+        with the length the list states and no pointer type (`None`), which is what the
+        caller uses to emit a constant table.
+        """
         if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
                 and iter_node.func.id == "enumerate" and len(iter_node.args) == 1 and not iter_node.keywords):
             return None
         arg:ast.expr = iter_node.args[0]
+        if isinstance(arg, (ast.List, ast.Tuple)) and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, (int, float))
+                and not isinstance(e.value, bool) for e in arg.elts):
+            self._enumerate_constants = [e.value for e in arg.elts]
+            return "", None
+        if isinstance(arg, ast.Name) and arg.id in self._constant_lists:
+            # `weights = [1.0, 2.0]`, then `enumerate(weights)`: the list is the table.
+            self._enumerate_constants = list(self._constant_lists[arg.id])
+            return "", None
+        self._enumerate_constants = []
         param:str = ""
         if isinstance(arg, ast.Name):
-            param = arg.id
+            # A local alias of an array (`src = a`, then `ndenumerate(src)`) names the same
+            # buffer, so its extents are the aliased array's own.
+            param = self._array_pointer_root(arg.id)
         elif (self.self_param and isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
                 and arg.value.id == self.self_param):
             param = f"_self_{arg.attr}"
@@ -2815,6 +3105,72 @@ class FunctionTranslator:
         if not is_ptr(t):
             return None
         return param, t
+
+    def _collect_constant_lists(self, body:List[ast.stmt])->None:
+        """Record `weights = [1.0, 2.0, ...]` when a loop enumerates it.
+
+        A literal list is a compile-time table: its length is the dispatch bound and each
+        element is a constant, so the loop reads them from the source itself (see
+        `_emit_constant_enumerate_head`) and the binding emits nothing. Only a list an
+        `enumerate` names is treated that way -- any other list stays an ordinary value.
+        """
+        enumerated:Set[str] = set()
+        for statement in body:
+            for node in ast.walk(statement):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == "enumerate" and len(node.args) == 1
+                        and isinstance(node.args[0], ast.Name)):
+                    enumerated.add(node.args[0].id)
+        for statement in body:
+            if not (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)):
+                continue
+            if statement.targets[0].id not in enumerated:
+                continue
+            value:ast.expr = statement.value
+            if isinstance(value, (ast.List, ast.Tuple)) and all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, (int, float))
+                    and not isinstance(e.value, bool) for e in value.elts):
+                self._constant_list_names.add(statement.targets[0].id)
+                self._constant_lists[statement.targets[0].id] = [
+                    e.value for e in value.elts]
+
+    def _emit_constant_enumerate_head(self, index_name:str, value_name:str,
+                                      loop:ast.For)->None:
+        """The work-item head for `for i, x in enumerate([1.0, 2.0, ...])`.
+
+        The list is a compile-time table: its length is the dispatch's bound and each
+        element is a constant, so the value is a `switch` over the index rather than a
+        buffer the host would have to build and pass. The bound is a literal, so the guard
+        is too.
+        """
+        values:List[object] = self._enumerate_constants
+        extent:int = len(values)
+        self.work_item_indices = [index_name]
+        self._define(index_name, "int", None)
+        if self._opencl_syntax:
+            self._emit(f"const int {index_name} = get_global_id(0);")
+        else:
+            self._emit(f"const int {index_name} = "
+                       f"(int)(blockIdx.x * blockDim.x + threadIdx.x);")
+        self._emit(f"if ({index_name} >= {extent})")
+        self._emit("{")
+        self._emit("    return;")
+        self._emit("}")
+        self._emit_blank()
+        # The element's type is the one its constants promote to (int beside a float is a
+        # `double` under the mapping, python's own arithmetic).
+        element:str = ("double" if any(isinstance(v, float) for v in values) else "int")
+        self._define(value_name, element, loop.target)
+        self._emit(f"{self._device_type(element)} {value_name} = 0;")
+        self._emit(f"switch ({index_name})")
+        self._emit("{")
+        for position, value in enumerate(values):
+            literal:str = (self._real_literal(float(value), element)
+                           if element == "double" else str(int(value)))
+            self._emit(f"    case {position}: {value_name} = {literal}; break;")
+        self._emit("}")
+        self._emit_blank()
 
     def _emit_work_item_head(self, index_name:str, param:str)->None:
         """Emit the gid definition and the out-of-range guard."""
@@ -2875,7 +3231,9 @@ class FunctionTranslator:
         arg:ast.expr = iter_node.args[0]
         param:str = ""
         if isinstance(arg, ast.Name):
-            param = arg.id
+            # A local alias of an array (`src = a`, then `ndenumerate(src)`) names the same
+            # buffer, so its extents are the aliased array's own.
+            param = self._array_pointer_root(arg.id)
         elif (self.self_param and isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
                 and arg.value.id == self.self_param):
             param = f"_self_{arg.attr}"
@@ -3242,7 +3600,7 @@ class FunctionTranslator:
             # below it the statement would run once per work item.
             if self._host_created_assignment(stmt):
                 continue
-            self._visit_statement(stmt)
+            self._visit_host_statement(stmt)
 
         if enumerate_form is not None:
             loop:ast.For = body[magic_index]
@@ -3255,6 +3613,18 @@ class FunctionTranslator:
                     "`for i, x in enumerate(array)`", target)
             index_name:str = target.elts[0].id
             value_name:str = target.elts[1].id
+
+            if arr_t is None:
+                # A literal list: the domain is `len(list)` and the element is the constant
+                # at that position. No array parameter is involved, so the dispatch reads the
+                # length the list states.
+                self.gid_param = ""
+                self._emit_constant_enumerate_head(index_name, value_name, loop)
+                self._visit_work_item_body(loop.body)
+                # The domain is the list's own length: an empty array name marks a literal
+                # extent (see the `name.startswith` mapping in PyKernel._compile).
+                self.work_size_dims = [("", len(self._enumerate_constants))]
+                return
 
             self.gid_param = param
             self._emit_work_item_head(index_name, param)
@@ -3355,17 +3725,30 @@ class FunctionTranslator:
         range_call:ast.Call = loop.iter
         bound:ast.expr = range_call.args[0]
 
-        array_name:str = (self._shape_holder_param(bound.value) or "")
-        outer:Optional[OuterVarEntry] = self.outer_vars.get(array_name)
-        host:Optional[HostValueEntry] = self.host_values.get(array_name)
+        # Two names, because the two questions they answer have different answers for a
+        # slice. `guard_name` is what the per-item bound is read from, which is the local
+        # itself (`part.shape[0]` is the slice's length); `size_name` is the parameter the
+        # *launch* is sized from, which is the array the local points at, because extents
+        # are launch parameters named after arrays. Launching the array's full extent and
+        # skipping the excess with the guard is the same arrangement the automatic work
+        # size already uses when it rounds a grid up.
+        raw_name:Optional[str] = self._loop_domain_name(bound.value)
+        if raw_name is None:
+            self._error(
+                "a magic loop's iteration domain must be `<array>.shape[0]`", bound)
+        guard_name:str = (raw_name if raw_name in self._array_slice_extents
+                          else self._array_pointer_root(raw_name))
+        size_name:str = self._array_pointer_root(raw_name)
+        outer:Optional[OuterVarEntry] = self.outer_vars.get(size_name)
+        host:Optional[HostValueEntry] = self.host_values.get(size_name)
         is_outer_array:bool = ((outer is not None and is_ptr(outer["type"]))
                                or (host is not None and is_ptr(host["type"])))
-        if not is_outer_array and not is_ptr(self._lookup(array_name)):
-            self._error(f"'{array_name}' is not an array parameter of this kernel", bound)
+        if not is_outer_array and not is_ptr(self._lookup(guard_name)):
+            self._error(f"'{raw_name}' is not an array parameter of this kernel", bound)
 
-        self.gid_param = array_name
+        self.gid_param = guard_name
 
-        gid_bound:str = self._shape_var(array_name, 0)
+        gid_bound:str = self._shape_var(guard_name, 0)
         target:str = loop.target.id
         # This branch emits its own work-item head (the 1-D form), so it has to record the
         # index variable that makes a `arr[i] += v` provably race-free just as the
@@ -3384,7 +3767,7 @@ class FunctionTranslator:
 
         # The loop body is the work-item body; nested range loops translate as real serial loops
         self._visit_work_item_body(loop.body)
-        self.work_size_dims = [(array_name, 0)]
+        self.work_size_dims = [(size_name, 0)]
 
     # ---------- statements ----------
 
@@ -3440,6 +3823,143 @@ class FunctionTranslator:
         if name is None:
             return False
         return name in self.host_values
+
+    def _visit_host_statement(self, node:ast.stmt)->None:
+        """Bind one host-region statement, or translate it when the host could not run it.
+
+        A statement above the first magic loop (or between two of them) runs **once**, on
+        the host, exactly as python reads it -- never once per work item. So when the
+        interpreter already ran it (its line is in `host_statement_lines`, see
+        `_host_region_values`), the device gets no code for it at all: only the values it
+        bound travel to the kernel, as parameters.
+
+        A statement the host could not run stays device code, and that is what keeps
+        `zeros_per_group(...)` above a loop working: a shared buffer is declared by the
+        kernel, so there is nothing for the host to execute.
+        """
+        if int(getattr(node, "lineno", 0) or 0) in self.host_statement_lines:
+            self._bind_host_statement(node)
+            return
+        self._visit_statement(node)
+
+    def _loop_written_names(self)->Set[str]:
+        """Names the magic loops' bodies assign as a plain python local.
+
+        Such a name is a plain local the work item updates; only one that is *also*
+        initialized above the loop and read after it is carried through a device slot (see
+        `_carried_scalars`). The distinction matters: the names here are what keeps a host
+        scalar from being bound twice, so this is deliberately narrower than "any name the
+        loop assigns" -- a `self.<attr> += ...` or an element store is not a local at all.
+        """
+        body:List[ast.stmt] = list(self.tree.body)
+        start:int = _magic_loop_index(body)
+        names:Set[str] = set()
+        for statement in body[start:]:
+            if not isinstance(statement, ast.For):
+                continue
+            for child in ast.walk(statement):
+                if isinstance(child, ast.AugAssign) and isinstance(child.target, ast.Name):
+                    names.add(child.target.id)
+                elif isinstance(child, ast.Assign):
+                    for target in child.targets:
+                        if isinstance(target, ast.Name):
+                            names.add(target.id)
+        return names
+
+    def _bind_host_statement(self, node:ast.stmt)->None:
+        """Give the device the values a host statement bound.
+
+        The statement ran on the host (see `_host_region_values`), so its value exists at
+        launch time; what is recorded here is which of its names the device has to receive.
+        A name a device argument can carry becomes a scalar or array parameter. A name it
+        cannot carry -- a string, a dict, an arbitrary-precision number -- stays on the
+        host: nothing is bound for the device, and no statement that reads it can be device
+        code (that was decided when the host ran it). A statement that binds no value
+        (`import json`) contributes neither.
+        """
+        # `lo, hi = bounds(1)` above the loop: the host ran the helper, so both values are
+        # known, and each name becomes its own scalar parameter. The device never calls the
+        # helper -- the pair is data by the time the launch happens.
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Tuple):
+            for element in node.targets[0].elts:
+                if isinstance(element, ast.Name):
+                    self._bind_host_value(element.id, element)
+            return
+        name:Optional[str] = _assigned_name_of(node)
+        if name is None or name in self.host_values:
+            return
+        # An outer-scope name (`nonlocal held` in an enclosing `def`, or `global`) is *not*
+        # a host value: it travels through its own slot (see _bind_outer_variables), and
+        # every use of it already compiles against that. Treating it as a host scalar
+        # declared it twice and gave the device a pointer where the outer slot is a value.
+        if name in self.outer_vars:
+            return
+        # A name the *loop* updates (`total = 0.0` above it, `total = total + x[i]` inside)
+        # is one location for the whole launch, carried through a device slot (see
+        # _bind_carried_scalars). Its initializer is host work in the sense that python ran
+        # it, but the slot is what carries the value, and the kernel is what finalizes it.
+        # A `return total` *inside* the loop does not qualify as a carried scalar (the
+        # helper requires the name to be read after the loop), so the loop body is
+        # consulted directly.
+        if name in self.carried_scalars or name in self._loop_written_names():
+            # Not a host value: the loop updates it, so the ordinary walk owns the
+            # initializer (a device local, or a carried slot). Translating it here is what
+            # keeps the work item's own copy declared -- and it is what the body meant.
+            self._visit_statement(node)
+            return
+        # `part = a[0:4]` is a pointer into the array, not a host value (see
+        # _emit_array_slice): the device binds the offset itself.
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Subscript) \
+                and isinstance(node.value.slice, ast.Slice):
+            return
+        # `weights = [1.0, 2.0, 3.0]` feeding `enumerate(weights)` is a compile-time table:
+        # the loop reads the elements from the list's own literal (see
+        # _emit_constant_enumerate_head), so the binding emits no device code and no
+        # parameter carries it.
+        if isinstance(node, ast.Assign) and isinstance(node.value, (ast.List, ast.Tuple)):
+            assigned:Optional[str] = _assigned_name_of(node)
+            if assigned is not None and assigned in self._constant_list_names:
+                return
+        # `src = a` is a pointer assignment, not a host value: no parameter carries the
+        # local, and letting it become a host scalar made the launch look for an extent the
+        # argument list does not have (an `IndexError` from the shape check).
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            source_name:Optional[str] = self._pointer_source_name(node.value)
+            if source_name is not None and is_ptr(self._lookup(source_name)):
+                self._visit_statement(node)
+                return
+        produced:object = self.host_region_values.get(name, _UNRESOLVED)
+        if produced is _UNRESOLVED:
+            # The host ran the statement but bound no value under this name, so there is
+            # nothing for the device to receive; the name simply stays host-side.
+            return
+        self._bind_host_value(name, node)
+
+    def _bind_host_value(self, name:str, node:Optional[ast.AST])->None:
+        """Give the device one host-bound name, as a scalar (or array) parameter.
+
+        The value came from a statement the interpreter ran (see `_host_region_values`), so
+        it exists at launch time. A type a device argument can carry becomes a parameter; a
+        string, a dict or an arbitrary-precision number cannot, and stays on the host.
+        """
+        if name in self.host_values or name in self.host_scalars:
+            return
+        produced:object = self.host_region_values.get(name, _UNRESOLVED)
+        if produced is _UNRESOLVED:
+            return
+        try:
+            device_type:DeviceType = infer_ctype(produced, self.type_map)
+        except SyntaxError:
+            device_type = None
+        if device_type is None:
+            # Not something a device argument can carry: the value stays on the host.
+            return
+        # A *host value* is its own entry list, not an entry of host_values: host_values is
+        # what the body *created* (see _bind_host_values), and the launch treats those
+        # differently -- a creation is passed as an object, this one as a scalar.
+        self.host_scalars[name] = device_type
+        self.params.append((name, device_type))
 
     def _is_creation_expression(self, node:ast.expr)->bool:
         """True when this expression *builds data* the device cannot build itself.
@@ -3684,6 +4204,10 @@ class FunctionTranslator:
         launch. A `range` over something that is not an array's shape (`range(8)`) does not
         name a work-item domain, so it is an ordinary serial loop and stays allowed, exactly
         as it was before the several-pass split existed.
+
+        An argument that is a local alias of an array (`src = a`, then `enumerate(src)`) is
+        the same domain: resolving the alias here is what keeps a body with one dispatch
+        loop from reading as a body with two.
         """
         iterator:ast.expr = node.iter
         if isinstance(iterator, ast.Call):
@@ -4520,6 +5044,38 @@ class FunctionTranslator:
             self._error("chained assignment is not supported", node)
         target:ast.expr = node.targets[0]
 
+        # `weights = [1.0, 2.0, 3.0]` feeding `enumerate(weights)` is a compile-time table:
+        # the loop reads the elements from the literal itself (see
+        # _emit_constant_enumerate_head), so the binding emits nothing and no parameter
+        # carries it. Handled here rather than only where a host region binds it, because
+        # both paths reach this method.
+        if isinstance(target, ast.Name) and target.id in self._constant_list_names:
+            return
+
+        # `src = a` is a plain pointer assignment: an array parameter *is* a `T*` on the
+        # device, so the work item binds a second name to the same buffer and reads or
+        # writes through either. The statement itself is emitted by the ordinary assignment
+        # path below; what is recorded here is which array it was assigned from, because the
+        # *extents* are launch parameters named after the array -- a shape read through the
+        # local (`src.shape[0]`) has to resolve to them, or the launch looks for an argument
+        # that does not exist (an `IndexError` from the shape check). Only a bare name or a
+        # receiver member is a candidate: `threadIdx.x` is an attribute too, and it is a
+        # value, not an array.
+        if isinstance(target, ast.Name) and self._lookup(target.id) is None:
+            source_name:Optional[str] = self._pointer_source_name(node.value)
+            if source_name is not None and is_ptr(self._lookup(source_name)):
+                self._array_pointer_sources[target.id] = source_name
+
+        # A *slice* of an array (`part = a[lo:hi]`) is a pointer into the same buffer: the
+        # device has no view type, so the slice becomes `T* part = a + lo;` and its length
+        # is the one the slice wrote down. A constant slice is a fixed extent, which is what
+        # makes `part.shape[0]` a compile-time number (see _shape_var).
+        if isinstance(target, ast.Name) and isinstance(node.value, ast.Subscript) \
+                and isinstance(node.value.slice, ast.Slice) \
+                and self._lookup(target.id) is None:
+            if self._emit_array_slice(target.id, node):
+                return
+
         # `box.total = v` is a call to the property's setter. It is handled here rather
         # than in _visit_target because a setter takes the value, which only the
         # assignment knows -- and because the result is a statement, not an expression.
@@ -4667,13 +5223,21 @@ class FunctionTranslator:
 
         if is_ptr(t) and not (isinstance(t, tuple) and _structs_module.dtype_for(t[1]) is not None):
             # A pointer to a *structure* is an aliasable handle (`q = item; q.a` counts as a
-            # read of `item.a`), so it copies like a scalar. An array pointer is different:
-            # rebinding an outer array is refused earlier, while binding the outer
-            # variables, so this message only covers a local/parameter target.
+            # read of `item.a`), so it copies like a scalar. An array pointer is the same
+            # thing on the device -- an array parameter *is* a `T*` -- so `src = a` binds a
+            # second name to the same buffer and the work item reads/writes it through
+            # either. Rebinding an *outer* array stays refused (the object is shared with the
+            # caller, so only its elements may be written), and that is the one case left.
             if isinstance(target, ast.Name) and target.id in self.outer_vars:
                 self._error(
                     f"cannot rebind the outer array '{target.id}': the array object itself "
                     f"is shared with the caller, so a device kernel can only write its elements", node)
+            if isinstance(target, ast.Name) and self._lookup(target.id) is None:
+                # One pointer assigned to a fresh local: a real C declaration, so every later
+                # use of the name is an ordinary variable read.
+                self._emit(f"{self._device_type(t[1])}* {device_name(target.id)} = {code};")
+                self._define(target.id, t, node)
+                return
             self._error("cannot assign an array to a variable", node)
 
         if isinstance(target, ast.Name):
@@ -5070,6 +5634,37 @@ class FunctionTranslator:
         self._expand_print_pieces(pieces, leaves, selectors)
         self._emit_print_leaves(leaves, selectors, call, terminator)
 
+    def _print_fstring(self, node:ast.JoinedStr)->List[Tuple[str, str, Any]]:
+        """An f-string as print pieces: its literal runs are text, its fields are values.
+
+        `f"slot {i}"` is the same output as `print("slot", i, sep="")`, and that is how it is
+        emitted -- python's f-string is a `JoinStr` of `Constant` and `FormattedValue` parts,
+        and the second sort is exactly one value. A conversion (`!r`/`!s`/`!a`) or a format
+        spec (`:>4`, `:.2f`) asks python's formatting machinery for text the device has no
+        formatter for, so each is refused with the reason rather than silently ignored.
+        """
+        pieces:List[Tuple[str, str, Any]] = []
+        for part in node.values:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                pieces.append(("text", part.value, None))
+                continue
+            if not isinstance(part, ast.FormattedValue):
+                self._error(
+                    "an f-string part has no device form: use literal text and plain "
+                    "`{expression}` fields", part)
+            if part.conversion not in (-1, None):
+                self._error(
+                    "an f-string conversion (`!r`, `!s`, `!a`) formats through python's "
+                    "repr/str, which the device has no formatter for: print the value in a "
+                    "plain `{expression}` field instead", part)
+            if part.format_spec is not None:
+                self._error(
+                    "an f-string format spec (`{value:>4}`, `{value:.2f}`) needs python's "
+                    "formatting machinery, which the device does not have: print the value "
+                    "in a plain `{expression}` field instead", part)
+            pieces.extend(self._print_argument(part.value))
+        return pieces
+
     def _print_sep_end(self, call:ast.Call)->Tuple[str, str]:
         """The separator and terminator a print() call asks for.
 
@@ -5117,7 +5712,14 @@ class FunctionTranslator:
           ("bool", code, "bool")    a bool, printed as True/False
           ("real", code, type)      a float or double, printed like python's repr
           ("vec", code, type)       a vector, printed like its python repr
+
+        An f-string is exactly a list of those pieces already: its literal runs are fixed
+        text and each `{expression}` is one value, so it is expanded here rather than
+        refused. A conversion or a format spec (`{x!r}`, `{x:>4}`) is not, because python's
+        formatting machinery has no device counterpart -- the value is printed its own way.
         """
+        if isinstance(node, ast.JoinedStr):
+            return self._print_fstring(node)
         if isinstance(node, ast.Constant) and node.value is None:
             return [("text", "None", None)]
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -5466,6 +6068,7 @@ class FunctionTranslator:
             return
         # _visit_array_target already narrows a pointer to its element type.
         base_code, element_t = self._visit_array_target(target.value)
+        self._record_element_write(target.value)
         if is_image(element_t):
             self._error(
                 "'op=' on an image element is not supported; write `img[x, y] = value` "
@@ -5563,9 +6166,12 @@ class FunctionTranslator:
         """The device type of each element a tuple-returning helper answers, or None.
 
         Read from the helper's own returns: a `np.<dtype>(...)` cast names its width, a
-        python float result names the mapping's width, a python int result is an int.
-        Anything else (an argument's member, a call) is not statically known here, and
-        the caller refuses rather than guessing.
+        python float result names the mapping's width, a python int result is an int, and
+        arithmetic over its own parameters (`return n, n + 2`) takes the type of the
+        parameter it starts from -- the same rule the kernel's own expressions follow. That
+        last case is what makes an ordinary helper usable: `lo, hi = bounds(i)` is how
+        python spells "give me two numbers", and a helper written that way has no cast to
+        read. Anything whose type is not statically known is refused rather than guessed.
         """
         if not isinstance(call.func, ast.Name):
             return None
@@ -5577,35 +6183,76 @@ class FunctionTranslator:
         except (OSError, TypeError):
             return None
         python_float_kind:str = self.type_map.get("float", "float")
+        # The helper's own parameters, at the types its call site passes: `n` in
+        # `def bounds(n)` is whatever the caller handed over, which is what the arithmetic
+        # below has to start from.
+        parameter_types:Dict[str, object] = {}
+        try:
+            names:List[str] = list(target.__code__.co_varnames[
+                :target.__code__.co_argcount])
+        except AttributeError:
+            names = []
+        for position, name in enumerate(names):
+            if position < len(call.args):
+                parameter_types[name] = self._visit_expression(call.args[position])[1]
         sites:List[List[object]] = []
         for sub in ast.walk(tree):
             if not (isinstance(sub, ast.Return) and isinstance(sub.value, ast.Tuple)):
                 continue
             element_types:List[object] = []
             for element in sub.value.elts:
-                if isinstance(element, ast.Call) \
-                        and isinstance(element.func, ast.Attribute) \
-                        and isinstance(element.func.value, ast.Name) \
-                        and self.resolve_global(element.func.value.id) is np:
-                    mapped:Optional[str] = DTYPE_MAP.get(element.func.attr)
-                    if mapped is None:
-                        return None
-                    element_types.append(mapped)
-                    continue
-                if isinstance(element, ast.BinOp) and isinstance(element.op, ast.Mult):
-                    # `2.0 * a` under a double mapping answers a double; the operand
-                    # kinds are what the kernel's own translation gives them.
-                    element_types.append(python_float_kind if python_float_kind == "double"
-                                         else "float")
-                    continue
-                if isinstance(element, ast.Constant) and isinstance(element.value, float):
-                    element_types.append(python_float_kind)
-                    continue
-                return None
+                inferred:Optional[object] = self._tuple_element_type(
+                    element, python_float_kind, parameter_types)
+                if inferred is None:
+                    return None
+                element_types.append(inferred)
             sites.append(element_types)
         if len({tuple(site) for site in sites}) != 1 or not sites:
             return None
         return sites[0]
+
+    def _tuple_element_type(self, element:ast.expr, python_float_kind:str,
+                            parameter_types:Dict[str, object])->Optional[object]:
+        """One element of a helper's tuple return, at its device type, or None.
+
+        The shapes an ordinary two-value helper uses: a cast, a float/int constant, one of
+        the helper's own parameters, or arithmetic over those. Everything else -- an
+        argument's member, another call -- is not statically known here.
+        """
+        if isinstance(element, ast.Call) \
+                and isinstance(element.func, ast.Attribute) \
+                and isinstance(element.func.value, ast.Name) \
+                and self.resolve_global(element.func.value.id) is np:
+            return DTYPE_MAP.get(element.func.attr)
+        if isinstance(element, ast.Constant):
+            if isinstance(element.value, bool):
+                return "bool"
+            if isinstance(element.value, float):
+                return python_float_kind
+            if isinstance(element.value, int):
+                return "int"
+            return None
+        if isinstance(element, ast.Name):
+            return parameter_types.get(element.id)
+        if isinstance(element, ast.UnaryOp):
+            return self._tuple_element_type(element.operand, python_float_kind,
+                                            parameter_types)
+        if isinstance(element, ast.BinOp) and isinstance(
+                element.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod)):
+            left:Optional[object] = self._tuple_element_type(
+                element.left, python_float_kind, parameter_types)
+            right:Optional[object] = self._tuple_element_type(
+                element.right, python_float_kind, parameter_types)
+            if isinstance(element.op, ast.Div):
+                # True division of two ints answers a float in python, so the result is the
+                # mapping's float width rather than an int.
+                return python_float_kind if left is not None and right is not None else None
+            if left is None or right is None:
+                return None
+            if is_float(left) or is_float(right):
+                return "double" if "double" in (left, right) else python_float_kind
+            return "int"
+        return None
 
     def _emit_tuple_call_unpack(self, targets:List[ast.expr], call:ast.Call)->None:
         """`x, y = pair(...)`: translate the call, passing the destinations as outputs.
@@ -5846,6 +6493,7 @@ class FunctionTranslator:
                 return self._scalar_position(element_code, element_t, target)
             base_code, base_t = self._visit_array_target(target.value)
             index_code, _ = self._visit_subscript_index(target)
+            self._record_element_write(target.value)
             return f"{base_code}[{index_code}]", base_t
         if isinstance(target, ast.Attribute):
             # `p.x = ...` on a structure value: a C member store. The read side already
@@ -5971,6 +6619,15 @@ class FunctionTranslator:
         why it needs the array's name; a scalar index is already a flat offset and is left
         alone, so the 1-D spelling keeps working on a multidimensional array.
 
+        A **negative index** is python's from-the-end spelling, and emitting it raw was a
+        silent out-of-bounds access: `a[-1]` read the word *before* the buffer and answered
+        0.0 where python answers the last element, and `a[-1] = v` wrote outside the array.
+        A constant negative index becomes `extent - n` at translation time; a computed one
+        gets the same correction around a `%`-free select, so `i - n` cannot underflow into
+        a neighbouring array. An extent of zero is python's own `IndexError` territory, so
+        the expression is clamped to 0 rather than left negative (the caller's bounds guard
+        already skips the work item when the array is empty).
+
         An atomic call passes the whole array as the target, so an atomic on a shared buffer
         must name the group's slice (`buf[blockIdx]`) rather than the buffer.
         """
@@ -5979,11 +6636,15 @@ class FunctionTranslator:
             if slice_shape is not None:
                 # An atomic on a shared buffer names the group's slice as its array, and the
                 # slice carries its own shape, so the flattening needs no `_shape_var`.
-                dims:List[Translated] = [self._visit_expression(e) for e in index.elts]
+                dims:List[Tuple[str, object]] = [
+                    (self._visit_expression(e), e) for e in index.elts]
                 terms:List[str] = []
-                for d, (code, t) in enumerate(dims):
+                for d, ((code, t), element) in enumerate(dims):
                     if not is_int(t):
                         self._error("array indices must be integers", node)
+                    code = self._python_index(
+                        code, element,
+                        literal_extent=(slice_shape[d] if d < len(slice_shape) else None))
                     term:str = code
                     for inner in range(d + 1, len(dims)):
                         if inner >= len(slice_shape):
@@ -6000,12 +6661,13 @@ class FunctionTranslator:
                     "a shared buffer is indexed by its group first, so pass the tuple after "
                     "the group: `buf[blockIdx][i, j]`", node)
             array_name:str = self._array_name(target)
-            dims:List[Translated] = [self._visit_expression(e) for e in index.elts]
-            terms:List[str] = []
-            for d, (code, t) in enumerate(dims):
+            dims = [(self._visit_expression(e), e) for e in index.elts]
+            terms = []
+            for d, ((code, t), element) in enumerate(dims):
                 if not is_int(t):
                     self._error("array indices must be integers", node)
-                term:str = code
+                code = self._python_index(code, element, target, dim=d)
+                term = code
                 for inner in range(d + 1, len(dims)):
                     term = f"{term} * {self._shape_var(array_name, inner)}"
                 terms.append(term)
@@ -6013,7 +6675,64 @@ class FunctionTranslator:
         code, t = self._visit_expression(index)
         if not is_int(t):
             self._error("array index must be an integer", node)
-        return code, t
+        return self._python_index(code, index, target), t
+
+    def _python_index(self, code:str, node:ast.expr,
+                      target:Optional[ast.expr]=None, dim:int=0,
+                      literal_extent:Optional[int]=None)->str:
+        """A python index as the device reads it, with a constant negative index folded.
+
+        `a[-1]` is python's last element, and the device has no such addressing: the index
+        is a plain offset, so a raw `-1` reaches memory *before* the buffer. A constant
+        negative index is therefore rewritten as `extent - n`, which is the element python
+        names -- `a[-1]` and `a[n - 1]` are the same access, so the fold costs nothing.
+
+        The extent is looked up **only** when the fold actually happens, and that matters
+        beyond tidiness: `_shape_var` is what *registers* an extent parameter, so asking
+        for one eagerly made every kernel subscript declare a shape it never read. A
+        gid-style Metal body then grew an `_out_shape0` parameter it is defined not to
+        have, and a 2-D one grew axis 0 as well as axis 1.
+
+        A *computed* index is passed through unchanged, deliberately. Wrapping it in a
+        sign test would evaluate the expression twice (wrong for a call or a subscript) and
+        would put a select around every array access in every kernel to pay for a case that
+        is an out-of-range index by python's own rules -- `a[k]` with a negative `k` is the
+        same kind of mistake as `a[100]` on a short array, which the device has never
+        bounds-checked either.
+        """
+        constant:Optional[int] = _constant_int_of(node)
+        if constant is None or constant >= 0:
+            return code
+        extent:Optional[str] = None
+        if literal_extent is not None:
+            extent = str(literal_extent)
+        elif target is not None:
+            try:
+                extent = self._shape_var(self._array_name(target), dim)
+            except SyntaxError:
+                extent = None
+        if extent is None:
+            self._error(
+                "a negative index needs the array's extent to count from the end, and "
+                "the array this index addresses is not known here", node)
+        # `extent - n` is python's answer. If the array is shorter than the index python
+        # raises IndexError, and no work item can raise it, so the offset is clamped.
+        needed:int = -constant
+        return f"((({extent}) - {needed} >= 0) ? (({extent}) - {needed}) : 0)"
+        if constant is not None:
+            if constant >= 0:
+                return code
+            if extent is None:
+                self._error(
+                    "a negative index needs the array's extent to count from the end, and "
+                    "the array this index addresses is not known here", node)
+            # `extent - n` is python's answer. If the array is shorter than the index python
+            # raises IndexError, and no work item can raise it, so the offset is clamped.
+            needed:int = -constant
+            return f"((({extent}) - {needed} >= 0) ? (({extent}) - {needed}) : 0)"
+        if extent is None:
+            return f"((({code}) >= 0) ? ({code}) : 0)"
+        return f"((({code}) >= 0) ? ({code}) : (({code}) + ({extent})))"
 
     def _array_name(self, node:ast.expr)->str:
         if isinstance(node, ast.Name):
@@ -6194,6 +6913,11 @@ class FunctionTranslator:
             # The host created this object; on the device it is just the parameter that
             # carries it (see _host_created_assignment).
             return device_name(node.id), host["type"]
+        host_scalar:Optional[DeviceType] = self.host_scalars.get(node.id)
+        if host_scalar is not None:
+            # A host-region statement bound this value; the device reads the parameter
+            # that carries it (see _bind_host_statement).
+            return device_name(node.id), host_scalar
         outer:Optional[Dict[str, object]] = self.outer_vars.get(node.id)
         if outer is not None:
             # A writable outer variable travels as `T*`, so every use is a dereference; a
@@ -6486,6 +7210,7 @@ class FunctionTranslator:
         # One complex operand and one real scalar. The scalar's own width decides whether the
         # result widens, and the header names the mixed conversion after the widths it joins.
         complex_is_left:bool = left_dtype is not None
+        complex_side:str = left_side if complex_is_left else right_side
         scalar_side:str = right_side if complex_is_left else left_side
         complex_code:str = left_code if complex_is_left else right_code
         scalar_code:str = right_code if complex_is_left else left_code
@@ -6495,28 +7220,34 @@ class FunctionTranslator:
         # ambiguous (CUDA rejects it with "no suitable constructor exists").
         element:str = "double" if mixed_scalar or kind == "c128" else "float"
         typed_scalar:str = f"(({element})({scalar_code}))"
-        # The complex operand's own width is what the function declares, so a c64 value
-        # reaching a c128 function (the `mixed_scalar` case) is widened first.
+        # `kind` is the *result* width, so a c64 operand meeting a double scalar still has to
+        # be widened to reach the c128 function the header declares.
         typed_complex:str = complex_code
-        if mixed_scalar and kind == "c64":
+        if mixed_scalar and complex_side == "c64":
             typed_complex = f"c64_widen_c128({complex_code})"
             self.complex_needs.update(complex_support.mixed_needs())
 
-        def scalar_call(name:str)->Translated:
-            if mixed_scalar:
-                self.complex_needs.update(complex_support.mixed_needs())
-                return f"{name}_c128({typed_complex}, {typed_scalar})", "c128"
-            return f"{name}({typed_complex}, {typed_scalar})", kind
+        def scalar_call(operation:str)->Translated:
+            """`z op s`, as the header's function: the scalar is the second argument.
+
+            Never `f"{kind}_{operation}_c128"`: the header's `_c128` suffix marks an operand
+            of that width (`c64_scale_c128(c64, double)`), and because `kind` here is already
+            the widened result, appending it named helpers that do not exist -- every
+            complex-op-float spelling was refused with "c128_scale_c128 is undefined".
+            """
+            return f"{kind}_{operation}({typed_complex}, {typed_scalar})", kind
+
+        def reversed_call(operation:str)->Translated:
+            """`s op z`, whose scalar is the *first* argument the header declares."""
+            return f"{kind}_{operation}({typed_scalar}, {typed_complex})", kind
 
         if operator == "Mult":
             # `s * z` and `z * s` are the same product: the scalar is the second argument.
-            return scalar_call(f"{kind}_scale")
+            return scalar_call("scale")
         if operator == "Div":
             if complex_is_left:
-                return scalar_call(f"{kind}_scale_div")
-            return (f"{kind}_rdiv({scalar_code}, {complex_code})" if not mixed_scalar
-                    else f"{kind}_rdiv_c128({scalar_code}, {complex_code})"), (
-                        "c128" if mixed_scalar else kind)
+                return scalar_call("scale_div")
+            return reversed_call("rdiv")
         if operator in ("Add", "Sub"):
             # `z + s` and `z - s` add or subtract the real part; `s + z` is the *same* sum as
             # `z + s` (addition commutes, so it reuses the same function), while `s - z` has to
@@ -6525,12 +7256,10 @@ class FunctionTranslator:
             if operator == "Add":
                 if not complex_is_left:
                     scalar_code, complex_code = complex_code, scalar_code
-                return scalar_call(f"{kind}_add_real")
+                return scalar_call("add_real")
             if complex_is_left:
-                return scalar_call(f"{kind}_sub_real")
-            return (f"{kind}_rsub({scalar_code}, {complex_code})" if not mixed_scalar
-                    else f"{kind}_rsub_c128({scalar_code}, {complex_code})"), (
-                        "c128" if mixed_scalar else kind)
+                return scalar_call("sub_real")
+            return reversed_call("rsub")
         if operator == "Pow":
             if complex_is_left:
                 # `z ** 2` (the Mandelbrot iteration shape) is the direct product: the
@@ -6543,10 +7272,8 @@ class FunctionTranslator:
                         and isinstance(node.right.value, int) \
                         and node.right.value == 2 and not isinstance(node.right.value, bool):
                     return f"{kind}_mul({complex_code}, {complex_code})", kind
-                return scalar_call(f"{kind}_pow_real")
-            return (f"{kind}_rpow({scalar_code}, {complex_code})" if not mixed_scalar
-                    else f"{kind}_rpow_c128({scalar_code}, {complex_code})"), (
-                        "c128" if mixed_scalar else kind)
+                return scalar_call("pow_real")
+            return reversed_call("rpow")
         return None
 
     def _emit_complex_constructor(self,
@@ -7263,6 +7990,13 @@ class FunctionTranslator:
         if shared is not None:
             return shared
 
+        # A slice used directly as an index (`a[:][i]`, `a[2:][j]`) is the same pointer at
+        # an offset: emit the offset arithmetically so the expression needs no local. This
+        # has to come *before* the generic visit below, which would try to evaluate the
+        # slice as an expression of its own (and there is no Slice value on the device).
+        if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Slice):
+            return self._visit_sliced_subscript(node)
+
         # A zeros_per_group() slice remembers the shape it was declared with, so a
         # multidimensional subscript can be flattened exactly like an array parameter's.
         readonly_code, readonly_t = self._visit_expression(value)
@@ -7275,6 +8009,39 @@ class FunctionTranslator:
             return self._emit_image_read(base_code, base_t, node)
         index_code, _ = self._visit_subscript_index(node)
         return f"{base_code}[{index_code}]", base_t
+
+    def _visit_sliced_subscript(self, node:ast.Subscript)->Translated:
+        """`a[lo:hi][i]`: the element of the slice, as `array[lo + i]` on the buffer.
+
+        A slice is a pointer at an offset, and indexing it is indexing that offset. Folding
+        the two into one subscript is what lets the spelling appear in an expression without
+        a local to hold the view. A slice with a step is refused by `_emit_array_slice`'s
+        rules, and a nested slice (`a[1:][1:]`) is refused here rather than guessed at.
+        """
+        sliced:ast.Subscript = cast(ast.Subscript, node.value)
+        base:ast.expr = sliced.value
+        slice_node:ast.Slice = cast(ast.Slice, sliced.slice)
+        if isinstance(base, ast.Subscript) and isinstance(base.slice, ast.Slice):
+            self._error("a slice of a slice is not supported: take one slice into a local "
+                        "and index it", node)
+        base_code, base_t = self._visit_expression(base)
+        if not is_ptr(base_t):
+            self._error("only an array parameter can be sliced", node)
+        step:Optional[ast.expr] = slice_node.step
+        if step is not None and _constant_int_of(step) != 1:
+            if _constant_int_of(step) == -1:
+                self._error(
+                    "a reversed slice (`a[::-1]`) is not a device pointer: a work item "
+                    "cannot walk backwards through a buffer with one, so read the elements "
+                    "with an explicit index instead (`a[n - 1 - i]`)", step)
+            self._error("a slice step must be the constant 1", step)
+        start:str = "0" if slice_node.lower is None else self._visit_expression(slice_node.lower)[0]
+        index_code, index_t = self._visit_expression(node.slice)
+        if not is_int(index_t):
+            self._error("array index must be an integer", node)
+        # `_visit_expression` answered the *pointer* type (a subscript on a name is a
+        # pointer), so the element type is what the caller expects back.
+        return f"{base_code}[({start}) + ({index_code})]", (cast(tuple, base_t))[1]
 
     def _visit_shared_index(self, code:str, t:object, node:ast.Subscript)->Translated:
         """Index a shared slice: `buf[blockIdx][i]`, `[i, j]`, and `[i][j]` all flatten.
@@ -7302,7 +8069,10 @@ class FunctionTranslator:
             if not is_int(element_t):
                 self._error("an index into a zeros_per_group() buffer must be an integer",
                             element)
-            term:str = element_code
+            # A negative index counts from that axis's extent, exactly as it does on an
+            # array parameter. Left raw it addressed the shared array's own header.
+            term:str = self._python_index(element_code, element,
+                                          literal_extent=shape[position])
             for extent in shape[position + 1:len(shape)]:
                 term = f"({term}) * {extent}"
             terms.append(term)
@@ -10230,7 +11000,7 @@ class FunctionTranslator:
         multi-dimensional subscripting needs them.
         """
         params:List[str] = []
-        outer_names:Set[str] = set(self.outer_vars) | set(self.host_values)
+        outer_names:Set[str] = set(self.outer_vars) | set(self.host_values) | set(self.host_scalars)
         for name, t in self.params:
             if name in outer_names:
                 continue
@@ -10327,6 +11097,20 @@ class FunctionTranslator:
                 declarations.append(f"{self._kernel_scalar_type(outer['type'])} {name}")
         for name, entry in self.host_values.items():
             declarations.append(f"{self._host_value_declaration(name, entry, device)}")
+        # The plain values a host-region statement bound: they are filled in at launch
+        # time exactly like a creation, so they are declared with them. A scalar is a
+        # plain parameter; an array the host built is a buffer, the same spelling a
+        # creation of that shape gets.
+        for name, t in self.host_scalars.items():
+            if name in self.outer_vars:
+                # The outer scope already declared it (an enclosing `nonlocal` slot): one
+                # parameter, and it is the slot, not a second by-value copy.
+                continue
+            if is_ptr(t):
+                qualifier = "" if device else self._buffer_qualifier()
+                declarations.append(f"{qualifier}{self._device_type(t[1])}* {device_name(name)}")
+            else:
+                declarations.append(f"{self._kernel_scalar_type(t)} {device_name(name)}")
         return declarations
 
     def _host_value_declaration(self, name:str, entry:Dict[str, object], device:bool)->str:
@@ -10372,7 +11156,7 @@ class FunctionTranslator:
         # Outer-scope parameters are held in self.params so the host can index launch
         # arguments by name, but they are *declared* last: the host appends them after the
         # work-size/sampler/local-size arguments it derives (see PyKernel._invoke_inner).
-        outer_names:Set[str] = set(self.outer_vars) | set(self.host_values)
+        outer_names:Set[str] = set(self.outer_vars) | set(self.host_values) | set(self.host_scalars)
         params:List[str] = []
         for name, t in self.params:
             if name in outer_names:

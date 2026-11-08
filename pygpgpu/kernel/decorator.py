@@ -1482,6 +1482,21 @@ class PyKernel(_KernelBase[_P]):
         owner:Optional[type] = None
         self_struct_members:Dict[str, str] = {}
         self_struct_type:object = None
+        # The host regions -- the statements above the first magic loop, between two of
+        # them, and after the last one -- run **once per call**, here, before anything else
+        # looks at the body. Their values are this call's (a statement may read the caller's
+        # arguments), and the lines tell the translator which statements are host work, so
+        # it emits no device code for them (see _host_region_values).
+        host_executed:List[int] = []
+        host_values_now:Dict[str, object] = {}
+        if not self._is_method or instance is not None:
+            built:Dict[str, object] = _host_created_values(
+                self.raw_func, tuple(args), instance)[0]
+            host_values_now, host_executed = _host_region_values(
+                self.raw_func, tuple(args), instance, set(built))
+            host_values_now = {**built, **host_values_now}
+        self.host_region_snapshot = host_values_now
+        self.host_region_statements = host_executed
         if self._is_method:
             if instance is None:
                 raise TypeError(f"{self.__name__}() requires an instance")
@@ -1490,7 +1505,10 @@ class PyKernel(_KernelBase[_P]):
             # that the instance is here: calling a self-method makes the attributes
             # *it* reads kernel arguments too, recursively.
             owner = type(instance)
-            self_attrs = scan_self_attrs(self.raw_func, self._self_param, owner)
+            # Which statements the host regions run is a fact about the *source*, so the lines
+            # computed above are what decides which methods are host-only (see `_host_region_values`).
+            self_attrs = scan_self_attrs(self.raw_func, self._self_param, owner,
+                                         set(host_executed))
             for name in self_attrs:
                 if not hasattr(instance, name):
                     raise SyntaxError(
@@ -1683,12 +1701,23 @@ class PyKernel(_KernelBase[_P]):
             gap_namespaces.append((region_globals, region_locals))
         gap_names:List[str] = list(launch_meta.get("gap_names") or [])
         created_all:List[str] = list(launch_meta.get("kernel_created_all") or [])
+        # A gap value the interpreter bound between the passes travels as a host scalar of
+        # its own type (see _bind_host_statement), not through the carried `int` slot below:
+        # `shift = len(label)` holds a number, but the statement it came from is host code
+        # and its value may be anything a python name can hold.
+        host_scalar_names:Set[str] = set(launch_meta.get("host_values") or [])
         gap_slots:Dict[str, object] = {}
         for name, value in _host_scalar_values(
-                self.raw_func, [n for n in gap_names if n not in created_all],
+                self.raw_func, [n for n in gap_names
+                                if n not in created_all and n not in host_scalar_names],
                 tuple(args), instance).items():
             slot = np.zeros(1, dtype=np.int32)
-            slot[0] = int(value)
+            try:
+                slot[0] = int(value)
+            except (TypeError, ValueError):
+                # Not a number: it travels as a host scalar of its own type instead (see
+                # _bind_host_statement), and this slot is not its carrier.
+                continue
             gap_slots[name] = slot
         # The created objects the device signature declares: the aligned prefix picks the
         # real array from here rather than a scalar slot.
@@ -1696,6 +1725,17 @@ class PyKernel(_KernelBase[_P]):
                                           if name in created}
 
         outer_writable = list(outer_state["writable"])
+        # The plain values host-region statements bound, in device-parameter order: the
+        # translator appended them after the created objects (see _bind_host_statement), so
+        # the launch supplies them in that same order.
+        host_value_names:List[str] = [name for name in launch_meta.get("host_values") or []
+                                      if name not in created_all]
+        # Their actual values, recomputed on *this* call: the compile that recorded the
+        # signature happens once, but a host-region value can depend on the arguments
+        # (`shift = len(label)`), so the launch reads the snapshot the call just made.
+        host_region_values:Dict[str, object] = dict(
+            getattr(self, "host_region_snapshot", None)
+            or launch_meta.get("host_region_values") or {})
         runtime_values:List[object] = list(outer_state["full"]) + _created_arguments(created)
         return_state:Dict[str, object] = (self._alloc_return_slots(returns)
                                       if returns else {})
@@ -1739,7 +1779,8 @@ class PyKernel(_KernelBase[_P]):
             declared:List[str] = [name for name in (
                 phase_param_names[phase_index]
                 if phase_index < len(phase_param_names) else [])
-                if name not in outer_vars and name not in created]
+                if name not in outer_vars and name not in created
+                and name not in host_value_names]
             if declared:
                 # Align the values to this phase's own signature: a gap value only one pass
                 # reads, or a carried scalar this pass writes, is not in the shared prefix.
@@ -1771,6 +1812,17 @@ class PyKernel(_KernelBase[_P]):
                 if (extra_created is None or name in extra_created) and \
                         name not in declared:
                     phase_args.append(_kernel_scalar_argument(value, infer_ctype(value)))
+            # The plain values a *host-region statement* bound (a `w = len(label)` above the
+            # loop, or an arbitrary-precision number the device receives as a double). They
+            # are declared with the created objects, so they are appended with them -- and
+            # skipped when this phase's signature already carries them in the prefix.
+            for name in host_value_names:
+                if name in created or name in outer_vars or name in declared:
+                    continue
+                if name not in host_region_values:
+                    continue
+                value = host_region_values[name]
+                phase_args.append(_kernel_scalar_argument(value, infer_ctype(value)))
             if return_state:
                 phase_args.extend(return_state["buffers"])
                 # A pass that never claims -- one whose only return runs in its host tail --
@@ -2567,8 +2619,12 @@ class PyKernel(_KernelBase[_P]):
         # Statements above the magic loop that only build data are executed by the
         # interpreter, not translated: numpy decides the shape and dtype, and the resulting
         # object is what the kernel receives as a parameter (see
-        # FunctionTranslator._host_created_assignment).
+        # FunctionTranslator._host_created_assignment). The values and the line numbers were
+        # computed once for this call, before the body was scanned (see _invoke_inner).
         creation_values, _ = _host_created_values(self.raw_func, args, instance)
+        executed_lines:List[int] = list(getattr(self, "host_region_statements", []))
+        region_values:Dict[str, object] = dict(
+            getattr(self, "host_region_snapshot", None) or creation_values)
         # The class each STRUCTURE argument was actually built from. One dtype can stand
         # for several classes, so the dtype alone cannot say whose method `p.total` is --
         # but the launch has the instance the caller handed over, and its type is the
@@ -2593,7 +2649,8 @@ class PyKernel(_KernelBase[_P]):
             self_struct_members=self_struct_members,
             self_struct_type=self_struct_type,
             struct_arg_classes=struct_arg_classes,
-            host_creation_values=creation_values,
+            host_creation_values=region_values,
+            host_executed_lines=executed_lines,
             type_map=self._type_map)
         # `@kernel(domain="x")` names the parameter whose shape declares the iteration
         # domain. It is applied before `translate()` so the declaration is in place while the
@@ -3005,6 +3062,14 @@ class PyKernel(_KernelBase[_P]):
                  # the launch has to supply (a returned creation below the loop included).
                  "kernel_created_all": sorted({name
                                                for names in phase_created for name in names}),
+                 # The plain values a host-region statement bound, in the device-parameter
+                 # order they were appended (a `w = len(label)` above the loop, an
+                 # arbitrary-precision number the kernel receives as a scalar), and the
+                 # values themselves for the launch to hand over.
+                 "host_values": list(translator.host_scalars),
+                 "host_region_values": {name: value for name, value
+                                        in self.host_region_snapshot.items()
+                                        if name in translator.host_scalars},
                  "subscript_indices": dict(translator.subscript_indices),
                  # name -> the line of its widest subscript, and the offset that turns a
                  # parsed-copy line into the user's own: the launch blames that statement,
@@ -3014,6 +3079,10 @@ class PyKernel(_KernelBase[_P]):
                  # name -> the subscript as the user wrote it, so the frame stand-in can
                  # re-run that expression and let CPython draw its own caret.
                  "subscript_texts": dict(translator.subscript_texts),
+                 # The arrays a local was sliced from (`part = a[lo:hi]`): a slice is one
+                 # pointer at an offset, which is only the same thing as python's view when
+                 # the array has one dimension. Checked at launch, where the rank is known.
+                 "sliced_arrays": list(translator.sliced_arrays),
                  "source_first_line": int(getattr(translator, "first_line", 1) or 1),
                  "loop_line": int(getattr(translator, "magic_loop_line", 0) or 0),
                  # How many index names the magic loop unpacks: the launch checks it against
@@ -3384,6 +3453,26 @@ def _check_shape_indices(kernel_name:str, full:List[object],
             error.lineno = first_line + loop_line - 1  # type: ignore[attr-defined]
         raise error from None
 
+    # A slice is a pointer at an offset, which is what python's view really is only for a
+    # one-dimensional array. On a 2-D one, `a[0:2]` is two *rows*, so `part[i]` is a row
+    # and not the element `a[0 + i]`; emitting the offset would answer a scalar where
+    # python answers an array, silently. The rank is known here and nowhere in the
+    # translator (a device pointer carries no rank), so this is where it is refused.
+    for name in sorted(set(launch_meta.get("sliced_arrays") or [])):
+        param_index = name_to_index.get(name, -1)
+        if param_index < 0:
+            continue
+        shape = shape_of(param_index)
+        if shape is None or len(shape) == 1:
+            continue
+        raise ValueError(
+            f"{kernel_name}(): a slice of '{name}' names "
+            f"{'rows' if len(shape) == 2 else 'sub-arrays'}, not elements: the array has "
+            f"shape {shape}, so `{name}[lo:hi]` is a view of whole "
+            f"{'rows' if len(shape) == 2 else 'sub-arrays'} while the device pointer it "
+            f"becomes addresses elements. Slice a one-dimensional array, or index "
+            f"`{name}` directly")
+
     # A subscript asks for *its* number of indices; that is what python counts.
     for name, count in sorted(launch_meta["subscript_indices"].items()):
         param_index:int = name_to_index.get(name, -1)
@@ -3509,6 +3598,141 @@ def _host_scalar_values(func:object, names:List[str], args:Optional[Tuple[object
 def _reads_name(node:object, name:str)->bool:
     """Whether an expression reads the given plain name."""
     return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
+
+
+def _is_array_pointer_assignment(statement:object)->bool:
+    """True for `local = <array>` or `local = <array>[<slice>]`: both bind a device pointer.
+
+    The right-hand side has to be a *bare* name or receiver attribute, or a slice of one:
+    anything else is an expression the host may well be the one to evaluate.
+    """
+    if not (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)):
+        return False
+    value:object = statement.value
+    if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Slice):
+        return True
+    if isinstance(value, ast.Name):
+        return True
+    return isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+
+
+def _host_region_values(func:object,
+                        args:Optional[Tuple[object, ...]]=None,
+                        instance:object=None,
+                        created_names:Optional[Set[str]]=None
+                        )->Tuple[Dict[str, object], List[int]]:
+    """Run every host-region statement, once, and report what it bound.
+
+    A kernel body's statements above its first magic loop, and between two of them, are
+    ordinary python: the interpreter runs them **once**, as the body reads -- not once per
+    work item. That is the rule the rest of this package already follows for the tail
+    (PyKernel._run_host_region); the region above and between the loops is host code for
+    the same reason, so it is executed here through the function's own namespace: its
+    globals, its positional arguments, its receiver and its closure cells.
+
+    The second result is the list of *line numbers of the statements that ran*: those are
+    host work, and the translator emits no device code for them (see
+    `FunctionTranslator.host_statement_lines`). A statement the host could not run is left
+    out of it, and stays device code -- that is how a device-only builtin such as
+    `zeros_per_group(...)` above a loop keeps working.
+
+    The body's tail -- the statements after the last magic loop -- is host work too (the
+    host runs it once, after the launch; see PyKernel._run_host_region), so it is executed
+    and reported here as well. A `return` in the tail is skipped: it answers the launch's
+    value, and evaluating it twice would run its expression twice.
+
+    A statement that assigns an **outer-scope** name (`nonlocal held; held = fresh`) is
+    left out: that name travels through its own device slot and the *device* writes it
+    (see _bind_outer_variables). Running it here would overwrite the slot's initial value
+    from the host, and the value the kernel wrote would be lost.
+
+    A **creation** (`mid = np.zeros(4)`) is left out too, when `created_names` says the
+    build already produced that object: `_host_created_values` decides whether it travels
+    as a device object, and building a second one here would shadow the launch's copy.
+    """
+    from .translator import (_assigned_name_of, _is_magic_loop_stmt, _magic_loop_end,
+                             _outside_loops, get_dedented_source, _parse_kernel_source,
+                             _outer_scope_names)
+
+    values:Dict[str, object] = {}
+    executed:List[int] = []
+    try:
+        tree:object = _parse_kernel_source(get_dedented_source(func))
+    except SyntaxError:
+        return values, executed
+    if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
+        return values, executed
+    body:List[object] = list(tree.body[0].body)
+    # A body with no magic loop is a *gid-style* body (`@kernel(domain="x")` or a bracket):
+    # every one of its top-level statements is per-work-item code, so none of them is host
+    # work. Running `atomic_add(...)` there would execute it once on the host (it is a
+    # device builtin and refuses) and then once per work item on the device -- the atomic
+    # landed twice.
+    if not any(_is_magic_loop_stmt(statement)
+               for statement in body if isinstance(statement, ast.For)):
+        return values, executed
+    # `local = <array>` is a pointer assignment, not host work: the device binds a second
+    # name to the same buffer, and the array it names is a kernel argument (so its extents
+    # are launch parameters). Running it here made the array look like a host value, and the
+    # generated signature then lost the argument the shape came from.
+    body = [statement for statement in body
+            if not _is_array_pointer_assignment(statement)]
+    outer_names:Set[str] = _outer_scope_names(func)
+    built:Set[str] = set(created_names or ())
+    statements:List[object] = list(_outside_loops(body))
+    statements = [statement for statement in statements
+                  if _assigned_name_of(statement) not in outer_names
+                  and _assigned_name_of(statement) not in built]
+    # The tail after the last magic loop, with any `return` left out: it is host work, and a
+    # name it binds (`rest = helper()` after the loop) has to reach the host that runs it.
+    tail:List[object] = [statement for statement
+                         in body[_magic_loop_end(body):]
+                         if not isinstance(statement, ast.Return)
+                         and _assigned_name_of(statement) not in outer_names
+                         and _assigned_name_of(statement) not in built]
+    statements.extend(tail)
+    if not statements:
+        return values, executed
+
+    globalns:Dict[str, object] = dict(func.__globals__)
+    localns:Dict[str, object] = {}
+    for arg_name, value in zip(_positional_argument_names(func), args or ()):
+        localns[arg_name] = value
+    receiver:str = _receiver_name(func)
+    if receiver and instance is not None:
+        localns[receiver] = instance
+    for name, cell in zip(func.__code__.co_freevars, func.__closure__ or ()):
+        try:
+            localns[name] = cell.cell_contents
+        except ValueError:
+            pass
+
+    for statement in statements:
+        # One `exec` per statement, so an `import` binds its module and a nested block runs
+        # its own statements; the region is a run of statements in body order sharing one
+        # namespace, exactly like a function body.
+        try:
+            module:ast.Module = ast.Module(body=[statement], type_ignores=[])
+            exec(compile(module, "<kernel host region>", "exec"),  # noqa: S102 - the kernel source itself
+                 globalns, localns)
+        except Exception:
+            # The host cannot run it, so it is not host work: the translator keeps it and
+            # reports its own refusal if it is not device code either.
+            continue
+        lineno:int = int(getattr(statement, "lineno", 0) or 0)
+        if lineno:
+            executed.append(lineno)
+        target:Optional[str] = _assigned_name_of(statement)
+        if target is not None and target in localns:
+            values[target] = localns[target]
+        elif isinstance(statement, ast.Assign) and len(statement.targets) == 1 \
+                and isinstance(statement.targets[0], ast.Tuple):
+            # `lo, hi = bounds(1)`: each unpacked name is a value of its own.
+            for element in statement.targets[0].elts:
+                if isinstance(element, ast.Name) and element.id in localns:
+                    values[element.id] = localns[element.id]
+    return values, executed
 
 
 def _host_created_values(func:object,

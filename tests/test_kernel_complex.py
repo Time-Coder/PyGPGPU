@@ -83,6 +83,38 @@ def test_a_real_scalar_scales_and_divides(runner, dtype):
     np.testing.assert_allclose(out, a / 2.0, rtol=1e-6)
 
 
+FLOAT_SCALAR_FORMS = [
+    ("scale_by_float", lambda a: a * 2.0),
+    ("add_float", lambda a: a + 2.0),
+    ("sub_float", lambda a: a - 2.0),
+    ("div_by_float", lambda a: a / 2.0),
+    ("pow_float", lambda a: a ** 2.0),
+    ("rsub_float", lambda a: 2.0 - a),
+    ("rdiv_float", lambda a: 2.0 / a),
+    ("rpow_float", lambda a: 2.0 ** a),
+]
+
+
+@pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
+@pytest.mark.parametrize("name, expected", FLOAT_SCALAR_FORMS,
+                         ids=[name for name, _ in FLOAT_SCALAR_FORMS])
+def test_a_float_literal_beside_a_complex_value(runner, dtype, name, expected):
+    """A python float is a double, so these widen to c128 at either array width.
+
+    The widening is what makes them worth their own test: the emitted call has to be the
+    header's `c128_scale` / `c128_rsub` / ..., and not a `_c128`-suffixed name -- that
+    suffix marks an *operand* of that width (`c64_scale_c128(c64, double)`), and a c128
+    operand has no such helper. Every form here used to fail to compile with
+    "identifier c128_scale_c128 is undefined", because the name was built from the
+    already-widened result width. The kernels sit with the others at the bottom of the
+    file, so the form is named here and looked up when the test runs.
+    """
+    a = values(dtype)
+    out = np.zeros(2, dtype=dtype)
+    runner(globals()[name], a, out)
+    np.testing.assert_allclose(out, np.asarray(expected(a), dtype=dtype), rtol=1e-6)
+
+
 @pytest.mark.parametrize("dtype", [FLOAT, DOUBLE], ids=["complex64", "complex128"])
 def test_a_complex_scalar_argument_carries_both_parts(runner, dtype):
     """A scalar argument travels by value, and the imaginary part must survive the trip."""
@@ -399,6 +431,57 @@ def scale(a: np.ndarray, factor: np.float32, out: np.ndarray):
 def scale_div(a: np.ndarray, factor: np.float32, out: np.ndarray):
     for i in range(out.shape[0]):
         out[i] = a[i] / factor
+
+
+# The same operations with a *literal* scalar in the expression: a python float is a
+# double, so each of these takes the widened (c128) path and names a different header
+# function from the ones the scalar-argument kernels above reach.
+@kernel
+def scale_by_float(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = a[i] * 2.0
+
+
+@kernel
+def add_float(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = a[i] + 2.0
+
+
+@kernel
+def sub_float(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = a[i] - 2.0
+
+
+@kernel
+def div_by_float(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = a[i] / 2.0
+
+
+@kernel
+def pow_float(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = a[i] ** 2.0
+
+
+@kernel
+def rsub_float(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = 2.0 - a[i]
+
+
+@kernel
+def rdiv_float(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = 2.0 / a[i]
+
+
+@kernel
+def rpow_float(a: np.ndarray, out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = 2.0 ** a[i]
 
 
 @kernel
