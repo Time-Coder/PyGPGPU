@@ -1,150 +1,23 @@
-"""Host <-> device memory layout for vectors, and for containers that hold them.
-
-The host library (`pygf`) stores a 3-component vector in **three** components (12 bytes for
-float3) because that is what a Python object naturally is. The device ABI is not uniform:
-
-* CUDA and HIP define `float3` as three floats, so the host layout is already correct;
-* OpenCL defines `cl_float3` as four slots (16 bytes, the fourth unused), because every
-  vector type there is sized for `vload4` alignment.
-
-So a 3-component vector -- and any structure or ndarray that contains one -- has to be
-re-laid-out when it crosses into an OpenCL kernel, and re-laid-out again when data comes
-back. This module is that boundary: `pack` produces the buffer the device expects,
-`unpack` writes the device's result back into the caller's own object, so nothing above the
-boundary ever sees the padded form.
-
-Everything here is a no-op for CUDA/HIP and for vector widths other than three, which is
-what keeps the common case free.
-"""
+# Packing a value into the layout the device reads.
 from __future__ import annotations
+from ._layout_geometry import (
+    Packed,
+    RecordField,
+    _host_components,
+    _is_vector_class,
+    _needs_padding,
+    _opencl_record_layout,
+    _record_device_dtype,
+    _vector_dtype_name,
+    vector_name_of,
+)
+
+from ._layout_classes import _device_class
 
 import ctypes
-from typing import Callable, Dict, List, Optional, Tuple
-
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
-
-_HOST_CLASSES: Optional[dict[str, type]] = None
-
-
-def _host_classes()->dict[str, type]:
-    """name -> the class the host uses for that vector type (`pygf`'s classes)."""
-    global _HOST_CLASSES
-    if _HOST_CLASSES is not None:
-        return _HOST_CLASSES
-    import pygf
-    from ..kernel.translator import _vec_registry
-
-    classes:dict[str, type] = {}
-    for name in _vec_registry():
-        # `getattr` with a runtime name returns `Any`; the value is tested at once.
-        host:object = getattr(pygf, name, None)
-        classes[name] = host if isinstance(host, type) else _vec_registry()[name]
-    _HOST_CLASSES = classes
-    return classes
-
-
-def _device_class(name:str, backend:str)->type:
-    """The class whose memory layout the device uses for this vector type."""
-    if backend != "opencl":
-        return _host_classes()[name]
-    from ..kernel.translator import _vec_registry
-    return _vec_registry()[name]
-
-
-def _component_size(dtype:np.dtype)->int:
-    """The size of one scalar or vector value in the device layout."""
-    vector:Optional[str] = None
-    if dtype.fields is not None:
-        vector = _vector_dtype_name(dtype)
-    if vector is not None:
-        return int(_device_class(vector, "opencl").dtype.itemsize)
-    return int(dtype.itemsize)
-
-
-def _alignment_of(dtype:np.dtype)->int:
-    """The OpenCL C alignment of a field type.
-
-    A vector of three or four components is 16-byte aligned (a padded vec3 is 16 bytes), a
-    two-component vector 8, and a scalar its own size. A structure takes the largest
-    alignment of its members.
-    """
-    if dtype.fields is not None:
-        vector:Optional[str] = _vector_dtype_name(dtype)
-        if vector is not None:
-            size:int = int(_device_class(vector, "opencl").dtype.itemsize)
-            return size if size in (2, 4, 8, 16) else 16
-        # A nested structure: the maximum alignment of its members.
-        return max([_alignment_of(np.dtype(dtype.fields[name][0]))
-                    for name in dtype.names or ()] or [1])
-    return int(dtype.itemsize) or 1
-
-
-# One field of a record as the packers describe it: its name, its dtype (or the ctypes
-# type that stands for it), and the shape it is an array of when it is one.
-RecordField = Tuple[str, object, Optional[Tuple[int, ...]]]
-
-# What every packer hands back: the value in the device's own layout, plus the callable
-# that copies a moved value back into the host's form (None when nothing moved).
-Packed = Tuple[object, Optional[Callable[[object], None]]]
-
-
-def _opencl_record_layout(fields:List[RecordField])->np.dtype:
-    """A record dtype with the offsets and total size OpenCL C would give the structure."""
-    names:List[str] = []
-    formats:List[object] = []
-    offsets:List[int] = []
-    cursor:int = 0
-    alignment:int = 1
-    for name, field_dtype, shape in fields:
-        base:np.dtype = np.dtype(field_dtype)
-        element_align:int = _alignment_of(base)
-        element_size:int = _component_size(base)
-        count:int = 1
-        if shape:
-            for extent in shape:
-                count *= int(extent)
-            element_align = max(element_align, 1)
-        field_align:int = element_align
-        alignment = max(alignment, field_align)
-        cursor = -(-cursor // field_align) * field_align
-        names.append(name)
-        formats.append((base, shape) if shape else base)
-        offsets.append(cursor)
-        cursor += element_size * count
-    itemsize:int = -(-cursor // alignment) * alignment
-    return np.dtype({"names": names, "formats": formats,
-                     "offsets": offsets, "itemsize": itemsize})
-
-
-def _record_device_dtype(dtype:np.dtype, backend:str)->Tuple[np.dtype, bool]:
-    """The device-layout dtype for a record, and whether anything had to change.
-
-    Every field is looked at on its own: a vector field of width three is replaced by the
-    padded device type, a nested record is rebuilt, and an array of either keeps its extents.
-    """
-    fields:List[RecordField] = []
-    changed:bool = False
-    for name in dtype.names or ():
-        field_dtype:np.dtype = np.dtype(dtype.fields[name][0])
-        shape:Optional[Tuple[int, ...]] = None
-        if field_dtype.subdtype is not None:
-            base_dtype, shape = field_dtype.subdtype
-            field_dtype = base_dtype
-        vector:Optional[str] = _vector_dtype_name(field_dtype)
-        if vector is not None and _needs_padding(vector, backend):
-            field_dtype = _device_class(vector, "opencl").numpy_dtype()
-            changed = True
-        elif vector is None and field_dtype.fields is not None:
-            replaced, nested_changed = _record_device_dtype(field_dtype, backend)
-            if nested_changed:
-                field_dtype = replaced
-                changed = True
-        fields.append((name, field_dtype, shape))
-    if backend != "opencl":
-        return np.dtype([(name, dtype_) if shape is None else (name, dtype_, shape)
-                         for name, dtype_, shape in fields]), changed
-    return _opencl_record_layout(fields), changed
 
 
 def _copy_record(host:object, target:object, backend:str)->None:
@@ -182,54 +55,6 @@ def _pack_record_array(array:np.ndarray, backend:str)->Packed:
     return packed, unpack
 
 
-def vector_name_of(value:object)->Optional[str]:
-    """The vector type name of a vector instance, or None."""
-    if not isinstance(value, type(value)):
-        return None
-    # A numpy scalar is not a vector, even when its class name collides with a vector type
-    # name (`np.uint8` is `numpy.uint8`, and the registry has an eight-component `uint8`).
-    if isinstance(value, np.generic):
-        return None
-    for name, cls in _host_classes().items():
-        if type(value) is cls or isinstance(value, cls):
-            return name
-    return None
-
-
-def _is_vector_class(cls:object)->Optional[str]:
-    """The vector type name a class stands for, or None."""
-    if not isinstance(cls, type):
-        return None
-    classes:dict[str, type] = _host_classes()
-    if cls.__name__ in classes:
-        return cls.__name__
-    for base in cls.__mro__:
-        if base.__name__ in classes:
-            return base.__name__
-    return None
-
-
-def _needs_padding(name:str, backend:str)->bool:
-    """True when the device layout has more components than the host's (a padded vec3)."""
-    if backend != "opencl":
-        return False
-    return len(_vec_device_components(name)) > len(_host_components(name))
-
-
-def _vec_device_components(name:str)->List[str]:
-    """The component names the device type actually has (a vec3 has a padding slot)."""
-    return [field for field, _ in _device_class(name, "opencl")._fields_]
-
-
-def _host_components(name:str)->List[str]:
-    return [field for field, _ in _host_classes()[name]._fields_ if field != "_"]
-
-
-# ---------------------------------------------------------------------------
-# A single vector value
-# ---------------------------------------------------------------------------
-
-
 def _pack_vector(value:object, backend:str)->object:
     name:str = vector_name_of(value) or ""
     if not name or not _needs_padding(name, backend):
@@ -245,29 +70,6 @@ def _unpack_vector(device_value:object, host_value:object)->None:
     """Copy the components back; the padding slot is ignored."""
     for field in _host_components(vector_name_of(host_value) or ""):
         setattr(host_value, field, getattr(device_value, field))
-
-
-# ---------------------------------------------------------------------------
-# ndarrays of vectors, and structures that contain vectors
-# ---------------------------------------------------------------------------
-
-
-def _vector_dtype_name(dtype:np.dtype)->Optional[str]:
-    """The vector type an ndarray dtype denotes, or None.
-
-    The comparison is on the whole dtype, not on the field names: `float3` and `int3` share
-    the names x/y/z and differ only in the component type. A device-layout dtype (the padded
-    OpenCL form) maps back to the same vector, so results arriving from a kernel are
-    recognized too.
-    """
-    wanted:np.dtype = np.dtype(dtype)
-    for name, cls in _host_classes().items():
-        if wanted == cls.numpy_dtype():
-            return name
-    for name in _host_classes():
-        if wanted == _device_class(name, "opencl").numpy_dtype():
-            return name
-    return None
 
 
 def _pack_array(array:np.ndarray, backend:str)->Packed:
@@ -287,11 +89,6 @@ def _pack_array(array:np.ndarray, backend:str)->Packed:
             array[field] = current[field]
 
     return packed, unpack
-
-
-# ---------------------------------------------------------------------------
-# Entry points
-# ---------------------------------------------------------------------------
 
 
 def pack(value:object, backend:str)->Packed:
