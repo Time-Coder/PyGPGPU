@@ -65,7 +65,6 @@ ALLOWLIST: Dict[str, Tuple[int, str]] = {
     "pygpgpu/kernel/include/complex.h": (1064, "device header; split last (plan 5.3)"),
     "pygpgpu/opencl/driver/clinfo.py": (1940, "phase 5 - data modules (plan 5.4.1)"),
     "pygpgpu/cuda/driver/cuinfo.py": (935, "phase 5 - data modules (plan 5.4.1)"),
-    "pygpgpu/metal/oop/kernel.py": (574, "phase 5 - shim-only move; deeper split needs 4 test edits (plan 5.4.3)"),
     "pygpgpu/opencl/oop/program_parser.py": (636, "phase 5 - struct-builder mixin (plan 5.4.2)"),
     "pygpgpu/cuda/oop/program_parser.py": (610, "phase 5 - struct-builder mixin (plan 5.4.2)"),
     "pygpgpu/hip/oop/program_parser.py": (613, "phase 5 - struct-builder mixin (plan 5.4.2)"),
