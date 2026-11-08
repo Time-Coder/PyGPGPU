@@ -75,6 +75,8 @@ class _PykernelCallMixin:
             # machinery, and the device backends never run the body at all, so it is
             # replaced by a stand-in carrying the same file, line and function name; the
             # library frames between the two are spliced out here.
+            import traceback as _tb
+            _tb.print_exception(type(caught), caught, caught.__traceback__)
             caught.__traceback__ = _user_traceback(caught, self.raw_func)
             raise caught from None
 

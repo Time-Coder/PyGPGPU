@@ -56,7 +56,6 @@ EXEMPT_EXTENSIONS: Tuple[str, ...] = (".pyi",)
 ALLOWLIST: Dict[str, Tuple[int, str]] = {
     "pygpgpu/cparser/ShaderBuiltins.py": (16874, "generated; delete-or-split decision pending (plan 5.6)"),
     "pygpgpu/cparser/cparser.py": (1200, "unreachable legacy chain (plan 5.6)"),
-    "pygpgpu/kernel/decorator/pykernel_invoke.py": (719, "_invoke_inner is one continuous flow over ~20 locals; its signature and body are pinned by the launch tests (plan 5.2)"),
     "pygpgpu/kernel/decorator/pykernel_compile.py": (529, "_compile is one flow whose positional signature is pinned by nine test call sites (plan 5.2)"),
     "pygpgpu/kernel/decorator/__init__.py": (330, "wave 2 done: the class is assembled from subject mixins (plan 5.2)"),
     "pygpgpu/kernel/include/complex.h": (1064, "device header; split last (plan 5.3)"),
