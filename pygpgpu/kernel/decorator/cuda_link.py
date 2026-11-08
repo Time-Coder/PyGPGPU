@@ -55,11 +55,12 @@ class _LinkedImage:
     """
 
     def __init__(self, module:object, kernel_infos:Dict[str, object],
-                 context:object, device:object)->None:
+                 structs:Dict[str, type], context:object, device:object)->None:
         self.id = module
         self.kernel_infos:Dict[str, object] = kernel_infos
         # `Kernel` reaches back into its program for these during a launch, so a linked
         # build has to answer them like an NVRTC one does.
+        self.structs:Dict[str, type] = dict(structs)
         self.context:object = context
         self.device:object = device
         self.prefix:str = "nvcc"
@@ -154,7 +155,11 @@ def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->object
     parser:ProgramParser = ProgramParser()
     parser.parse(source_path, None, None, None)
     kernel_infos:Dict[str, object] = dict(parser.kernel_infos)
-    program:object = _LinkedImage(module, kernel_infos, device_obj.default_context, device_obj)
+    # Structure arguments are bound through the parsed layout too: a module that launches
+    # a kernel from device code may also carry a receiver structure (a method kernel), and
+    # the argument binder asks the program for the structure's class.
+    program:object = _LinkedImage(module, kernel_infos, parser._struct_types,
+                                  device_obj.default_context, device_obj)
     kernel:object = Kernel(program, c_name)
     # `Kernel` starts with an empty argument layout and a `Program` fills it while fetching
     # its kernels; a linked build has no such program, so the parsed layout is handed over.
