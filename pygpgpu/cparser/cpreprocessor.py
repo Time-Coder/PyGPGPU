@@ -60,9 +60,30 @@ class CPreprocessor:
         related_files = set()
         def add_related_file(match:re.Match):
             file_name:str = match.group("file_name")
-            if base_directory and not os.path.isabs(file_name):
-                # Relative to the expanded source, never to the caller's working directory.
-                file_name = os.path.join(base_directory, file_name)
+            if not os.path.isabs(file_name):
+                # A relative `#line` name is spelled two different ways, and they are
+                # relative to different places. A file that was **included** keeps the
+                # `#include` spelling, which is relative to the including file's directory.
+                # The **main** source keeps the path the caller handed the preprocessor,
+                # which is relative to the process's current directory.
+                #
+                # Resolving both against the source's directory therefore doubled the main
+                # file's path (`.../pykernels/pykernels/x.cu`), `_load` found no such file and
+                # re-parsed on every run -- the same symptom the base directory was added to
+                # cure, from the other side. Taking the first candidate that exists is what
+                # tells the two spellings apart, and when neither exists the source's
+                # directory is still preferred, so a genuinely missing header is still
+                # reported by `_load`'s "missing related file" branch.
+                candidates:List[str] = []
+                if base_directory:
+                    candidates.append(os.path.join(base_directory, file_name))
+                candidates.append(os.path.abspath(file_name))
+                for candidate in candidates:
+                    if os.path.isfile(candidate):
+                        file_name = candidate
+                        break
+                else:
+                    file_name = candidates[0]
             file_name = os.path.abspath(file_name).replace("\\", "/")
             related_files.add(file_name)
             return ""
