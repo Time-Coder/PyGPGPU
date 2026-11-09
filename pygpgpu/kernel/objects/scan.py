@@ -10,6 +10,7 @@ from .scan_paths import (  # noqa: F401  (the facade re-exports the path helpers
     _list_root,
     _member_path,
     _parse,
+    _readonly_parse,
     _resolve_list_path,
     _tree_key,
     looks_like_object,

@@ -82,6 +82,18 @@ target on both tasks. Profiling one launch showed almost none of that time was o
 * every array argument went through a vector-type lookup that asked all forty-odd vector
   classes for their numpy dtype, a ctypes round trip each, for an array that was plain float32.
 
-Three caches and one short-circuit later the per-call time is within a small factor of the
-other two GPU frameworks. The fixes are in the library, not in the benchmark: the numbers this
-folder reports today are what a user gets.
+Caching those three and short-circuiting the fourth brought the call from 16.7 ms to about
+1 ms. A second pass at the profile then found two more:
+
+* the gate that decides whether a body constructs a class was walking the AST **from a fresh
+  `deepcopy` on every launch**, which was the largest single python cost once compiling was
+  out of the way -- it only reads the tree, so it takes the cached one now (`_readonly_parse`);
+* that gate and the "does this body build a value from a class" answer are facts about the
+  source, so they are remembered per function rather than re-derived per call.
+
+Together the two rounds took the steady-state call to **0.29 ms (mandelbrot) and 0.31 ms
+(stencil)** against Numba CUDA's 0.12/0.19 and Taichi's 0.17/0.13 -- a factor of 2.5 and 1.6,
+where it started at ~100. What is left is dominated by the six driver calls a launch makes,
+not by python.
+
+None of the fixes are in the benchmark: the numbers this folder reports are what a user gets.

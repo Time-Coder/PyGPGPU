@@ -18,6 +18,9 @@ _LIFTED_VALUES:Dict[str, Dict[str, object]] = {}
 _LIFTED_VALUES:Dict[str, Dict[str, object]] = {}
 # class -> the members a lifted construction supplied, in the constructor order.
 _LIFTED_MEMBERS:Dict[type, List[Tuple[str, type]]] = {}
+# tree key -> whether that body (or a helper it calls) builds a value from a class. A fact
+# about the source, asked once per launch, so it is remembered (see _constructs_a_class).
+_CONSTRUCTS_CACHE:Dict[str, bool] = {}
 
 
 

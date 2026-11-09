@@ -1,9 +1,10 @@
 # The structures a body constructs inline, and the classes behind them.
 from __future__ import annotations
-from .scan import _parse, _tree_key
+from .scan import _parse, _readonly_parse, _tree_key
 from .state import (
     _CONSTRUCTED,
     _CONSTRUCTED_PARAMETERS,
+    _CONSTRUCTS_CACHE,
     _LIFTED_MEMBERS,
     _LIFTED_TREES,
     _LIFTED_VALUES,
@@ -32,14 +33,28 @@ def _constructs_a_class(func:object, resolve:Callable[[str], object],
     A body already lifted answers from the recorded values: its tree holds the name the lift
     gave it, not the construction, so reading that tree would say "no class is built" and
     skip the very scan that produced the names.
+
+    The answer is a fact about the source, and it is asked once per launch, so the top-level
+    call is remembered. Lifting cannot change it: it only ever runs because the answer was
+    True, and the recorded values then short-circuit above.
     """
+    if _seen is None:
+        key:str = _tree_key(func)
+        remembered:Optional[bool] = _CONSTRUCTS_CACHE.get(key)
+        if remembered is not None:
+            return remembered
+        answer:bool = _constructs_a_class(func, resolve, set())
+        _CONSTRUCTS_CACHE[key] = answer
+        return answer
     if _LIFTED_VALUES.get(_tree_key(func)):
         return True
     seen:set = set() if _seen is None else _seen
     if _tree_key(func) in seen:
         return False
     seen.add(_tree_key(func))
-    tree:Optional[ast.Module] = _parse(func)
+    # Read-only: this only decides whether the body needs the object machinery, so it walks
+    # the shared cached tree instead of paying for a copy on every launch.
+    tree:Optional[ast.Module] = _readonly_parse(func)
     if tree is None:
         return False
     for node in ast.walk(tree):
@@ -277,3 +292,6 @@ def forget_constructed()->None:
     _LIFTED_TREES.clear()
     _LIFTED_VALUES.clear()
     _LIFTED_MEMBERS.clear()
+    _CONSTRUCTS_CACHE.clear()
+
+

@@ -122,6 +122,26 @@ def _parse(func:Callable[..., object])->Optional[ast.Module]:
         return None
 
 
+def _readonly_parse(func:Callable[..., object])->Optional[ast.Module]:
+    """The tree for a caller that only walks it, with no copy.
+
+    The same tree `_parse` starts from, minus the `deepcopy`. An analysis that reads the body
+    and rewrites nothing -- deciding whether the body constructs a class, collecting its
+    members, checking what it writes -- was paying for a full copy of the AST on every
+    launch, which showed up as the largest single cost of a call once the compile was out of
+    the way. **The answer is shared: never mutate it.**
+    """
+    from ..translator import _parse_kernel_source, get_dedented_source  # noqa: PLC0415
+
+    cached:Optional[ast.Module] = _LIFTED_TREES.get(_tree_key(func))
+    if cached is not None:
+        return cached
+    try:
+        return _parse_kernel_source(get_dedented_source(func))
+    except Exception:
+        return None
+
+
 
 def _tree_key(func:Callable[..., object])->str:
     """A key naming one function's source, so a lifted tree can be found again."""
