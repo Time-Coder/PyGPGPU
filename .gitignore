@@ -31,3 +31,6 @@ examples/*.pyi
 # The comparison redirects Numba's on-disk cache here through NUMBA_CACHE_DIR, so
 # clearing it by name is possible; it is build output, not source.
 .numba-cache/
+
+# The comparison writes each task's numpy answer here (see common.reference).
+benchmarks/compare/reference_*.npy

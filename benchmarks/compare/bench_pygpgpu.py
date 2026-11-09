@@ -1,13 +1,18 @@
-"""The two tasks written for PyGPGPU, launched on CUDA.
+﻿"""The two tasks written for PyGPGPU, launched on CUDA.
 
 Run standalone: `python bench_pygpgpu.py --task both`. The script imports PyGPGPU and
 nothing else from the comparison, so its import cost is its own.
 """
 from __future__ import annotations
 import sys
+import time
 from pathlib import Path
 
-import numpy as np
+# Taken before anything is imported, so the timeline can say what the framework's own
+# imports cost against the total this process spends before its first kernel exists.
+T0 = time.perf_counter()
+
+import numpy as np  # noqa: E402  (after T0, which has to precede every import)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -18,6 +23,8 @@ import harness  # noqa: E402
 from common import (MANDEL_CENTER_IMAG, MANDEL_CENTER_REAL, MANDEL_MAX_ITER,  # noqa: E402
                     MANDEL_SCALE)
 
+harness.set_t0(T0)
+harness.mark("pygpgpu imported")
 set_print_info(False)
 
 # The backend this run launches on; `--arch` picks it (cuda, hip or opencl).
@@ -79,6 +86,7 @@ def make(task: str):
 
     if task == "mandelbrot":
         out = gnp.zeros((common.MANDEL_HEIGHT, common.MANDEL_WIDTH), dtype=np.float32)
+        harness.mark("mandelbrot: buffers allocated")
 
         def run() -> object:
             mandelbrot[BACKEND](out)
@@ -94,6 +102,7 @@ def make(task: str):
 
     source = gnp.asarray(common.laplacian_input())
     out = gnp.zeros(source.shape, dtype=source.dtype)
+    harness.mark("laplacian: buffers allocated")
 
     def run() -> object:
         laplacian[BACKEND](source, out)
@@ -111,3 +120,5 @@ if __name__ == "__main__":
     BACKEND = arguments.arch or "cuda"
     print(f"ARCH {BACKEND}")
     harness.run_tasks(arguments, make)
+
+

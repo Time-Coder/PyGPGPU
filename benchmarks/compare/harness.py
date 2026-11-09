@@ -1,4 +1,4 @@
-"""One benchmark script: how the four are driven, and what they report.
+﻿"""One benchmark script: how the four are driven, and what they report.
 
 Every `bench_*.py` is a standalone process that imports **only its own framework**. Two
 things are measured from the outside and one from the inside, and all three are asked for:
@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -32,7 +32,47 @@ def parse_args(description: str) -> argparse.Namespace:
     parser.add_argument("--startup-only", action="store_true",
                         help="import the framework and initialise its device, then stop -- "
                              "what a process pays before it runs anything")
+    parser.add_argument("--timeline", action="store_true",
+                        help="print where the process spent its time: import, buffers, the "
+                             "first call (which carries the compile or the cache read), and "
+                             "the checks")
     return parser.parse_args()
+
+
+# (label, seconds since the process's own T0), filled by `mark`. Off unless asked for, so a
+# normal run pays nothing for the instrumentation.
+_TIMELINE: List[Tuple[str, float]] = []
+
+
+def mark(label: str, since: Optional[float] = None) -> None:
+    """Record a milestone. `since` is the call's own `T0`, taken before its imports."""
+    _TIMELINE.append((label, time.perf_counter() - (since if since is not None else _T0)))
+
+
+def set_t0(since: float) -> None:
+    """Adopt the script's own start, so every mark shares one time base.
+
+    A script takes its `T0` before importing its framework; this module is imported after
+    that, so without this the import mark and the later marks would be offsets from two
+    different instants and the first gap would come out negative.
+    """
+    global _T0
+    _T0 = since
+
+
+_T0: float = time.perf_counter()
+
+
+def print_timeline() -> None:
+    """Report the milestones as offsets from the start of the run, with the gaps between."""
+    if not _TIMELINE:
+        return
+    previous = 0.0
+    print("TIMELINE (ms since this script started)")
+    for label, offset in _TIMELINE:
+        print(f"  {offset * 1000:9.1f}  (+{(offset - previous) * 1000:8.1f})  {label}")
+        previous = offset
+    sys.stdout.flush()
 
 
 def _verdict(task: str, actual: np.ndarray, expected: np.ndarray) -> Tuple[bool, str]:
@@ -82,13 +122,16 @@ def report(task: str, run: Callable[[], object], repeat: int,
     """
     import common
 
+    mark(f"{task}: buffers ready")
     started = time.perf_counter()
     run()
     first = (time.perf_counter() - started) * 1000
+    mark(f"{task}: first call done (compile or cache read inside)")
 
     second_started = time.perf_counter()
     run()
     second = (time.perf_counter() - second_started) * 1000
+    mark(f"{task}: second call done")
 
     best = second
     for _ in range(max(0, repeat - 1)):
@@ -96,8 +139,8 @@ def report(task: str, run: Callable[[], object], repeat: int,
         run()
         best = min(best, (time.perf_counter() - again) * 1000)
 
-    expected = (common.mandelbrot_reference() if task == "mandelbrot"
-                else common.laplacian_reference())
+    expected = common.reference(task)
+    mark(f"{task}: reference loaded")
     actual = np.asarray(fetch() if fetch is not None else run())
     ok, detail = _verdict(task, actual, expected)
     print(f"TASK {task}")
@@ -131,4 +174,7 @@ def run_tasks(args: argparse.Namespace,
     for name in names:
         run, fetch = factory(name)
         report(name, run, args.repeat, fetch)
+    if getattr(args, "timeline", False):
+        print_timeline()
+
 

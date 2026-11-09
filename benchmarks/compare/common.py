@@ -92,6 +92,27 @@ def laplacian_reference() -> np.ndarray:
 
 # --- shared reporting --------------------------------------------------------
 
+def reference(task: str) -> np.ndarray:
+    """The answer every framework is checked against, remembered on disk.
+
+    Computing it is a numpy loop of `MANDEL_MAX_ITER` passes over half a million pixels --
+    about three quarters of a second, which is larger than any framework's entire start-up
+    and would otherwise be charged to whichever process happened to run first. It is written
+    to `reference_<task>.npy` beside this module and loaded from there afterwards, so the
+    cold and warm columns measure the framework rather than the reference. Delete the file,
+    or pass `--regenerate-reference`, to rebuild it.
+    """
+    import os
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / f"reference_{task}.npy"
+    if path.is_file() and not os.environ.get("BENCH_REGENERATE_REFERENCE"):
+        return np.load(path)
+    answer = mandelbrot_reference() if task == "mandelbrot" else laplacian_reference()
+    np.save(path, answer)
+    return answer
+
+
 def checksum(array: np.ndarray) -> float:
     """One number that catches a wrong answer without printing a whole array.
 
