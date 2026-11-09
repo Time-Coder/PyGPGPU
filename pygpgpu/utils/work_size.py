@@ -1,7 +1,7 @@
-# The work-size heuristics: one grid, per backend, from the caller's extents.
+﻿# The work-size heuristics: one grid, per backend, from the caller's extents.
 from __future__ import annotations
 from functools import lru_cache
-from typing import List, Optional, Sequence, Tuple, cast
+from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 
 
@@ -185,6 +185,11 @@ def join_with_and(items):
     
     return ', '.join(items[:-1]) + ', and ' + items[-1]
 
+# device -> the limits read from it, so a launch does not query the driver for them again
+# (see `device_limits`). Keyed by the device object, which every backend compares by handle.
+_DEVICE_LIMITS:Dict[object, Tuple[Optional[int], Optional[Tuple[int, ...]]]] = {}
+
+
 def device_limits(device: object) -> Tuple[Optional[int], Optional[Tuple[int, ...]]]:
     """Best-effort (max_work_group_size, max_work_item_sizes) for a backend device.
 
@@ -192,7 +197,26 @@ def device_limits(device: object) -> Tuple[Optional[int], Optional[Tuple[int, ..
     CUDA attributes (max_threads_per_block / max_block_dim_x..z). Returns
     (None, None) when nothing is available, so callers can fall back to a
     conservative default instead of failing.
+
+    The answer is remembered per device: reading it is a *driver* round trip on CUDA and
+    HIP (`cuDeviceGetAttribute`), the launch asks for it every call, and a device's limits
+    do not change. The result is an int and a tuple, so every caller can share it.
     """
+    try:
+        cached:Optional[Tuple[Optional[int], Optional[Tuple[int, ...]]]] = _DEVICE_LIMITS.get(
+            device)
+    except TypeError:
+        # A device that is not hashable cannot be remembered; reading it again is correct.
+        return _read_device_limits(device)
+    if cached is not None:
+        return cached
+    limits:Tuple[Optional[int], Optional[Tuple[int, ...]]] = _read_device_limits(device)
+    _DEVICE_LIMITS[device] = limits
+    return limits
+
+
+def _read_device_limits(device: object) -> Tuple[Optional[int], Optional[Tuple[int, ...]]]:
+    """Read a device's limits from the backend, one attribute query each."""
     def read(name: str) -> object:
         try:
             value = getattr(device, name, None)
@@ -279,3 +303,4 @@ def blocks_to_global(blocks: Tuple[int, ...], threads: Tuple[int, ...]
             f"number of axes")
     global_size:Tuple[int, ...] = tuple(b * t for b, t in zip(block_extents, thread_extents))
     return global_size, thread_extents
+

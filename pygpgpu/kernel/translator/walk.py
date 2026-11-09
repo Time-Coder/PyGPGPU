@@ -1,4 +1,4 @@
-# The AST questions asked before a body is translated.
+﻿# The AST questions asked before a body is translated.
 from __future__ import annotations
 from .predicates import is_ptr
 from .source_text import _parse_kernel_source, get_dedented_source
@@ -6,7 +6,7 @@ import ast
 import builtins
 import functools
 import hashlib
-from typing import (Callable, Dict, List, Optional, Set)
+from typing import (Callable, Dict, List, Optional, Set, Tuple)
 import numpy as np
 
 
@@ -104,7 +104,8 @@ def _outside_loops(body:List[ast.stmt])->List[ast.stmt]:
     return outside
 
 
-def _creation_assignments(func:Callable)->List[ast.stmt]:
+@functools.lru_cache(maxsize=512)
+def _creation_assignments(func:Callable)->Tuple[ast.stmt, ...]:
     """The statements the host runs before the launch, in body order.
 
     Two kinds are lifted out, both from **above** the magic loop:
@@ -119,11 +120,14 @@ def _creation_assignments(func:Callable)->List[ast.stmt]:
     is device code only. A magic loop is what defines "above" here: an assignment below it
     would run once per work item, so it is not lifted out (the translator refuses a creation
     there).
+
+    The answer is a fact about the source and the launch asks for it on every call, so it is
+    remembered per function; a tuple because the callers only iterate it.
     """
     source:str = get_dedented_source(func)
     tree:ast.Module = _parse_kernel_source(source)
     if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
-        return []
+        return ()
     body:List[ast.stmt] = tree.body[0].body
     magic_index:Optional[int] = next(
         (index for index, stmt in enumerate(body) if _is_magic_loop_stmt(stmt)), None)
@@ -193,7 +197,7 @@ def _creation_assignments(func:Callable)->List[ast.stmt]:
             chosen.append(stmt)
         elif name is not None and name in fitting and name not in creation_names:
             chosen.append(stmt)
-    return chosen
+    return tuple(chosen)
 
 
 def _is_host_evaluable(node:ast.expr)->bool:
@@ -437,3 +441,5 @@ def type_sig(types:List[object])->str:
 
 def short_hash(text:str)->str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
+
+
