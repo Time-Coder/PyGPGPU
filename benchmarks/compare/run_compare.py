@@ -27,6 +27,7 @@ import argparse
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -60,6 +61,18 @@ def clear_caches() -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
+def _median(values: List[float]) -> float:
+    """The middle sample: one slow run cannot move it the way it moves a mean."""
+    return statistics.median(values) if values else float("nan")
+
+
+def _spread(values: List[float]) -> str:
+    """The whole range as `min-max`, so a reader can see how much the ranking can move."""
+    if not values:
+        return "-"
+    return f"{min(values):.0f}-{max(values):.0f}"
+
+
 def run_once(script: str, extras: Tuple[str, ...], task: str, repeat: int) -> Tuple[float, Dict[str, str]]:
     """Start one framework script and time the whole process; return its reported fields."""
     command = [PYTHON, str(HERE / script), "--task", task, "--repeat", str(repeat), *extras]
@@ -82,41 +95,62 @@ def run_once(script: str, extras: Tuple[str, ...], task: str, repeat: int) -> Tu
 
 
 def compare(only: Optional[List[str]], task: str, repeat: int,
-            warm_samples: int = 3) -> List[Dict[str, object]]:
-    """Cold is one sample (the caches can only be cold once); warm is the best of several.
+            warm_samples: int = 3, rounds: int = 1) -> List[Dict[str, object]]:
+    """Cold and warm are both measured per round; the table reports the median.
+
+    Cold can only be sampled once per round -- the caches are gone after it -- so ranking it
+    needs several rounds rather than several samples inside one.
 
     A warm run repeated back to back is not always faster than the cold one on this machine:
     the cache files were just written, and an on-access scanner reads them on the run that
     follows. Taking the best of several warm runs removes that one-off cost without hiding
     anything -- every sample is printed.
+
+    `rounds` repeats the whole cold-then-warm cycle, because a single sample of either is not
+    enough to rank the four against each other: start-up varies by hundreds of milliseconds
+    between runs of the same script. Each round clears the caches again, so every cold sample
+    really is cold, and the table reports the **median** of the rounds with the spread that
+    makes the ranking honest.
     """
     rows: List[Dict[str, object]] = []
     for name, script, extras in FRAMEWORKS:
         if only and name not in only:
             continue
-        clear_caches()
-        cold, _ = run_once(script, extras, task, repeat)
-        samples: List[float] = []
-        warm_fields: Dict[str, str] = {}
-        for _ in range(max(1, warm_samples)):
-            elapsed, warm_fields = run_once(script, extras, task, repeat)
-            samples.append(elapsed)
-        warm = min(samples)
+        cold_runs: List[float] = []
+        warm_runs: List[float] = []
+        call2_runs: List[float] = []
+        best_runs: List[float] = []
+        fields: Dict[str, str] = {}
+        for _ in range(max(1, rounds)):
+            clear_caches()
+            cold, _ = run_once(script, extras, task, repeat)
+            cold_runs.append(cold)
+            warmest: Optional[float] = None
+            for _ in range(max(1, warm_samples)):
+                elapsed, fields = run_once(script, extras, task, repeat)
+                warmest = elapsed if warmest is None else min(warmest, elapsed)
+            assert warmest is not None
+            warm_runs.append(warmest)
+            call2_runs.append(float(fields.get("CALL2_MS", "nan")))
+            best_runs.append(float(fields.get("CALLBEST_MS", "nan")))
         row: Dict[str, object] = {
             "framework": name,
             "task": task,
-            "cold": cold,
-            "warm": warm,
-            "samples": samples,
-            "call2": float(warm_fields.get("CALL2_MS", "nan")),
-            "best": float(warm_fields.get("CALLBEST_MS", "nan")),
-            "correct": warm_fields.get("CORRECT", "?"),
-            "arch": warm_fields.get("ARCH", "-"),
+            "cold": _median(cold_runs),
+            "warm": _median(warm_runs),
+            "call2": _median(call2_runs),
+            "best": _median(best_runs),
+            "cold_runs": cold_runs,
+            "warm_runs": warm_runs,
+            "correct": fields.get("CORRECT", "?"),
+            "arch": fields.get("ARCH", "-"),
         }
         rows.append(row)
-        print(f"{name:11s} {task:10s} cold {cold:8.1f} ms   "
-              f"warm {warm:8.1f} ms {[round(s) for s in samples]}   "
-              f"call2 {row['call2']:7.3f} ms   correct {row['correct']}")
+        print(f"{name:11s} {task:10s} "
+              f"cold {row['cold']:8.1f} ms [{_spread(cold_runs)}]   "
+              f"warm {row['warm']:8.1f} ms [{_spread(warm_runs)}]   "
+              f"call2 {row['call2']:7.3f} ms   best {row['best']:7.3f} ms   "
+              f"correct {row['correct']}")
         sys.stdout.flush()
     return rows
 
@@ -130,6 +164,9 @@ def main() -> int:
                         help="extra timed calls inside each script")
     parser.add_argument("--warm-samples", type=int, default=3,
                         help="how many warm runs to time before taking the best")
+    parser.add_argument("--rounds", type=int, default=1,
+                        help="cold-then-warm cycles per framework; the table reports the "
+                             "median, and 3 or more is what makes the ranking trustworthy")
     arguments = parser.parse_args()
 
     tasks: Tuple[str, ...] = (("mandelbrot", "laplacian") if arguments.task == "both"
@@ -137,9 +174,11 @@ def main() -> int:
     rows: List[Dict[str, object]] = []
     for task in tasks:
         print(f"\n=== {task} ===")
-        rows.extend(compare(arguments.only, task, arguments.repeat, arguments.warm_samples))
+        rows.extend(compare(arguments.only, task, arguments.repeat, arguments.warm_samples,
+                            arguments.rounds))
 
-    print("\n| framework | task | cold script | warm script | call 2 | best call | correct |")
+    print("\n| framework | task | cold script (median) | warm script (median) | "
+          "call 2 (median) | best call (median) | correct |")
     print("| --- | --- | ---: | ---: | ---: | ---: | --- |")
     for row in rows:
         detail = str(row["correct"]).split("(")[0].strip()
@@ -152,3 +191,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
