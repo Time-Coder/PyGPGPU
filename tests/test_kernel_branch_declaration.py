@@ -1,15 +1,15 @@
-"""A local first assigned inside a branch, and what the reader is told about it.
+"""A local first assigned inside a branch: python's function scope, on the device.
 
-Python scopes a name to the whole function: assigning it inside an `if` makes it local, and
-reading it before that assignment raises `UnboundLocalError` -- but only when the branch did
-not run. The device has the stricter rule (C wants a declaration before the read, and the
-generated declaration sits where the first assignment is), so the same source is refused.
+Python scopes a name to the whole function -- assigning it inside an `if` makes it local and
+readable after the `if` -- and the device used to disagree: the binding was recorded on the
+block, so it vanished when the block ended and the read failed with "unknown name". Two
+layers had to follow: the binding is recorded on the function's own scope, and the C
+declaration moves to the top of the function (a declaration inside the block is not in scope
+after it).
 
-The refusal is the subject here, not the rule: the message has to say that the *assignment is
-inside the branch*, because "unknown name" sends a reader looking for a typo in a name the
-body obviously assigns. When the declaration is allowed to move to the top of the function --
-which is what python's function-scope rule already means -- this test flips to asserting the
-value instead, and the name of the test says so.
+One place still differs from python, and it is pinned below rather than hidden: python raises
+`UnboundLocalError` when the branch did not run, while a device has no exception to raise, so
+the hoisted declaration starts at zero.
 """
 from __future__ import annotations
 
@@ -46,26 +46,52 @@ def assigned_before_the_branch(out: np.ndarray, flag: int):
         out[i] = value
 
 
-def test_the_message_names_the_branch_rather_than_the_name(gpu_backend: str) -> None:
-    out = np.zeros(4, dtype=np.float32)
-    with pytest.raises(SyntaxError) as caught:
-        assigned_in_both_branches[gpu_backend](out, 1)
-    message = str(caught.value)
-    assert "assigned inside a branch" in message, message
-    assert "value = 0" in message, message
-    # The old wording pointed at the name, which is the one thing that was not wrong.
-    assert "unknown name" not in message, message
+@kernel
+def assigned_inside_a_loop_then_read(out: np.ndarray):
+    for i in range(out.shape[0]):
+        total = 0.0
+        for k in range(3):
+            last = 2.0 * k
+            total += last
+        out[i] = total + last
 
 
-def test_one_branch_is_the_same_story(gpu_backend: str) -> None:
-    out = np.zeros(4, dtype=np.float32)
-    with pytest.raises(SyntaxError) as caught:
-        assigned_in_one_branch[gpu_backend](out, 1)
-    assert "assigned inside a branch" in str(caught.value)
+def test_each_branch_supplies_the_value(gpu_backend: str) -> None:
+    positive = np.zeros(4, dtype=np.float32)
+    assigned_in_both_branches[gpu_backend](positive, 1)
+    assert np.allclose(np.asarray(positive), np.float32(1.5))
+
+    negative = np.zeros(4, dtype=np.float32)
+    assigned_in_both_branches[gpu_backend](negative, -1)
+    assert np.allclose(np.asarray(negative), np.float32(-1.5))
 
 
-def test_assigning_before_the_branch_is_accepted(gpu_backend: str) -> None:
-    """The workaround the message points at has to work, or the message is a dead end."""
+def test_assigning_before_the_branch_still_wins(gpu_backend: str) -> None:
     out = np.zeros(4, dtype=np.float32)
     assigned_before_the_branch[gpu_backend](out, 1)
     assert np.allclose(np.asarray(out), np.float32(1.5))
+
+
+def test_a_name_from_a_loop_body_survives_the_loop(gpu_backend: str) -> None:
+    """`last` is bound inside the loop and read after it, which python allows."""
+    out = np.zeros(2, dtype=np.float32)
+    assigned_inside_a_loop_then_read[gpu_backend](out)
+    # 0 + 2 + 4 = 6 from the loop, plus the last `last` (4) read after it.
+    assert np.allclose(np.asarray(out), np.float32(10.0))
+
+
+def test_a_branch_that_did_not_run_leaves_zero(gpu_backend: str) -> None:
+    """The documented divergence: python raises, a device reads the hoisted zero."""
+    out = np.zeros(4, dtype=np.float32)
+    assigned_in_one_branch[gpu_backend](out, -1)
+    assert np.allclose(np.asarray(out), np.float32(0.0))
+
+
+def test_the_interpreter_agrees_where_it_can() -> None:
+    """The `python` backend runs the body for real, so the both-branches case must match."""
+    out = np.zeros(4, dtype=np.float32)
+    assigned_in_both_branches["python"](out, 1)
+    assert np.allclose(out, np.float32(1.5))
+
+    with pytest.raises(UnboundLocalError):
+        assigned_in_one_branch["python"](np.zeros(4, dtype=np.float32), -1)

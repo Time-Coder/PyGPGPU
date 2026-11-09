@@ -50,6 +50,18 @@ class _EmitMixin:
             self.lines.append("")
 
 
+    def _hoist_declaration(self, name:str, type_text:str)->None:
+        """Record a local whose declaration belongs at the top of the function.
+
+        An assignment inside a branch would otherwise declare it there, and python scopes
+        the name to the whole function, so a read after the branch has nothing to name.
+        Recorded once: later assignments to the same name are plain stores.
+        """
+        if name not in self._hoisted_names:
+            self._hoisted_names.add(name)
+            self._hoisted_declarations.append((name, type_text))
+
+
     def _render_body(self, lines:Optional[List[str]]=None)->str:
         """The emitted lines with separators placed where a reader expects them.
 
@@ -65,6 +77,20 @@ class _EmitMixin:
         and the C compiler rejects a store of the wider value into it.
         """
         source:List[str] = (self.lines if lines is None else lines)
+        if self._hoisted_declarations:
+            # The declarations go at the top of the body, in the order the names were first
+            # assigned, and every recorded site shifts by what is inserted in front of it.
+            prefix:List[str] = [f"    {type_text} {device_name(name)} = ({type_text})0;"
+                                for name, type_text in self._hoisted_declarations]
+            source = prefix + list(source)
+            inserted:int = len(prefix)
+            self._declaration_sites = (
+                [(index, name, type_text)
+                 for index, (name, type_text) in enumerate(self._hoisted_declarations)]
+                + [(line_index + inserted, name, initial_type)
+                   for line_index, name, initial_type in self._declaration_sites])
+            self._hoisted_declarations = []
+            self._hoisted_names = set()
         if self._declaration_sites:
             source = list(source)
             for line_index, name, initial_type in self._declaration_sites:
@@ -143,13 +169,22 @@ class _EmitMixin:
 
     def _define(self, name:str, t:DeviceType, node:Optional[ast.AST])->None:
         """Record a variable's type; node is optional because some declarations have no
-        source node to blame in an error message."""
+        source node to blame in an error message.
+
+        A **local** name is recorded on the function's own scope, not on the block being
+        translated. Python scopes a name to the whole function -- `if flag: value = 1` makes
+        `value` local and readable after the `if` -- while a block-scoped record disappears
+        when `_push_scope_block` pops, which is what made the same source fail here with
+        "unknown name". A name that is already bound in the function scope (a parameter, a
+        value an earlier statement defined, a carried scalar) keeps its entry there, because
+        shadowing one of those inside a block is refused rather than supported.
+        """
         existing:DeviceType = self._lookup(name)
         if existing is None:
-            self.scopes[-1][name] = t
+            self.scopes[0][name] = t
         elif existing != t:
             if is_int(existing) and is_float(t):
-                self.scopes[-1][name] = t
+                self._retype(name, t)
             elif is_float(existing) and is_float(t):
                 # Widening only ever goes up (float -> double), the same rule the int ->
                 # float case above follows: a python variable is untyped, so `scale = 1.0`
@@ -157,9 +192,18 @@ class _EmitMixin:
                 # mapping) refused with "changes type from float to double". The scope
                 # entry is what every later read and the declaration itself see, so
                 # re-pointing it widens the variable in place.
-                self.scopes[-1][name] = t
+                self._retype(name, t)
             else:
                 self._error(f"variable '{name}' changes type from {existing} to {t}", node)
+
+
+    def _retype(self, name:str, t:DeviceType)->None:
+        """Re-point an existing binding, on the scope that already holds it."""
+        for scope in reversed(self.scopes):
+            if name in scope:
+                scope[name] = t
+                return
+        self.scopes[0][name] = t
 
 
     def _is_const_struct(self, name:str)->bool:

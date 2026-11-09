@@ -266,6 +266,17 @@ class _AssignMixin(_PrivateArrayMixin):
                     decl = f"{const}{self._kernel_scalar_type(t[1])}* "
                 else:
                     decl = self._device_type(t) + " "
+                if len(self.scopes) > 1:
+                    # The assignment is inside a branch or loop, so this block is where the
+                    # declaration would land -- and a read after the block would then have no
+                    # declaration in scope. Python scopes the name to the whole function, so
+                    # the declaration moves to the top of it and this line keeps only the
+                    # store. The value is zero: a read between the block and a later
+                    # assignment sees 0 rather than an uninitialised register, which is the
+                    # closest a device gets to python's UnboundLocalError.
+                    self._hoist_declaration(target.id, decl.strip())
+                    self._emit(f"{device_name(target.id)} = {code};")
+                    return
                 # A later widening (`scale = 1.0` here, a double inside the loop) has to
                 # rewrite this declaration's type -- see _render_body's fixup pass.
                 self._declaration_sites.append((len(self.lines), target.id,
