@@ -199,7 +199,18 @@ class _StatementsMixin:
             if not is_int(t):
                 self._error("range() arguments must be integers", a)
         target:str = node.target.id
+        if self._lookup(target) is None:
+            # Python scopes the loop target to the whole function, and a C `for (int k ...)`
+            # scopes it to the loop: a read after the loop named an undefined identifier. The
+            # declaration is hoisted, and the loop drives a *hidden* counter that assigns the
+            # target on each pass. The counter is what the exit increment belongs to, so the
+            # target is left holding the last value the iterator yielded -- `range(3)` leaves
+            # `k == 2` in python, and `for (k = 0; k < 3; k++)` would have left 3. It is also
+            # what lets a body write the target without steering the loop: python rebinds it
+            # from the iterator each pass, and a shared counter cannot tell the two apart.
+            self._hoist_declaration(target, "int")
         self._define(target, "int", node.target)
+        counter:str = f"_{target}_i"
 
         if len(values) == 1:
             start, stop, step = "0", values[0][0], None
@@ -209,14 +220,18 @@ class _StatementsMixin:
             start, stop, step = values[0][0], values[1][0], values[2][0]
 
         if step is None:
-            self._emit(f"for (int {target} = {start}; {target} < {stop}; {target}++)")
-            self._emit("{")
+            self._emit(f"for (int {counter} = {start}; {counter} < {stop}; {counter}++)")
         elif re.fullmatch(r"-?\d+", step):
             cond_op:str = (">" if step.startswith("-") else "<")
-            self._emit(f"for (int {target} = {start}; {target} {cond_op} {stop}; {target} += {step})")
-            self._emit("{")
+            self._emit(f"for (int {counter} = {start}; {counter} {cond_op} {stop}; {counter} += {step})")
         else:
             self._error("range() step must be a constant integer", node.iter.args[-1])
+        self._emit("{")
+        self._indent += 1
+        try:
+            self._emit(f"{target} = {counter};")
+        finally:
+            self._indent -= 1
         self._push_scope_block(node.body, is_loop=True)
         self._emit("}")
         self._emit_blank()
@@ -263,16 +278,24 @@ class _StatementsMixin:
 
         name:str = node.target.id
         index:str = f"_{name}_idx"
+        fresh:bool = self._lookup(name) is None
+        if fresh:
+            # The element copy is python's loop target: it survives the loop, so its
+            # declaration is hoisted like any other first assignment. `{0}` zeroes a scalar
+            # and a record alike, where the `(T)0` cast the assignment path uses cannot
+            # initialize a structure.
+            self._hoist_declaration(name, self._device_type(element_t), "{0}")
         self._emit(f"for (int {index} = 0; {index} < {stop}; {index}++)")
         self._emit("{")
-        # The declaration belongs to the loop body, so it is emitted after the indent step:
-        # before it, the line landed at the `for` line's own level and every element loop in
-        # a generated source read as if the copy lived outside its block.
         self._define(name, element_t, node.target)
         self._indent += 1
         self.loop_depth += 1
         try:
-            self._emit(f"{self._device_type(element_t)} {name} = {code}[{index}];")
+            # A first binding reads the hoisted declaration; a rebinding keeps the loop
+            # body's own declaration, which shadows the outer name the way a fresh C
+            # variable does and terminates the way the nested loop needs.
+            self._emit(f"{name} = {code}[{index}];" if fresh
+                       else f"{self._device_type(element_t)} {name} = {code}[{index}];")
             for statement in node.body:
                 self._visit_statement(statement)
         finally:

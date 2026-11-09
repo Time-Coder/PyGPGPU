@@ -278,7 +278,7 @@ class _InitMixin:
             # Locals whose declaration moves to the top of the function because their first
             # assignment is inside a branch or loop; python scopes a name to the whole
             # function, so a read after the block needs the declaration there.
-            self._hoisted_declarations:List[Tuple[str, str]] = []
+            self._hoisted_declarations:List[Tuple[str, str, str]] = []
             self._hoisted_names:Set[str] = set()
             # A local bound to an array extent above the magic loop (`rows: int =
             # out.shape[0]`): the name resolves to (array, dim), which is what an

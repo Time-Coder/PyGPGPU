@@ -50,16 +50,20 @@ class _EmitMixin:
             self.lines.append("")
 
 
-    def _hoist_declaration(self, name:str, type_text:str)->None:
+    def _hoist_declaration(self, name:str, type_text:str,
+                           zero:Optional[str]=None)->None:
         """Record a local whose declaration belongs at the top of the function.
 
         An assignment inside a branch would otherwise declare it there, and python scopes
         the name to the whole function, so a read after the branch has nothing to name.
-        Recorded once: later assignments to the same name are plain stores.
+        Recorded once: later assignments to the same name are plain stores. `zero` is the
+        initializer the hoisted declaration carries -- the `(T)0` cast suits a scalar or a
+        pointer, and `{0}` is the form a record needs.
         """
         if name not in self._hoisted_names:
             self._hoisted_names.add(name)
-            self._hoisted_declarations.append((name, type_text))
+            self._hoisted_declarations.append(
+                (name, type_text, zero if zero is not None else f"({type_text})0"))
 
 
     def _render_body(self, lines:Optional[List[str]]=None)->str:
@@ -80,13 +84,13 @@ class _EmitMixin:
         if self._hoisted_declarations:
             # The declarations go at the top of the body, in the order the names were first
             # assigned, and every recorded site shifts by what is inserted in front of it.
-            prefix:List[str] = [f"    {type_text} {device_name(name)} = ({type_text})0;"
-                                for name, type_text in self._hoisted_declarations]
+            prefix:List[str] = [f"    {type_text} {device_name(name)} = {zero};"
+                                for name, type_text, zero in self._hoisted_declarations]
             source = prefix + list(source)
             inserted:int = len(prefix)
             self._declaration_sites = (
                 [(index, name, type_text)
-                 for index, (name, type_text) in enumerate(self._hoisted_declarations)]
+                 for index, (name, type_text, _) in enumerate(self._hoisted_declarations)]
                 + [(line_index + inserted, name, initial_type)
                    for line_index, name, initial_type in self._declaration_sites])
             self._hoisted_declarations = []
