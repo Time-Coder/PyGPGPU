@@ -172,7 +172,26 @@ class _ExpressionsMixin:
             return self._visit_constant(ast.Constant(value=value))
         if isinstance(value, (int, float)) and not isinstance(value, np.ndarray):
             return self._visit_constant(ast.Constant(value=value))
-        self._error(f"unknown name '{node.id}' (only parameters, local variables and int/float/bool global constants are supported)", node)
+        self._error(self._unknown_name_message(node), node)
+
+
+    def _unknown_name_message(self, node:ast.Name)->str:
+        """Why a name the body plainly assigns cannot be read here.
+
+        The common way to reach this is an assignment that happens inside a branch: the name
+        is a local of the function, but C has no declaration for it until the statement that
+        assigns it runs, so reading it after the branch fails. Python says the same thing
+        differently -- it raises UnboundLocalError, and only when the branch did not run --
+        which is why this reads better as a statement about where the first assignment is
+        than as "unknown name".
+        """
+        name:str = node.id
+        if name in self._local_names():
+            return (f"'{name}' is assigned inside a branch or loop, so it has no value yet "
+                    f"at this point: give it one before the branch (`{name} = 0`) so the "
+                    f"branch only updates it")
+        return (f"unknown name '{name}' (only parameters, local variables and int/float/bool "
+                f"global constants are supported)")
 
 
     def _real_literal(self, value:float, width:str)->str:
