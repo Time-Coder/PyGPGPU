@@ -237,10 +237,10 @@ class _RunLaunchMixin:
         # Every phase of the body gets the same geometry: they are passes over one domain.
         # Each is launched in turn on the stream this call owns, so the arrays that travel
         # between them stay on the device instead of going back to the host and returning.
-        # The asynchronous forms launch the first kernel only -- a multi-pass body is a
-        # sequence of dependent launches, and a future per pass is an interface this
-        # launch does not have -- so it is refused by name rather than silently running
-        # one pass of several. A single-phase body (the common case) launches whole.
+        # The asynchronous forms run the whole sequence: a multi-pass body is a chain of
+        # dependent launches, and its chain is driven by the backend's own completion
+        # events rather than by a thread that waits (see _phase_async). A single-phase
+        # body (the common case) launches whole.
         if launch in ("submit", "async"):
             if len(plan.active_kernels) > 1:
                 # Dependent passes: each waits for the previous one's completion event,
