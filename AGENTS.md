@@ -46,6 +46,40 @@ PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP,
 
 - **Metal carries the whole shared science vocabulary, and refuses the CUDA-only one by name.** `SHARED_MATH_BUILTINS` and `SHARED_MATH_TEMPLATES` are keyed by backend, so every entry now has a `metal` spelling: MSL declines the `f`-suffixed CUDA forms and spells the fast approximations `fast::` (`fast::sin`, ...) rather than OpenCL's `native_`. Two entries are deliberately not direct translations. (1) **`native_recip` is a template, not a callee**: MSL has no reciprocal intrinsic at all, so it is written as the division it is (`(1.0f / (x))`), which is why it lives in `SHARED_MATH_TEMPLATES` -- putting an expression in a table of function names would emit `1.0f / (x)(...)`. (2) **The CUDA-only families stay CUDA/HIP-only**: `fast_exp`/`exact_recip` and the conversions are not spelled for Metal, and `_emit_cuda_only_builtin` now refuses them by backend name instead of indexing the table. Both lookups that read a spelling are written as a table lookup plus an explicit `self._error` when the backend is missing -- never a bare `[self.launch_backend]`, which raised a `KeyError` from inside the translation. `tests/test_metal_launch_path.py` pins all of it: every shared entry has a metal spelling, the two tables stay disjoint, and no CUDA-only entry claims one.
 
+## Vector types: pygf owns the layout, the package owns the widths it lacks
+
+**A vector class is defined once per *layout*, never once per backend.** The layout is what a
+device parameter means, and it is not the same on every backend: a three-component vector is
+**12 bytes compact on CUDA/HIP** and **16 bytes aligned on OpenCL** (the fourth slot is
+padding). So the rule is not "pygf owns vectors" -- it is that three places own them, and each
+owns a disjoint set. Measured on the current tree:
+
+| where | classes | what it owns |
+| --- | ---: | --- |
+| **pygf** | 12 | `float2/3/4`, `int2/3/4`, `uint2/3/4`, `double2/4` -- the layouts every backend agrees on |
+| **`pygpgpu/vec_types/`** | 24 | every width pygf has no class for: all 8- and 16-wide, and the `char`/`uchar`/`short`/`ushort` families |
+| **`{cuda,hip}/driver/vec_types/`** | 14 | only what the CUDA/HIP ABI spells differently: every **3-component** type (`char3`, `double3`, `float3`, `int3`, `short3`, `uchar3`, `uint3`, `ushort3`, `long3`, `ulong3`) plus `long2`/`long4`/`ulong2`/`ulong4` |
+| **`opencl/driver/vec_types/`** | 18 | the same 14 in OpenCL's padded layout, plus `long8`/`long16`/`ulong8`/`ulong16`, widths CUDA does not have |
+
+Two facts make that table checkable rather than asserted: the 14 names a backend defines are
+**exactly** the 14 whose dtype differs from the others', and the other **32** are already the
+shared classes -- `pygf.float2 is CUInfo.vec_types["float2"]` is `True`, while
+`pygf.float3 is CUInfo.vec_types["float3"]` is `False`. To re-check after touching any of this:
+compare `np.dtype(cls).itemsize` and the field list of each table's entry for the same name.
+
+Three consequences are load-bearing. (1) **Do not "unify" a table onto the neutral layer to
+save a file.** That was tried: pointing the vector registry at `pygpgpu/vec_types` instead of
+`CLInfo.vec_types` removed the whole OpenCL driver import from a CUDA process (94 -> 45 modules
+and 42 ms off the first call) and broke five OpenCL tests, because the 3-component layouts
+genuinely differ. The cheaper-looking fix was the wrong one. (2) **HIP reuses CUDA's 14**,
+since HIP's ABI is CUDA's, and additionally borrows `long8`/`long16`/`ulong8`/`ulong16` from
+the OpenCL package -- the only table that has them. That borrow is **layout-identical** (same
+itemsize, same `s0..s7`/`s0..sF` field names), so it is correct today, and it is the one entry
+in this area that reads as accidental; if HIP ever needs those widths for real, they belong in
+the neutral layer rather than in a second OpenCL import. (3) **`CLInfo.vec_types` is not "the
+OpenCL vector table"** -- 24 of its 50 entries are the neutral classes. A question about
+"OpenCL's vector types" has to be asked per name, not per table.
+
 ## File size policy (hard rule)
 
 **A first-party source file must stay under 500 lines, and a file that grows past 200 lines is a
