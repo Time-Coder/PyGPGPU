@@ -26,6 +26,18 @@ def _touched(names: List[str], statements: List[ast.stmt]) -> Set[str]:
     return touched
 
 
+def _can_be_deferred(value: object) -> bool:
+    """Whether a plain array can travel as its own deferred view safely.
+
+    The deferred path reads the array's bytes back into the view that was bound. A
+    non-contiguous array's device layout is a compacted copy (the binding layer stages it),
+    so writing those bytes back through the view lands in the wrong place: the caller's
+    array looks unmodified and the buffer behind it is scrambled. Such an array keeps the
+    immediate read-back it always had.
+    """
+    return bool(getattr(value.flags, "c_contiguous", False))
+
+
 def deferred_arrays(plan: object) -> Dict[str, object]:
     """The array arguments a multi-pass body can keep on the device between passes.
 
@@ -42,7 +54,7 @@ def deferred_arrays(plan: object) -> Dict[str, object]:
     for name, value in zip(plan.prefix_names, plan.full):
         if name in needed:
             continue
-        if isinstance(value, np.ndarray) and value.ndim > 0:
+        if isinstance(value, np.ndarray) and value.ndim > 0 and _can_be_deferred(value):
             deferred[name] = value
     return deferred
 

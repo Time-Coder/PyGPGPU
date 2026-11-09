@@ -122,3 +122,24 @@ def test_the_interpreter_needs_no_copies(gpu_backend, copy_trace):
     two_passes_untouched[gpu_backend](a, b)
     np.testing.assert_array_equal(b, np.array([1.0, 3.0, 5.0, 7.0], dtype=np.float32))
     assert copy_trace() == []
+
+
+def test_a_strided_array_is_written_back_to_its_own_buffer(gpu_backend):
+    """A non-contiguous view must keep the immediate read-back, and land in the right place.
+
+    The deferred path writes the device bytes back through the view that was bound, and a
+    strided array's device copy is a *compacted* staging buffer: writing it back that way
+    left the caller's view unmodified and scrambled the buffer behind it. Such an array is
+    therefore excluded from the deferred set, which is what keeps this case correct.
+    """
+    backing = np.zeros(8, dtype=np.float32)
+    backing[::2] = np.arange(4, dtype=np.float32)
+    view = backing[::2]
+    b = np.zeros(4, dtype=np.float32)
+    two_passes_untouched[gpu_backend](view, b)
+    np.testing.assert_array_equal(np.asarray(view),
+                                  np.array([0.0, 2.0, 4.0, 6.0], dtype=np.float32))
+    np.testing.assert_array_equal(backing,
+                                  np.array([0.0, 0.0, 2.0, 0.0, 4.0, 0.0, 6.0, 0.0],
+                                           dtype=np.float32))
+    np.testing.assert_array_equal(b, np.array([1.0, 3.0, 5.0, 7.0], dtype=np.float32))
