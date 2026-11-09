@@ -12,8 +12,14 @@ different compilers, and Taichi's CPU backend is a different program from its CU
 | --- | --- | --- |
 | `pygpgpu-cuda` / `-opencl` / `-hip` | `bench_pygpgpu.py --arch ...` | CUDA, OpenCL, HIP |
 | `taichi-cuda` / `-cpu` | `bench_taichi.py --arch ...` | CUDA, x64 |
+| `quadrants-cuda` / `-vulkan` / `-cpu` | `bench_quadrants.py --arch ...` | CUDA, Vulkan, x64 |
 | `warp-cuda` | `bench_warp.py` | CUDA |
 | `numba-cuda` / `numba-cpu` | `bench_numba_cuda.py`, `bench_numba_cpu.py` | CUDA, CPU |
+
+**Quadrants is a Taichi derivative, and its script mirrors `bench_taichi.py` call for call** on
+purpose: a difference between the two numbers is then a difference in the compiler and
+runtime, not in how the task was written. Its Vulkan backend *does* work here, where Taichi's
+aborts -- so the two are not interchangeable even though the API is.
 
 Taichi's Vulkan backend is **not in the list**: `ti.init(arch=ti.vulkan)` aborts on this
 machine with a VulkanMemoryAllocator assertion (`vk_mem_alloc.h`, line 16039), so there is no
