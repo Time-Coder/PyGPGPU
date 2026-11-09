@@ -1,4 +1,4 @@
-﻿"""Python's block statements share one function scope, and the device must agree.
+"""Python's block statements share one function scope, and the device must agree.
 
 Only `def`/`class`/lambda/comprehension create a scope in python; `if`, `elif`, `while` and
 `for` do not -- a name first assigned inside any of them is a function local, readable after
@@ -63,10 +63,32 @@ def from_three_levels_of_nesting(out: np.ndarray, which: int):
         out[i] = found
 
 
+@kernel
+def complex_from_a_branch(out: np.ndarray, flag: int):
+    """A *record*-typed local introduced by a branch: the hoisted declaration needs `{0}`.
+
+    `c128` is a structure, and C has no conversion from an int to one, so the `(T)0` cast the
+    scalar path uses does not compile here. The high-precision Mandelbrot viewer found this.
+    """
+    for i in range(out.shape[0]):
+        if flag > 0:
+            z = 1.5 + 2.5j
+        else:
+            z = -1.5 - 2.5j
+        out[i] = float(z.real)
+
+
 def test_a_while_block_introduces_the_name(gpu_backend: str) -> None:
     out = np.zeros(4, dtype=np.float32)
     from_a_while_block[gpu_backend](out, 3)
     assert np.allclose(np.asarray(out), np.float32(2.0))
+
+
+def test_a_record_local_can_come_from_a_branch(gpu_backend: str) -> None:
+    for flag, expected in ((1, 1.5), (-1, -1.5)):
+        out = np.zeros(4, dtype=np.float32)
+        complex_from_a_branch[gpu_backend](out, flag)
+        assert np.allclose(np.asarray(out), np.float32(expected)), flag
 
 
 def test_an_elif_chain_introduces_the_name(gpu_backend: str) -> None:

@@ -281,10 +281,9 @@ class _StatementsMixin:
         fresh:bool = self._lookup(name) is None
         if fresh:
             # The element copy is python's loop target: it survives the loop, so its
-            # declaration is hoisted like any other first assignment. `{0}` zeroes a scalar
-            # and a record alike, where the `(T)0` cast the assignment path uses cannot
-            # initialize a structure.
-            self._hoist_declaration(name, self._device_type(element_t), "{0}")
+            # declaration is hoisted like any other first assignment (the type decides how the
+            # zero is spelled, which is what a record element needs).
+            self._hoist_declaration(name, self._device_type(element_t))
         self._emit(f"for (int {index} = 0; {index} < {stop}; {index}++)")
         self._emit("{")
         self._define(name, element_t, node.target)

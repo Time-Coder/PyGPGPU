@@ -15,6 +15,7 @@ from .notation import (
     device_name,
 )
 from .predicates import (
+    is_aggregate,
     is_float,
     is_int,
     is_ptr,
@@ -50,20 +51,32 @@ class _EmitMixin:
             self.lines.append("")
 
 
+    def _zero_for_type(self, type_text:str)->str:
+        """The zero value a hoisted declaration starts at.
+
+        A **record** (`c64`/`c128`, a structure) cannot be cast from an int -- C has no
+        conversion to a structure type, and `(c128)0` is a compile error -- so it takes `{0}`,
+        which zeroes every member and is valid for a scalar too. A scalar and a pointer keep
+        the cast. A **vector** keeps it as well: a scalar cast to a vector is OpenCL's
+        broadcast initializer, where brace-initializing one is not portable.
+        """
+        base:str = type_text.replace("const", "").strip()
+        return "{0}" if is_aggregate(base) else f"({base})0"
+
+
     def _hoist_declaration(self, name:str, type_text:str,
                            zero:Optional[str]=None)->None:
         """Record a local whose declaration belongs at the top of the function.
 
         An assignment inside a branch would otherwise declare it there, and python scopes
         the name to the whole function, so a read after the branch has nothing to name.
-        Recorded once: later assignments to the same name are plain stores. `zero` is the
-        initializer the hoisted declaration carries -- the `(T)0` cast suits a scalar or a
-        pointer, and `{0}` is the form a record needs.
+        Recorded once: later assignments to the same name are plain stores. `zero` defaults
+        to what the type can express (see `_zero_for_type`); a record needs the brace form.
         """
         if name not in self._hoisted_names:
             self._hoisted_names.add(name)
             self._hoisted_declarations.append(
-                (name, type_text, zero if zero is not None else f"({type_text})0"))
+                (name, type_text, zero if zero is not None else self._zero_for_type(type_text)))
 
 
     def _render_body(self, lines:Optional[List[str]]=None)->str:
