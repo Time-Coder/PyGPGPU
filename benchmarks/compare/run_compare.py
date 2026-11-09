@@ -38,10 +38,17 @@ HERE: Path = Path(__file__).resolve().parent
 PYTHON: str = sys.executable
 NUMBA_CACHE: Path = HERE / ".numba-cache"
 
-# name, script, extra arguments, the cache paths that keep it warm
+# name, script, extra arguments. One entry per *framework and backend*, because the backend
+# is most of what a GPU framework's number means: PyGPGPU's CUDA and OpenCL paths are the
+# same source through two different compilers, and Taichi's CPU backend is a different
+# program from its CUDA one.
 FRAMEWORKS: List[Tuple[str, str, Tuple[str, ...]]] = [
-    ("pygpgpu", "bench_pygpgpu.py", ()),
-    ("taichi", "bench_taichi.py", ("--arch", "cuda")),
+    ("pygpgpu-cuda", "bench_pygpgpu.py", ("--arch", "cuda")),
+    ("pygpgpu-opencl", "bench_pygpgpu.py", ("--arch", "opencl")),
+    ("pygpgpu-hip", "bench_pygpgpu.py", ("--arch", "hip")),
+    ("taichi-cuda", "bench_taichi.py", ("--arch", "cuda")),
+    ("taichi-cpu", "bench_taichi.py", ("--arch", "cpu")),
+    ("warp-cuda", "bench_warp.py", ("--arch", "cuda")),
     ("numba-cuda", "bench_numba_cuda.py", ()),
     ("numba-cpu", "bench_numba_cpu.py", ()),
 ]
@@ -94,6 +101,11 @@ def run_once(script: str, extras: Tuple[str, ...], task: str, repeat: int) -> Tu
     return elapsed, fields
 
 
+def run_startup(script: str, extras: Tuple[str, ...]) -> float:
+    """Time a run that imports the framework, starts its runtime and stops."""
+    return run_once(script, (*extras, "--startup-only"), "mandelbrot", 0)[0]
+
+
 def compare(only: Optional[List[str]], task: str, repeat: int,
             warm_samples: int = 3, rounds: int = 1) -> List[Dict[str, object]]:
     """Cold and warm are both measured per round; the table reports the median.
@@ -118,11 +130,13 @@ def compare(only: Optional[List[str]], task: str, repeat: int,
             continue
         cold_runs: List[float] = []
         warm_runs: List[float] = []
+        startup_runs: List[float] = []
         call2_runs: List[float] = []
         best_runs: List[float] = []
         fields: Dict[str, str] = {}
         for _ in range(max(1, rounds)):
             clear_caches()
+            startup_runs.append(run_startup(script, extras))
             cold, _ = run_once(script, extras, task, repeat)
             cold_runs.append(cold)
             warmest: Optional[float] = None
@@ -136,6 +150,7 @@ def compare(only: Optional[List[str]], task: str, repeat: int,
         row: Dict[str, object] = {
             "framework": name,
             "task": task,
+            "startup": _median(startup_runs),
             "cold": _median(cold_runs),
             "warm": _median(warm_runs),
             "call2": _median(call2_runs),
@@ -146,11 +161,12 @@ def compare(only: Optional[List[str]], task: str, repeat: int,
             "arch": fields.get("ARCH", "-"),
         }
         rows.append(row)
-        print(f"{name:11s} {task:10s} "
-              f"cold {row['cold']:8.1f} ms [{_spread(cold_runs)}]   "
-              f"warm {row['warm']:8.1f} ms [{_spread(warm_runs)}]   "
-              f"call2 {row['call2']:7.3f} ms   best {row['best']:7.3f} ms   "
-              f"correct {row['correct']}")
+        print(f"{name:16s} {task:10s} "
+              f"start {row['startup']:7.1f} ms  "
+              f"cold {row['cold']:8.1f} ms  "
+              f"warm {row['warm']:8.1f} ms  "
+              f"call2 {row['call2']:7.3f} ms  best {row['best']:7.3f} ms  "
+              f"{row['correct'].split('(')[0].strip()}")
         sys.stdout.flush()
     return rows
 
@@ -177,14 +193,13 @@ def main() -> int:
         rows.extend(compare(arguments.only, task, arguments.repeat, arguments.warm_samples,
                             arguments.rounds))
 
-    print("\n| framework | task | cold script (median) | warm script (median) | "
-          "call 2 (median) | best call (median) | correct |")
-    print("| --- | --- | ---: | ---: | ---: | ---: | --- |")
+    print("\n| framework | task | start-up | cold (full) | warm (full) | call 2 | best call | correct |")
+    print("| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |")
     for row in rows:
         detail = str(row["correct"]).split("(")[0].strip()
-        print(f"| {row['framework']} | {row['task']} | {row['cold']:.0f} ms | "
-              f"{row['warm']:.0f} ms | {row['call2']:.3f} ms | {row['best']:.3f} ms | "
-              f"{detail} |")
+        print(f"| {row['framework']} | {row['task']} | {row['startup']:.0f} ms | "
+              f"{row['cold']:.0f} ms | {row['warm']:.0f} ms | {row['call2']:.3f} ms | "
+              f"{row['best']:.3f} ms | {detail} |")
     failures = [row for row in rows if not str(row["correct"]).startswith("yes")]
     return 1 if failures else 0
 

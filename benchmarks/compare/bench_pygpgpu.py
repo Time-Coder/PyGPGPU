@@ -20,6 +20,9 @@ from common import (MANDEL_CENTER_IMAG, MANDEL_CENTER_REAL, MANDEL_MAX_ITER,  # 
 
 set_print_info(False)
 
+# The backend this run launches on; `--arch` picks it (cuda, hip or opencl).
+BACKEND = "cuda"
+
 
 @kernel
 def mandelbrot(out: np.ndarray):
@@ -65,7 +68,7 @@ def make(task: str):
 
     The buffers are allocated through `pygpgpu.numpy` and filled once, before any timing, so
     the steady-state number is the launch and nothing else. That is the same position the
-    other three frameworks are put in -- a taichi field and a `numba.cuda` device array are
+    other frameworks are put in -- a taichi field and a `numba.cuda` device array are
     both resident by construction, and a framework that uploaded and downloaded its arrays on
     every call would be measuring the PCIe bus rather than its compiler.
 
@@ -78,7 +81,7 @@ def make(task: str):
         out = gnp.zeros((common.MANDEL_HEIGHT, common.MANDEL_WIDTH), dtype=np.float32)
 
         def run() -> object:
-            mandelbrot["cuda"](out)
+            mandelbrot[BACKEND](out)
             return out
 
         def fetch() -> np.ndarray:
@@ -93,7 +96,7 @@ def make(task: str):
     out = gnp.zeros(source.shape, dtype=source.dtype)
 
     def run() -> object:
-        laplacian["cuda"](source, out)
+        laplacian[BACKEND](source, out)
         return out
 
     def fetch() -> np.ndarray:
@@ -105,4 +108,6 @@ def make(task: str):
 
 if __name__ == "__main__":
     arguments = harness.parse_args(__doc__ or "")
+    BACKEND = arguments.arch or "cuda"
+    print(f"ARCH {BACKEND}")
     harness.run_tasks(arguments, make)

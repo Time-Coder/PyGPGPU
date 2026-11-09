@@ -1,4 +1,4 @@
-﻿"""One benchmark script: how the four are driven, and what they report.
+"""One benchmark script: how the four are driven, and what they report.
 
 Every `bench_*.py` is a standalone process that imports **only its own framework**. Two
 things are measured from the outside and one from the inside, and all three are asked for:
@@ -29,6 +29,9 @@ def parse_args(description: str) -> argparse.Namespace:
                         help="how many extra calls to time after the first two")
     parser.add_argument("--arch", default=None,
                         help="the backend this framework should pick, when it has a choice")
+    parser.add_argument("--startup-only", action="store_true",
+                        help="import the framework and initialise its device, then stop -- "
+                             "what a process pays before it runs anything")
     return parser.parse_args()
 
 
@@ -118,6 +121,13 @@ def run_tasks(args: argparse.Namespace,
     """
     names: Tuple[str, ...] = (("mandelbrot", "laplacian") if args.task == "both"
                               else (args.task,))
+    if getattr(args, "startup_only", False):
+        # The framework is imported and (for taichi) its runtime started by the time this
+        # runs, so the process it belongs to measures exactly what a caller pays before the
+        # first kernel exists.
+        print("STARTUP_ONLY yes")
+        sys.stdout.flush()
+        return
     for name in names:
         run, fetch = factory(name)
         report(name, run, args.repeat, fetch)
