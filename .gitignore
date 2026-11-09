@@ -26,4 +26,4 @@ examples/*.pyi
 
 # Editor state. A per-machine .vscode/settings.json records the local interpreter choice,
 # which differs between developers and has no bearing on the library.
-.vscode/
+.vscode/numba-cache/
