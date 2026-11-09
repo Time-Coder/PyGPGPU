@@ -19,6 +19,9 @@ class _KernelAsyncMixin:
         """
         future = future_type()
         context = self._program.context
+        # This may run on any thread, so the context has to be selected before the first
+        # driver call (`get_async_stream` itself is one).
+        context.make_current()
         stream = context.get_async_stream(blocking=False)
 
         if stream is None:
@@ -39,6 +42,7 @@ class _KernelAsyncMixin:
     def _launch_when_free(self, future, args, kwargs, future_type:type)->None:
         """Worker-thread half of an asynchronous launch that had to wait."""
         context = self._program.context
+        context.make_current()
         try:
             stream = context.get_async_stream(blocking=True)
         except BaseException as error:

@@ -59,6 +59,11 @@ class _KernelLaunchMixin:
 
     def _before_call(self, args, kwargs, async_launch:bool=False):
         context = self._program.context
+        # `hipSetDevice` is per thread, and a thread that did not create the context has
+        # none selected: the first launch from a worker thread fails with
+        # HIP_ERROR_INVALID_CONTEXT before anything is enqueued. Already-current costs one
+        # attribute comparison.
+        context.make_current()
         if async_launch:
             stream = context.get_async_stream(blocking=True)
         else:

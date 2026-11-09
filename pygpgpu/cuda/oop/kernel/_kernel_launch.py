@@ -66,6 +66,13 @@ class _KernelLaunchMixin:
 
     def _before_call(self, args, kwargs, async_launch:bool=False):
         context = self._program.context
+        # `cuCtxSetCurrent` is per thread, and a thread that did not create the context has
+        # none bound: the first launch from a worker thread fails with
+        # CUDA_ERROR_INVALID_CONTEXT before anything is enqueued. Binding here covers every
+        # launch this backend makes, because both the sync and the async path arrive
+        # through this method or through `_launch_when_free`. Already-current is the common
+        # case and costs one query.
+        context.make_current()
         if async_launch:
             stream = context.get_async_stream(blocking=True)
         else:

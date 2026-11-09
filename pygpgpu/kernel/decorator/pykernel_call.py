@@ -221,12 +221,19 @@ class _PykernelCallMixin:
         The statements between two passes read shared slots on the host; the copies that
         fill them are stream callbacks, so a device-level sync is the one wait that is
         correct regardless of which stream each launch used.
+
+        The sync is a driver call, and a driver call needs the device's context bound to the
+        calling thread -- `cuCtxSetCurrent`/`hipSetDevice` are per thread, so a launch from a
+        worker thread that has never run one arrives here with nothing bound. Binding first
+        is what lets a kernel be called from any thread; it is a no-op when already current.
         """
         if backend == "cuda":
             from ...cuda.driver import CUDA
+            device_obj.default_context.make_current()
             CUDA.cuCtxSynchronize()
         elif backend == "hip":
             from ...hip.driver import HIP
+            device_obj.default_context.make_current()
             HIP.hipDeviceSynchronize()
         elif backend == "metal":
             # Metal's launch waits on its own command buffer, so every launch that
