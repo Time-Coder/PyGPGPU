@@ -19,15 +19,21 @@ def double_float_mapping():
     Every value here is a host scalar, so the width has to be wide enough for the python
     float the region computed. The mapping is process-wide, so restoring the module's own
     default afterwards is what keeps the following test modules on theirs.
-    """
-    from pygpgpu.kernel import decorator  # noqa: PLC0415
 
-    saved = decorator._type_map_default  # noqa: SLF001 (restored in the finally)
+    The saved name has to be the one `set_type_map` writes, which lives in
+    `decorator/type_map.py`; the `decorator` package *re-exports* it, so rebinding the
+    re-exported name restores nothing and leaves every later module translating a python
+    float as a double. That leak is invisible in this module and shows up two files later
+    as a `double` that has no device atomic operation.
+    """
+    from pygpgpu.kernel.decorator import type_map  # noqa: PLC0415
+
+    saved = type_map._type_map_default  # noqa: SLF001 (restored in the finally)
     set_type_map(float=np.float64)
     try:
         yield
     finally:
-        decorator._type_map_default = saved  # noqa: SLF001 (restored here)
+        type_map._type_map_default = saved  # noqa: SLF001 (restored here)
 
 
 # ---------------------------------------------------------------------------
