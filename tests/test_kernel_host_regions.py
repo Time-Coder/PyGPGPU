@@ -254,3 +254,52 @@ def test_a_plain_scalar_above_the_loop_stays_device_code(runner):
     out = np.zeros(4, np.float64)
     runner(device_member_above_loop, out)
     np.testing.assert_allclose(out, np.arange(4) + 7.0)
+
+
+@kernel
+def two_passes_after_each_other(out: np.ndarray, mid: np.ndarray):
+    """A two-loop body: the second loop is a pass, never host work."""
+    for i in range(out.shape[0]):
+        out[i] = float(i)
+    for i in range(mid.shape[0]):
+        mid[i] = out[i] + 1.0
+    return float(mid[0])
+
+
+def test_the_host_scan_stops_at_the_last_magic_loop():
+    """The host tail starts after the **last** magic loop, not after the first one.
+
+    `_magic_loop_end` answers the end of the first magic loop, which is what a single phase
+    slice needs. The discovery run asked it about the whole body instead, so a two-loop body
+    put its *second* loop into the tail and the host executed that loop in python -- once per
+    launch, for every pixel. The answer stayed correct, because the device pass overwrote
+    what the host pass wrote, so nothing about the result could see it: only the record of
+    which statements ran can. On an 800x600 fractal frame that was nine of its ten seconds.
+    """
+    import ast
+
+    from pygpgpu.kernel.decorator import host_regions as regions
+    from pygpgpu.kernel.translator import (_is_magic_loop_stmt, _parse_kernel_source,
+                                          get_dedented_source)
+
+    # `_host_region_values` parses the dedented source, so the line numbers it reports are
+    # the ones this parse gives, which is what makes the two comparable.
+    tree = _parse_kernel_source(get_dedented_source(two_passes_after_each_other.raw_func))
+    body = tree.body[0].body
+    loops = [statement for statement in body
+             if isinstance(statement, ast.For) and _is_magic_loop_stmt(statement)]
+    assert len(loops) == 2, "the fixture kernel must have two magic loops"
+
+    _, executed = regions._host_region_values(
+        two_passes_after_each_other.raw_func, (np.zeros(2), np.zeros(2)))
+
+    def lines_of(statement):
+        # Every node that carries a line number: walking also yields the `ctx` markers,
+        # which are plain singletons and have none.
+        return {node.lineno for node in ast.walk(statement)
+                if getattr(node, "lineno", None) is not None}
+
+    first_lines = lines_of(loops[0])
+    second_lines = lines_of(loops[1])
+    assert not (set(executed) & first_lines), (sorted(executed), sorted(first_lines))
+    assert not (set(executed) & second_lines), (sorted(executed), sorted(second_lines))

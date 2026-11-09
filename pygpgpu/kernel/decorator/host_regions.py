@@ -154,7 +154,7 @@ def _host_region_values(func:object,
     build already produced that object: `_host_created_values` decides whether it travels
     as a device object, and building a second one here would shadow the launch's copy.
     """
-    from ..translator import (_is_magic_loop_stmt, _magic_loop_end,
+    from ..translator import (_is_magic_loop_stmt,
                              _outside_loops, get_dedented_source, _parse_kernel_source,
                              _outer_scope_names)
 
@@ -187,10 +187,19 @@ def _host_region_values(func:object,
     statements = [statement for statement in statements
                   if _assigned_name_of(statement) not in outer_names
                   and _assigned_name_of(statement) not in built]
-    # The tail after the last magic loop, with any `return` left out: it is host work, and a
-    # name it binds (`rest = helper()` after the loop) has to reach the host that runs it.
+    # The tail after the **last** magic loop, with any `return` left out: it is host work, and
+    # a name it binds (`rest = helper()` after the loop) has to reach the host that runs it.
+    # `_magic_loop_end` answers the end of the *first* magic loop, because it is written for a
+    # single phase slice (`[header..., for-loop, after...]`). Used on a whole body it put
+    # every later loop into the tail as well, and the host then *ran* that loop in python,
+    # once per launch: a two-pass body's second pass executed twice, once on the device and
+    # once on the host, which is where an 800x600 fractal frame spent nine of its ten
+    # seconds. The tail starts after the last one.
+    last_loop:int = max((index for index, statement in enumerate(body)
+                         if isinstance(statement, ast.For)
+                         and _is_magic_loop_stmt(statement)), default=-1)
     tail:List[object] = [statement for statement
-                         in body[_magic_loop_end(body):]
+                         in body[last_loop + 1 if last_loop >= 0 else len(body):]
                          if not isinstance(statement, ast.Return)
                          and _assigned_name_of(statement) not in outer_names
                          and _assigned_name_of(statement) not in built]
