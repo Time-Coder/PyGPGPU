@@ -51,6 +51,11 @@ class _PrivateArrayMixin:
         is folded into the signature digest that hashes the C name (see `_source_signature`).
         A module constant bakes the same way -- it is one number for the life of the process,
         the same rule `np.ndindex(HEIGHT, WIDTH)` already follows.
+
+        A parameter whose value is not a usable size is a different refusal from "the name
+        cannot be resolved": the user did everything the feature asks, and the *value* this
+        launch carried is the problem, so the message names the value instead of telling them
+        to use a parameter.
         """
         def bake(candidate:ast.expr)->Optional[int]:
             if isinstance(candidate, ast.Name):
@@ -60,14 +65,31 @@ class _PrivateArrayMixin:
                      if name == candidate.id), None)
                 if position is not None and position < len(self.argument_values):
                     value:object = self.argument_values[position]
-                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                        return int(value)
-                    return None
+                    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+                        self._error(
+                            f"zeros_per_group() shape read from parameter '{candidate.id}' "
+                            f"must be a whole number of elements, and this launch carried "
+                            f"{value!r}: the size is baked into the compiled kernel, so it "
+                            f"cannot be a fraction or a switch", candidate)
+                    if int(value) <= 0:
+                        self._error(
+                            f"zeros_per_group() shape read from parameter '{candidate.id}' "
+                            f"must be positive, and this launch carried {int(value)}: a "
+                            f"shared buffer with no elements has nothing to index",
+                            candidate)
+                    return int(value)
                 # A module-level constant (or an attribute of one): one number for the
                 # process, which is what `_constant_extent` already bakes for an
                 # `np.ndindex` bound.
                 resolved:object = self.resolve_global(candidate.id)
-                return _constant_extent(resolved)
+                extent:Optional[int] = _constant_extent(resolved)
+                if extent is None and resolved is not None and not isinstance(
+                        resolved, (int, np.integer)):
+                    self._error(
+                        f"zeros_per_group() shape read from module constant '{candidate.id}' "
+                        f"must be a whole number of elements, and it is {resolved!r}",
+                        candidate)
+                return extent
             if isinstance(candidate, ast.Attribute) and isinstance(candidate.value, ast.Name):
                 holder:object = self.resolve_global(candidate.value.id)
                 if isinstance(holder, types.ModuleType):

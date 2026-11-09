@@ -66,6 +66,40 @@ def test_a_computed_shape_is_refused_with_its_reason(gpu_backend: str) -> None:
     assert "int parameter" in message, message
 
 
+def test_a_non_whole_size_names_the_value_this_launch_carried(gpu_backend: str) -> None:
+    """The name resolved and the launch ran -- the *value* is the problem, so say that."""
+
+    @kernel(domain="out")
+    def fractional(out: np.ndarray, group_size: float):
+        bins = zeros_per_group(group_size, np.float32)
+        bins[blockIdx][0] = 0.0
+        barrier()
+        out[0] = bins[blockIdx][0]
+
+    out = np.zeros(1, dtype=np.float32)
+    with pytest.raises(SyntaxError) as caught:
+        fractional[gpu_backend][(1, 8)](out, 2.5)
+    message = str(caught.value)
+    assert "whole number" in message, message
+    assert "2.5" in message, message
+
+
+def test_a_zero_size_names_the_value_this_launch_carried(gpu_backend: str) -> None:
+    @kernel(domain="out")
+    def empty(out: np.ndarray, group_size: int):
+        bins = zeros_per_group(group_size, np.float32)
+        bins[blockIdx][0] = 0.0
+        barrier()
+        out[0] = bins[blockIdx][0]
+
+    out = np.zeros(1, dtype=np.float32)
+    with pytest.raises(SyntaxError) as caught:
+        empty[gpu_backend][(1, 8)](out, 0)
+    message = str(caught.value)
+    assert "positive" in message, message
+    assert "carried 0" in message, message
+
+
 def test_a_module_constant_bakes_the_same_literal_every_launch(gpu_backend: str) -> None:
     module_size = 96
 
