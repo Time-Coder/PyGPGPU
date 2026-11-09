@@ -22,6 +22,11 @@ import pytest
 
 from pygpgpu import kernel
 
+# This module, named so a kernel body can read a constant through it (`forms.EXTENT_ROWS`).
+import sys as _sys
+
+forms = _sys.modules[__name__]
+
 
 # ---------------------------------------------------------------------------
 # One spelling per shape, each writing every element it claims
@@ -83,6 +88,47 @@ def test_literal_extents_domain(runner):
     result = runner(literal_extents_loop, image)
     assert result.shape == (2, 3)
     expected = np.array([[i * 10 + j for j in range(3)] for i in range(2)], dtype=np.float32)
+    np.testing.assert_allclose(result, expected)
+
+
+EXTENT_ROWS = 2
+EXTENT_COLUMNS = 3
+
+
+@kernel
+def constant_extents_loop():
+    """A module-level integer as the extent: a compile-time constant, like a literal."""
+    dest: np.ndarray = np.zeros((EXTENT_ROWS, EXTENT_COLUMNS), dtype=np.float32)
+    for i, j in np.ndindex(EXTENT_ROWS, EXTENT_COLUMNS):
+        dest[i, j] = float(i * 10 + j)
+    return dest
+
+
+@kernel
+def module_attribute_extents_loop():
+    """The same constant reached through the module it lives in."""
+    dest: np.ndarray = np.zeros((forms.EXTENT_ROWS, forms.EXTENT_COLUMNS), dtype=np.float32)
+    for i, j in np.ndindex(forms.EXTENT_ROWS, forms.EXTENT_COLUMNS):
+        dest[i, j] = float(i * 10 + j)
+    return dest
+
+
+@pytest.mark.parametrize("kernel_under_test", [constant_extents_loop,
+                                               module_attribute_extents_loop],
+                         ids=["global-name", "module-attribute"])
+def test_a_constant_extent_is_a_domain(runner, kernel_under_test):
+    """A global integer sizes the launch, the same way a literal does.
+
+    It did not: `_extent_source` knew literals, array shapes and `self.` attributes, so a
+    module-level name resolved to nothing, the loop was not recognised as the work-item
+    dispatch, and the body was walked as ordinary statements -- where the `for` it plainly
+    contained was then reported as a *second* magic loop. The message named a shape the body
+    never wrote, which is what made it hard to act on.
+    """
+    result = runner(kernel_under_test)
+    assert result.shape == (EXTENT_ROWS, EXTENT_COLUMNS)
+    expected = np.array([[i * 10 + j for j in range(EXTENT_COLUMNS)]
+                         for i in range(EXTENT_ROWS)], dtype=np.float32)
     np.testing.assert_allclose(result, expected)
 
 

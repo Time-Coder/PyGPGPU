@@ -23,10 +23,9 @@ set_print_info(False)
 
 @kernel
 def mandelbrot(out: np.ndarray):
-    # The extents come from the array's own shape: an `np.ndindex` whose arguments are plain
-    # global names is not recognized as the work-item dispatch (see the README), and a
-    # shape access is the canonical spelling anyway. The scalars are module-level names
-    # imported into this module, which a kernel reads as outer values.
+    # The extents come from the array's own shape, which is the canonical spelling; a
+    # module-level constant works too. The scalars are module-level names imported into this
+    # module, which a kernel reads as outer values.
     for row, column in np.ndindex(out.shape[0], out.shape[1]):
         width: float = float(out.shape[1])
         height: float = float(out.shape[0])

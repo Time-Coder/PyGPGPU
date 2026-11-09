@@ -1,6 +1,7 @@
 # The ND index machinery: launch ids folded into one work position.
 from __future__ import annotations
 import ast
+from types import ModuleType
 from typing import (List, Optional, Set, Tuple)
 import numpy as np
 from .notation import (
@@ -12,6 +13,21 @@ from .predicates import (
     is_int,
     is_ptr,
 )
+
+
+def _constant_extent(value:object)->Optional[int]:
+    """`value` as a compile-time iteration extent, or None when it is not one.
+
+    An `np.ndindex` extent has to be a number the launch can be sized by before any work item
+    runs, so a module-level integer counts and nothing else does: a bool is not a count (it
+    is `True`/`False`, and `np.ndindex(True)` would be a one-element domain that reads as a
+    mistake), and a numpy integer is accepted as the same number a python `int` would be.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    return None
 
 
 class _NdIndexMixin:
@@ -135,6 +151,17 @@ class _NdIndexMixin:
                 holder_type:DeviceType = self._lookup(binding[0])
                 if is_ptr(holder_type) or is_image(holder_type):
                     return binding
+            # A module-level integer is a constant for the launch, exactly like a literal:
+            # `HEIGHT = 512` beside the kernel, then `np.ndindex(HEIGHT, WIDTH)`. Leaving it
+            # out meant the loop was not recognised as the work-item dispatch at all -- the
+            # body was then walked as ordinary statements, and the `for` it plainly contained
+            # was reported as a *second* magic loop, with a message about a shape the body
+            # never wrote. The value is read through `resolve_global`, so a kernel parameter
+            # of the same name (a runtime value, still unsupported as an extent) resolves to
+            # nothing here and keeps its own refusal.
+            constant:Optional[int] = _constant_extent(self.resolve_global(node.id))
+            if constant is not None:
+                return "", constant
             return None
         if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and self.self_param and node.value.id == self.self_param):
@@ -158,6 +185,19 @@ class _NdIndexMixin:
                 if member_type is not None and is_int(member_type):
                     self.work_size_members.append(node.attr)
                     return f"(self)->{member}", -3
+            return None
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            # A constant on a module the body names (`config.HEIGHT`): the same compile-time
+            # value a bare global would be, and the same refusal when it is not one. A class
+            # attribute is left out -- `Cls.ATTR` is an object the body is not allowed to
+            # read, and guessing at it here would turn a refusal into a silently different
+            # domain; it falls through to the refusal the name resolution already gives.
+            holder_module:object = self.resolve_global(node.value.id)
+            if isinstance(holder_module, ModuleType):
+                module_constant:Optional[int] = _constant_extent(
+                    getattr(holder_module, node.attr, None))
+                if module_constant is not None:
+                    return "", module_constant
             return None
         if not isinstance(node, ast.Subscript):
             return None
