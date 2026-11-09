@@ -14,14 +14,18 @@ from typing import Dict, List, Optional, Set
 import numpy as np
 
 
-def _touched(names: List[str], statements: List[ast.stmt]) -> Set[str]:
-    """The names one host region reads or writes."""
+def _touched(statements: List[ast.stmt]) -> Set[str]:
+    """Every name one host region mentions, in any context.
+
+    A region that mentions an array at all needs its current bytes: python on the host reads
+    the object it names, and an alias (`view = a`, then `view[0]`) reaches the array through
+    the name `a` on that very statement -- which is why a mention is enough and a dataflow
+    analysis is not needed here.
+    """
     touched: Set[str] = set()
     for statement in statements:
         for node in ast.walk(statement):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                touched.add(node.id)
-            elif isinstance(node, ast.Name) and node.id in names:
+            if isinstance(node, ast.Name):
                 touched.add(node.id)
     return touched
 
@@ -47,9 +51,9 @@ def deferred_arrays(plan: object) -> Dict[str, object]:
     regions: List[List[ast.stmt]] = list(plan.launch_meta.get("phase_gaps") or [])
     tail: List[ast.stmt] = list(plan.launch_meta.get("body_tail")
                                 or plan.launch_meta.get("phase_tail") or [])
-    needed: Set[str] = _touched([], tail)
+    needed: Set[str] = _touched(tail)
     for region in regions:
-        needed |= _touched([], region)
+        needed |= _touched(region)
     deferred: Dict[str, object] = {}
     for name, value in zip(plan.prefix_names, plan.full):
         if name in needed:
