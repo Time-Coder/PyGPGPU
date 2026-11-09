@@ -4,6 +4,7 @@ from .predicates import is_ptr
 from .source_text import _parse_kernel_source, get_dedented_source
 import ast
 import builtins
+import functools
 import hashlib
 from typing import (Callable, Dict, List, Optional, Set)
 import numpy as np
@@ -398,19 +399,33 @@ def _declared_scope_names(tree:ast.AST)->Set[str]:
     return names
 
 
+@functools.lru_cache(maxsize=512)
+def _outer_scope_names_cached(func:object)->frozenset:
+    """The declared outer names, cached: a launch asks for them on every call.
+
+    The answer depends only on the function's source, and the walk behind it visits every
+    node of the body -- which for a kernel with no `global`/`nonlocal` at all still cost a
+    full tree walk per launch, on a path that has to stay close to the launch itself.
+
+    A frozen set is cached and callers get a fresh `set` copy, because the callers treat the
+    answer as their own working set.
+    """
+    try:
+        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+    except SyntaxError:
+        return frozenset()
+    if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
+        return frozenset()
+    return frozenset(_declared_scope_names(tree.body[0]))
+
+
 def _outer_scope_names(func:object)->Set[str]:
     """The names this function's body declares `nonlocal`/`global`.
 
     Those travel through the outer scope's own device slot: the *device* writes them, so
     the host must not run the statement that assigns them (see `_host_region_values`).
     """
-    try:
-        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
-    except SyntaxError:
-        return set()
-    if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
-        return set()
-    return _declared_scope_names(tree.body[0])
+    return set(_outer_scope_names_cached(func))
 
 
 def type_sig(types:List[object])->str:

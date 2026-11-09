@@ -103,6 +103,7 @@ class Scan:
 
 
 def _parse(func:Callable[..., object])->Optional[ast.Module]:
+    import copy as _copy  # noqa: PLC0415
     from ..translator import _parse_kernel_source, get_dedented_source  # noqa: PLC0415
 
     cached:Optional[ast.Module] = _LIFTED_TREES.get(_tree_key(func))
@@ -110,11 +111,13 @@ def _parse(func:Callable[..., object])->Optional[ast.Module]:
         # The scan lifts an inline construction into a local (see _inline_constructions),
         # and every later step has to read that same tree: a fresh parse would give back
         # the original `self.hit(ray, Interval(...))`, with the lifted name nowhere in it.
-        import copy as _copy  # noqa: PLC0415
-
         return _copy.deepcopy(cached)
     try:
-        return _parse_kernel_source(get_dedented_source(func))
+        # The scan *rewrites* the tree it is given -- that is what lifting a construction
+        # is -- so it takes a copy of the parsed one. `_parse_kernel_source` answers a
+        # cached tree shared by every reader, and inserting a statement into that would
+        # hand the next launch a body with a lifted name no scan put there.
+        return _copy.deepcopy(_parse_kernel_source(get_dedented_source(func)))
     except Exception:
         return None
 

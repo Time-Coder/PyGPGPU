@@ -5,6 +5,7 @@ from __future__ import annotations
 from ._layout_classes import _device_class, _host_classes
 
 from typing import Callable, List, Optional, Tuple
+import functools
 import numpy as np
 
 
@@ -147,6 +148,7 @@ def _host_components(name:str)->List[str]:
     return [field for field, _ in _host_classes()[name]._fields_ if field != "_"]
 
 
+@functools.lru_cache(maxsize=None)
 def _vector_dtype_name(dtype:np.dtype)->Optional[str]:
     """The vector type an ndarray dtype denotes, or None.
 
@@ -154,7 +156,17 @@ def _vector_dtype_name(dtype:np.dtype)->Optional[str]:
     the names x/y/z and differ only in the component type. A device-layout dtype (the padded
     OpenCL form) maps back to the same vector, so results arriving from a kernel are
     recognized too.
+
+    Two things make this cheap enough for a per-argument hot path. **A plain dtype is not a
+    vector**: every vector class answers a *structured* dtype (`x`/`y`/`z` fields), so a dtype
+    without fields returns None without consulting the classes at all -- and a kernel's usual
+    arguments are plain float/int arrays, which used to cost one `.numpy_dtype()` per vector
+    class (forty-odd of them, each a ctypes round trip) on every launch. The answer is also
+    cached, because it depends on nothing but the dtype and the same dtypes come back on every
+    call.
     """
+    if dtype.fields is None:
+        return None
     wanted:np.dtype = np.dtype(dtype)
     for name, cls in _host_classes().items():
         if wanted == cls.numpy_dtype():

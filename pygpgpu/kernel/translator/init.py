@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -160,7 +161,13 @@ class _InitMixin:
                 # the user's file: error line numbers are reported against the file, not the copy.
                 self.first_line:int = _source_first_line(func)
                 self.source_text:str = _trimmed_source(func)
-                tree:ast.Module = _parse_kernel_source(self.source_text)
+                # A translator *owns* its tree: a multi-pass body hands each of its phases a
+                # slice by assigning `phase.tree.body`, and a phase translator parses the same
+                # text as the main one. `_parse_kernel_source` answers a cached tree, so the
+                # copy is what keeps one phase's transplant from rewriting the main
+                # translator's body (and every later phase's). It is paid once per compile,
+                # not once per launch.
+                tree:ast.Module = copy.deepcopy(_parse_kernel_source(self.source_text))
                 if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
                     raise SyntaxError("decorated object must be a plain function") from None
                 self.tree:ast.FunctionDef = tree.body[0]

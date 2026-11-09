@@ -1,14 +1,24 @@
 # Reading a kernel's source, and the AST shims that make one tree parse everywhere.
 from __future__ import annotations
 import ast
+import functools
 import inspect
+import sys
 import textwrap
 from typing import (Callable, Dict, List)
 
 
 
+@functools.lru_cache(maxsize=512)
 def get_dedented_source(func:Callable)->str:
-    """Read the function source, drop decorator lines and dedent (class methods are indented; ast.parse needs a top-level def)."""
+    """Read the function source, drop decorator lines and dedent (class methods are indented; ast.parse needs a top-level def).
+
+    Cached per function object, because one launch reads the same body several times -- the
+    phase split, the host-region scan and the creation scan each want the text -- and
+    `inspect.getsource` re-reads the file and re-tokenizes it on every call. A function's
+    source cannot change after it is defined, so the answer is safe to keep; the bound keeps
+    a program that creates kernels in a loop from growing the table without limit.
+    """
     try:
         source:str = inspect.getsource(func)
     except OSError as e:
@@ -76,10 +86,15 @@ def _normalize_ast_legacy_nodes(tree:ast.AST)->ast.AST:
     The legacy class names are looked up dynamically (``getattr``) rather than
     referenced statically so type checkers do not flag their deprecation on new
     CPython versions.
+
+    The version gate is what makes that possible. `hasattr(ast, "Num")` is *not* a usable
+    test on 3.12+: the aliases still exist there, but their `__instancecheck__` raises a
+    `DeprecationWarning`, so every `isinstance` below warned once per node -- thousands of
+    `warnings.warn` calls per launch, which made re-parsing the source the single largest
+    cost of a kernel call. From 3.9 the parser already answers the modern shapes, so the
+    whole walk is skipped there.
     """
-    if not hasattr(ast, "Num"):
-        # CPython 3.9+: the constant aliases no longer exist and ast.parse
-        # already returns the modern form, so no rewriting is needed.
+    if sys.version_info >= (3, 9):
         return tree
     _ast_index = getattr(ast, "Index", None)
     if _ast_index is not None and isinstance(tree, _ast_index):
@@ -153,6 +168,13 @@ def _has_device_return(body:List[ast.stmt])->bool:
     return False
 
 
+@functools.lru_cache(maxsize=256)
 def _parse_kernel_source(source:str)->ast.Module:
-    """Parse a kernel source string into an AST normalized across Python versions."""
+    """Parse a kernel source string into an AST normalized across Python versions.
+
+    The result is cached by the source text, because one launch asks for the same body
+    several times -- the phase split, the host-region scan and the creation scan each parse
+    it -- and a kernel's source never changes. The tree is returned to callers that only
+    read it; the translators that *rewrite* a body build their own tree from the same text.
+    """
     return _normalize_ast_legacy_nodes(ast.parse(source, mode="exec"))
