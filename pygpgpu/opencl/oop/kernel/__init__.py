@@ -158,6 +158,15 @@ class Kernel(_KernelArgsMixin, _KernelLaunchMixin, _KernelAsyncMixin, CLObject):
         queue = context.get_sync_queue(device)
         try:
             all_events = self._call(args, kwargs, queue)
+            # `_call` answers the *read-back* events, and a pass whose arguments are all
+            # deferred (`gnp` arrays, which include the arrays a multi-pass boundary keeps on
+            # the device) produces none -- so waiting on that list alone returned while the
+            # launch was still running. Anything a caller does next with those bytes is then
+            # unordered against it, which is how a deferred flush downloaded a buffer the
+            # kernel had not written yet (an all-zero answer on a correct launch). Finishing
+            # the queue covers the launch and every read-back enqueued behind it, which is
+            # what CUDA's `stream.sync()` gives the other backends.
+            queue.wait()
             Event.wait(all_events)
         finally:
             # Every read-back event has completed, so the queue is idle.

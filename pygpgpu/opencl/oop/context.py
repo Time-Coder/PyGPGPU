@@ -270,6 +270,25 @@ class Context(CLObject):
             queue.busy = False
         self._async_slots.release()
 
+    def sync(self)->None:
+        """Block until every command queue this context owns is idle.
+
+        OpenCL has no context-wide barrier -- `clFinish` drains one queue -- so the
+        equivalent of CUDA's `cuCtxSynchronize` is finishing each one. Both collections
+        hold every queue this context created, busy or idle, and a busy one may be carrying
+        the read-back a caller is about to look for, which is exactly what makes this the
+        right wait before host code reads a device-written value.
+
+        The queues are collected under the lock and finished outside it: a queue's own
+        completion callbacks take the lock to release it, so holding it across `clFinish`
+        would deadlock.
+        """
+        with self._queue_lock:
+            queues:List[CommandQueue] = list(self._async_queues)
+            queues.extend(self._sync_queues.values())
+        for queue in queues:
+            queue.wait()
+
     def create_buffer(self, data:Union[bytes, bytearray, np.ndarray, None]=None, size:int=0, flags:Optional[cl_mem_flags]=None)->Buffer:
         return Buffer(self, data=data, size=size, flags=flags)
     

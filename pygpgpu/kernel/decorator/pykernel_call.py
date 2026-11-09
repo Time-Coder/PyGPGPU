@@ -235,6 +235,12 @@ class _PykernelCallMixin:
             from ...hip.driver import HIP
             device_obj.default_context.make_current()
             HIP.hipDeviceSynchronize()
+        elif backend == "opencl":
+            # OpenCL has no context-wide barrier, so the context finishes every queue it
+            # owns (see its `sync`). Leaving this branch out meant a multi-pass body on
+            # OpenCL ran its host region without waiting for the read-back the previous
+            # pass had queued, and read whatever the bytes happened to be.
+            device_obj.default_context.sync()
         elif backend == "metal":
             # Metal's launch waits on its own command buffer, so every launch that
             # returned has already completed; the queue is serial, which makes that
