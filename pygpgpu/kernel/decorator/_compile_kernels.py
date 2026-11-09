@@ -4,6 +4,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     Tuple,
 )
 from .. import source_paths
@@ -90,23 +91,34 @@ class _CompileKernelsMixin:
 
         plan.launch:object = plan.kernels[0]
 
-        # Atomic targets: static analysis cannot recognize pointer-cast writes, so force them to writable
+        # Atomic targets: static analysis cannot recognize pointer-cast writes, so force them to writable.
+        # The set comes from the phase translators as well, and the flag is forced on every
+        # kernel. A multi-pass body has **one kernel object per pass**, each with its own
+        # argument table, and its loops live on the phase translators -- so reading only the
+        # main translator's set (empty for such a body, because it never visits a loop) and
+        # forcing only `kernels[0]` left a later pass's member store bound without the write
+        # flag: the device wrote it and the host never read it back, so a member the kernel
+        # assigned came home with its old value.
         from ...constants import KernelFlags
-        for plan.target_name in plan.translator.atomic_targets:
-            if plan.target_name in plan.launch._args:
-                plan.launch._args[plan.target_name].kernel_flags = (plan.launch._args[plan.target_name].kernel_flags | KernelFlags.Writed)
-
-        # The return slots are written by the device and read back on the host, so they stay
-        # fully bidirectional. `atomicCAS(&_ret_claim[0], 0, 1)` *reads* the claim word to
-        # compare it against zero, and a slot that was never uploaded would compare against
-        # whatever the device buffer happened to hold -- the claim would fire at random or
-        # never, and a launch would return the wrong site's value. That is the same reason a
-        # write-only argument is still uploaded, applied to a slot the library owns rather
-        # than to the caller's data.
-        for plan.slot_name in (plan.translator.RETURN_CLAIM, plan.translator.RETURN_SITE):
-            plan.slot_info:object = plan.launch._args.get(plan.slot_name)
-            if plan.slot_info is not None:
-                plan.slot_info.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed)
+        plan.written_targets:Set[str] = set(plan.translator.atomic_targets)
+        for plan.phase_translator in plan.translator.phase_translators:
+            plan.written_targets.update(plan.phase_translator.atomic_targets)
+        for plan.kernel in plan.kernels:
+            for plan.target_name in plan.written_targets:
+                if plan.target_name in plan.kernel._args:
+                    plan.kernel._args[plan.target_name].kernel_flags = (
+                        plan.kernel._args[plan.target_name].kernel_flags | KernelFlags.Writed)
+            # The return slots are written by the device and read back on the host, so they
+            # stay fully bidirectional. `atomicCAS(&_ret_claim[0], 0, 1)` *reads* the claim
+            # word to compare it against zero, and a slot that was never uploaded would
+            # compare against whatever the device buffer happened to hold -- the claim would
+            # fire at random or never, and a launch would return the wrong site's value. That
+            # is the same reason a write-only argument is still uploaded, applied to a slot
+            # the library owns rather than to the caller's data.
+            for plan.slot_name in (plan.translator.RETURN_CLAIM, plan.translator.RETURN_SITE):
+                plan.slot_info:object = plan.kernel._args.get(plan.slot_name)
+                if plan.slot_info is not None:
+                    plan.slot_info.kernel_flags = (KernelFlags.Readed | KernelFlags.Writed)
 
         plan.param_index:Dict[str, int] = {plan.name: i for i, (plan.name, plan._) in enumerate(plan.translator.params)}
         # A multi-phase body is translated per phase, so the main translator indexes nothing;
