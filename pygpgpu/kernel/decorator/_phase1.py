@@ -11,6 +11,7 @@ from ...utils import device_limits
 from ..translator import (
     PTR,
     DeviceType,
+    baked_shared_shapes,
     infer_ctype,
     scan_self_attrs,
     type_sig,
@@ -193,6 +194,16 @@ class _PrepareLaunchMixin:
                     raise type(e)(f"self.{name}: {e}") from None
 
         plan.sig:str = type_sig(plan.arg_types + plan.self_types)
+        # A `zeros_per_group` shape read from a kernel parameter bakes the *value* into the
+        # generated source, so the value specializes the kernel the way a type does: it has
+        # to be part of the identity both the `_cache` entry and the C name hash, or a second
+        # call with a different shape would reuse the first one's binary and launch a grid
+        # against a buffer of the wrong size. Only the parameters the source actually names
+        # are hashed, so a kernel without a shared buffer keys exactly as it always did.
+        baked:Tuple[Tuple[str, int], ...] = baked_shared_shapes(self.raw_func, list(args),
+                                                                self._resolve_global)
+        if baked:
+            plan.sig:str = f"{plan.sig}|shapes={','.join(f'{name}={value}' for name, value in baked)}"
         # The mapping is part of the cache key, not only part of the type signature: two
         # kernels over the same argument values under different mappings produce `int` and
         # `long` parameters, and only one `_cache` entry may answer for a launch. The types

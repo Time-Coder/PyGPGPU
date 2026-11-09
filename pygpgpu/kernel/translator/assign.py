@@ -405,10 +405,15 @@ class _AssignMixin(_PrivateArrayMixin):
         shape_node:ast.expr = call.args[0]
         extents:Optional[List[int]] = self._constant_shape(shape_node, "zeros_per_group()")
         if extents is None:
+            extents = self._baked_shape(shape_node)
+        if extents is None:
             self._error(
-                "zeros_per_group() shape must be a constant positive integer or a tuple of "
-                "them: the buffer is a fixed-size __shared__/__local array, so a launch-time "
-                "shape cannot size it", shape_node)
+                "zeros_per_group() shape must be a constant positive integer, a tuple of "
+                "them, or an int parameter of this kernel: the buffer is a fixed-size "
+                "__shared__/__local array whose size is baked into the generated source, so "
+                "a kernel parameter specializes the kernel per value (each value compiles "
+                "its own kernel) while anything computed at launch time -- a host-region "
+                "value, an expression -- cannot reach it", shape_node)
             raise AssertionError("unreachable: _error raises")  # narrows `extents` for the checker
 
         dtype_node:ast.expr = call.args[1]

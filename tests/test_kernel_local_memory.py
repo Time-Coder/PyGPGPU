@@ -126,19 +126,37 @@ def test_a_shared_scratch_buffer_without_atomics(gpu_backend):
     np.testing.assert_array_equal(hist, x * 2)
 
 
-def test_the_local_count_must_be_a_literal(gpu_backend):
-    """The size is a compile-time constant, exactly like `__shared__ T name[N]`."""
+def test_a_module_constant_sizes_the_buffer(gpu_backend):
+    """A module global bakes to the same literal every launch, like an `np.ndindex` bound."""
 
     @kernel(domain="out")
     def uses_a_global_count(out: np.ndarray):
-        slots = zeros_per_group(BINS, np.float32)  # a module global, not a literal
+        slots = zeros_per_group(BINS, np.float32)  # a module global, baked to 256
+        slots[blockIdx][get_local_id(0)] = float(BINS)
+        barrier()
+        out[get_global_id(0)] = slots[blockIdx][get_local_id(0)]
+
+    out = np.zeros(BINS, dtype=np.float32)
+    uses_a_global_count[gpu_backend][(1, BINS)](out)
+    assert out[0] == np.float32(BINS)
+
+
+def test_a_computed_count_is_still_refused(gpu_backend):
+    """A size the launch cannot know before compiling cannot declare the buffer."""
+    factor = 2
+
+    @kernel(domain="out")
+    def uses_a_computed_count(out: np.ndarray, width: int):
+        size = width * factor
+        slots = zeros_per_group(size, np.float32)
         slots[blockIdx][get_local_id(0)] = 0.0
         barrier()
         out[get_global_id(0)] = slots[blockIdx][get_local_id(0)]
 
+    out = np.zeros(BINS, dtype=np.float32)
     with pytest.raises(SyntaxError) as caught:
-        uses_a_global_count[gpu_backend][(1, BINS)](np.zeros(BINS, dtype=np.float32))
-    assert "constant" in str(caught.value)
+        uses_a_computed_count[gpu_backend][(1, BINS)](out, BINS)
+    assert "int parameter" in str(caught.value)
 
 
 def test_a_shared_buffer_must_be_indexed_by_its_group(gpu_backend):

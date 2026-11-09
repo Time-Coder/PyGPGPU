@@ -1,8 +1,12 @@
 # A creation below the magic loop: a private C array per work item.
 from __future__ import annotations
 import ast
+import types
 from typing import (Any, List, Optional, Tuple)
 import numpy as np
+from .nd_index import (
+    _constant_extent,
+)
 from .type_map import (
     DTYPE_MAP,
 )
@@ -30,6 +34,53 @@ class _PrivateArrayMixin:
             extents:List[int] = []
             for element in node.elts:
                 extent:Optional[int] = one(element)
+                if extent is None:
+                    return None
+                extents.append(extent)
+            return extents
+        return None
+
+
+    def _baked_shape(self, node:ast.expr)->Optional[List[int]]:
+        """The extents of a shape read from a *value* this launch carries.
+
+        A shared buffer's size is baked into the generated source (`__shared__ T name[N]` is
+        a fixed-size declaration), so when the shape names a kernel parameter the parameter's
+        value specializes the kernel: the number is read here, once, and the generated source
+        carries the literal. A different value compiles a kernel of its own, because the value
+        is folded into the signature digest that hashes the C name (see `_source_signature`).
+        A module constant bakes the same way -- it is one number for the life of the process,
+        the same rule `np.ndindex(HEIGHT, WIDTH)` already follows.
+        """
+        def bake(candidate:ast.expr)->Optional[int]:
+            if isinstance(candidate, ast.Name):
+                # A kernel parameter: this launch's value, positional order.
+                position:Optional[int] = next(
+                    (position for position, (name, _) in enumerate(self.params)
+                     if name == candidate.id), None)
+                if position is not None and position < len(self.argument_values):
+                    value:object = self.argument_values[position]
+                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                        return int(value)
+                    return None
+                # A module-level constant (or an attribute of one): one number for the
+                # process, which is what `_constant_extent` already bakes for an
+                # `np.ndindex` bound.
+                resolved:object = self.resolve_global(candidate.id)
+                return _constant_extent(resolved)
+            if isinstance(candidate, ast.Attribute) and isinstance(candidate.value, ast.Name):
+                holder:object = self.resolve_global(candidate.value.id)
+                if isinstance(holder, types.ModuleType):
+                    return _constant_extent(getattr(holder, candidate.attr, None))
+            return None
+
+        single:Optional[int] = bake(node)
+        if single is not None:
+            return [single]
+        if isinstance(node, ast.Tuple) and node.elts:
+            extents:List[int] = []
+            for element in node.elts:
+                extent:Optional[int] = bake(element)
                 if extent is None:
                     return None
                 extents.append(extent)

@@ -34,7 +34,8 @@ class _InitMixin:
                      self_struct_type:object=None,
                      struct_arg_classes:Optional[Dict[str, type]]=None,
                      receiver_as_argument:bool=False,
-                     type_map:Optional[Dict[str, str]]=None):
+                     type_map:Optional[Dict[str, str]]=None,
+                     argument_values:Optional[List[object]]=None):
             self.func:Callable = func
             self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
             self.backend:str = backend
@@ -145,6 +146,12 @@ class _InitMixin:
             # set is host work -- it runs once, on the host, before the launch -- so the device
             # must not run it too (see _host_statement_lines and _bind_host_statement).
             self.host_region_values:Dict[str, object] = dict(host_creation_values or {})
+            # The caller's actual arguments, in positional order, so a compile-time fact the
+            # body needs can read the *value* a parameter carries this launch. Only
+            # `zeros_per_group`'s shape reads it today: a shared buffer's size is baked into
+            # the generated source, so it specializes the kernel the way a type does, and
+            # the value is part of the signature digest that hashes the C name.
+            self.argument_values:List[object] = list(argument_values or [])
             # The plain values a host-region statement bound, by name -> device type (see
             # _bind_host_statement). They are parameters like any other, but they are not
             # *creations*, so the launch must not treat them as objects.

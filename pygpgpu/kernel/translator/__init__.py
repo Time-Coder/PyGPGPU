@@ -229,6 +229,7 @@ from .nested_launch import _NestedLaunchMixin
 from ._exports import EXPORTED_NAMES
 from .walk import _is_creation_expression
 from .init import _InitMixin
+from .shared_shapes import baked_shared_shapes
 
 
 class FunctionTranslator(_InitMixin, _EmitMixin, _NamingMixin, _PhasesMixin, _MagicLoopMixin, _HostRegionsMixin, _OuterVarsMixin, _StatementsMixin, _ReturnsMixin, _AssignMixin, _AugassignMixin, _TargetsMixin, _TuplesMixin, _PrintEmitMixin, _ExpressionsMixin, _OperatorsMixin, _SubscriptsMixin, _ImagesMixin, _AttributesMixin, _ComplexValuesMixin, _QuaternionsMixin, _MagicMethodsMixin, _VectorOpsMixin, _StructuresMixin, _CallsMixin, _BuiltinEmitMixin, _NumpyEmitMixin, _DeviceCallMixin, _RenderMixin, _BuiltinPythonMixin, _NdIndexMixin, _PrivateArrayMixin, _NestedLaunchMixin):
