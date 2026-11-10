@@ -1,6 +1,7 @@
 # Merging rendered definitions into a file, and splitting one back into its pieces.
 from __future__ import annotations
 from .guards import (
+    PROTOTYPE_MARKER,
     QUAT_DEFINE_PREFIX,
     _is_file_guard_line,
     _is_fixed_header_include,
@@ -39,7 +40,14 @@ def _definition_identity(code: str) -> Optional[str]:
     a file the compiler refuses with "extraneous closing brace". A declaration is therefore a
     line whose first word is not a control statement and which has no `=` before its opening
     parenthesis.
+
+    The forward-declaration block answers the marker: it is one identity for the whole
+    block, so `_merge_definitions` keeps it where it was and compares it as a whole --
+    which is what lets two calls union their declarations in place instead of stacking a
+    second block beside the first (see `merge_prototype_blocks`).
     """
+    if code.lstrip().startswith(PROTOTYPE_MARKER):
+        return PROTOTYPE_MARKER
     for line in code.splitlines():
         stripped = line.strip()
         if stripped.startswith("struct "):
@@ -124,6 +132,18 @@ def _merge_definitions(existing: List[str], definitions: List[str]) -> Tuple[Lis
             if identity is not None:
                 added_identities.add(identity)
             continue
+        if identity == PROTOTYPE_MARKER:
+            # The forward-declaration block is *unioned*, not replaced: a later call
+            # renders only its own callees, and replacing the block would drop the ones
+            # an earlier call declared -- calls the file still holds.
+            from .prototypes import merge_prototype_blocks  # noqa: PLC0415 (import cycle)
+
+            held:str = "\n\n".join(part.strip("\n") for part in groups[index][1]).strip("\n")
+            unioned:Optional[str] = merge_prototype_blocks([held, cleaned])
+            if unioned is not None and unioned != held:
+                groups[index] = (identity, [unioned])
+                changed = True
+            continue
         held:str = "\n\n".join(part.strip("\n") for part in groups[index][1]).strip("\n")
         if held != cleaned:
             groups[index] = (identity, [cleaned])
@@ -198,9 +218,10 @@ def _split_source(source: str, path: str = "") -> Tuple[List[str], List[str]]:
     """A generated source as (header, definitions).
 
     The header is every piece that declares a type or a directive: structure typedefs,
-    `#include` lines and preprocessor defines. Those belong to the file as a whole and are
-    emitted once, whichever kernel happens to be written second. Everything else is a
-    function definition.
+    `#include` lines and preprocessor defines. The forward-declaration block is header
+    material too -- it says nothing but `name;` declarations -- and it is kept as *one*
+    piece so `_canonical_header` can union the blocks several calls wrote. Everything else
+    is a function definition.
     """
     source = _strip_file_guard(source, path)
     file_macro: str = guard_macro(path) if path else ""
@@ -212,7 +233,8 @@ def _split_source(source: str, path: str = "") -> Tuple[List[str], List[str]]:
         first: str = lines[0].strip() if lines else ""
         is_declaration: bool = (first.startswith("struct ")
                                 or first.startswith("typedef struct")
-                                or first.startswith("#"))
+                                or first.startswith("#")
+                                or first == PROTOTYPE_MARKER)
         if not is_declaration:
             definitions.append(piece)
             continue
@@ -241,8 +263,15 @@ def _canonical_header(header: List[str]) -> List[str]:
     includes: List[str] = []
     declarations: List[str] = []
     seen_declarations: set = set()
+    # The forward-declaration blocks several calls wrote: they are unioned into one at
+    # the end, not deduped by exact text, because a later call may render fewer callees
+    # than the file already declares (see `merge_prototype_blocks`).
+    blocks: List[str] = []
     for piece in header:
         lines: List[str] = piece.splitlines()
+        if lines and lines[0].strip() == PROTOTYPE_MARKER:
+            blocks.append(piece.strip("\n"))
+            continue
         directives: List[str] = [line for line in lines if line.lstrip().startswith("#")]
         remainder: List[str] = [line for line in lines if line not in directives]
         if remainder:
@@ -286,5 +315,15 @@ def _canonical_header(header: List[str]) -> List[str]:
                                   if not _is_fixed_header_include(line)]
     canonical.extend(fixed_includes)
     canonical.extend(declarations)
+    if blocks:
+        # The forward declarations sit *before* the module includes: an included file's
+        # definitions call functions this unit defines later, and C refuses the call as
+        # an implicit declaration when it reads first. They follow the declarations
+        # (typedefs), because a declaration may name a structure type.
+        from .prototypes import merge_prototype_blocks  # noqa: PLC0415 (import cycle)
+
+        merged_block: Optional[str] = merge_prototype_blocks(blocks)
+        if merged_block:
+            canonical.append(merged_block)
     canonical.extend(module_includes)
     return canonical

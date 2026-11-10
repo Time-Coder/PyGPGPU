@@ -38,7 +38,7 @@ class _CompileTranslateMixin:
                         "fp16 (np.float16) arguments are not supported on the cuda backend: "
                         "NVRTC on this machine cannot resolve cuda_fp16.h; use np.float32 instead") from None
 
-        plan.c_name:str = self._c_kernel_name(sig, backend)
+        plan.c_name:str = self._c_kernel_name(sig, backend, owner=owner)
         plan.device_cache:Dict[object, object] = {}
         # self_types leads with the receiver struct when the receiver travels as one, so
         # the attribute map pairs the array attributes with the types after it.
@@ -97,7 +97,8 @@ class _CompileTranslateMixin:
         # holding two declarations of it ("more than one instance of overloaded function").
         # Re-deriving the name with the rendered declaration folds that into the same hash.
         plan.c_name = self._c_kernel_name(sig, backend,
-                                     declaration=";".join(plan.translator.parameter_declarations()))
+                                     declaration=";".join(plan.translator.parameter_declarations()),
+                                     owner=owner)
         # One kernel per magic loop: a body with several renders several, launched in order
         # so the arrays stay on the device between them.
         plan.rendered:List[Tuple[str, str]] = plan.translator.render_kernels(plan.c_name)

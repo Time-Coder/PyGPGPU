@@ -46,9 +46,10 @@ A generated file is laid out as:
 
 1. the file guard (`#ifndef __<file>_<hash>__`);
 2. the structure typedef block;
-3. the `#include` lines, in dependency order;
-4. the device functions and the kernel, in dependency order;
-5. `#endif`.
+3. the forward-declaration block (see the next section);
+4. the `#include` lines, in dependency order;
+5. the device functions and the kernel, in dependency order;
+6. `#endif`.
 
 **The typedef block has to precede the includes**, because an included file's text may name those
 types: `scene.cu`'s helper takes a `Ray`, so `Ray` must already be in scope where the `#include`
@@ -56,9 +57,30 @@ expands. `assemble_source` therefore keeps the block order the caller built inst
 by "a line starting with `#` leads" -- that re-sort put the includes ahead of the declarations and
 broke every cross-module helper.
 
+**The forward-declaration block has to precede the includes too**, for the same order reason one
+level down: an included file's functions call device functions whose *definitions* sit behind the
+include -- the base-class helper a subclass override reaches is defined in the kernel's own file,
+after the `#include` that pulls the override in. C refuses a call it has not seen declared
+(`implicit declaration of function ... is invalid in OpenCL`, `identifier ... is undefined` on
+CUDA/HIP), so every file a compilation writes carries one block declaring the signature of every
+device function the compilation reached, spelled as the definition's own first line plus `;`.
+Duplicate identical declarations are legal C, so the block repeating across a unit's files costs
+nothing.
+
 The includes follow the **same dependency order** as the definitions, because C needs a callee
 before its caller: `scene.cu` calls `Sphere.hit`, so `#include "sphere.cu"` has to be read first.
 `_called_modules` works out which other modules a file's own code calls into.
+
+## The forward-declaration block is unioned, never replaced
+
+A file is rewritten on every kernel call of its module, and each call renders only the callees
+*that call* reached. Two kernels of one module can reach different helpers of another module, so
+the block a later call writes holds fewer declarations than the file already carries -- replacing
+the block would drop the earlier ones and break the first kernel's own calls. The block therefore
+carries a marker comment as its first line, which gives the whole block one merge identity:
+`_merge_definitions` unions the blocks by their declaration text and keeps the union where the
+first block sat, and `_canonical_header` folds the blocks of several calls into one. A declaration
+whose function has since left the file is dead text, which costs nothing.
 
 ## Structure typedefs belong to the whole compilation
 
@@ -107,6 +129,13 @@ argument types -- the extents derived from the body, the outer-scope values, the
 name, and the file then held two declarations of it. **Nothing appends a number to settle a
 collision** -- the hash is what does that, so a name never reads `blend_ab12_1`, and a kernel
 name keeps its single `name_<hash>` shape.
+
+A **method kernel's** hash also covers the class the launched *instance* belongs to. Its device
+body is not the decorated body alone: a body that calls `self.<hook>(...)` compiles against the
+hook the receiver's class supplies, and two subclasses of one `@kernel` supply different hooks
+over the identical signature. Without the class in the hash -- and in the in-memory launch cache
+key, which carries the same mark -- the second subclass to launch reused the first one's binary
+and silently answered the first one's numbers.
 
 ## A generated file is invalidated by its source's digest, not only by its timestamp
 

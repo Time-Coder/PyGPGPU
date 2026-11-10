@@ -10,6 +10,13 @@ from typing import List
 QUAT_DEFINE_PREFIX: str = "#define QUAT_"
 
 
+# The first line of the block that forward-declares the device functions one generated file
+# calls but does not define. It is a comment, so every compiler ignores it, and it is what
+# gives the block an identity of its own: `merge._definition_identity` answers it, so the
+# block is recognised, kept first and *unioned* rather than appended beside an older copy.
+PROTOTYPE_MARKER: str = "/* pygpgpu: device functions called here but defined elsewhere */"
+
+
 
 # The folder a cache keeps its device headers in; the same spelling `complex.py` and
 # `quaternion.py` use.

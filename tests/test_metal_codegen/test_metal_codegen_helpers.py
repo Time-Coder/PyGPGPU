@@ -368,14 +368,23 @@ def test_two_kernels_in_one_file_share_one_helper_definition(tmp_path: Any,
         program_module.Program = original
 
     source = captured["source"]
-    assert source.count("float shared_across_kernels_") == 1, "the helper is duplicated"
+    # The definition appears once; the forward-declaration block spells the same
+    # signature a second time (see docs/generated-source.md), so the definition is
+    # what the count pins -- a duplicated *definition* is what C++ refuses.
+    signature_lines = [line for line in source.splitlines()
+                       if "float shared_across_kernels_" in line and "(" in line]
+    assert len(signature_lines) == 2, "the helper is duplicated"
+    declarations = [line for line in signature_lines if line.strip().endswith(";")]
+    assert len(declarations) == 1, declarations
     assert source.count("kernel void") == 2, "both kernels must be in the file"
-    # The helper precedes both kernels: C needs the callee before its caller.
-    helper_at = source.index("float shared_across_kernels_")
+    # The declaration precedes the definition, which precedes both kernels: C needs the
+    # callee declared before its caller, and the definition before the kernels read on.
+    declaration_at = source.index(declarations[0])
+    definition_at = source.index("float shared_across_kernels_", declaration_at + 1)
     kernel_positions = [index for index in range(len(source))
                         if source.startswith("kernel void", index)]
     assert len(kernel_positions) == 2
-    assert all(position > helper_at for position in kernel_positions)
+    assert all(position > definition_at for position in kernel_positions)
 
     ok, diagnostics = _syntax_diagnostics(source)
     assert ok, diagnostics

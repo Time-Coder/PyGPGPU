@@ -209,7 +209,16 @@ class _PrepareLaunchMixin:
         # `long` parameters, and only one `_cache` entry may answer for a launch. The types
         # already differ (`sig` carries them), so this is belt-and-braces for the case where
         # a mapping is changed to a width whose type name another entry already used.
-        plan.cache_key:str = f"{plan.backend}|{plan.device_key}|{plan.sig}|{self._type_map_key()}"
+        # The resolved owner is part of the key for the same reason: a method kernel's body
+        # compiles against the hook the *receiver's* class supplies, and two subclasses of
+        # one `@kernel` declare the same argument types -- without the class here the
+        # second subclass to launch reused the first one's binary and silently answered its
+        # numbers (see tests/known_failures/subclass_kernel_identity.py). The kernel's C
+        # name carries the same mark (see `_c_kernel_name`), so the two halves agree.
+        owner_mark:str = (f"{plan.owner.__module__}.{plan.owner.__qualname__}"
+                       if plan.owner is not None else "")
+        plan.cache_key:str = (f"{plan.backend}|{plan.device_key}|{plan.sig}"
+                          f"|{self._type_map_key()}|{owner_mark}")
         plan.entry = self._cache.get(plan.cache_key)
         if plan.entry is None:
             # Create the device objects for any Image before compiling. On the driver

@@ -44,6 +44,7 @@ from .layout import (
 )
 from .guards import (
     INCLUDE_FOLDER,
+    PROTOTYPE_MARKER,
     QUAT_DEFINE_PREFIX,
     _is_file_guard_line,
     _is_fixed_header_include,
@@ -52,6 +53,12 @@ from .guards import (
     guard_macro,
     guard_source,
     include_line,
+)
+from .prototypes import (
+    compilation_prototypes,
+    merge_prototype_blocks,
+    prototype_block,
+    prototype_prototypes,
 )
 from .merge import (
     _CONTROL_KEYWORDS,

@@ -44,6 +44,14 @@ class _CompileWriteMixin:
         # describes this module's text. mtime alone is not reliable (`git checkout` restores
         # the old stamp), so the digest is what actually decides.
         plan.source_digest:str = source_paths.python_source_digest(plan.kernel_source_file)
+        # Each FOREIGN file's freshness is decided by *its own* python module's digest,
+        # computed per write below (one compilation can touch several). The kernel's digest
+        # stamped on them instead restarted a foreign file whenever a kernel from another
+        # module wrote it: the test module's shared `.cl` was wiped by three known-failure
+        # repros in a row, each drop taking the helper definitions a third module's kept
+        # kernel file still calls -- "unresolved extern function" for a definition that was
+        # on disk minutes earlier.
+        plan.foreign_digests:Dict[str, str] = {}
 
         def module_of(entry:Dict[str, object])->str:
             """The python file a device function came from, spelled as a cache path."""
@@ -72,6 +80,14 @@ class _CompileWriteMixin:
                                    + list(plan.translator.nested_helpers)
                                    + list(plan.translator.nested_kernels))
         plan.device_prefix.extend(entry["code"] for entry in plan.own_entries)
+
+        # One forward-declaration block for the compilation's whole callee set, carried by
+        # every file this pass writes. An included file's definitions call functions this
+        # unit defines *later* (the base-class helper an override reaches sits behind the
+        # include), and C refuses a call it has not seen declared -- which is exactly the
+        # `identifier "Base_scale_<hash>" is undefined` this block removes.
+        plan.prototype_lines:List[str] = source_paths.compilation_prototypes(
+            list(plan.device_cache.values()), plan.device_prefix)
 
         plan.structure_dtypes:List[DeviceType] = list(plan.translator.structure_dtypes())
         for entry in plan.device_cache.values():
@@ -209,6 +225,11 @@ class _CompileWriteMixin:
             plan.own_header.append(plan.include_lines)
         if plan.typedefs:
             plan.own_header.append(plan.typedefs)
+        if plan.prototype_lines:
+            # The declarations precede the includes: a pasted definition calls functions
+            # whose definitions sit behind it (in this file's own pieces), and C requires
+            # the declaration first (see compilation_prototypes).
+            plan.own_header.append(source_paths.prototype_block(plan.prototype_lines))
         if plan.foreign_includes:
             plan.own_header.append("\n".join(plan.foreign_includes))
 
@@ -221,6 +242,11 @@ class _CompileWriteMixin:
             # would put every declaration in every file, which is a cycle of includes and a
             # duplicate definition in the one file two modules share.
             plan.foreign_header:List[str] = []
+            if plan.prototype_lines:
+                # The same declarations this compilation's other files carry: a foreign
+                # definition calls helpers defined in the kernel's own file, which is
+                # included *after* this one (see compilation_prototypes).
+                plan.foreign_header.append(source_paths.prototype_block(plan.prototype_lines))
             if plan.include_lines:
                 plan.foreign_header.append(plan.include_lines)
             # A foreign module may itself call into a third module: every structure is
@@ -231,11 +257,16 @@ class _CompileWriteMixin:
                 if other != plan.path and other in _called_modules(plan.path, plan.foreign_entries)]
             if plan.callee_includes:
                 plan.foreign_header.append("\n".join(plan.callee_includes))
+            plan.foreign_source_file:str = plan.entries[0].get("source_file", "") or ""
+            plan.foreign_digest:str = plan.foreign_digests.get(plan.foreign_source_file)
+            if plan.foreign_digest is None:
+                plan.foreign_digest = source_paths.python_source_digest(plan.foreign_source_file)
+                plan.foreign_digests[plan.foreign_source_file] = plan.foreign_digest
             plan.written[plan.path] = source_paths.append_source(
                 plan.path, plan.foreign_header,
                 [entry["code"] for entry in plan.entries if entry["code"]],
-                plan.entries[0].get("source_file", "") or "",
-                source_digest=plan.source_digest)
+                plan.foreign_source_file,
+                source_digest=plan.foreign_digest)
 
         plan.source_path:str = source_paths.append_source(
             plan.own_path, plan.own_header, [piece for piece in plan.pieces if piece],

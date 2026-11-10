@@ -1,6 +1,9 @@
 from __future__ import annotations
 import inspect
 import os
+from typing import (
+    Optional,
+)
 from ..translator import (
     short_hash,
 )
@@ -57,7 +60,8 @@ class _PykernelIdentityMixin:
         return self.raw_func.__globals__.get(name)
 
 
-    def _c_kernel_name(self, sig:str, backend:str, declaration:str="")->str:
+    def _c_kernel_name(self, sig:str, backend:str, declaration:str="",
+                     owner:Optional[type]=None)->str:
         """The kernel's C name, unique per module and per what it declares.
 
         Two modules can define a kernel with the same name and the same argument types --
@@ -72,6 +76,15 @@ class _PykernelIdentityMixin:
         body whose derived signature changed kept its old name, and the file then held two
         declarations of that name. It is folded into the *same* hash rather than appended
         as a second one, so a kernel name stays `name_<hash>` (see docs/generated-source.md).
+
+        `owner` is the class the *instance* belongs to, for a method kernel. Such a kernel's
+        device body is not the decorated body alone: a body that calls `self.<hook>(...)`
+        compiles against the hook the receiver's class supplies, and two subclasses of one
+        `@kernel` supply different hooks over the identical signature. The class is
+        therefore part of what the kernel *is* -- its absence is what let a second subclass
+        reuse the first one's compiled binary, and silently answer the first one's numbers
+        (see tests/known_failures/subclass_kernel_identity.py). The in-memory cache key
+        carries the same mark, so the two halves cannot disagree.
         """
         source_file:str = getattr(getattr(self.raw_func, "__code__", None),
                                   "co_filename", "") or ""
@@ -86,6 +99,8 @@ class _PykernelIdentityMixin:
             if "<" not in owner_name:
                 base = f"{owner_name}_{self.__name__}"
         payload:str = module_mark + "|" + sig + "_" + backend
+        if owner is not None:
+            payload += "|owner=" + f"{owner.__module__}.{owner.__qualname__}"
         if declaration:
             payload += "|" + declaration
         return f"{base}_{short_hash(payload)}"
