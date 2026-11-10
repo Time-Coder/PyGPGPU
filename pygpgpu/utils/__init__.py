@@ -37,10 +37,9 @@ from .work_size import (
 from .print_info import (
     _PRINT_INFO_ENABLED,
     _PRINT_INFO_MODULES,
-    get_print_info,
+    _set_print_info,
     initial_print_info,
     nvidia_package_libraries,
-    set_print_info,
 )
 from .futures import (
     _asyncio_future_of,

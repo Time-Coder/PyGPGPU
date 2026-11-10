@@ -11,24 +11,19 @@ from ..translator import (
 
 
 
-# The process-wide `int`/`float` mapping `set_type_map()` installs, or None. Read **once**,
+# The process-wide `int`/`float` mapping `config.type_map` installs, or None. Read **once**,
 # when a kernel is decorated: a mapping is part of what that kernel means, so changing it
 # afterwards cannot change a kernel that already exists (its `type_map` is a snapshot, and it
-# is in its cache key). That is also what keeps `set_type_map()` honest across a warm cache.
+# is in its cache key). That is also what keeps `config.type_map` honest across a warm cache.
 _type_map_default:Optional[Dict[str, str]] = None
 _type_map_lock = threading.Lock()
 
 
-def set_type_map(int:object=None, float:object=None)->None:
+def _install_type_map(declared:Optional[Dict[str, object]])->None:
     """Set the default device width a python ``int`` / ``float`` travels as.
 
-    Called with no arguments it restores the built-in widths (``int`` = 32-bit ``int``,
-    ``float`` = 32-bit ``float``)::
-
-        set_type_map(float=np.float64)     # every kernel decorated from now on is 64-bit
-
-        @kernel
-        def accurate(scale, out): ...       # `scale` is a `double`
+    ``declared`` is keyed by the internal name (``"int"`` / ``"float"``); ``None`` restores
+    the built-in widths (``int`` = 32-bit ``int``, ``float`` = 32-bit ``float``).
 
     The values are the same type objects `@kernel(float=...)` takes -- a numpy dtype or
     scalar type, a ctypes scalar class, or a device type name. A decorator's own `int=`/
@@ -40,22 +35,17 @@ def set_type_map(int:object=None, float:object=None)->None:
     cannot be served the binary an earlier one compiled. Call it before decorating.
     """
     global _type_map_default
-    if int is None and float is None:
+    if not declared:
         with _type_map_lock:
             _type_map_default = None
         return
-    declared:Dict[str, object] = {}
-    if int is not None:
-        declared["int"] = int
-    if float is not None:
-        declared["float"] = float
     resolved:Dict[str, str] = validate_type_map(declared)
     with _type_map_lock:
         _type_map_default = resolved
 
 
-def get_type_map()->Dict[str, str]:
-    """The process-wide mapping `set_type_map()` installed, as device type names."""
+def _type_map_default_snapshot()->Dict[str, str]:
+    """The process-wide mapping `config.type_map` installed, as device type names."""
     with _type_map_lock:
         current:Optional[Dict[str, str]] = _type_map_default
     return dict(current) if current else {}
@@ -63,7 +53,7 @@ def get_type_map()->Dict[str, str]:
 
 def _effective_type_map(type_map:Optional[Dict[str, object]])->Dict[str, str]:
     """The mapping a kernel is declared with: its own, over the process-wide default."""
-    base:Dict[str, str] = get_type_map()
+    base:Dict[str, str] = _type_map_default_snapshot()
     if not type_map:
         return base
     resolved:Dict[str, str] = validate_type_map(type_map)

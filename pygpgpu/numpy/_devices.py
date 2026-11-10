@@ -66,7 +66,7 @@ def probe(backend: str) -> bool:
 def default_target() -> Target:
     """The device a copy targets when the caller names none.
 
-    It is the kernel call's own default -- ``set_default_device()`` when configured,
+    It is the kernel call's own default -- ``config.default_device`` when configured,
     otherwise the ``cuda -> hip -> metal -> opencl`` probe -- so an array's plain
     ``to_device()`` lands where a plain ``kernel(...)`` call would run.
     """

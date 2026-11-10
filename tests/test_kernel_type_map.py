@@ -3,7 +3,7 @@
 Neither python builtin has a width of its own -- `int` is arbitrary precision and `float`
 is a 64-bit double -- so the translator has to pick one. The default is 32 bits, which keeps
 every existing kernel's signature unchanged; `@kernel(int=..., float=...)` and the process-
-wide `set_type_map()` choose another, and this module pins what each of those does.
+wide `config.type_map` choose another, and this module pins what each of those does.
 
 Three things are load-bearing and each is checked here:
 
@@ -25,7 +25,7 @@ import ctypes
 import numpy as np
 import pytest
 
-from pygpgpu import get_type_map, kernel, set_type_map
+from pygpgpu import config, kernel
 from pygpgpu.kernel.translator import (
     infer_ctype,
     resolve_device_type,
@@ -316,7 +316,7 @@ def test_the_decorator_records_the_mapping():
     assert mapped._type_map == {"float": "double", "int": "long"}
 
 
-def test_set_type_map_is_a_snapshot_at_decoration_time():
+def test_config_type_map_is_a_snapshot_at_decoration_time():
     """A kernel keeps the mapping it was declared with, even after the default changes."""
 
     @kernel
@@ -324,7 +324,7 @@ def test_set_type_map_is_a_snapshot_at_decoration_time():
         for i in range(out.shape[0]):
             out[i] = scale
 
-    set_type_map(float=np.float64)
+    config.type_map = {float: np.float64}
 
     @kernel
     def after(scale, out):
@@ -333,11 +333,11 @@ def test_set_type_map_is_a_snapshot_at_decoration_time():
 
     assert before._type_map == {}
     assert after._type_map == {"float": "double"}
-    set_type_map()
+    config.type_map = None
 
 
 def test_a_decorator_mapping_wins_over_the_global_one():
-    set_type_map(int=np.int64, float=np.float64)
+    config.type_map = {int: np.int64, float: np.float64}
 
     @kernel(float=np.float32)
     def mixed(scale, out):
@@ -345,25 +345,25 @@ def test_a_decorator_mapping_wins_over_the_global_one():
             out[i] = scale
 
     assert mixed._type_map == {"int": "long", "float": "float"}
-    set_type_map()
+    config.type_map = None
 
 
 def test_the_global_setter_normalizes_its_entries():
-    set_type_map(float=np.dtype("float64"), int=ctypes.c_int64)
-    assert get_type_map() == {"float": "double", "int": "long"}
-    set_type_map()
+    config.type_map = {float: np.dtype("float64"), int: ctypes.c_int64}
+    assert config.type_map == {float: "double", int: "long"}
+    config.type_map = None
 
 
-def test_setting_no_arguments_restores_the_defaults():
-    set_type_map(float=np.float64)
-    assert get_type_map() == {"float": "double"}
-    set_type_map()
-    assert get_type_map() == {}
+def test_setting_none_restores_the_defaults():
+    config.type_map = {float: np.float64}
+    assert config.type_map == {float: "double"}
+    config.type_map = None
+    assert config.type_map == {}
 
 
 @pytest.fixture(autouse=True)
 def reset_global_mapping():
     """Every test starts and ends with the built-in widths, whatever it does in between."""
-    set_type_map()
+    config.type_map = None
     yield
-    set_type_map()
+    config.type_map = None

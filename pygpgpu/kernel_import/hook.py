@@ -10,16 +10,15 @@ from typing import Dict, List, Optional
 
 
 class kernel_import:
-    """The import hook: `kernel_import.install()`, then import the module."""
+    """The import hook: `kernel_import.install()`, then import the module.
+
+    The hook's own settings are ``pygpgpu.config.kernel_import`` -- ``type_checked``,
+    ``generate_pyi`` and the per-backend build ``options`` -- and they are read when a
+    source module is imported, so a change applies to the next import.
+    """
 
     _lock = threading.Lock()
     _installed:bool = False
-    _config:Dict[str, object] = {
-        "type_checked": False,
-        "generate_pyi": True,
-        # Per-backend build options; None keeps each backend's own default.
-        "options": {"cuda": None, "hip": None, "opencl": None},
-    }
 
     @staticmethod
     def install()->None:
@@ -38,16 +37,6 @@ class kernel_import:
                     del sys.meta_path[i]
             kernel_import._installed = False
 
-    @staticmethod
-    def config(type_checked:bool=False, generate_pyi:bool=True,
-               options:Optional[Dict[str, object]]=None)->None:
-        """Configure the hook. `options` maps backend -> BuildOptions (None = default)."""
-        with kernel_import._lock:
-            kernel_import._config["type_checked"] = type_checked
-            kernel_import._config["generate_pyi"] = generate_pyi
-            if options is not None:
-                kernel_import._config["options"].update(options)
-
 
 class _KernelImportFinder:
     """The meta-path finder: resolve a name to same-named .cl/.cu/.hip sources."""
@@ -58,9 +47,13 @@ class _KernelImportFinder:
         sources:Dict[str, str] = _source_paths_for(fullname, path)
         if not sources:
             return None
-        config:Dict[str, object] = kernel_import._config
-        loader = _MergedModuleLoader(fullname, sources, config["options"],
-                                     config["type_checked"], config["generate_pyi"])
+        # The settings are read here rather than cached on the hook, so the value the
+        # import uses is the one `config.kernel_import` holds at that moment.
+        from ..settings import config as _settings
+        import_settings = _settings.kernel_import
+        loader = _MergedModuleLoader(fullname, sources, import_settings.options,
+                                     import_settings.type_checked,
+                                     import_settings.generate_pyi)
         # The module's file location is whichever source comes first in the probe order;
         # a merged module is a leaf, so it carries no `__path__`.
         first_source:str = next(sources[backend] for backend, _ in _BACKEND_EXTENSIONS

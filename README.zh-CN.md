@@ -76,13 +76,27 @@ Python ≥ 3.7。GPU 运行时按需自备(任一即可):
 ```python
 from pygpgpu import kernel, funcs, float4             # @kernel / 双面函数库 / 向量类型
 from pygpgpu import get_global_id, atomic_add        # 设备内建也是顶层普通函数
-from pygpgpu import list_devices, get_device
+from pygpgpu import list_devices, get_device, config  # 设备查询 / 进程级设置
 from pygpgpu import kernel_import                    # 手写 .cl/.cu/.hip 文件的 import 钩子
 ```
 
 子包路径(`pygpgpu.kernel` / `pygpgpu.vec_types` / `pygpgpu.opencl` / ...)依然可用。顶层 `pygpgpu.kernel` 指的是 `@kernel` 装饰器, 要取子模块里的东西请写 `from pygpgpu.kernel import ...`。
 
 `kernel_import` 的导入与安装都不需要 GPU 运行时; 合并模块里的某个 kernel 在首次调用时才加载它自己那个后端。
+
+进程级设置都是同一个对象 `pygpgpu.config` 的属性 —— 没有需要另外查找的 `set_...()` 函数:
+
+```python
+import numpy as np
+import pygpgpu
+
+pygpgpu.config.print_info = False                    # 进度日志
+pygpgpu.config.type_map = {float: np.float64}        # python float 使用的宽度
+pygpgpu.config.default_device = ["cuda:0", "hip:0"]  # 不带中括号的 k(...) 依次尝试
+pygpgpu.config.kernel_import.type_checked = True     # 手写 kernel 的 import 钩子
+```
+
+每个属性都在它所属的章节里说明 —— 类型宽度见 “为 `int` 和 `float` 选择宽度”, 默认设备见 “选择默认设备”, 日志开关见 “进度输出”, import 钩子见 “手写 kernel 文件”。
 
 ### @kernel 装饰器
 
@@ -129,14 +143,19 @@ def f(step, out): ...          # `step` 是 `int`; f(2 ** 31, out) 会抛 ValueE
 f(np.int64(2 ** 31), out)      # numpy 标量自带宽度, 所以这样可以
 ```
 
-想给 Python 内置类型换默认宽度时, 在装饰器上或进程级指定:
+想给 Python 内置类型换默认宽度时, 在装饰器上或通过 `pygpgpu.config` 进程级指定:
 
 ```python
+import numpy as np
+from pygpgpu import config, kernel
+
 @kernel(float=np.float64, int=np.int64)   # python float/complex -> double, python int -> long
 def accurate(scale, step, out): ...
 
-set_type_map(float=np.float64)            # 之后装饰的每个 kernel 都生效
+config.type_map = {float: np.float64}     # 之后装饰的每个 kernel 都生效
 ```
+
+`config.type_map` 以 Python 内置类型为键(只能出现 `int` 和 `float`), 值就是装饰器关键字接受的那些类型对象; 赋值整体替换旧映射, 赋 `None` 或 `{}` 恢复内置的 32 位宽度。读回的是解析后的设备类型名, 所以未设置的进程读到 `{}`, 上面的赋值读回是 `{float: 'double'}`。
 
 值是类型对象 —— numpy dtype 或标量类型(`np.int64`、`np.dtype("uint32")`)、ctypes 标量类(`ctypes.c_double`) —— 也可以是设备类型名(`"long"`)。可选集合是封闭的, 且两个键不同:
 
@@ -149,7 +168,7 @@ set_type_map(float=np.float64)            # 之后装饰的每个 kernel 都生�
 
 只有 `int` 和 `float` 可映射, 因为 numpy 标量自带宽度并保持不变(`np.uint32(x)` 仍是 `uint`)。Python `complex` 同样没有自己的宽度, 所以跟随 `float=` —— 默认的 32 位 `float` 对应 `complex64`, `float=np.float64` 对应 `complex128`; `np.complex64`/`np.complex128` 保持自己的宽度。这个选择覆盖 Python complex 进入函数体的每一种方式: 参数、字面量(`3 + 4j`), 以及 `complex(re, im)`。
 
-这个选择在装饰时确定 —— `set_type_map()` 不会改变已经存在的 kernel —— 并且是 kernel 身份的一部分, 所以两种映射绝不会共用同一个已编译二进制。
+这个选择在装饰时确定 —— 给 `config.type_map` 赋值不会改变已经存在的 kernel —— 并且是 kernel 身份的一部分, 所以两种映射绝不会共用同一个已编译二进制。
 
 映射也会作用到**对象的成员**: 普通对象会变成结构体, 成员就是结构体的字段。因此在 `int=np.int64` 下 `obj.n = 2 ** 31` 按 64 位传输; 而在默认 32 位宽度下同一个值会抛 `ValueError`, 而不是回绕。调用者**显式声明**过的成员类型(`_fields_` 里的 `ctypes.c_int64`)保持其自身宽度 —— 映射不会覆盖写明的东西。
 
@@ -334,7 +353,19 @@ vecadd.vecadd[(3907, 256)](a, a, out, np.int32(len(a)))   # (blocks, threads)
 注意那个 `n` 参数: 手写 kernel 必须按真实元素个数做守卫, 因为启动的 work size 会被向上取整到
 local size 的整数倍。`get_global_size(0)` 返回的是取整后的启动尺寸、不是缓冲区长度, 所以不能拿它当边界。
 
-struct 定义自动映射为 ctypes 类型; kernel 旁自动生成 `.pyi`, IDE 补全可用。
+struct 定义自动映射为 ctypes 类型; kernel 旁自动生成 `.pyi`, IDE 补全可用。钩子自身的设置在
+`config.kernel_import`, 每一项都在 kernel 模块被导入时读取:
+
+```python
+from pygpgpu import config
+
+config.kernel_import.type_checked = True    # 按生成的 stub 检查每次调用的 dtype
+config.kernel_import.generate_pyi = False   # 不在源码旁写 .pyi
+config.kernel_import.options = {"cuda": build_options}   # 后端 -> BuildOptions
+```
+
+`type_checked` 把错误的 dtype 变成调用处的 `TypeError`, 而不是设备上的失败; `generate_pyi`
+默认为 `True`。给 `options` 赋值会整体替换映射, 新映射没有提到的后端回到各自的构建默认值。
 
 ### 一个 kernel, 多个后端
 
@@ -1038,22 +1069,23 @@ dev = get_device("cuda:0")   # 直接取对应后端的 Device 对象
 
 ### 选择默认设备
 
-没有中括号的调用会按 `cuda -> hip -> metal -> opencl` 使用第一个可用后端。`set_default_device()`
+没有中括号的调用会按 `cuda -> hip -> metal -> opencl` 使用第一个可用后端。`config.default_device`
 可以替换这个顺序:
 
 ```python
-from pygpgpu import kernel, set_default_device
+from pygpgpu import config, kernel
 
-set_default_device("opencl:cpu", "cuda")     # 先试 CPU 设备, 不可用则回退到 cuda
-k(x, out)                                    # 无中括号: 按该列表依次尝试
+config.default_device = ["opencl:cpu", "cuda"]   # 先试 CPU 设备, 不可用则回退到 cuda
+k(x, out)                                        # 无中括号: 按该列表依次尝试
 
-set_default_device("gfx1036")                # 只写设备名: 会在各后端中查找
-set_default_device("cuda", "opencl:0")
-set_default_device()                         # 不传参数: 恢复内置顺序
+config.default_device = "gfx1036"                # 只写设备名: 会在各后端中查找
+config.default_device = "cuda"                   # 单个选择器等价于只有一项的列表
+config.default_device = None                     # 恢复内置顺序
 ```
 
 使用与中括号相同的选择器写法, 逐项尝试直到某一项可用, 不可用的项会被跳过。该列表在
-调用时读取, 因此对调用之前装饰的 kernel 同样生效; `get_default_device()` 返回当前列表。
+调用时读取, 因此对赋值之前装饰的 kernel 同样生效; 读取 `config.default_device` 得到生效
+的列表 —— 未设置时就是内置探测顺序 `cuda -> hip -> metal -> opencl`。
 用 `@kernel(backend=...)` 显式指定后端的 kernel 不受影响。
 
 ## 缓存
@@ -1082,13 +1114,13 @@ launch CUDA Kernel('pyk_saxpy_e6a555c8') on Device('NVIDIA GeForce RTX 4070 Lapt
 日志默认开启, 由每个后端各一个开关控制(`CL.print_info`、`CUDA.print_info`、`NVRTC.print_info`、`HIP.print_info`、`HipCompiler.print_info`)。一次全部关闭/打开:
 
 ```python
-from pygpgpu import set_print_info
+from pygpgpu import config
 
-set_print_info(False)      # 此后静默
-set_print_info(True)       # 恢复详细输出(默认)
+config.print_info = False      # 此后静默
+config.print_info = True       # 恢复详细输出(默认)
 ```
 
-`set_print_info` 只作用于**已经导入**的后端模块, 所以它绝不会仅仅为了静默输出而加载某个 GPU 运行时。在调用之后才导入的后端会重新回到详细模式——请在你用到的后端都导入后再调用, 或者直接单独设置某个开关(`pygpgpu.opencl.driver.CL.print_info = False`)。
+`config.print_info` 只作用于**已经导入**的后端模块, 所以它绝不会仅仅为了静默输出而加载某个 GPU 运行时。它同时记录进程级默认值, 因此在赋值**之后**才导入的后端同样从静默开始 —— 两者的先后顺序无关紧要, 读取 `config.print_info` 得到的是默认值而不是某个后端的开关。只改单个后端时, 直接设置它自己的属性(`pygpgpu.opencl.driver.CL.print_info = False`), 这不会影响共享的默认值。
 
 ## 已知限制
 

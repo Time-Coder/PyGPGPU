@@ -12,7 +12,7 @@ from .binding import (
 )
 from typing import List, Optional, Tuple
 import numpy as np
-from ...utils import get_print_info
+from ...utils import initial_print_info
 from .._backends import (download, sync_queue, wait_event)
 from .._devices import copy_queue, release_copy_queue
 
@@ -108,8 +108,14 @@ class _HostStateMixin:
 
 
     def _print_copy_info(self) -> bool:
-        """Whether the backends in use currently log progress."""
-        return get_print_info()
+        """Whether the copy log is on: ``config.print_info``, read without a device.
+
+        This asks the process-wide default rather than scanning the loaded backends' own
+        flags, so a copy line is decided by the setting the caller wrote. Silencing one
+        backend directly with its own class attribute does not move this, the same way it
+        does not move what a backend imported later starts from.
+        """
+        return initial_print_info()
 
 
     def _wait_pending(self, bindings: Optional[List[_Binding]] = None) -> None:

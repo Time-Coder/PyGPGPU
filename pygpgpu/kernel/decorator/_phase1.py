@@ -50,7 +50,7 @@ class _PrepareLaunchMixin:
             # Decorated as @kernel(backend=...): that backend wins over any default.
             plan.backend = self.backend
         else:
-            # No bracket and no explicit backend: consult set_default_device(), read now
+            # No bracket and no explicit backend: consult config.default_device, read now
             # rather than at decoration time so a later call takes effect.
             _backend, _default_device = _default_target()
             plan.backend = _backend

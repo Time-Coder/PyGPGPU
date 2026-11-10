@@ -54,27 +54,18 @@ from .devices import (
     _backend_devices,
     _parse_work_item,
     _default_backend,
-    _default_device_lock,
-    _default_devices,
     _default_target,
     _device_match_keys,
     _entry_usable,
     _parse_selector,
     _probe_backend,
-    _probed_backend,
     _resolve_device,
     available_devices,
-    get_default_device,
     get_device,
     list_devices,
-    set_default_device,
 )
 from .type_map import (
     _effective_type_map,
-    _type_map_default,
-    _type_map_lock,
-    get_type_map,
-    set_type_map,
 )
 from .binding import (
     _RECEIVER_PLACEHOLDER,
@@ -185,7 +176,7 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
 
         self.raw_func:Callable = func
         self.backend:str = backend
-        # True when the decorator named a backend, so set_default_device() must not
+        # True when the decorator named a backend, so config.default_device must not
         # override it. A backend chosen by probing is only a snapshot, not a binding.
         self._explicit_backend:bool = explicit_backend
         # The parameter whose shape declares the iteration domain, or None. A gid-style body
@@ -195,9 +186,9 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
         self._domain:Optional[str] = domain
         # The device width a python `int`/`float` travels as, resolved to device type names
         # when the decorator ran and **not** read again later: this decorator's mapping is
-        # part of what this kernel *is*, so a later set_type_map() must not change kernels
-        # that were already declared. Only the two builtins are here; a numpy scalar names
-        # its own width and keeps it (see translator.infer_ctype).
+        # part of what this kernel *is*, so a later config.type_map assignment must not
+        # change kernels that were already declared. Only the two builtins are here; a
+        # numpy scalar names its own width and keeps it (see translator.infer_ctype).
         self._type_map:Dict[str, str] = _effective_type_map(type_map)
         self.is_pykernel:bool = True
         self.__name__:str = func.__name__

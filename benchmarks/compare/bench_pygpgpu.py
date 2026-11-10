@@ -16,7 +16,7 @@ import numpy as np  # noqa: E402  (after T0, which has to precede every import)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from pygpgpu import kernel, set_print_info  # noqa: E402
+from pygpgpu import config, kernel  # noqa: E402
 
 import common  # noqa: E402
 import harness  # noqa: E402
@@ -25,7 +25,7 @@ from common import (MANDEL_CENTER_IMAG, MANDEL_CENTER_REAL, MANDEL_MAX_ITER,  # 
 
 harness.set_t0(T0)
 harness.mark("pygpgpu imported")
-set_print_info(False)
+config.print_info = False
 
 # The backend this run launches on; `--arch` picks it (cuda, hip or opencl).
 BACKEND = "cuda"

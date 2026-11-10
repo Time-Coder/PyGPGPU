@@ -4,7 +4,7 @@ import numpy as np
 import math
 import mpmath as mp
 
-from pygpgpu import kernel, set_print_info, set_type_map
+from pygpgpu import kernel, config
 from pygf import float2, color3f
 
 import matplotlib.pyplot as plt
@@ -13,8 +13,8 @@ from matplotlib.image import AxesImage
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-set_print_info(False)
-set_type_map(float=np.float64)
+config.print_info = False
+config.type_map = {float: np.float64}
 
 # Digits kept for the view centre. A double render dies where one pixel
 # (1/(200*scale)) falls under a double's 1e-16, i.e. around scale 1e14; the camera

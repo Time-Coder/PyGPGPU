@@ -25,7 +25,7 @@ from typing import Optional
 import numpy as np
 import math
 
-from pygpgpu import kernel, set_print_info, set_type_map
+from pygpgpu import kernel, config
 from pygf import float2, color3f
 
 import matplotlib.pyplot as plt
@@ -34,8 +34,8 @@ from matplotlib.image import AxesImage
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-set_print_info(False)
-set_type_map(float=np.float64)
+config.print_info = False
+config.type_map = {float: np.float64}
 
 class MandelbrotViewer:
 

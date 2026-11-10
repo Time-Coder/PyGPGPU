@@ -9,8 +9,9 @@ halves of that policy for both array flavours the package accepts:
 * a boundary whose region reads an array copies **that** array home before the region runs,
   because the region is python and must see the previous pass's output.
 
-They read the copy trace the backends print under `set_print_info(True)`, which is the only
-place a copy is observable from the host: the array's own contents look the same either way.
+They read the copy trace the backends print under `config.print_info = True`, which is the
+only place a copy is observable from the host: the array's own contents look the same either
+way.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import numpy as np
 import pytest
 
 import pygpgpu.numpy as gnp
-from pygpgpu import kernel, set_print_info
+from pygpgpu import config, kernel
 
 
 @kernel
@@ -81,11 +82,12 @@ def _launch_positions(lines: list[str]) -> list[int]:
 @pytest.fixture
 def copy_trace(capsys):
     """Run one launch and report the copy lines in the order the backend printed them."""
-    set_print_info(True)
+    saved = config.print_info
+    config.print_info = True
     try:
         yield lambda: _copy_trace(capsys, capsys.readouterr().out)
     finally:
-        set_print_info(False)
+        config.print_info = saved
 
 
 @pytest.mark.parametrize("flavour", ["plain", "gnp"])

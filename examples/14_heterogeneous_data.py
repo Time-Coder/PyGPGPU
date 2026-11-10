@@ -29,7 +29,7 @@ import ctypes
 
 import numpy as np
 
-from pygpgpu import kernel, float3, get_default_device, set_print_info
+from pygpgpu import config, kernel, float3
 
 
 # A structure with one member of each kind it may hold. The classes are ordinary
@@ -230,11 +230,10 @@ def _show(label: str, value: object):
 
 
 def main() -> None:
-    # The backends log every buffer copy and every launch. Picking a device is what imports
-    # a backend, so the log is switched off after that rather than at module level -- a flag
-    # set before the import would not reach the backend that just started up.
-    get_default_device()
-    set_print_info(False)
+    # The backends log every buffer copy and every launch. The setting also decides what a
+    # backend imported later starts from, so one assignment here is enough -- it does not
+    # have to wait for the backend to be imported by the first launch.
+    config.print_info = False
 
     # --- scalars -----------------------------------------------------------
     out = np.zeros(2, dtype=np.float32)

@@ -26,21 +26,23 @@ DEFAULT_BACKEND_ORDER:Tuple[str, ...] = ("cuda", "hip", "metal", "opencl")
 
 _probed_backend:Optional[str] = None
 
-# The selector list a bracketed-less call walks, set by set_default_device(). None means
-# "use DEFAULT_BACKEND_ORDER". Each entry is (backend, device-or-None).
+# The selector list a bracketed-less call walks, installed through
+# ``config.default_device``. None means "use DEFAULT_BACKEND_ORDER". Each entry is
+# (backend, device-or-None).
 _default_devices:Optional[List[Tuple[Optional[str], Optional[str]]]] = None
 _default_device_lock = threading.Lock()
 
 
-def set_default_device(*selectors:str)->None:
+def _install_default_devices(selectors:Optional[List[str]])->None:
     """Choose what a kernel call without a bracket runs on, in order of preference.
 
-    ``set_default_device("opencl:cpu", "cuda")`` makes a plain ``k(...)`` try the CPU
+    ``config.default_device = ["opencl:cpu", "cuda"]`` makes a plain ``k(...)`` try the CPU
     OpenCL device first and fall back to cuda when that is unusable. Entries are the same
     selector strings the brackets accept -- ``"backend"``, ``"backend:device"`` or a bare
     device name -- and each is tried until one resolves.
 
-    Called with no arguments it restores the built-in order (``cuda -> hip -> opencl``).
+    ``None`` (or an empty list) restores the built-in order (``cuda -> hip -> metal ->
+    opencl``).
 
     A kernel decorated with an explicit ``@kernel(backend=...)`` keeps that backend and is
     unaffected; this only decides what an unspecified call means. The list is read at call
@@ -56,7 +58,7 @@ def set_default_device(*selectors:str)->None:
     for selector in selectors:
         if not isinstance(selector, str):
             raise TypeError(
-                "set_default_device() takes selector strings like 'opencl:cpu', got %s"
+                "config.default_device takes selector strings like 'opencl:cpu', got %s"
                 % type(selector).__name__)
         backend, device = _parse_selector(selector)
         if backend is None and device is None:
@@ -67,7 +69,7 @@ def set_default_device(*selectors:str)->None:
         _default_devices = parsed
 
 
-def get_default_device()->List[str]:
+def _default_device_selectors()->List[str]:
     """The selector list an unspecified kernel call currently walks."""
     with _default_device_lock:
         entries = _default_devices
@@ -82,7 +84,7 @@ def _entry_usable(backend:Optional[str], device:Optional[str])->Optional[Tuple[s
     """Resolve one default entry to a (backend, device) pair, or None if unusable.
 
     A backend-less entry (a bare device name) is looked up across the standard order, so
-    ``set_default_device("gfx1036")`` finds it whichever backend owns it.
+    ``config.default_device = ["gfx1036"]`` finds it whichever backend owns it.
     """
     candidates:List[str] = [backend] if backend is not None else list(DEFAULT_BACKEND_ORDER)
     for candidate in candidates:
@@ -102,8 +104,8 @@ def _default_target()->Tuple[str, Optional[str]]:
     """The backend (and device) a call without a bracket should use.
 
     Walks the configured list first, then the built-in order; the result is cached only
-    while the configuration is unchanged, because set_default_device() may change it at
-    any time.
+    while the configuration is unchanged, because ``config.default_device`` may change it
+    at any time.
     """
     global _probed_backend
     with _default_device_lock:
@@ -114,10 +116,10 @@ def _default_target()->Tuple[str, Optional[str]]:
             if resolved is not None:
                 return resolved
         raise RuntimeError(
-            "none of the devices set by set_default_device() is usable: %s. "
-            "Check the names against list_devices(), or call set_default_device() with "
-            "no arguments to restore the built-in order."
-            % ", ".join(get_default_device()))
+            "none of the devices in config.default_device is usable: %s. "
+            "Check the names against list_devices(), or assign None to "
+            "config.default_device to restore the built-in order."
+            % ", ".join(_default_device_selectors()))
 
     if _probed_backend is None:
         for backend in DEFAULT_BACKEND_ORDER:
@@ -160,7 +162,7 @@ def _probe_backend(backend:str)->Optional[str]:
 
 
 def _default_backend()->str:
-    """The backend an unspecified call uses, honouring set_default_device()."""
+    """The backend an unspecified call uses, honouring ``config.default_device``."""
     return _default_target()[0]
 
 

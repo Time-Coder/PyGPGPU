@@ -18,9 +18,9 @@ _PRINT_INFO_MODULES:Tuple[str, ...] = (
 
 # The process-wide default every backend's own flag starts from. A backend module is imported
 # lazily -- the call that first needs it is what pulls it in -- so flipping only the flags of
-# the modules already loaded left `set_print_info(False)` at the top of a script with no
-# effect: the class did not exist yet, and it then defaulted to verbose. Each module now takes
-# its initial value from here, which is what makes the order of the two calls irrelevant.
+# the modules already loaded left a quiet setting at the top of a script with no effect: the
+# class did not exist yet, and it then defaulted to verbose. Each module now takes its initial
+# value from here, which is what makes the order of the two calls irrelevant.
 _PRINT_INFO_ENABLED:bool = True
 
 
@@ -28,7 +28,7 @@ def initial_print_info() -> bool:
     """The process-wide default for a backend's own ``print_info`` flag.
 
     A backend calls this where it declares the flag, so a module imported *after*
-    ``set_print_info(False)`` starts quiet. The flag stays an ordinary class attribute
+    ``config.print_info = False`` starts quiet. The flag stays an ordinary class attribute
     afterwards; this only decides what it starts as.
     """
     return _PRINT_INFO_ENABLED
@@ -92,27 +92,7 @@ def nvidia_package_libraries(names: List[str]) -> List[str]:
     return found
 
 
-def get_print_info() -> bool:
-    """Whether progress logging is currently on for any already-imported backend.
-
-    A backend that has not been imported yet keeps its default (verbose) flag, so
-    this reports False only when every loaded backend has been silenced. That is
-    what the copy logger wants: it should stay quiet when the backends the caller
-    actually uses are quiet.
-    """
-    import sys
-
-    for module_name in _PRINT_INFO_MODULES:
-        module = sys.modules.get(module_name)
-        if module is None:
-            continue
-        for value in vars(module).values():
-            if isinstance(value, type) and vars(value).get("print_info", False):
-                return True
-    return False
-
-
-def set_print_info(enabled:bool) -> None:
+def _set_print_info(enabled:bool) -> None:
     """Turn the progress logging of every backend on or off, now and from now on.
 
     Each backend keeps its own ``print_info`` flag (``CL``, ``CUDA``, ``NVRTC``, ``HIP`` and
@@ -121,14 +101,14 @@ def set_print_info(enabled:bool) -> None:
     modules already in ``sys.modules``, so it never pulls in a GPU runtime just to silence
     output::
 
-        from pygpgpu import set_print_info
-        set_print_info(False)      # quiet
-        set_print_info(True)       # verbose again (the default)
+        import pygpgpu
+        pygpgpu.config.print_info = False      # quiet
+        pygpgpu.config.print_info = True       # verbose again (the default)
 
-    The call may be made before the backends are imported, which is the usual place for it:
-    it also records the value as the process-wide default, and a backend imported later takes
-    its flag's initial value from there. Only flipping the loaded modules would have left
-    ``set_print_info(False)`` at the top of a script with no effect at all, because the
+    The assignment may be made before the backends are imported, which is the usual place
+    for it: it also records the value as the process-wide default, and a backend imported
+    later takes its flag's initial value from there. Only flipping the loaded modules would
+    have left a quiet setting at the top of a script with no effect at all, because the
     backend is imported lazily by the first call that needs it and its class did not exist
     yet -- the script then printed everything it asked to silence.
 

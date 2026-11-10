@@ -66,7 +66,7 @@ def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None
     builtins are mapped: a numpy scalar or array already names its own width and keeps it
     (``np.uint32(x)`` is still ``uint``). A python ``complex`` has no width either, so it
     follows ``float=``. The choice is fixed when the decorator runs and is part of the
-    kernel's identity, so ``set_type_map()`` does not change a kernel that is already
+    kernel's identity, so ``config.type_map`` does not change a kernel that is already
     declared.
     """
     type_map:Optional[Dict[str, object]] = None
@@ -84,7 +84,7 @@ def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None
             return PyKernel(f, backend, explicit_backend=True, domain=domain,
                             type_map=type_map)
         # No backend named: the call-time default decides, so this snapshot is only used
-        # for reporting until set_default_device() (or a bracket) has a say.
+        # for reporting until config.default_device (or a bracket) has a say.
         return PyKernel(f, _default_backend(), explicit_backend=False, domain=domain,
                         type_map=type_map)
 

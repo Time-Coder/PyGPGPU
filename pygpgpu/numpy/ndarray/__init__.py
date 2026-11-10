@@ -81,7 +81,6 @@ from typing import Callable, Dict, List, Mapping, Optional, Tuple
 import numpy as np
 from numpy.typing import DTypeLike
 from ...constants import KernelFlags
-from ...utils import get_print_info
 from .._backends import (allocate, allocate_image, download, error_code_ok, event_callback,
                         is_host_mapped, release, sync_queue, upload, wait_event,
                         zero_copy_support)

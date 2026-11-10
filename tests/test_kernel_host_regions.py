@@ -10,30 +10,24 @@ crosses to the device is a value a device argument can carry.
 import numpy as np
 import pytest
 
-from pygpgpu import kernel, set_type_map
+from pygpgpu import config, kernel
 
 @pytest.fixture(autouse=True)
 def double_float_mapping():
     """A python `float` travels as a double, and the previous default is restored.
 
     Every value here is a host scalar, so the width has to be wide enough for the python
-    float the region computed. The mapping is process-wide, so restoring the module's own
-    default afterwards is what keeps the following test modules on theirs.
-
-    The saved name has to be the one `set_type_map` writes, which lives in
-    `decorator/type_map.py`; the `decorator` package *re-exports* it, so rebinding the
-    re-exported name restores nothing and leaves every later module translating a python
-    float as a double. That leak is invisible in this module and shows up two files later
-    as a `double` that has no device atomic operation.
+    float the region computed. The mapping is process-wide, so restoring it matters: a leak
+    here is invisible in this module and shows up two files later as a `double` that has no
+    device atomic operation. `config.type_map` round-trips what it reports (`{float:
+    "double"}` is a value its setter accepts), so the assignment is the whole save/restore.
     """
-    from pygpgpu.kernel.decorator import type_map  # noqa: PLC0415
-
-    saved = type_map._type_map_default  # noqa: SLF001 (restored in the finally)
-    set_type_map(float=np.float64)
+    saved = config.type_map
+    config.type_map = {float: np.float64}
     try:
         yield
     finally:
-        type_map._type_map_default = saved  # noqa: SLF001 (restored here)
+        config.type_map = saved
 
 
 # ---------------------------------------------------------------------------

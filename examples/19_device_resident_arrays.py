@@ -8,11 +8,10 @@ residency, explicit transfers, cross-device staging, zero-copy and torch interop
 Run: ``python examples/19_device_resident_arrays.py``
 """
 import numpy as np
-import pygpgpu
 import pygpgpu.numpy as gnp
-from pygpgpu import kernel, list_devices
+from pygpgpu import config, kernel, list_devices
 
-pygpgpu.set_print_info(False)
+config.print_info = False
 
 
 @kernel

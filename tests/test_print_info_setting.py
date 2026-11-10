@@ -1,11 +1,12 @@
-"""`set_print_info(False)` silences the backends even when it is called first.
+"""`config.print_info = False` silences the backends even when it is set first.
 
-The call used to flip only the `print_info` flags of modules already in `sys.modules`, and a
-backend module is imported lazily -- by the first call that needs it. So the natural spelling,
-one line at the top of a script, did nothing at all: the class did not exist when the call ran,
-and it then defaulted to verbose, printing translation, compilation, copy and launch lines that
-the caller had explicitly asked to silence. The call now records the value as the process-wide
-default, and each backend takes its flag's initial value from there.
+The setting used to flip only the `print_info` flags of modules already in `sys.modules`, and
+a backend module is imported lazily -- by the first call that needs it. So the natural
+spelling, one line at the top of a script, did nothing at all: the class did not exist when
+the call ran, and it then defaulted to verbose, printing translation, compilation, copy and
+launch lines that the caller had explicitly asked to silence. The setting now records the
+value as the process-wide default, and each backend takes its flag's initial value from
+there.
 
 The ordering is only observable in a *fresh* process, because the test session has already
 imported the backends, so the tests that are about it run in subprocesses.
@@ -39,15 +40,15 @@ def _run(script: str, timeout: int = 300) -> subprocess.CompletedProcess:
 
 
 def test_the_default_survives_a_later_import_opencl():
-    """The backend imported *after* the call starts out silenced."""
+    """The backend imported *after* the setting starts out silenced."""
     completed = _run("""
         import sys
-        from pygpgpu import set_print_info
-        set_print_info(False)
+        from pygpgpu import config
+        config.print_info = False
         module_name = "pygpgpu.opencl.driver.cl"
         assert module_name not in sys.modules, "the backend was imported too early to test this"
         from pygpgpu.opencl.driver import cl
-        assert cl.CL.print_info is False, "the backend imported after the call is verbose"
+        assert cl.CL.print_info is False, "the backend imported after the setting is verbose"
         print("flag after import:", cl.CL.print_info)
     """)
     assert "flag after import: False" in completed.stdout
@@ -57,14 +58,14 @@ def test_setting_it_back_on_before_an_import_stays_verbose():
     """The value is a setting, not a one-way switch: `True` is the default and is honoured."""
     completed = _run("""
         import sys
-        from pygpgpu import get_print_info, set_print_info
-        set_print_info(False)
-        set_print_info(True)
+        from pygpgpu import config
+        config.print_info = False
+        config.print_info = True
         module_name = "pygpgpu.opencl.driver.cl"
         assert module_name not in sys.modules
         from pygpgpu.opencl.driver import cl
-        assert cl.CL.print_info is True, "a backend imported after set_print_info(True) is quiet"
-        assert get_print_info() is True
+        assert cl.CL.print_info is True, "a backend imported after config.print_info = True is quiet"
+        assert config.print_info is True
         print("flag after import:", cl.CL.print_info)
     """)
     assert "flag after import: True" in completed.stdout
@@ -84,10 +85,10 @@ def test_a_launch_prints_nothing_once_silenced(tmp_path):
 
         import numpy as np
 
-        from pygpgpu import kernel, set_print_info
+        from pygpgpu import config, kernel
         from pygpgpu.kernel import source_paths
 
-        set_print_info(False)
+        config.print_info = False
         shutil.rmtree(source_paths.cache_root(__file__, "opencl"), ignore_errors=True)
 
         @kernel
@@ -146,11 +147,11 @@ def test_the_flag_is_per_process_and_independent_of_the_setting():
     why the two are not the same thing.
     """
     completed = _run("""
-        from pygpgpu import set_print_info
+        from pygpgpu import config
         from pygpgpu.opencl.driver import cl
         from pygpgpu.cuda.driver import cuda
 
-        set_print_info(False)
+        config.print_info = False
         assert cl.CL.print_info is False and cuda.CUDA.print_info is False
         cl.CL.print_info = True
         assert cl.CL.print_info is True, "a direct assignment must still win"

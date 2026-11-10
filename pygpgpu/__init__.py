@@ -7,6 +7,9 @@ remember subpackage names::
     from pygpgpu import list_devices, get_device
     from pygpgpu import kernel_import                    # import hook for handwritten .cl/.cu/.hip files
 
+    import pygpgpu
+    pygpgpu.config.type_map = {float: np.float64}        # process-wide settings
+
 Subpackage paths (pygpgpu.kernel / pygpgpu.vec_types / pygpgpu.opencl / ...)
 still work. Note that top-level `pygpgpu.kernel` refers to the @kernel
 decorator (same name as the subpackage; the top level exports the decorator),
@@ -21,6 +24,12 @@ from typing import List
 # arrays get the same element access. See pygf/vector_array.py.
 import pygf  # noqa: F401  (applies the numpy.array patch on import)
 
+# ---------- Top-level export: the process-wide settings object ----------
+# One instance, published as `pygpgpu.config`, and the only way a process-wide setting is
+# changed. Every value is read lazily by the code that owns it, so importing this pulls in
+# no GPU runtime and no translator.
+from .settings import Config, config  # noqa: E402
+
 # ---------- Top-level exports: public API of kernel ----------
 # kernel subpackage's __all__ copied as-is (top-level kernel is the @kernel decorator)
 
@@ -28,13 +37,9 @@ from .kernel import (
     DEFAULT_BACKEND_ORDER,
     PyKernel,
     available_devices,
-    get_default_device,
-    get_type_map,
     list_devices,
     get_device,
     kernel,
-    set_default_device,
-    set_type_map,
 )
 # The dual-sided device builtins are plain functions, so they are exported here directly:
 # `from pygpgpu import get_global_id, atomic_add`. Inside a @kernel body the translator
@@ -76,14 +81,6 @@ from .image import Image, ImageAddress, ImageFilter
 # until a kernel is actually called, and only that kernel's backend then -- so it imports
 # directly rather than through a lazy proxy.
 from .kernel_import import kernel_import  # noqa: E402  (needs the imports above)
-
-
-# ---------- Top-level export: the progress-logging switch ----------
-
-# The switch itself lives in utils, below every backend, so the copy logger inside
-# the numpy layer can consult the same source of truth without reaching into a
-# backend driver. This name is the public entry point.
-from .utils import get_print_info, set_print_info  # noqa: E402  (needs to follow the imports above)
 
 
 # ---------- Top-level export: the host-side CUDA libraries ----------
@@ -173,16 +170,14 @@ __all__ = [
     # kernel
     "kernel", "PyKernel", "DEFAULT_BACKEND_ORDER",
     "list_devices", "get_device", "available_devices",
-    "set_default_device", "get_default_device",
-    "set_type_map", "get_type_map",
+    # the process-wide settings (print_info, type_map, default_device, kernel_import)
+    "config", "Config",
     # device builtins (dual-sided functions; see pygpgpu/kernel/builtins.py)
     *_builtin_names,
     # the device-side library function registry
     "device_function",
     # images
     "Image", "ImageFilter", "ImageAddress",
-    # logging
-    "set_print_info",
     # vec_types
     "funcs",
     "char2", "char4", "char8", "char16",

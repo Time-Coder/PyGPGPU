@@ -75,13 +75,28 @@ Every commonly used API is importable straight from the `pygpgpu` top level — 
 
 ```python
 from pygpgpu import kernel, funcs, float4             # @kernel / dual-sided funcs / vector types
-from pygpgpu import list_devices, get_device
+from pygpgpu import list_devices, get_device, config  # device query / process-wide settings
 from pygpgpu import kernel_import                    # the import hook for handwritten .cl/.cu/.hip files
 ```
 
 The submodule paths (`pygpgpu.kernel` / `pygpgpu.vec_types` / `pygpgpu.opencl` / ...) still work. Note that top-level `pygpgpu.kernel` is the `@kernel` decorator; to reach things inside the submodule write `from pygpgpu.kernel import ...`.
 
 `kernel_import` needs no GPU runtime to be imported or installed, and a merged kernel loads only its own backend's runtime when it is first called.
+
+Process-wide settings are attributes of one object, `pygpgpu.config` — there is no
+`set_...()` function to look up:
+
+```python
+import numpy as np
+import pygpgpu
+
+pygpgpu.config.print_info = False                    # progress logging
+pygpgpu.config.type_map = {float: np.float64}        # the width a python float travels as
+pygpgpu.config.default_device = ["cuda:0", "hip:0"]  # what a plain k(...) tries, in order
+pygpgpu.config.kernel_import.type_checked = True     # handwritten-kernel import hook
+```
+
+Each attribute is documented in the section that owns it — the type widths under "Choosing a width for `int` and `float`", the default device under "Choosing the default device", the logging flag under "Progress output", and the import hook under "Handwritten kernel files".
 
 ### The @kernel decorator
 
@@ -132,14 +147,23 @@ f(np.int64(2 ** 31), out)      # a numpy scalar names its own width, so this wor
 ```
 
 When you want a different default for the Python builtins, name one at the decorator or
-process-wide:
+process-wide through `pygpgpu.config`:
 
 ```python
+import numpy as np
+from pygpgpu import config, kernel
+
 @kernel(float=np.float64, int=np.int64)   # python floats/complex -> double, python ints -> long
 def accurate(scale, step, out): ...
 
-set_type_map(float=np.float64)            # every kernel decorated from now on
+config.type_map = {float: np.float64}     # every kernel decorated from now on
 ```
+
+`config.type_map` is keyed by the Python builtin (only `int` and `float` may appear) and its
+values are the very type objects the decorator keyword takes; assigning a new mapping replaces
+the previous one wholesale, and assigning `None` or `{}` restores the built-in 32-bit widths.
+Reading it back answers device type names, so an unset process answers `{}` and the line above
+reads back as `{float: 'double'}`.
 
 The value is a type object — a numpy dtype or scalar type (`np.int64`, `np.dtype("uint32")`),
 a ctypes scalar class (`ctypes.c_double`) — or a device type name (`"long"`). The choice is a
@@ -163,9 +187,9 @@ follows `float=` — the default 32-bit `float` gives `complex64`, and `float=np
 Python complex value enters the body: the argument, a literal (`3 + 4j`), and
 `complex(re, im)`.
 
-The choice is fixed when the decorator runs — `set_type_map()` does not change a kernel that
-already exists — and it is part of the kernel's identity, so two mappings never share a
-compiled binary.
+The choice is fixed when the decorator runs — assigning `config.type_map` does not change a
+kernel that already exists — and it is part of the kernel's identity, so two mappings never
+share a compiled binary.
 
 The mapping reaches an **object's members** too, because a plain object becomes a structure
 whose members are that structure's fields: with `int=np.int64`, `obj.n = 2 ** 31` travels as
@@ -360,7 +384,17 @@ Note the `n` argument: a handwritten kernel must clamp against the real element 
 launch size is rounded up to a multiple of the local size. `get_global_size(0)` reports that rounded
 size, not the buffer length, so it is not a usable bound.
 
-Struct definitions map to ctypes types; a `.pyi` stub is generated next to the kernel so IDE completion works.
+Struct definitions map to ctypes types; a `.pyi` stub is generated next to the kernel so IDE completion works. The hook's own settings sit at `config.kernel_import`, and each one is read when a kernel module is imported:
+
+```python
+from pygpgpu import config
+
+config.kernel_import.type_checked = True    # check each call's dtypes against the stub
+config.kernel_import.generate_pyi = False   # do not write the .pyi beside the source
+config.kernel_import.options = {"cuda": build_options}   # backend -> BuildOptions
+```
+
+`type_checked` turns a wrong dtype into a `TypeError` at the call rather than a device failure, and `generate_pyi` defaults to `True`. Assigning `options` replaces the whole mapping, so a backend it does not name goes back to its own build default.
 
 ### One kernel, several backends
 
@@ -1132,23 +1166,24 @@ dev = get_device("cuda:0")   # the Device object of that backend, directly
 ### Choosing the default device
 
 A call without a bracket runs on the first usable backend in `cuda -> hip -> metal -> opencl`.
-`set_default_device()` replaces that order:
+`config.default_device` replaces that order:
 
 ```python
-from pygpgpu import kernel, set_default_device
+from pygpgpu import config, kernel
 
-set_default_device("opencl:cpu", "cuda")     # try the CPU device, fall back to cuda
-k(x, out)                                    # no bracket: walks that list
+config.default_device = ["opencl:cpu", "cuda"]   # try the CPU device, fall back to cuda
+k(x, out)                                        # no bracket: walks that list
 
-set_default_device("gfx1036")                # a bare device name: found on any backend
-set_default_device("cuda", "opencl:0")
-set_default_device()                         # no arguments: restore the built-in order
+config.default_device = "gfx1036"                # a bare device name: found on any backend
+config.default_device = "cuda"                   # a single selector is a one-entry list
+config.default_device = None                     # restore the built-in order
 ```
 
 The same selector strings the brackets accept are used, and each entry is tried until one
 resolves; an unusable entry is skipped. The list is read at call time, so it also applies
-to kernels decorated before the call, and `get_default_device()` reports what it currently
-is. A kernel decorated with an explicit `@kernel(backend=...)` keeps that backend.
+to kernels decorated before the assignment, and reading `config.default_device` reports the
+effective list — the configured one, or `cuda -> hip -> metal -> opencl` while nothing is set.
+A kernel decorated with an explicit `@kernel(backend=...)` keeps that backend.
 
 ## Caching
 
@@ -1176,13 +1211,13 @@ launch CUDA Kernel('pyk_saxpy_e6a555c8') on Device('NVIDIA GeForce RTX 4070 Lapt
 The logging is on by default and is controlled by one flag per backend (`CL.print_info`, `CUDA.print_info`, `NVRTC.print_info`, `HIP.print_info`, `HipCompiler.print_info`). To switch them all at once:
 
 ```python
-from pygpgpu import set_print_info
+from pygpgpu import config
 
-set_print_info(False)      # quiet from here on
-set_print_info(True)       # verbose again (the default)
+config.print_info = False      # quiet from here on
+config.print_info = True       # verbose again (the default)
 ```
 
-`set_print_info` only touches backends whose module is already imported, so it never loads a GPU runtime just to silence output. A backend imported *after* the call starts out verbose again — call it once your backends are in use, or set a single flag directly (`pygpgpu.opencl.driver.CL.print_info = False`).
+`config.print_info` only touches backends whose module is already imported, so it never loads a GPU runtime just to silence output. It also records the process-wide default, so a backend imported *after* the assignment starts out quiet too: the order of the two does not matter, and `config.print_info` reads back the default and not one backend's flag. To change a single backend alone, set its own attribute (`pygpgpu.opencl.driver.CL.print_info = False`), which does not move the shared default.
 
 ## Known limitations
 
