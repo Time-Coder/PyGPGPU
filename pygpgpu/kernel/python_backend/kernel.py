@@ -184,6 +184,10 @@ class PythonKernel:
                     f"the block size {local} names {len(local)} dimension(s) but the launch "
                     f"has {len(domain)}; both have to name the same number of axes")
         frame = PythonFrame(domain, local or local_size_for_global(domain))
+        # The body runs once per work item here, so "this work group" is a fact about the
+        # launch and a block-local array (`local_array`) has one answer. The frame's shared
+        # storage is what gives every work item of one block the same array.
+        frame.per_work_item = True
         previous: Optional[PythonFrame] = get_host_frame()
         set_host_frame(frame)
         winner: object = _NO_RESULT

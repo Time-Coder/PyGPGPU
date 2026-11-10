@@ -8,6 +8,7 @@ from ..device_builtins import (
     INDEX_VECTOR_OPENCL,
 )
 from .notation import (
+    BLOCK_ARRAY,
     DeviceType,
     HostValueEntry,
     PTR,
@@ -144,11 +145,20 @@ class _ExpressionsMixin:
             return f"{device_name(t[1])}[0]", "int"
         if t is not None:
             if isinstance(t, tuple) and len(t) == 5 and t[0] == "shared":
-                # A shared buffer is not itself a pointer: it is one slice per group, and
-                # only uf[block_id(d)] picks the caller's out (see _visit_shared_slice).
+                # A per-group buffer is not itself a pointer: it is one slice per group,
+                # and only `buf[blockIdx]` picks the caller's out (see
+                # _visit_shared_slice).
                 self._error(
-                    f"'{node.id}' is a zeros_per_group() buffer, which is one slice per work group: "
-                    f"index it with the group first, as '{node.id}[blockIdx]'", node)
+                    f"'{node.id}' is a local_array_per_group() buffer, which is one "
+                    f"slice per work group: index it with the group first, as "
+                    f"'{node.id}[blockIdx]'. A buffer this block indexes directly is "
+                    f"`local_array(...)`", node)
+            if isinstance(t, tuple) and len(t) == 5 and t[0] == BLOCK_ARRAY:
+                # A block-local buffer already *is* this block's storage, so its name stands
+                # for the declared array itself: the C name is what an atomic passes as its
+                # array, and indexing it is an ordinary element access (see
+                # _visit_block_array).
+                return t[2], t
             if isinstance(t, tuple) and len(t) == 4 and t[0] == "bodyarr":
                 # A private array created in the body is indexed like any array; its extents
                 # are constants (see _shape_var).

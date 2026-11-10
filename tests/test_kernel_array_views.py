@@ -460,16 +460,16 @@ def test_a_negative_index_through_an_alias_uses_the_arrays_extent(runner):
 
 
 def test_a_negative_index_into_a_shared_buffer_counts_from_its_axis(gpu_backend):
-    """A `zeros_per_group` buffer has a compile-time shape, so its axes are known.
+    """A `local_array_per_group` buffer has a compile-time shape, so its axes are known.
 
     Left raw, `buf[blockIdx][-1]` addressed the shared array's own header -- an illegal
     address rather than a wrong number, because shared memory has nothing before it.
     """
-    from pygpgpu import barrier, blockIdx, zeros_per_group
+    from pygpgpu import barrier, blockIdx, local_array_per_group
 
     @kernel
     def shared_last(out: np.ndarray):
-        buf = zeros_per_group(4, np.float32)
+        buf = local_array_per_group(4, np.float32)
         for i in range(out.shape[0]):
             buf[blockIdx][i] = i
             barrier()

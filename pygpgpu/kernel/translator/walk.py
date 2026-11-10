@@ -73,7 +73,7 @@ def _outside_loops(body:List[ast.stmt])->List[ast.stmt]:
     Only statements whose meaning is *host* work belong here. A serial `for` loop and an
     `if` block are per-work-item code that the device must run (every work item iterates
     its own slice, or tests its own lane), so they are left to the translator; returning
-    them to the host would execute device-only builtins there -- `zeros_per_group` used
+    them to the host would execute device-only builtins there -- `local_array_per_group` used
     under such a loop reported "only available inside a @kernel function body" for a body
     that plainly was one.
     """
@@ -83,7 +83,7 @@ def _outside_loops(body:List[ast.stmt])->List[ast.stmt]:
     # A statement is host work only if the host can *execute* it. The body's serial loops and
     # its `if` blocks are per-work-item code: every work item iterates its own slice or tests
     # its own lane, so handing them to the host would run device-only builtins there --
-    # `zeros_per_group` under such a loop reported "only available inside a @kernel function
+    # `local_array_per_group` under such a loop reported "only available inside a @kernel function
     # body" for a body that plainly was one. A bare `for` / `If` is therefore never host code,
     # with or without a dispatch loop; everything else (a creation, a plain assignment) is,
     # because its value has to exist before the launch.
@@ -350,7 +350,7 @@ def _is_magic_loop_stmt(stmt:ast.stmt)->bool:
     which statements are host code. `for j in range(lane * 4, lane * 4 + 4)` is an ordinary
     serial loop over four elements, but it used to count as the dispatch -- which pushed
     every statement above it into the host region, where a device-only builtin such as
-    `zeros_per_group` cannot run (it reported "only available inside a @kernel function
+    `local_array_per_group` cannot run (it reported "only available inside a @kernel function
     body" for a body that plainly was one). `_is_secondary_magic_loop` already told a
     literal `range(8)` apart from a real domain; this predicate has to agree with it.
     """

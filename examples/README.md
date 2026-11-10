@@ -72,8 +72,11 @@ and compare against it, as `vecadd.cl` does.
 
 The pure-Python backend (`k["python"]`) keeps the same meaning for both styles: a magic-loop kernel
 runs once as written (the loop already covers the elements), while a gid-style kernel runs once per
-work item of its iteration domain. It cannot emulate `local`, since group-shared memory needs
-parallel work items.
+work item of its iteration domain. Work-group memory is emulated: `local_array_per_group` /
+`shared_array_per_block` give a real block-to-array mapping, and `local_array` / `shared_array`
+give the current block's array, shared by the work items of that block. A serial run's `barrier()`
+orders nothing, so a body that depends on a later work item's write reads what the serial order has
+produced so far.
 
 ## About backend initialization
 

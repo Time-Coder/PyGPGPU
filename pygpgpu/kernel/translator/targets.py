@@ -4,10 +4,11 @@ from typing import (Dict, List, Optional, Tuple)
 import numpy as np
 from ..structs import dtype_for as structs_dtype_for, member_types as structs_member_types
 from .notation import (
+    BLOCK_ARRAY,
     DeviceType,
     OuterVarEntry,
-    SHARED_SLICE,
     Translated,
+    WORK_GROUP_VALUES,
 )
 from .vectors import (
     is_vec,
@@ -51,9 +52,9 @@ class _TargetsMixin:
             member:Optional[Translated] = self._struct_member_access(target)
             if member is not None:
                 return member
-            # A store into a zeros_per_group() slice: the same flattening as the read side.
+            # A store into a work-group buffer: the same flattening as the read side.
             slice_code, slice_t = self._visit_expression(target.value)
-            if isinstance(slice_t, tuple) and slice_t and slice_t[0] == SHARED_SLICE:
+            if isinstance(slice_t, tuple) and slice_t and slice_t[0] in WORK_GROUP_VALUES:
                 element_code, element_t = self._visit_shared_index(slice_code, slice_t, target)
                 return self._scalar_position(element_code, element_t, target)
             base_code, base_t = self._visit_array_target(target.value)
@@ -190,10 +191,11 @@ class _TargetsMixin:
         must name the group's slice (`buf[blockIdx]`) rather than the buffer.
         """
         if isinstance(index, ast.Tuple):
-            slice_shape:Optional[Tuple[int, ...]] = self._shared_slice_shape(target)
+            slice_shape:Optional[Tuple[int, ...]] = self._work_group_shape(target)
             if slice_shape is not None:
-                # An atomic on a shared buffer names the group's slice as its array, and the
-                # slice carries its own shape, so the flattening needs no `_shape_var`.
+                # An atomic on a work-group buffer names that buffer as its array, and its
+                # declared shape travels with the value, so the flattening needs no
+                # `_shape_var`.
                 dims:List[Tuple[str, object]] = [
                     (self._visit_expression(e), e) for e in index.elts]
                 terms:List[str] = []
@@ -207,8 +209,8 @@ class _TargetsMixin:
                     for inner in range(d + 1, len(dims)):
                         if inner >= len(slice_shape):
                             self._error(
-                                f"this shared buffer has {len(slice_shape)} dimension(s), so "
-                                f"it cannot be indexed with {len(dims)}", node)
+                                f"this work-group buffer has {len(slice_shape)} dimension(s), "
+                                f"so it cannot be indexed with {len(dims)}", node)
                         term = f"{term} * {slice_shape[inner]}"
                     terms.append(term)
                 return " + ".join(terms), "int"
@@ -216,7 +218,7 @@ class _TargetsMixin:
                     and isinstance(self._lookup(self._array_name(target)), tuple) \
                     and self._lookup(self._array_name(target))[0] == "shared":
                 self._error(
-                    "a shared buffer is indexed by its group first, so pass the tuple after "
+                    "a per-group buffer is indexed by its group first, so pass the tuple after "
                     "the group: `buf[blockIdx][i, j]`", node)
             array_name:str = self._array_name(target)
             dims = [(self._visit_expression(e), e) for e in index.elts]
@@ -294,14 +296,26 @@ class _TargetsMixin:
         return f"((({code}) >= 0) ? ({code}) : (({code}) + ({extent})))"
 
 
-    def _shared_slice_shape(self, node:ast.expr)->Optional[Tuple[int, ...]]:
-        """The shape a `zeros_per_group` slice was declared with, or None if it is not one."""
-        if not isinstance(node, ast.Subscript) or not isinstance(node.value, ast.Name):
-            return None
-        t:DeviceType = self._lookup(node.value.id)
-        if not (isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"):
-            return None
-        if not self._is_block_id_expression(node.slice):
-            return None
-        shape:Tuple[int, ...] = tuple(t[4])
-        return shape
+    def _work_group_shape(self, node:ast.expr)->Optional[Tuple[int, ...]]:
+        """The shape a work-group buffer was declared with, or None if it is not one.
+
+        Both kinds answer, because both carry the same declared extents: a per-group buffer
+        reaches its slice through the group subscript, a block-local one is already there.
+        """
+        if not isinstance(node, ast.Name):
+            if not isinstance(node, ast.Subscript):
+                return None
+            if not isinstance(node.value, ast.Name):
+                return None
+            t:DeviceType = self._lookup(node.value.id)
+            if isinstance(t, tuple) and len(t) == 5 and t[0] == BLOCK_ARRAY:
+                return tuple(t[4])
+            if not (isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"):
+                return None
+            if not self._is_block_id_expression(node.slice):
+                return None
+            return tuple(t[4])
+        t = self._lookup(node.id)
+        if isinstance(t, tuple) and len(t) == 5 and t[0] == BLOCK_ARRAY:
+            return tuple(t[4])
+        return None

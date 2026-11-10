@@ -201,13 +201,13 @@ def test_an_outer_scalar_is_written_by_the_device(runner):
     assert held == np.complex128(5 + 6j)
 
 
-def test_zeros_per_group_above_the_loop_is_still_device_code(runner):
+def test_local_array_per_group_above_the_loop_is_still_device_code(runner):
     """A device-only builtin has no host meaning, so the host leaves it alone."""
-    from pygpgpu import barrier, blockIdx, zeros_per_group
+    from pygpgpu import barrier, blockIdx, local_array_per_group
 
     @kernel
     def shared_above_loop(out: np.ndarray):
-        buf = zeros_per_group(4, np.float32)
+        buf = local_array_per_group(4, np.float32)
         for i in range(out.shape[0]):
             buf[blockIdx][0] = 1.0
             barrier()

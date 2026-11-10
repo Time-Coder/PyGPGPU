@@ -4,8 +4,13 @@ import re
 from typing import (Any, Dict, List, Optional, Tuple, cast)
 from ..structs import dtype_for as structs_dtype_for
 from .notation import (
-    DeviceType,
+    BLOCK_ARRAY,
+    BLOCK_LOCAL_BUILTINS,
+    BLOCK_SLICE,
+    PER_GROUP_BUILTINS,
     SHARED_SLICE,
+    WORK_GROUP_SLICES,
+    DeviceType,
     Translated,
 )
 from .receivers import (
@@ -83,7 +88,7 @@ class _SubscriptsMixin:
             is_array:bool = (is_ptr(binding) and not is_struct_ptr) or (
                 isinstance(binding, tuple) and len(binding) == 4 and binding[0] == "bodyarr")
             is_shared:bool = (isinstance(binding, tuple) and len(binding) == 5
-                              and binding[0] == "shared")
+                              and binding[0] in ("shared", BLOCK_ARRAY))
             if not is_array and not is_shared:
                 base_code, base_t = self._visit_expression(node.value)
                 owner:Optional[Tuple[type, Any]] = self._magic_owner(base_t, "__getitem__")
@@ -96,12 +101,19 @@ class _SubscriptsMixin:
                         node, self_param=_receiver_param_of(method),
                         receiver_as_argument=True)
 
-        # `buf[k]` on a `zeros_per_group(...)` value: the index selects a work group, and only
-        # caller's own group is reachable from inside a work item, so `k` must be the block
-        # id. The result is that group's slice, which is then indexed normally.
+        # `buf[k]` on a `local_array_per_group(...)` value: the index selects a work group,
+        # and only the caller's own group is reachable from inside a work item, so `k` must
+        # be the block id. The result is that group's slice, which is then indexed normally.
         shared:Optional[Translated] = self._visit_shared_slice(node)
         if shared is not None:
             return shared
+
+        # `buf[i]` on a `local_array(...)`/`shared_array(...)` value: this block's own
+        # storage, so every subscript is an ordinary element index and no group selection
+        # happens at all. Read here so the flattening below sees a plain buffer.
+        block:Optional[Translated] = self._visit_block_array(node)
+        if block is not None:
+            return block
 
         # A slice used directly as an index (`a[:][i]`, `a[2:][j]`) is the same pointer at
         # an offset: emit the offset arithmetically so the expression needs no local. This
@@ -110,10 +122,10 @@ class _SubscriptsMixin:
         if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Slice):
             return self._visit_sliced_subscript(node)
 
-        # A zeros_per_group() slice remembers the shape it was declared with, so a
-        # multidimensional subscript can be flattened exactly like an array parameter's.
+        # A work-group slice remembers the shape it was declared with, so a multidimension
+        # subscript can be flattened exactly like an array parameter's.
         readonly_code, readonly_t = self._visit_expression(value)
-        if isinstance(readonly_t, tuple) and readonly_t and readonly_t[0] == SHARED_SLICE:
+        if isinstance(readonly_t, tuple) and readonly_t and readonly_t[0] in WORK_GROUP_SLICES:
             element_code, element_t = self._visit_shared_index(readonly_code, readonly_t, node)
             return self._scalar_position(element_code, element_t, node)
 
@@ -159,12 +171,25 @@ class _SubscriptsMixin:
 
 
     def _visit_shared_index(self, code:str, t:object, node:ast.Subscript)->Translated:
-        """Index a shared slice: `buf[blockIdx][i]`, `[i, j]`, and `[i][j]` all flatten.
+        """Index a work-group buffer: `buf[blockIdx][i]`, `[i, j]` and `[i][j]` all flatten.
+
+        Both kinds of work-group storage reach here, and they differ only in what the
+        marker's shape starts from: a per-group buffer's value *is* the caller's slice once
+        the group subscript has folded away, while a block-local buffer never had one. So
+        the subscript a body writes is the same row-major flattening either way.
 
         A tuple subscript consumes several axes at once; a single subscript consumes one and
         hands back a slice with the remaining axes, so a nested spelling reaches the same
         element (`buf[blockIdx][row][col]` is `buf[row * 4 + col]`).
+
+        A ``block-local`` buffer arrives as its *binding* when the store path visits the base
+        name directly (`bins[i] = v`), and as its slice once the group subscript has folded;
+        both are normalized to the slice form here, which is the one shape the flattening
+        below reads.
         """
+        if isinstance(t, tuple) and t and t[0] == BLOCK_ARRAY:
+            t = (BLOCK_SLICE, t[1], tuple(t[4]))
+        marker:str = t[0]
         ctype:object = t[1]
         shape:Tuple[int, ...] = tuple(t[2])
         offset_base:int = t[3] if len(t) > 3 else 0
@@ -175,15 +200,15 @@ class _SubscriptsMixin:
             elements = [index]
         if len(elements) > len(shape):
             self._error(
-                f"this zeros_per_group() buffer has {len(shape)} dimension(s) "
+                f"this {self._work_group_spelling(t)} buffer has {len(shape)} dimension(s) "
                 f"({', '.join(str(e) for e in shape)}), so it cannot be indexed with "
                 f"{len(elements)}", index)
         terms:List[str] = []
         for position, element in enumerate(elements):
             element_code, element_t = self._visit_expression(element)
             if not is_int(element_t):
-                self._error("an index into a zeros_per_group() buffer must be an integer",
-                            element)
+                self._error(f"an index into a {self._work_group_spelling(t)} buffer must be an "
+                            f"integer", element)
             # A negative index counts from that axis's extent, exactly as it does on an
             # array parameter. Left raw it addressed the shared array's own header.
             term:str = self._python_index(element_code, element,
@@ -202,25 +227,55 @@ class _SubscriptsMixin:
         # it would target the whole buffer. `_scalar_position` refuses that where a scalar is
         # required.
         combined:str = f"({offset_base}) + ({flat})" if offset_base else flat
-        return f"{code}", (SHARED_SLICE, ctype, remaining, combined)
+        return f"{code}", (marker, ctype, remaining, combined)
 
 
     def _scalar_position(self, code:str, t:object, node:ast.AST)->Translated:
-        """A shared slice's element, refusing a partly indexed one.
+        """A work-group buffer's element, refusing a partly indexed one.
 
         `buf[blockIdx]` with `(2, 2)` axes and one index is a slice of a row; it has no
         device value of its own, so using it where a scalar is needed is an error rather than
         a buffer with no subscript.
         """
-        if isinstance(t, tuple) and t and t[0] == SHARED_SLICE:
+        if isinstance(t, tuple) and t and t[0] in WORK_GROUP_SLICES:
+            spelling:str = self._work_group_spelling(t)
+            hint:str = ("`buf[blockIdx][i, j]`" if t[0] == SHARED_SLICE else "`buf[i, j]`")
             self._error(
-                f"this shared buffer has {len(t[2])} dimension(s) left, so it is a slice rather "
-                f"than an element: index every axis, as `buf[blockIdx][i, j]`", node)
+                f"this {spelling}() buffer has {len(t[2])} dimension(s) left, so it is a slice "
+                f"rather than an element: index every axis, as {hint}", node)
         return code, t
 
 
+    def _visit_block_array(self, node:ast.Subscript)->Optional[Translated]:
+        """`buf[i]` on a `local_array(...)`/`shared_array(...)` value: this block's storage.
+
+        There is nothing to select: the value already *is* the caller's block, so the
+        subscript is an ordinary element index and the flattening of the following axes is
+        the same row-major one an array parameter gets. The marker carries the declared
+        shape, so the axes are known at translation time.
+        """
+        if not isinstance(node.value, ast.Name):
+            return None
+        t:DeviceType = self._lookup(node.value.id)
+        if not (isinstance(t, tuple) and len(t) == 5 and t[0] == BLOCK_ARRAY):
+            return None
+        ctype, c_name, shape = t[1], t[2], t[4]
+        return self._visit_shared_index(c_name, (BLOCK_SLICE, ctype, shape), node)
+
+
+    def _work_group_spelling(self, t:object)->str:
+        """The builtin name a work-group buffer's error message should use.
+
+        Both pairs build one declaration, but an error has to name the spelling the body
+        actually wrote, and the marker's first slot is what says which of the two it came
+        from -- including on a partly indexed slice, which keeps its origin.
+        """
+        return (PER_GROUP_BUILTINS[0] if isinstance(t, tuple) and t and t[0] in (
+            SHARED_SLICE, BLOCK_ARRAY) else BLOCK_LOCAL_BUILTINS[0])
+
+
     def _visit_shared_slice(self, node:ast.Subscript)->Optional[Translated]:
-        """`buf[blockIdx]` on a shared buffer: **this** group's storage, and nothing more.
+        """`buf[blockIdx]` on a per-group buffer: **this** group's storage, and nothing more.
 
         The subscript picks *which* group's slice is meant, which is a real choice on the
         host (where the value is a mapping) but not on a device: the hardware already
@@ -246,9 +301,10 @@ class _SubscriptsMixin:
         index:ast.expr = node.slice
         if not self._is_block_id_expression(index):
             self._error(
-                "a zeros_per_group() buffer is one slice per work group, and a work item can only "
-                "reach its own: index it with the group first, as `buf[blockIdx][j]` "
-                "(or `buf[get_group_id(0)][j]`)", index)
+                "a local_array_per_group() buffer is one slice per work group, and a work "
+                "item can only reach its own: index it with the group first, as "
+                "`buf[blockIdx][j]` (or `buf[get_group_id(0)][j]`). A buffer this block "
+                "indexes directly is `local_array(...)`", index)
         # Both backends give each work group its own copy of the buffer -- OpenCL allocates
         # one `__local` parameter per group, CUDA/HIP a `__shared__` array per block -- so
         # the slice a work item reaches is the whole buffer, and the block id only names

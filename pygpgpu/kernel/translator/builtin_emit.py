@@ -20,9 +20,10 @@ from ..device_builtins import (
     emit_index,
 )
 from .notation import (
+    BLOCK_ARRAY,
     PTR,
-    SHARED_SLICE,
     Translated,
+    WORK_GROUP_VALUES,
 )
 from .vectors import (
     _vec_field_names,
@@ -152,9 +153,14 @@ class _BuiltinEmitMixin(_BuiltinPythonMixin):
                         "arguments", node)
                 self._error(f"gpu.{name}(array, index, value) takes exactly 3 arguments", node)
             (arr_code, arr_t), (idx_code, idx_t) = args[0], args[1]
-            if isinstance(arr_t, tuple) and arr_t and arr_t[0] == SHARED_SLICE:
-                # `atomic_add(bins[blockIdx], i, 1)`: the group's slice is the array the atomic
-                # indexes into, and any offset already consumed is folded into the index.
+            if isinstance(arr_t, tuple) and arr_t and arr_t[0] == BLOCK_ARRAY:
+                # `atomic_add(bins, i, 1)` on this block's own storage: the binding is the
+                # declaration, so the array is its C name and its element type.
+                arr_code, arr_t = arr_t[2], (PTR, arr_t[1])
+            if isinstance(arr_t, tuple) and arr_t and arr_t[0] in WORK_GROUP_VALUES:
+                # `atomic_add(bins[blockIdx], i, 1)` on per-group storage: the group's slice
+                # is the array the atomic indexes into, and any offset already consumed is
+                # folded into the index.
                 pending:str = arr_t[3] if len(arr_t) > 3 else ""
                 if pending:
                     idx_code = f"({pending}) + ({idx_code})"

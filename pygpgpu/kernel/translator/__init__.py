@@ -80,11 +80,14 @@ from .type_map import (
     validate_type_map,
 )
 from .notation import (
+    BLOCK_ARRAY,
+    BLOCK_LOCAL_BUILTINS,
     DeviceType,
     HostValueEntry,
     IMAGE,
     OuterObjectEntry,
     OuterVarEntry,
+    PER_GROUP_BUILTINS,
     PTR,
     RESERVED_DEVICE_NAMES,
     RESERVED_PREFIX,

@@ -6,7 +6,9 @@ from ..device_builtins import (
     float_atomic_add_source,
 )
 from .notation import (
-    SHARED_SLICE,
+    BLOCK_ARRAY,
+    BLOCK_SLICE,
+    WORK_GROUP_VALUES,
     Translated,
 )
 from .receivers import (
@@ -67,10 +69,15 @@ class _AugassignMixin:
             return
 
         target:ast.Subscript = node.target  # type: ignore[assignment]
-        # `bins[blockIdx][value] += 1` on shared memory: the slice is the array, and any
-        # offset already consumed folds into the index.
+        # `bins[blockIdx][value] += 1` on per-group storage, or `bins[value] += 1` on this
+        # block's own storage: the buffer is the array, and any offset already consumed
+        # folds into the index.
         slice_code, slice_t = self._visit_expression(target.value)
-        if isinstance(slice_t, tuple) and slice_t and slice_t[0] == SHARED_SLICE:
+        if isinstance(slice_t, tuple) and slice_t and slice_t[0] == BLOCK_ARRAY:
+            # The binding itself, not a slice: this block's array is already the whole
+            # storage, so there is no group subscript and no offset to carry.
+            slice_t = (BLOCK_SLICE, slice_t[1], tuple(slice_t[4]))
+        if isinstance(slice_t, tuple) and slice_t and slice_t[0] in WORK_GROUP_VALUES:
             pending:str = slice_t[3] if len(slice_t) > 3 else ""
             index_code, _ = self._visit_shared_index("", slice_t, target)
             base_code:str = slice_code

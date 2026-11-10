@@ -113,7 +113,7 @@ def address_space_qualifier(opencl_word:str)->str:
 def barrier()->str:
     """A work-group barrier.
 
-    The threadgroup space is what a `zeros_per_group` buffer lives in, so its
+    The threadgroup space is what a `local_array_per_group` buffer lives in, so its
     writes have to become visible across the group -- the same reason the OpenCL
     spelling names the local fence. The device fence is added because the array
     arguments are written through the same barrier.

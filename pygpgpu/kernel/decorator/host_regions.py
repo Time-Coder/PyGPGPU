@@ -138,7 +138,7 @@ def _host_region_values(func:object,
     host work, and the translator emits no device code for them (see
     `FunctionTranslator.host_statement_lines`). A statement the host could not run is left
     out of it, and stays device code -- that is how a device-only builtin such as
-    `zeros_per_group(...)` above a loop keeps working.
+    `local_array_per_group(...)` above a loop keeps working.
 
     The body's tail -- the statements after the last magic loop -- is host work too (the
     host runs it once, after the launch; see PyKernel._run_host_region), so it is executed

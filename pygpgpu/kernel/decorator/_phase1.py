@@ -194,7 +194,7 @@ class _PrepareLaunchMixin:
                     raise type(e)(f"self.{name}: {e}") from None
 
         plan.sig:str = type_sig(plan.arg_types + plan.self_types)
-        # A `zeros_per_group` shape read from a kernel parameter bakes the *value* into the
+        # A `local_array_per_group` shape read from a kernel parameter bakes the *value* into the
         # generated source, so the value specializes the kernel the way a type does: it has
         # to be part of the identity both the `_cache` entry and the C name hash, or a second
         # call with a different shape would reuse the first one's binary and launch a grid

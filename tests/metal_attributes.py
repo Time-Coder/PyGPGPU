@@ -97,7 +97,7 @@ def check_attributes(source: str) -> List[str]:
         name: str = attribute.name
         if name == "threadgroup":
             # The threadgroup-memory attribute is legitimate and this package does
-            # emit it (a `zeros_per_group` buffer becomes `threadgroup uint*`).
+            # emit it (a `local_array_per_group` buffer becomes `threadgroup uint*`).
             continue
         if name in BINDING_ATTRIBUTES:
             # `[[buffer(n)]]`-style attributes belong to the host's own arguments; the

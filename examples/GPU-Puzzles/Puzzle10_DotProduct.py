@@ -1,6 +1,6 @@
 import numpy as np
 from numpy.typing import NDArray
-from pygpgpu import kernel, threadIdx, blockIdx, blockDim, zeros_per_block, barrier
+from pygpgpu import kernel, threadIdx, blockIdx, blockDim, shared_array_per_block, barrier
 
 TPB = 8
 
@@ -10,7 +10,7 @@ def dot_spec(a: NDArray, b: NDArray)->NDArray:
 @kernel
 def dot_test1(a: NDArray, b: NDArray) -> NDArray:
     out = np.zeros(1)
-    shared = zeros_per_block((TPB,), np.float32)
+    shared = shared_array_per_block((TPB,), np.float32)
     for i in range(a.shape[0]):
         local_i = threadIdx.x
         shared[blockIdx][local_i] = a[i] * b[i]
@@ -27,7 +27,7 @@ def dot_test1(a: NDArray, b: NDArray) -> NDArray:
 
 @kernel
 def dot_test2(a: NDArray, b: NDArray, out: NDArray) -> None:
-    shared = zeros_per_block((TPB,), np.float32)
+    shared = shared_array_per_block((TPB,), np.float32)
     i = blockIdx.x * blockDim.x + threadIdx.x
     local_i = threadIdx.x
 

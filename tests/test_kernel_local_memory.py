@@ -1,4 +1,4 @@
-"""Work-group shared memory: `zeros_per_group(...)`, `barrier()`, and atomics on those buffers.
+"""Work-group shared memory: `local_array_per_group(...)`, `barrier()`, and atomics on those buffers.
 
 This is the `__shared__` histogram every CUDA tutorial shows, written once and run on every
 device backend:
@@ -12,7 +12,7 @@ device backend:
     __syncthreads();
     if (threadIdx.x < 256) atomicAdd(&global[tid], bins[tid]);
 
-A `zeros_per_group(...)` value stands for **every group's slice**, so it is indexed by the group first
+A `local_array_per_group(...)` value stands for **every group's slice**, so it is indexed by the group first
 (`bins[blockIdx][lane]`) and only then by the slot. On a device that first subscript folds
 away -- the hardware already gives each group private storage -- but the spelling keeps the
 model honest, and it is what makes the same code meaningful on the host.
@@ -31,13 +31,13 @@ from pygpgpu import (
     barrier,
     blockIdx,
     threadIdx,
-    zeros_per_block,
+    shared_array_per_block,
     get_global_id,
     get_group_id,
     get_local_id,
     get_local_size,
     kernel,
-    zeros_per_group,
+    local_array_per_group,
 )
 
 BINS = 256
@@ -47,7 +47,7 @@ BINS = 256
 def shared_histogram(pixels: np.ndarray, hist: np.ndarray):
     """One work item per pixel; counts accumulate in shared memory, then merge once."""
     lane = get_local_id(0)         # threadIdx.x
-    bins = zeros_per_group(256, np.uint32)   # __shared__ uint bins[256], per group
+    bins = local_array_per_group(256, np.uint32)   # __shared__ uint bins[256], per group
 
     bins[blockIdx][lane] = 0       # zero this group's bins (one lane per bin)
     barrier()                      # __syncthreads()
@@ -63,7 +63,7 @@ def shared_histogram(pixels: np.ndarray, hist: np.ndarray):
 def shared_histogram_plus_equals(pixels: np.ndarray, hist: np.ndarray):
     """The same kernel with `+=`, which is atomic on shared memory for the same reason."""
     lane = get_local_id(0)
-    bins = zeros_per_group(256, np.uint32)
+    bins = local_array_per_group(256, np.uint32)
     bins[blockIdx][lane] = 0
     barrier()
     bins[blockIdx][int(pixels[get_global_id(0)])] += 1
@@ -76,7 +76,7 @@ def shared_histogram_plus_equals(pixels: np.ndarray, hist: np.ndarray):
 def shared_sums(x: np.ndarray, hist: np.ndarray):
     """A shared buffer used as a scratch pad, without atomics: each lane owns one slot."""
     lane = get_local_id(0)
-    slots = zeros_per_group(256, np.int32)
+    slots = local_array_per_group(256, np.int32)
     slots[blockIdx][lane] = int(x[get_global_id(0)]) * 2
     barrier()
     if lane < 256:
@@ -131,7 +131,7 @@ def test_a_module_constant_sizes_the_buffer(gpu_backend):
 
     @kernel(domain="out")
     def uses_a_global_count(out: np.ndarray):
-        slots = zeros_per_group(BINS, np.float32)  # a module global, baked to 256
+        slots = local_array_per_group(BINS, np.float32)  # a module global, baked to 256
         slots[blockIdx][get_local_id(0)] = float(BINS)
         barrier()
         out[get_global_id(0)] = slots[blockIdx][get_local_id(0)]
@@ -148,7 +148,7 @@ def test_a_computed_count_is_still_refused(gpu_backend):
     @kernel(domain="out")
     def uses_a_computed_count(out: np.ndarray, width: int):
         size = width * factor
-        slots = zeros_per_group(size, np.float32)
+        slots = local_array_per_group(size, np.float32)
         slots[blockIdx][get_local_id(0)] = 0.0
         barrier()
         out[get_global_id(0)] = slots[blockIdx][get_local_id(0)]
@@ -165,7 +165,7 @@ def test_a_shared_buffer_must_be_indexed_by_its_group(gpu_backend):
     @kernel(domain="out")
     def wrong_index(pixels: np.ndarray, out: np.ndarray):
         lane = get_local_id(0)
-        slots = zeros_per_group(256, np.int32)
+        slots = local_array_per_group(256, np.int32)
         slots[lane] = 1                    # a local id is not a group id
         barrier()
         out[get_global_id(0)] = slots[lane]
@@ -181,7 +181,7 @@ def test_a_shared_buffer_cannot_be_used_without_a_group():
 
     @kernel(domain="out")
     def bare(out: np.ndarray):
-        slots = zeros_per_group(256, np.int32)
+        slots = local_array_per_group(256, np.int32)
         out[get_global_id(0)] = slots
 
     with pytest.raises(SyntaxError) as caught:
@@ -199,7 +199,7 @@ def test_the_interpreter_backend_keeps_each_groups_slice_apart():
 
     @kernel
     def tag(out: np.ndarray):
-        buf = zeros_per_block((2, 2), np.int32)
+        buf = shared_array_per_block((2, 2), np.int32)
         blk = blockIdx.x
         lid = threadIdx.x
         buf[blk][lid // 2, lid % 2] = blk * 100 + lid

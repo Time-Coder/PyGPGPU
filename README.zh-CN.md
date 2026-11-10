@@ -228,6 +228,41 @@ def count_and_return(x: np.ndarray):
 
 三种写法在每个后端上都精确: 成千上万个工作项同时累加同一个位置也不会丢。外部标量永远是**共享**位置, 所以 `TOTAL += 1` 一定是原子操作; 而对它调用 `atomic_add(scalar, 0, 1)` 会被拒绝, 并提示改用前者——原子操作需要一个可下标的数组。
 
+### 工作组(共享)内存
+
+创建它的是四个名字, 也就是两对。`local_array_per_group` / `shared_array_per_block` 创建的值代表**所有组的切片**, 所以函数体用第一个下标选出自己那一组; `local_array` / `shared_array` 创建的是**本 block 自己的**数组, 直接下标即可, 因此只在 gid 风格函数体里才有意义(每次执行就是一个工作项)。每一对都是两个独立的函数, 而不是同一个函数取两个名字, 所以编辑器高亮的是真正写下的那个调用。
+
+```python
+from pygpgpu import (atomic_add, barrier, blockIdx, get_global_id, get_local_id,
+                     kernel, local_array, local_array_per_group)
+
+# 1) 本 block 自己的数组: 没有组下标, 仅限 gid 风格
+@kernel(domain="pixels")
+def histogram(pixels: np.ndarray, hist: np.ndarray):
+    lane = get_local_id(0)
+    bins = local_array(256, np.uint32)      # __shared__ uint bins[256]
+    bins[lane] = 0
+    barrier()
+    atomic_add(bins, int(pixels[get_global_id(0)]), 1)
+    barrier()
+    atomic_add(hist, lane, bins[lane])
+
+# 2) 每个组的切片: 同一份声明, 但先按组下标
+@kernel(domain="pixels")
+def histogram_grouped(pixels: np.ndarray, hist: np.ndarray):
+    lane = get_local_id(0)
+    bins = local_array_per_group(256, np.uint32)
+    bins[blockIdx][lane] = 0                # 本组的槽位
+    barrier()
+    atomic_add(bins[blockIdx], int(pixels[get_global_id(0)]), 1)
+    barrier()
+    atomic_add(hist, lane, bins[blockIdx][lane])
+```
+
+参数与 `np.zeros` 相同、顺序也相同——形状在前(整数或元组), dtype 在后——而且形状必须是**编译期常量**(字面量、模块常量, 或 int 类型的 kernel 参数; 后者会让 kernel 按值特化), 因为这块缓冲区在 CUDA/HIP 上是 `__shared__` 数组, 在 OpenCL/Metal 上是一个 `__local`/`threadgroup` 参数。写入阶段与读取阶段之间必须有一个 `barrier()`。对工作组内存用 `+=` 同样会变成原子操作, 理由与数组上的情形相同。
+
+在魔法循环函数体里调用 `local_array`/`shared_array` 会被拒绝: 那种函数体对整个 launch 只执行一次, 裸的 block 数组没有所属的组——那里应该写 `local_array_per_group` 并用 `blockIdx` 下标。
+
 ### 在 kernel 里打印
 
 在 OpenCL 与 CUDA 后端上, kernel 函数体里的 `print()` 可以直接用: 它会被翻译成设备端 `printf`, 打印出与 Python 相同的那一行, 调试 kernel 不必再手写 C。
@@ -303,7 +338,9 @@ saxpy["py"].submit(x, y, out, 2.0)   # 同一次启动, 放到线程池里执行
 | gid 写法(`get_global_id`), 迭代域来自 `@kernel(domain="x")` | 按声明的迭代域(`x` 的完整 shape)每个工作项跑一遍函数体, `get_global_id` 返回当前索引——也就是按 `np.ndindex` 顺序, 每个元素一步 |
 | gid 写法, 迭代域来自 `k[(blocks, threads)]` 中括号 | 同上, 按中括号的每个工作项跑一遍, 因此函数体必须像在 GPU 上一样, 自己针对真实元素个数做越界保护 |
 
-这类函数体里的内建函数会解析到 host 侧实现: 索引内建、原子操作(退化为普通读-改-写, 串行执行使其结果精确)、`barrier()`(空操作)以及向量数学函数族(直接调用 `pygpgpu.funcs` 的 host 实现)。有两种东西无法模拟, 会直接报错: `local`(组内共享内存需要并行工作项)与魔法循环函数体里的 `get_global_id`(那里没有"当前工作项", 请改用循环变量)。
+这类函数体里的内建函数会解析到 host 侧实现: 索引内建、原子操作(退化为普通读-改-写, 串行执行使其结果精确)、`barrier()`(空操作)、工作组数组以及向量数学函数族(直接调用 `pygpgpu.funcs` 的 host 实现)。有一种东西无法模拟, 会直接报错: 魔法循环函数体里的 `get_global_id`(那里没有"当前工作项", 请改用循环变量)。
+
+工作组内存是如实模拟的: `local_array_per_group` / `shared_array_per_block` 返回真正的映射(block id 到该组的数组), `local_array` / `shared_array` 返回当前 block 的数组, 在每个 block 的第一个工作项上创建、其余工作项复用。串行运行时 `barrier()` 仍然不提供任何顺序保证, 所以依赖**后续**工作项写入结果的函数体, 读到的是串行顺序到目前为止产生的内容。
 
 向量数组可以照常使用: 读取 `v = points[i]` 得到向量实例, `out[i] = v.xyzy * 2.0` 写回各分量。
 
@@ -1132,7 +1169,7 @@ config.print_info = True       # 恢复详细输出(默认)
 - `@kernel` 签名可以带默认值, 调用也可以用关键字传参: 启动前会先绑定为位置顺序, 并补上省略的默认值。`*args`、`**kwargs` 与仅限关键字参数仍不支持;
 - fp16 (`np.float16`) 参数在 CUDA/HIP 后端不可用(建议 float32);
 - HIP 后端的编译依赖 AMD HIP SDK 自带 clang; 本机 hipRTC(ROCm 7.2 Windows)对任何输入均失败, 故未使用;
-- 纯 Python 后端(`k["python"]`)不模拟 `local`(组内共享内存), 它是串行执行的, 没有并行工作项的概念。
+- 纯 Python 后端(`k["python"]`)串行地运行工作组内存: 那里 `barrier()` 不提供任何顺序保证, 所以依赖**后续**工作项写入结果的函数体, 读到的是串行顺序到目前为止产生的内容。
 
 在 CUDA 上，数组 API（`Array` 的 `cuMemcpy2D` 上传/回读）在每个受支持的解释器上都正常。`cuSurfObjectCreate` 与 `cuTexObjectCreate` 偶尔会对一份逐字节合法的描述符返回 `CUDA_ERROR_INVALID_VALUE`；失败集中在进程最初若干次调用，之后不再出现。在开发此项目的机器上实测（驱动 13.4，RTX 4070）：约每一百次创建失败一次，对已失败的描述符重试无法挽回，而为新建数组重新构造描述符通常可以。由于一个 `Image` 每次 launch 需要绑定一个 surface 和一个 texture，同一进程内连续启动多个图像 kernel 的场景可能损失若干次 launch。`python` 与 OpenCL 后端不受影响：OpenCL 的图像在每次 launch 时创建，其代码路径未出现过该失败，而 `python` 后端完全不接触设备。`examples/11_texture2d.py` 在驱动拒绝时报出原因而不是抛异常。
 ## License

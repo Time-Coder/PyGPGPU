@@ -54,7 +54,7 @@ kernel 有两种方式声明自己的迭代域, 自动 work size 需要其中之
 
 手写 kernel 必须自己 clamp, 而且不能用 `get_global_size(0)` 来做: 它返回的是取整后的启动规模, 不是元素个数。请像 `vecadd.cl` 那样把真实元素数作为 kernel 参数传入并据此比较。
 
-纯 Python 后端(`k["python"]`)对两种写法保持同样的语义: 魔法循环 kernel 按原样只跑一次(循环本身已覆盖所有元素), gid 写法 kernel 按其迭代域的每个工作项跑一次。它无法模拟 `local`, 因为组内共享内存需要并行的工作项。
+纯 Python 后端(`k["python"]`)对两种写法保持同样的语义: 魔法循环 kernel 按原样只跑一次(循环本身已覆盖所有元素), gid 写法 kernel 按其迭代域的每个工作项跑一次。工作组内存是模拟的: `local_array_per_group` / `shared_array_per_block` 给出真正的 block 到数组映射, `local_array` / `shared_array` 给出当前 block 的数组, 由该 block 的工作项共享。串行运行中 `barrier()` 不提供顺序保证, 所以依赖后续工作项写入结果的函数体, 读到的是串行顺序到目前为止产生的内容。
 
 ## 关于后端初始化
 

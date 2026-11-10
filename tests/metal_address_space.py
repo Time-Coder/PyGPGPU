@@ -11,7 +11,7 @@ this backend emits are:
 
 * ``device`` for every caller buffer -- the arrays, the returned-value slots, the
   return claim/site words, the outer-scope arrays, the host-created ones;
-* ``threadgroup`` for a `zeros_per_group` scratch buffer, which the dispatch gives
+* ``threadgroup`` for a `local_array_per_group` scratch buffer, which the dispatch gives
   each group privately.
 
 A pointer parameter with **no** qualifier is the failure this catches: it is what an

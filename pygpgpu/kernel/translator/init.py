@@ -148,7 +148,7 @@ class _InitMixin:
             self.host_region_values:Dict[str, object] = dict(host_creation_values or {})
             # The caller's actual arguments, in positional order, so a compile-time fact the
             # body needs can read the *value* a parameter carries this launch. Only
-            # `zeros_per_group`'s shape reads it today: a shared buffer's size is baked into
+            # `local_array_per_group`'s shape reads it today: a shared buffer's size is baked into
             # the generated source, so it specializes the kernel the way a type does, and
             # the value is part of the signature digest that hashes the C name.
             self.argument_values:List[object] = list(argument_values or [])

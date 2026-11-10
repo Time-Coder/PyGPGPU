@@ -28,7 +28,7 @@ on this machine (the expected answer everywhere off macOS).
 
 **The checks themselves are exercised elsewhere.** Every kernel here was run on an
 OpenCL device first, so the call shapes -- the bracket spelling, `atomic_add`'s tuple
-index, the `zeros_per_group`/`barrier` pair, the return claim -- are known to be
+index, the `local_array_per_group`/`barrier` pair, the return claim -- are known to be
 accepted by this library rather than assumed. What this script adds is the part OpenCL
 cannot answer for Metal: whether the *Metal* binding and dispatch do the same thing.
 """
@@ -120,11 +120,11 @@ def check_dispatch(device: str) -> None:
 
 def check_shared_memory(device: str) -> None:
     """A threadgroup buffer plus a barrier -- the reduction shape, on the device."""
-    from pygpgpu import barrier, blockIdx, get_local_id, zeros_per_group
+    from pygpgpu import barrier, blockIdx, get_local_id, local_array_per_group
 
     @kernel
     def reverse(text: np.ndarray, out: np.ndarray) -> None:
-        scratch = zeros_per_group(8, np.float32)
+        scratch = local_array_per_group(8, np.float32)
         lane = get_local_id(0)
         scratch[blockIdx][lane] = text[lane]
         barrier()

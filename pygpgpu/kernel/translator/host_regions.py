@@ -73,7 +73,7 @@ class _HostRegionsMixin:
         bound travel to the kernel, as parameters.
 
         A statement the host could not run stays device code, and that is what keeps
-        `zeros_per_group(...)` above a loop working: a shared buffer is declared by the
+        `local_array_per_group(...)` above a loop working: a shared buffer is declared by the
         kernel, so there is nothing for the host to execute.
         """
         if int(getattr(node, "lineno", 0) or 0) in self.host_statement_lines:

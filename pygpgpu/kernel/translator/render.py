@@ -4,7 +4,7 @@ from typing import (Dict, List, Optional, Set, Tuple)
 from ..structs import dtype_for as structs_dtype_for
 from .notation import (
     IMAGE,
-    SHARED_SLICE,
+    WORK_GROUP_VALUES,
     _CUDA_TYPE_NAMES,
     device_name,
 )
@@ -75,13 +75,13 @@ class _RenderMixin:
                 # a pointer too: one spelling for every structure.
                 const = ("const " if name not in self.member_writes else "")
                 params.append(f"{const}{self._device_type(t)}* {device_name(name)}")
-            elif isinstance(t, tuple) and t and t[0] == SHARED_SLICE:
-                # A `zeros_per_group` slice handed to a helper. It is a *pointer* into
-                # the group's own storage, in the space that storage lives in -- Metal
-                # spells that `threadgroup`, OpenCL `__local`, and CUDA/HIP need no
-                # qualifier. Rendering the tuple itself would print the internal type
-                # marker into the C source (`(('shared_slice', ...)) buf`), which no
-                # compiler accepts.
+            elif isinstance(t, tuple) and t and t[0] in WORK_GROUP_VALUES:
+                # A work-group buffer handed to a helper -- a per-group slice or a
+                # block-local array. It is a *pointer* into the group's own storage, in the
+                # space that storage lives in -- Metal spells that `threadgroup`, OpenCL
+                # `__local`, and CUDA/HIP need no qualifier. Rendering the tuple itself would
+                # print the internal type marker into the C source, which no compiler
+                # accepts.
                 space:str = ""
                 if self._metal_syntax:
                     space = "threadgroup "

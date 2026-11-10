@@ -11,6 +11,7 @@ from .type_map import (
     DTYPE_MAP,
 )
 from .notation import (
+    BLOCK_ARRAY,
     DeviceType,
     Translated,
     device_name,
@@ -67,13 +68,13 @@ class _PrivateArrayMixin:
                     value:object = self.argument_values[position]
                     if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
                         self._error(
-                            f"zeros_per_group() shape read from parameter '{candidate.id}' "
+                            f"a work-group array's shape read from parameter '{candidate.id}' "
                             f"must be a whole number of elements, and this launch carried "
                             f"{value!r}: the size is baked into the compiled kernel, so it "
                             f"cannot be a fraction or a switch", candidate)
                     if int(value) <= 0:
                         self._error(
-                            f"zeros_per_group() shape read from parameter '{candidate.id}' "
+                            f"a work-group array's shape read from parameter '{candidate.id}' "
                             f"must be positive, and this launch carried {int(value)}: a "
                             f"shared buffer with no elements has nothing to index",
                             candidate)
@@ -86,9 +87,9 @@ class _PrivateArrayMixin:
                 if extent is None and resolved is not None and not isinstance(
                         resolved, (int, np.integer)):
                     self._error(
-                        f"zeros_per_group() shape read from module constant '{candidate.id}' "
-                        f"must be a whole number of elements, and it is {resolved!r}",
-                        candidate)
+                        f"a work-group array's shape read from module constant "
+                        f"'{candidate.id}' must be a whole number of elements, and it is "
+                        f"{resolved!r}", candidate)
                 return extent
             if isinstance(candidate, ast.Attribute) and isinstance(candidate.value, ast.Name):
                 holder:object = self.resolve_global(candidate.value.id)
@@ -111,19 +112,21 @@ class _PrivateArrayMixin:
 
 
     def _is_local_buffer(self, node:ast.expr)->bool:
-        """True when ``node`` reaches `zeros_per_group(...)` memory, i.e. work-group shared storage.
+        """True when ``node`` reaches work-group shared storage, i.e. `__local` on OpenCL.
 
-        Both spellings count: the buffer itself (`bins`) and the group's slice of it
-        (`bins[blockIdx]`). The slice form is what an atomic call passes -- `atomic_add(
-        bins[blockIdx], i, 1)` -- and answering False there made the OpenCL cast say
-        `__global`, which the compiler rejects as a change of address space.
+        Both kinds count: a per-group buffer with its group subscript
+        (`bins[blockIdx]`) and a block-local one (`bins`). The spelling an atomic call passes
+        is what decides here -- `atomic_add(bins[blockIdx], i, 1)` and
+        `atomic_add(bins, i, 1)` are both work-group memory -- and answering False made the
+        OpenCL cast say `__global`, which the compiler rejects as a change of address space.
         """
         if isinstance(node, ast.Subscript):
             node = node.value
         if not isinstance(node, ast.Name):
             return False
         t:DeviceType = self._lookup(node.id)
-        return isinstance(t, tuple) and len(t) == 5 and t[0] == "shared"
+        return (isinstance(t, tuple) and len(t) == 5
+                and t[0] in ("shared", BLOCK_ARRAY))
 
 
     def _private_element_type(self, dtype_value:object)->Optional[Translated]:

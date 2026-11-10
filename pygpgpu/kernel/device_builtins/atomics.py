@@ -142,7 +142,7 @@ def _emit_atomic_metal(name:str, pointer:str, value_code:str,
 
     Two things are MSL's own. (1) **The address space is part of the type**: the
     atomics are overloaded on `device atomic_T&` and `threadgroup atomic_T&`, so a
-    `zeros_per_group` buffer must be cast to `threadgroup` and an array argument to
+    `local_array_per_group` buffer must be cast to `threadgroup` and an array argument to
     `device` -- the same distinction OpenCL draws with `__local`/`__global`, and for
     the same reason: one address space cannot be cast to the other. (2) **Compare-
     and-swap is `atomic_compare_exchange_weak_explicit`**, which takes *two*

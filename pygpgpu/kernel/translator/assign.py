@@ -7,8 +7,10 @@ from .type_map import (
     DTYPE_MAP,
 )
 from .notation import (
+    BLOCK_LOCAL_BUILTINS,
     DeviceType,
-    SHARED_SLICE,
+    PER_GROUP_BUILTINS,
+    WORK_GROUP_VALUES,
     Translated,
     device_name,
 )
@@ -16,9 +18,10 @@ from .predicates import (
     is_image,
     is_ptr,
 )
+from .work_group import _WorkGroupMixin
 
 
-class _AssignMixin(_PrivateArrayMixin):
+class _AssignMixin(_PrivateArrayMixin, _WorkGroupMixin):
 
     def _visit_assign(self, node:ast.Assign)->None:
         if len(node.targets) != 1:
@@ -138,10 +141,10 @@ class _AssignMixin(_PrivateArrayMixin):
                 f"cannot assign to self.{target.attr}: host attributes cannot be written by device code; "
                 f"write into an array element (self.{target.attr}[i] = ...) or use a local variable", node)
 
-        # shared memory declaration: buf = zeros_per_group(64, np.float32)
+        # shared memory declaration: buf = local_array_per_group(64, np.float32)
         if (isinstance(node.value, ast.Call)
-                and self._builtin_call_name(node.value) in ("zeros_per_group",
-                                                        "zeros_per_block")):
+                and self._builtin_call_name(node.value) in (
+                    PER_GROUP_BUILTINS + BLOCK_LOCAL_BUILTINS)):
             self._handle_local_declaration(node)
             return
 
@@ -301,10 +304,10 @@ class _AssignMixin(_PrivateArrayMixin):
                         pass
                 self._emit(f"{member[0]} = {code};")
                 return
-            # A store into a zeros_per_group() slice flattens like the read side, and has
-            # to be recognized before the array path (a slice is not a pointer parameter).
+            # A store into a work-group buffer flattens like the read side, and has to be
+            # recognized before the array path (a slice is not a pointer parameter).
             slice_code, slice_t = self._visit_expression(target.value)
-            if isinstance(slice_t, tuple) and slice_t and slice_t[0] == SHARED_SLICE:
+            if isinstance(slice_t, tuple) and slice_t and slice_t[0] in WORK_GROUP_VALUES:
                 store_code, store_t = self._visit_shared_index(slice_code, slice_t, target)
                 store_code, _ = self._scalar_position(store_code, store_t, target)
                 self._emit(f"{store_code} = {code};")
@@ -382,67 +385,3 @@ class _AssignMixin(_PrivateArrayMixin):
                 f"cannot rebind the outer array '{target.id}': the array object itself is "
                 f"shared with the caller, so a device kernel can only write its elements", node)
         return outer
-
-
-    def _handle_local_declaration(self, node:ast.Assign)->None:
-        """`buf = zeros_per_group(64, np.float32)` -> a shared array, one slice per work group.
-
-        A work item can only touch memory inside its own group, so the value the name
-        stands for is a **dictionary keyed by block id**: `buf[block_id(0)][j]` is this
-        group's slice. Indexing it with anything else is refused, because there is no
-        meaning for "the buffer of another group" inside a work item.
-
-        opencl: one `__local` parameter per buffer, sized for a single group, and the
-        kernel reads it through the group's own offset in that parameter;
-        cuda: a `__shared__` array, which is already per-group.
-        """
-        call:ast.Call = node.value
-        if len(call.args) != 2 or call.keywords:
-            self._error("zeros_per_group(shape, dtype) takes exactly 2 arguments", call)
-
-        # `np.zeros(shape, dtype)`, argument for argument: the shape comes first and may be
-        # an int (`256`) or a tuple (`(64, 64)`), and the dtype second.
-        shape_node:ast.expr = call.args[0]
-        extents:Optional[List[int]] = self._constant_shape(shape_node, "zeros_per_group()")
-        if extents is None:
-            extents = self._baked_shape(shape_node)
-        if extents is None:
-            self._error(
-                "zeros_per_group() shape must be a constant positive integer, a tuple of "
-                "them, or an int parameter of this kernel: the buffer is a fixed-size "
-                "__shared__/__local array whose size is baked into the generated source, so "
-                "a kernel parameter specializes the kernel per value (each value compiles "
-                "its own kernel) while anything computed at launch time -- a host-region "
-                "value, an expression -- cannot reach it", shape_node)
-            raise AssertionError("unreachable: _error raises")  # narrows `extents` for the checker
-
-        dtype_node:ast.expr = call.args[1]
-        dtype_name:str = ""
-        if isinstance(dtype_node, ast.Attribute) and isinstance(dtype_node.value, ast.Name):
-            module:object = self.resolve_global(dtype_node.value.id)
-            if module is np:
-                dtype_name = dtype_node.attr
-            else:
-                self._error("zeros_per_group() dtype must be a numpy dtype like np.float32", dtype_node)
-        elif isinstance(dtype_node, ast.Constant) and isinstance(dtype_node.value, str):
-            dtype_name = dtype_node.value
-        else:
-            self._error("zeros_per_group() dtype must be a numpy dtype like np.float32", dtype_node)
-
-        if dtype_name not in DTYPE_MAP:
-            self._error(f"zeros_per_group() unsupported dtype: {dtype_name}", dtype_node)
-
-        ctype:str = DTYPE_MAP[dtype_name]
-        if ctype == "half":
-            self._error("zeros_per_group() does not support half (fp16)", dtype_node)
-
-        total:int = 1
-        for extent in extents:
-            total *= extent
-        c_name:str = f"_local{len(self.local_buffers)}"
-        self.local_buffers.append((c_name, ctype, total))
-
-        target:ast.expr = node.targets[0]
-        if not isinstance(target, ast.Name):
-            self._error("zeros_per_group() result must be assigned to a plain variable", node)
-        self._define(target.id, ("shared", ctype, c_name, total, tuple(extents)), node)

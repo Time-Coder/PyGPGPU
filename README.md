@@ -252,6 +252,46 @@ def count_and_return(x: np.ndarray):
 
 All three are exact on every backend — thousands of work items incrementing one location lose nothing. An outer scalar is always a *shared* location, so `TOTAL += 1` there is always atomic; `atomic_add(scalar, 0, 1)` is refused with a message pointing at that spelling, since an atomic needs an array to index.
 
+### Work-group (shared) memory
+
+Four names build it, and they are two pairs. `local_array_per_group` / `shared_array_per_block`
+build a value that stands for **every group's slice at once**, so the body picks its own group
+with the first subscript; `local_array` / `shared_array` build **this block's own** array, which
+is indexed directly and is therefore only meaningful in a gid-style body (one work item per
+body run). Each pair is two functions rather than one function under two names, so an editor
+shows the call that was actually written.
+
+```python
+from pygpgpu import (atomic_add, barrier, blockIdx, get_global_id, get_local_id,
+                     kernel, local_array, local_array_per_group)
+
+# 1) This block's own array: no group subscript, gid style only.
+@kernel(domain="pixels")
+def histogram(pixels: np.ndarray, hist: np.ndarray):
+    lane = get_local_id(0)
+    bins = local_array(256, np.uint32)      # __shared__ uint bins[256]
+    bins[lane] = 0
+    barrier()
+    atomic_add(bins, int(pixels[get_global_id(0)]), 1)
+    barrier()
+    atomic_add(hist, lane, bins[lane])
+
+# 2) Every group's slice: the same declaration, indexed by the group first.
+@kernel(domain="pixels")
+def histogram_grouped(pixels: np.ndarray, hist: np.ndarray):
+    lane = get_local_id(0)
+    bins = local_array_per_group(256, np.uint32)
+    bins[blockIdx][lane] = 0                # this group's slot
+    barrier()
+    atomic_add(bins[blockIdx], int(pixels[get_global_id(0)]), 1)
+    barrier()
+    atomic_add(hist, lane, bins[blockIdx][lane])
+```
+
+The arguments are `np.zeros`' own, in its own order — shape first (an int or a tuple), dtype second — and the shape must be a **compile-time constant** (a literal, a module constant, or an int kernel parameter, which specializes the kernel per value), because the buffer is a `__shared__` array on CUDA/HIP and one `__local`/`threadgroup` parameter on OpenCL/Metal. `barrier()` is required between a write phase and a read phase. `+=` on work-group memory becomes an atomic for the same reason it does on an array.
+
+A `local_array`/`shared_array` call in a magic-loop body is refused: that body runs once for the whole launch, so a bare block array would have no group to belong to — spell it `local_array_per_group` and index by `blockIdx` there.
+
 
 
 Type annotations are optional: the snippets in this README carry them for readability, but the device types come from the arguments at call time, so the same code works unannotated (`self` is not a kernel argument, so annotating it changes nothing).
@@ -333,7 +373,9 @@ The two kernel styles keep their meanings, which is where the interpreter differ
 | gid-style (`get_global_id`), domain from `@kernel(domain="x")` | runs the body once per work item of the declared domain (`x`'s full shape), with `get_global_id` reporting the current index — one serial step per element, in `np.ndindex` order |
 | gid-style, domain from a `k[(blocks, threads)]` bracket | same, one step per work item of the bracket, so the body must clamp itself against the real element count exactly as it does on a GPU |
 
-Inside such a body the same functions resolve to their host implementations: the indexing builtins, the atomics (plain read-modify-writes — serial execution makes them exact), `barrier()` (a no-op) and the vector math family, which uses `pygpgpu.funcs`' host implementation. Two things cannot be emulated and raise instead: `local` (group-local memory is shared by parallel work items) and a `get_global_id` call inside a magic-loop body, where there is no current work item — use the loop variable there.
+Inside such a body the same functions resolve to their host implementations: the indexing builtins, the atomics (plain read-modify-writes — serial execution makes them exact), `barrier()` (a no-op), the work-group arrays and the vector math family, which uses `pygpgpu.funcs`' host implementation. One thing cannot be emulated and raises instead: a `get_global_id` call inside a magic-loop body, where there is no current work item — use the loop variable there.
+
+Work-group storage is emulated honestly: `local_array_per_group` / `shared_array_per_block` return a real mapping (block id to that group's array), and `local_array` / `shared_array` return the current block's array, created on the first work item of each block and reused by the rest. `barrier()` still orders nothing in a serial run, so a body that depends on a *later* work item's write reads what the serial order has produced so far.
 
 Vector-typed arrays work unchanged: reading `v = points[i]` yields a vector instance, and `out[i] = v.xyzy * 2.0` writes its components.
 
@@ -1229,7 +1271,7 @@ config.print_info = True       # verbose again (the default)
 - a `@kernel` signature may carry default values, and a call may pass arguments by keyword: the call is bound to positional order before launch, with omitted defaults filled in. `*args`, `**kwargs` and keyword-only parameters remain unsupported;
 - fp16 (`np.float16`) arguments are unavailable on the CUDA/HIP backends (use float32);
 - the HIP backend compiles with the clang shipped by the AMD HIP SDK; hipRTC on this machine (ROCm 7.2 Windows) fails on any input, so it is not used;
-- the pure-Python backend (`k["python"]`) does not emulate `local` (group-shared memory): it runs serially and has no parallel work items to share it.
+- the pure-Python backend (`k["python"]`) runs work-group storage serially: `barrier()` orders nothing there, so a body that depends on a *later* work item's write reads what the serial order has produced so far.
 
 On CUDA, the array APIs (`Array` upload/read-back through `cuMemcpy2D`) work on every supported interpreter. `cuSurfObjectCreate` and `cuTexObjectCreate` occasionally return `CUDA_ERROR_INVALID_VALUE` on a descriptor that is byte-for-byte valid; the failures cluster in the first few calls of a process and then stop. Measured on the machine this was developed on (driver 13.4, RTX 4070): about one in a hundred creations fails, retrying an already-failed descriptor does not recover it, and a fresh descriptor for a newly created array usually does. Because an `Image` binds one surface and one texture per launch, a scenario that launches several image kernels in one process can therefore lose a few launches. The `python` and OpenCL backends are unaffected: OpenCL images are created per launch on a code path that has not shown the failure, and the `python` backend touches no device at all. `examples/11_texture2d.py` reports a driver refusal instead of raising.
 ## License

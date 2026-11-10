@@ -25,7 +25,7 @@ import tempfile
 
 import numpy as np
 
-from pygpgpu import (barrier, blockIdx, get_global_id, kernel, zeros_per_group)
+from pygpgpu import (barrier, blockIdx, get_global_id, kernel, local_array_per_group)
 from pygpgpu.kernel import source_paths
 
 
@@ -301,7 +301,7 @@ def declares_shared_memory(out: np.ndarray):
     recompiles it repeatedly.
     """
     lane = get_global_id(0)
-    buf = zeros_per_group(64, np.int32)
+    buf = local_array_per_group(64, np.int32)
     buf[blockIdx][lane] = 7
     barrier()
     out[lane] = float(buf[blockIdx][lane])

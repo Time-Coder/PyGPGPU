@@ -8,8 +8,34 @@ from typing_extensions import TypedDict
 
 PTR = "*"  # type notation: ("*", base) means an array parameter, a plain string means a scalar
 
-# A zeros_per_group() slice: that group's storage, plus the shape it was declared with.
+# A local_array_per_group() slice: that group's storage, plus the shape it was declared with.
 SHARED_SLICE = "shared_slice"
+
+# A local_array()/shared_array() buffer: this block's own storage, indexed directly. The
+# binding is ("blockarr", ctype, c_name, total, extents), the same five slots a per-group
+# binding has, and the difference is the first one: a per-group buffer is a mapping that has
+# to be indexed by its group, a block-local one already *is* the caller's block.
+BLOCK_ARRAY = "blockarr"
+
+# The *indexed* form of a block-local buffer, the counterpart of SHARED_SLICE: the C name of
+# the storage, its element type, and the axes the subscripts still have to cover. The two
+# markers stay distinct because an error has to name the spelling the body wrote, but every
+# site that handles "a work-group buffer being indexed" handles both, which is WORK_GROUP_SLICES.
+BLOCK_SLICE = "block_slice"
+
+WORK_GROUP_SLICES:Tuple[str, ...] = (SHARED_SLICE, BLOCK_SLICE)
+
+# Every marker that means "work-group storage is being indexed": the two slice forms above
+# plus the block-local *binding*, which the store path sees directly when the base name is
+# the target (`bins[i] = v`). `_visit_shared_index` normalizes the binding to its slice, so a
+# site that handles indexing can accept all three and let that method sort out the shape.
+WORK_GROUP_VALUES:Tuple[str, ...] = WORK_GROUP_SLICES + (BLOCK_ARRAY,)
+
+# The builtin spellings that build each kind of work-group storage. Both pairs are published
+# and each pair means one thing, so the translator decides the declaration kind from the name
+# it resolved and the errors can name the spelling the user actually wrote.
+PER_GROUP_BUILTINS:Tuple[str, str] = ("local_array_per_group", "shared_array_per_block")
+BLOCK_LOCAL_BUILTINS:Tuple[str, str] = ("local_array", "shared_array")
 
 # Names a kernel body may use that C, C++ or OpenCL C reserves. A parameter or local called
 # `new` is legal python and illegal in every one of those languages -- CUDA and HIP compile
@@ -79,7 +105,7 @@ IMAGE = "image"
 # * a **scalar or vector name** -- `"int"`, `"float3"`, `"quatf"`, a struct name;
 # * a **pointer** -- `("*", base)`, an array parameter;
 # * an **image** -- `("image", channels, scalar)`, opaque storage the body samples;
-# * a **shared slice** -- `("shared_slice", ...)`, one group's zeros_per_group buffer;
+# * a **shared slice** -- `("shared_slice", ...)`, one group's local_array_per_group buffer;
 #
 # `is_ptr` / `is_vec` / `is_image` / `is_int` decide which, so the union says exactly what
 # those predicates accept. It used to be spelled `Any` at every one of these sites, which

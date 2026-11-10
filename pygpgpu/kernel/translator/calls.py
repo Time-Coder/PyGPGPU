@@ -9,7 +9,9 @@ from ..device_builtins import (
     ATOMIC_BUILTINS,
 )
 from .notation import (
+    BLOCK_LOCAL_BUILTINS,
     DeviceType,
+    PER_GROUP_BUILTINS,
     PTR,
     Translated,
 )
@@ -69,7 +71,7 @@ class _CallsMixin(_NestedLaunchMixin):
 
         builtin:Optional[str] = self._builtin_call_name(node)
         if builtin is not None:
-            if builtin in ("zeros_per_group", "zeros_per_block", "work_size"):
+            if builtin in (PER_GROUP_BUILTINS + BLOCK_LOCAL_BUILTINS + ("work_size",)):
                 self._error(
                     f"{builtin}() is a statement, not a value: use it on its own, as "
                     f"`name = {builtin}(...)`", node)

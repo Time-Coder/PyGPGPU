@@ -1,4 +1,4 @@
-"""A `zeros_per_group` shape read from a kernel parameter, and what it costs.
+"""A `local_array_per_group` shape read from a kernel parameter, and what it costs.
 
 The buffer's size is a literal in the generated source (`__shared__ T name[N]` is a
 fixed-size declaration), so a parameter-sized buffer **specializes the kernel**: the value is
@@ -16,12 +16,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pygpgpu import barrier, blockIdx, kernel, zeros_per_group
+from pygpgpu import barrier, blockIdx, kernel, local_array_per_group
 
 
 @kernel(domain="out")
 def parameterized(out: np.ndarray, group_size: int):
-    bins = zeros_per_group(group_size, np.float32)
+    bins = local_array_per_group(group_size, np.float32)
     lane = 0
     bins[blockIdx][lane] = float(group_size)
     barrier()
@@ -30,7 +30,7 @@ def parameterized(out: np.ndarray, group_size: int):
 
 @kernel(domain="out")
 def literal(out: np.ndarray):
-    bins = zeros_per_group(64, np.float32)
+    bins = local_array_per_group(64, np.float32)
     bins[blockIdx][0] = 64.0
     barrier()
     out[0] = bins[blockIdx][0]
@@ -53,7 +53,7 @@ def test_a_computed_shape_is_refused_with_its_reason(gpu_backend: str) -> None:
     @kernel(domain="out")
     def computed(out: np.ndarray, width: int):
         size = width * 2
-        bins = zeros_per_group(size, np.float32)
+        bins = local_array_per_group(size, np.float32)
         bins[blockIdx][0] = 0.0
         barrier()
         out[0] = bins[blockIdx][0]
@@ -71,7 +71,7 @@ def test_a_non_whole_size_names_the_value_this_launch_carried(gpu_backend: str) 
 
     @kernel(domain="out")
     def fractional(out: np.ndarray, group_size: float):
-        bins = zeros_per_group(group_size, np.float32)
+        bins = local_array_per_group(group_size, np.float32)
         bins[blockIdx][0] = 0.0
         barrier()
         out[0] = bins[blockIdx][0]
@@ -87,7 +87,7 @@ def test_a_non_whole_size_names_the_value_this_launch_carried(gpu_backend: str) 
 def test_a_zero_size_names_the_value_this_launch_carried(gpu_backend: str) -> None:
     @kernel(domain="out")
     def empty(out: np.ndarray, group_size: int):
-        bins = zeros_per_group(group_size, np.float32)
+        bins = local_array_per_group(group_size, np.float32)
         bins[blockIdx][0] = 0.0
         barrier()
         out[0] = bins[blockIdx][0]
@@ -105,7 +105,7 @@ def test_a_module_constant_bakes_the_same_literal_every_launch(gpu_backend: str)
 
     @kernel(domain="out")
     def from_constant(out: np.ndarray):
-        bins = zeros_per_group(module_size, np.float32)
+        bins = local_array_per_group(module_size, np.float32)
         bins[blockIdx][0] = float(module_size)
         barrier()
         out[0] = bins[blockIdx][0]

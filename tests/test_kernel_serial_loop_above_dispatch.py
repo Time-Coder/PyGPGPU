@@ -7,10 +7,10 @@ declaration:
 
     for j in range(lane * 4, lane * 4 + 4):     # serial, per work item
         acc += x[j]
-    buf = zeros_per_group(256, np.int32)        # device-only builtin
+    buf = local_array_per_group(256, np.int32)        # device-only builtin
 
 The loop was mistaken for the dispatch, so everything after it -- the shared-memory
-declaration included -- became the host *tail*, and `zeros_per_group` then ran on the host
+declaration included -- became the host *tail*, and `local_array_per_group` then ran on the host
 with no work item: "only available inside a @kernel function body", for a body that plainly
 was one. The two predicates now agree: a `range` is the dispatch only when it addresses
 `x.shape[0]`, which is the shape the translator itself treats as the work-item domain.
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from pygpgpu import barrier, blockIdx, get_global_id, kernel, zeros_per_group
+from pygpgpu import barrier, blockIdx, get_global_id, kernel, local_array_per_group
 
 ITEMS = 1024
 LANES = 256
@@ -35,7 +35,7 @@ def shared_sum_with_serial_loop(x: np.ndarray, out: np.ndarray):
         acc += x[j]
 
     # A literal shape: the buffer is a fixed-size __shared__/__local array.
-    buf = zeros_per_group(256, np.int32)
+    buf = local_array_per_group(256, np.int32)
     buf[blockIdx][lane] = acc
     barrier()
 
@@ -47,7 +47,7 @@ def shared_sum_with_serial_loop(x: np.ndarray, out: np.ndarray):
 
 
 def test_a_serial_loop_above_the_dispatch_keeps_the_body_on_the_device(gpu_backend):
-    """`zeros_per_group` must reach the device, not the host tail."""
+    """`local_array_per_group` must reach the device, not the host tail."""
     x = np.arange(1, ITEMS + 1, dtype=np.int32)
     out = np.zeros(1, dtype=np.int32)
     shared_sum_with_serial_loop[gpu_backend][(1, LANES)](x, out)

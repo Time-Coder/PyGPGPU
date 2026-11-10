@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pytest
 from pygpgpu import (barrier, blockDim, blockIdx, get_global_id,
-                     get_local_id, threadIdx, zeros_per_group)
+                     get_local_id, threadIdx, local_array_per_group)
 from pygpgpu.kernel.decorator import infer_ctype
 from pygpgpu.kernel.translator import FunctionTranslator
 
@@ -239,15 +239,15 @@ def shared_across_kernels(v):
 
 
 def shared_buffer(x, out):
-    """A `zeros_per_group` buffer: the shape a work-group scratch array takes."""
-    buf = zeros_per_group(256, "float32")
+    """A `local_array_per_group` buffer: the shape a work-group scratch array takes."""
+    buf = local_array_per_group(256, "float32")
     gid = get_global_id(0)
     out[gid] = buf[blockIdx][gid] + x[gid]
 
 
 def shared_scratch(x, out):
-    """A `zeros_per_group` buffer, written, barred, then read."""
-    scratch = zeros_per_group(256, np.float32)
+    """A `local_array_per_group` buffer, written, barred, then read."""
+    scratch = local_array_per_group(256, np.float32)
     lane = get_local_id(0)
     scratch[blockIdx][lane] = x[lane]
     barrier()
@@ -282,7 +282,7 @@ def uses_plain_helper(a, out):
 
 
 def uses_reads_shared(a, out):
-    scratch = zeros_per_group(64, np.float32)
+    scratch = local_array_per_group(64, np.float32)
     lane = get_local_id(0)
     scratch[blockIdx][lane] = a[lane]
     barrier()

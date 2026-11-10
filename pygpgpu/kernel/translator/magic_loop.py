@@ -35,7 +35,7 @@ class _MagicLoopMixin(_NdIndexMixin):
         # "After the loop" has to mean after the *dispatch* loop: a serial `for` above it
         # (`for j in range(lane * 4, lane * 4 + 4)`) is per-work-item code, and taking the
         # last `ast.For` of any kind as the boundary pushed everything between them -- a
-        # `zeros_per_group` declaration included -- into the host tail, where a device-only
+        # `local_array_per_group` declaration included -- into the host tail, where a device-only
         # builtin has no work item and fails.
         self.body_tail = list(body[_magic_loop_end(body):])
         # `rows: int = out.shape[0]` above the loop: the local stands for the extent, and

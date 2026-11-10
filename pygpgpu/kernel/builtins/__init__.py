@@ -162,7 +162,8 @@ from .work_item import (
     get_local_size,
     get_num_groups,
 )
-from .group_memory import barrier, zeros_per_group, zeros_per_block
+from .group_memory import barrier, local_array_per_group, shared_array_per_block
+from .block_memory import local_array, shared_array
 from .atomic import (
     atomic_add,
     atomic_sub,
@@ -184,7 +185,8 @@ __all__ = [
     # CUDA's index vectors (three axes each)
     "blockIdx", "threadIdx", "blockDim", "gridDim",
     # synchronisation and launch shape
-    "barrier", "zeros_per_group", "zeros_per_block",
+    "barrier", "local_array_per_group", "shared_array_per_block",
+    "local_array", "shared_array",
     # atomics
     "atomic_add", "atomic_sub", "atomic_min", "atomic_max",
     "atomic_and", "atomic_or", "atomic_xor", "atomic_xchg", "atomic_cas",

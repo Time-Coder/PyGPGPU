@@ -28,15 +28,21 @@ from pygpgpu import (
     float3,
     get_global_id,
     kernel,
-    zeros_per_group,
+    local_array_per_group,
 )
 from pygpgpu.kernel import builtins as namespace
 from pygpgpu.kernel import device_builtins as builtin_tables
+from pygpgpu.kernel.translator.notation import BLOCK_LOCAL_BUILTINS, PER_GROUP_BUILTINS
 from pygpgpu.kernel.builtins import dot as imported_dot
 
 
 def _dispatched_names() -> list[str]:
-    """Every name the translator dispatches on."""
+    """Every name the translator dispatches on.
+
+    `barrier` and the four work-group builders are not in a backend table: the barrier is one
+    emission per backend (`emit_barrier`), and the builders become a *declaration* rather than
+    a call, so the translator dispatches on them from `notation.py`'s name tuples.
+    """
     return sorted(set(builtin_tables.INDEX_BUILTINS)
                   | set(builtin_tables.ATOMIC_BUILTINS)
                   | set(builtin_tables.GENERIC_BUILTINS)
@@ -44,7 +50,9 @@ def _dispatched_names() -> list[str]:
                   | set(builtin_tables.SHARED_MATH_TEMPLATES)
                   | set(builtin_tables.CUDA_ONLY_BUILTINS)
                   | set(builtin_tables.CUDA_ONLY_CONVERSIONS)
-                  | {"zeros_per_group"})
+                  | {"barrier"}
+                  | set(PER_GROUP_BUILTINS)
+                  | set(BLOCK_LOCAL_BUILTINS))
 
 
 # ---------------------------------------------------------------------------
@@ -145,10 +153,23 @@ def test_barrier_is_a_no_op_on_the_host():
     assert barrier() is None
 
 
-def test_zeros_per_group_is_refused_on_the_host():
+def test_local_array_per_group_is_refused_on_the_host():
     with pytest.raises(SyntaxError) as caught:
-        zeros_per_group(16, np.float32)
-    assert "zeros_per_group" in str(caught.value)
+        local_array_per_group(16, np.float32)
+    assert "local_array_per_group" in str(caught.value)
+
+
+def test_the_work_group_names_are_four_distinct_functions():
+    """Two pairs, four `def`s: no name is an alias of another, so an editor can tell them apart."""
+    import pygpgpu as package
+
+    work_group = ("local_array_per_group", "shared_array_per_block",
+                  "local_array", "shared_array")
+    objects = [getattr(package, name) for name in work_group]
+    assert len({id(function) for function in objects}) == len(work_group), (
+        "two of the work-group builtins are the same object, so one is an alias")
+    for name, function in zip(work_group, objects):
+        assert function.__name__ == name, (name, function.__name__)
 
 
 # ---------------------------------------------------------------------------

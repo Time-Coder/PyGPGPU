@@ -3,16 +3,23 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import threading
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
+
+if TYPE_CHECKING:
+    # The element type is numpy's own; naming it here keeps this module import-light while
+    # still annotating the storage a block-local buffer keeps.
+    import numpy as np
+    from numpy.typing import DTypeLike
 
 
 
 class PythonFrame:
     """The launch state the builtin implementations read while a body runs serially.
 
-    Only launch state lives here: the launch shape and the current work item. The operations
-    themselves are the bodies in ``builtins.py``. One frame is installed per thread for the
-    duration of a kernel call, so two concurrent launches never see each other's work item.
+    Only launch state lives here: the launch shape, the current work item, and the
+    work-group storage the body has allocated so far. The operations themselves are the
+    bodies in ``builtins.py``. One frame is installed per thread for the duration of a
+    kernel call, so two concurrent launches never see each other's work item.
     """
 
     def __init__(self, global_size: Tuple[int, ...] = (),
@@ -22,6 +29,41 @@ class PythonFrame:
         # Global id per dimension of the work item being run; None for the plain call of
         # a magic-loop body, where there is no current work item.
         self.coords: Optional[Tuple[int, ...]] = None
+        # True only for a launch that runs the body once *per work item* -- the gid style.
+        # A magic-loop body runs once and stands for the whole launch, so the block-local
+        # builtins (whose value is the caller's own block) have no meaning there.
+        self.per_work_item: bool = False
+        # The work-group arrays this launch has handed out, keyed by (call site, block id).
+        # A serial run still has to give every work item of one block the *same* array:
+        # that is what a work group's shared memory is, and it is what lets a body read a
+        # slot a different work item wrote.
+        self.shared: Dict[Tuple[str, Tuple[int, ...]], "np.ndarray"] = {}
+
+
+    def block_of(self, coords: Tuple[int, ...]) -> Tuple[int, ...]:
+        """The work-group id a global position belongs to, one index per launch axis."""
+        block: list = []
+        for axis, coordinate in enumerate(coords):
+            local: int = self.local_size[axis] if axis < len(self.local_size) else 1
+            block.append(int(coordinate) // max(1, local))
+        return tuple(block)
+
+
+    def shared_array(self, site: str, block: Tuple[int, ...], shape: Tuple[int, ...],
+                     dtype: "DTypeLike") -> "np.ndarray":
+        """The array this block owns at one creation site, created on first use.
+
+        The site is part of the key because one body may declare several buffers; the block
+        id is the other half, because that is which group's storage is meant.
+        """
+        import numpy as np
+
+        key: Tuple[str, Tuple[int, ...]] = (site, tuple(int(b) for b in block))
+        store: "np.ndarray" = self.shared.get(key)
+        if store is None:
+            store = np.zeros(tuple(int(s) for s in shape), dtype=dtype)
+            self.shared[key] = store
+        return store
 
 
 
