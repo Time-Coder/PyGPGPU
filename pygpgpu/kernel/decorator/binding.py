@@ -116,10 +116,14 @@ def _body_only(error:BaseException)->Optional[TracebackType]:
     """The exceptions raised by a kernel body, without this library's frames.
 
     ``PyKernel._invoke`` ends the chain with the body's own frame: a stand-in on a device
-    backend, and the *real* frame on the interpreter backend, which has column information
-    a stand-in cannot carry. Everything ahead of it belongs to the launch machinery.
-    Nothing is returned for an error that carries neither -- a failure raised before the
-    body ran -- so that one keeps its own diagnostic.
+    backend, and the *real* frames on the interpreter backend, which has column information
+    a stand-in cannot carry. The chain below the body's frame is the user's own as well --
+    a raise inside a helper shows the helper's frame, exactly as an undecorated call would
+    -- so the user's chain is kept from where it BEGINS: the first frame of this package or
+    of a stand-in marks the launch machinery's head, and everything before it is the
+    boundary the exception traveled through. Nothing is returned for an error that carries
+    neither -- a failure raised before the body ran -- so that one keeps its own
+    diagnostic.
     """
     traceback:object = error.__traceback__
     keep:object = None
@@ -127,9 +131,8 @@ def _body_only(error:BaseException)->Optional[TracebackType]:
     while cursor is not None:
         code:object = cursor.tb_frame.f_code
         if _is_body_stand_in(code) or _is_user_frame(code):
-            # The last such frame is the body's: the launch machinery is all inside this
-            # package, so anything after it would be a callee, and the body is the callee.
             keep = cursor
+            break
         cursor = cursor.tb_next
     return keep
 

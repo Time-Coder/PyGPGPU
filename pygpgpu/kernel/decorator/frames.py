@@ -167,13 +167,19 @@ def _body_frame(func:Callable, error:BaseException)->Optional[TracebackType]:
             if (os.path.abspath(frame_code.co_filename) == os.path.abspath(filename)
                     and frame_code.co_name == body_name
                     and not _is_body_stand_in(frame_code)):
-                # The interpreter backend ran the body, so this is the user's own frame at
-                # the failing line -- with the column information only a real frame has.
-                # Nothing is gained by replacing it with a stand-in, and the caret is lost
-                # by doing so, which is what made this backend's error read differently
-                # from the undecorated one.
-                while cursor.tb_next is not None:
-                    cursor = cursor.tb_next
+                # The interpreter backend ran the body natively, so the frames BELOW this
+                # one are the user's own too -- a raise inside a helper shows the helper's
+                # frame, exactly as an undecorated call would. Keep the chain from this
+                # frame down to the last user frame: a library frame after it (a numpy
+                # wrapper, a callback) is where a native traceback would stop as well.
+                # Nothing is gained by replacing these frames with a stand-in, and the
+                # caret is lost by doing so, which is what made this backend's error read
+                # differently from the undecorated one.
+                inner:object = cursor
+                while inner.tb_next is not None \
+                        and _is_user_frame(inner.tb_next.tb_frame.f_code):
+                    inner = inner.tb_next
+                inner.tb_next = None
                 return cursor
             cursor = cursor.tb_next
         cursor = error.__traceback__
@@ -235,24 +241,21 @@ def _user_traceback(error:BaseException, func:Callable)->Optional[TracebackType]
     """The traceback native python would have produced: the caller, then the failing line.
 
     Everything between the two belongs to this library, so it is spliced out. The head is
-    the caller's own frame -- the line that asked the kernel to run -- and its successor is
-    the stand-in built by :func:`_body_frame`, which carries the body's file, line and
-    function name.
+    the caller's own frame -- the line that asked the kernel to run, added by the
+    re-raise at the launch boundary -- and its successor is the chain
+    :func:`_body_frame` returns: the stand-in it built for the body's failing line on a
+    device backend, and the body's own real frames down to the raise on the interpreter
+    backend (a raise inside a helper keeps the helper's frame, exactly as an undecorated
+    call would show it).
 
-    CPython prepends the frame that *executes* the ``raise``, so the chain cannot be
-    assembled by assigning ``tb_next``: the caller node is already part of the live chain,
-    and pointing it at the stand-in is rejected as a loop. It is assembled the way the
-    interpreter assembles one -- raise once from the stand-in, then drop that one frame --
-    which leaves exactly the frames of a native failure.
+    The chain ``_body_frame`` returns is already cut at the last user frame, so it is
+    handed back unchanged: a traceback node cannot be fabricated, and the nodes it carries
+    are either the stand-in's own raise or the live chain of the error being handled --
+    both real raises, both already cut. When there is no body frame at all (the body never
+    ran, or its source has no file to name), the first non-library frame of the live chain
+    is what remains.
     """
     body:Optional[TracebackType] = _body_frame(func, error)
     if body is None:
         return _caller_traceback(error.__traceback__)
-    body.tb_next = None
-    try:
-        # Never returns: the stand-in raises the caller's own exception object.
-        raise error.with_traceback(body)
-    except BaseException as raised:
-        # `raised.__traceback__` is this function's own frame followed by the stand-in.
-        head:object = raised.__traceback__
-        return head.tb_next if head is not None and head.tb_next is not None else body
+    return body
