@@ -284,9 +284,9 @@ class _TargetsMixin:
             if not tail:
                 return named, "int"
             # A store through a partial index broadcasts: the named flattening is the
-            # sub-array's first element, and the tail parameter carries the count of the
-            # contiguous elements that follow it (1 when the index is full-rank).
-            return f"(({named}) * {self._tail_var(array_name, len(dims))})", "int"
+            # sub-array's first element, and the tail counts the contiguous elements
+            # that follow it (1 when the index is full-rank).
+            return f"(({named}) * {self._tail_expression(array_name, len(dims))})", "int"
         code, t = self._visit_expression(index)
         if not is_int(t):
             self._error("array index must be an integer", node)

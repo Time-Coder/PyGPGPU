@@ -189,6 +189,23 @@ class _NamingMixin:
             self.shapes_used.append(key)
         return f"_{device_name(array_name)}_tail{count}"
 
+    def _tail_expression(self, array_name:str, count:int)->str:
+        """The C that counts a sub-array's elements after a partial index.
+
+        A private array's shape is a compile-time constant, so its tail is a literal --
+        only a parameter's tail is a launch parameter (see `_tail_var`). A local pointer
+        resolves to the array it was assigned from first, exactly as a shape read does.
+        """
+        root:str = self._array_pointer_root(array_name)
+        binding:DeviceType = self._lookup(root)
+        if isinstance(binding, tuple) and len(binding) == 4 and binding[0] == "bodyarr":
+            shape:Tuple[int, ...] = binding[2]
+            tail:int = 1
+            for extent in shape[count:]:
+                tail *= int(extent)
+            return str(tail)
+        return self._tail_var(array_name, count)
+
 
     def _array_pointer_root(self, name:str)->str:
         """The array a local pointer variable was assigned from, or the name itself.

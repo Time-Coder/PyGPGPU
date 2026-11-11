@@ -85,6 +85,23 @@ class _CompileWriteMixin:
         plan.device_prefix:List[str] = (list(plan.translator.device_helpers)
                                    + list(plan.translator.nested_helpers)
                                    + list(plan.translator.nested_kernels))
+        # A multi-phase body translates its work-item code on the phase translators, whose
+        # own device functions (a floored `%`, a HIP round-toward-zero helper) live on the
+        # phase's list -- the main one never visits a loop, so its own list is empty for
+        # such a body. The phases render into this same file, so their helpers join the
+        # prefix here. The same question answers for this file's *callee* entries: their
+        # bodies may name a device function of their own, and the definition travels with
+        # the entry (see _emit_device_call), so it is emitted beside the code that names it.
+        for phase in list(getattr(plan.translator, "phase_translators", ()) or ()):
+            helper_sources:List[str] = list(getattr(phase, "device_helpers", ()) or ())
+            for helper_source in helper_sources:
+                if helper_source not in plan.device_prefix:
+                    plan.device_prefix.append(helper_source)
+        for plan.own_entry in plan.own_entries:
+            entry_helpers:List[str] = list(plan.own_entry.get("device_helpers") or [])
+            for helper_source in entry_helpers:
+                if helper_source not in plan.device_prefix:
+                    plan.device_prefix.append(helper_source)
         plan.device_prefix.extend(entry["code"] for entry in plan.own_entries)
 
         # One forward-declaration block for the compilation's whole callee set, carried by
@@ -268,9 +285,21 @@ class _CompileWriteMixin:
             if plan.foreign_digest is None:
                 plan.foreign_digest = source_paths.python_source_digest(plan.foreign_source_file)
                 plan.foreign_digests[plan.foreign_source_file] = plan.foreign_digest
+            # A definition these entries' bodies call but no file defines yet -- a floored
+            # `%`, a HIP helper -- travels in the entry's own `device_helpers` (see
+            # _emit_device_call, which merges the callee's list). They are the foreign
+            # file's own prefix: the code that names one is in THIS file, so the
+            # definition has to be too.
+            plan.foreign_pieces:List[str] = []
+            for plan.entry in plan.entries:
+                for helper_source in plan.entry.get("device_helpers") or []:
+                    if helper_source not in plan.foreign_pieces:
+                        plan.foreign_pieces.append(helper_source)
+            plan.foreign_pieces.extend(entry["code"] for entry in plan.entries
+                                       if entry["code"])
             plan.written[plan.path] = source_paths.append_source(
                 plan.path, plan.foreign_header,
-                [entry["code"] for entry in plan.entries if entry["code"]],
+                [piece for piece in plan.foreign_pieces if piece],
                 plan.foreign_source_file,
                 source_digest=plan.foreign_digest)
             # What the heal path needs for this foreign file, kept per path: the header
@@ -278,8 +307,8 @@ class _CompileWriteMixin:
             # fails on the file is answered by rebuilding it from here (see
             # _compile_kernels) -- the one shape that is always current.
             plan.rewrite_plan[plan.path] = (list(plan.foreign_header),
-                                            [entry["code"] for entry in plan.entries
-                                             if entry["code"]],
+                                            [piece for piece in plan.foreign_pieces
+                                             if piece],
                                             plan.foreign_source_file, plan.foreign_digest)
 
         plan.source_path:str = source_paths.append_source(

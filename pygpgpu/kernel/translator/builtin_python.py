@@ -228,7 +228,16 @@ class _BuiltinPythonMixin:
                 return self._emit_vec_clamp(arg_codes, arg_types, vec_t), vec_t
             if self._opencl_syntax:
                 return f"clamp({', '.join(arg_codes)})", args[0][1]
-            return f"fminf(fmaxf({arg_codes[0]}, {arg_codes[1]}), {arg_codes[2]})", args[0][1]
+            # The CUDA spelling is the fmin/fmax pair, and the pair follows the promoted
+            # width: a double operand beside a float one left the call spelled fminf with
+            # a double inside, and the value that came out fed a `pow(float, double)` --
+            # two half-width candidates no overload matches. Casting to the width and
+            # spelling the pair for it keeps one answer per width.
+            width:str = "double" if any(t == "double" for _, t in args) else "float"
+            minimum:str = "fmin" if width == "double" else "fminf"
+            maximum:str = "fmax" if width == "double" else "fmaxf"
+            cast:List[str] = [f"(({width})({c}))" for c in arg_codes]
+            return f"{minimum}({maximum}({cast[0]}, {cast[1]}), {cast[2]})", width
 
         if name == "mix":
             if len(args) != 3:
@@ -260,7 +269,15 @@ class _BuiltinPythonMixin:
                 return self._emit_vec_clamp([code], [t], vec_t), vec_t
             if self._opencl_syntax:
                 return f"clamp({code}, 0.0f, 1.0f)", t
-            return f"fminf(fmaxf({code}, 0.0f), 1.0f)", t
+            # The pair follows the argument's width, the same rule the clamp branch
+            # spells out: a double operand under the float spell fed the same
+            # half-width mismatch a mixed `pow` call did.
+            width:str = "double" if t == "double" else "float"
+            minimum:str = "fmin" if width == "double" else "fminf"
+            maximum:str = "fmax" if width == "double" else "fmaxf"
+            zero:str = self._real_literal(0.0, width)
+            one:str = self._real_literal(1.0, width)
+            return f"{minimum}({maximum}(({width})({code}), {zero}), {one})", width
 
         if name == "step":
             if len(args) != 2:

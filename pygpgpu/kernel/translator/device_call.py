@@ -170,6 +170,11 @@ class _DeviceCallMixin:
                 # The same for complex values: a helper's body may use them too.
                 "complex_needs": set(callee.complex_needs),
             }
+            # Recorded after `render_device`, so a definition the render itself
+            # contributed (see _render_body's declaration fixup) is carried too: the
+            # write step emits these beside the entry's own code, in whichever file
+            # that code lands (see _compile_write's own and foreign prefixes).
+            entry["device_helpers"] = list(callee.device_helpers)
             self.device_cache[sig_key] = entry
         except Exception:
             self.device_cache.pop(sig_key, None)
