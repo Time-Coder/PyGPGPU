@@ -205,8 +205,8 @@ class FractalViewer(QWidget):
         self.draw()
         # The framebuffer stays on the device between frames -- every pixel is written, so
         # nothing about the last one has to be uploaded again -- and this is the one copy
-        # the window needs. A gnp array is what keeps it there; see __init__.
-        self.image.to_host(wait=True)
+        # the window needs. Asked for without waiting: the read below is what waits for it.
+        self.image.to_host()
         self._frame = _qimage_from_array(self.image)
         self.setWindowTitle(f"{self._title}  {self.status_text()}")
         self.update()

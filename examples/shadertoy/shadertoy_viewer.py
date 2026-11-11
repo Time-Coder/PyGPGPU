@@ -189,9 +189,10 @@ class ShadertoyViewer(QWidget):
         self.i_frame += 1
         self.draw()
         # The framebuffer lived on the device across the launch; this is the one copy that
-        # has to happen -- the pixels the window shows. Asked for explicitly so the wait is
-        # here, where the frame's cost is measured, rather than implicit in the QImage.
-        self.image.to_host(wait=True)
+        # has to happen -- the pixels the window shows. It is ASKED for without waiting: the
+        # read below is what waits for it (a gnp array blocks any host access until the copy
+        # lands), which lets the copy start before the QImage work instead of after it.
+        self.image.to_host()
         self._frame = _qimage_from_array(self.image)
         # The readout is the render cost, not the event rate: redraws fire on show, resize
         # and pointer events, so an idle window renders nothing and an interval would read
