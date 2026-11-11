@@ -20,6 +20,9 @@ from .predicates import (
     is_int,
     is_ptr,
 )
+from .vectors import (
+    is_vec,
+)
 
 
 class _EmitMixin:
@@ -59,9 +62,21 @@ class _EmitMixin:
         which zeroes every member and is valid for a scalar too. A scalar and a pointer keep
         the cast. A **vector** keeps it as well: a scalar cast to a vector is OpenCL's
         broadcast initializer, where brace-initializing one is not portable.
+
+        One vector case cannot keep the cast: a **CUDA** compile. A vector there is a plain
+        structure (CUDA's `float3` declares `float x, y, z;` and nothing else), so the cast
+        asks C++ for a converting constructor the struct does not have -- "no suitable
+        constructor exists to convert from int to float3" -- and it takes the record's own
+        `{0}`. HIP's `float3` is a `HIP_vector_type`, which carries exactly that converting
+        constructor, and OpenCL reads the cast as the broadcast: both keep the cast, which
+        is what their kernels compile today.
         """
         base:str = type_text.replace("const", "").strip()
-        return "{0}" if is_aggregate(base) else f"({base})0"
+        if is_aggregate(base):
+            return "{0}"
+        if is_vec(base) and self.launch_backend == "cuda":
+            return "{0}"
+        return f"({base})0"
 
 
     def _hoist_declaration(self, name:str, type_text:str,
