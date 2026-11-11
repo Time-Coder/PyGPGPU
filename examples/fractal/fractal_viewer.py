@@ -50,6 +50,7 @@ from PySide6.QtGui import QImage, QMouseEvent, QPainter, QPaintEvent, QResizeEve
 from PySide6.QtWidgets import QApplication, QWidget
 
 from pygpgpu import kernel, config
+from pygpgpu import numpy as gnp
 from pygf import color3f
 
 config.print_info = False
@@ -99,7 +100,12 @@ class FractalViewer(QWidget):
 
     def __init__(self, init_width: int = 800, init_height: int = 600, title: str = "fractal") -> None:
         super().__init__()
-        self.image = np.zeros((init_height, init_width, 3), dtype=np.uint8)
+        # A gnp array keeps its bytes on the device across launches. Every pixel of a frame
+        # is written, so the previous frame never has to travel back up: a plain numpy array
+        # would be uploaded again on each launch (the launch path always uploads a written
+        # argument, because its read-back is whole-buffer). Only the read-back the window
+        # needs in redraw() stays.
+        self.image = gnp.zeros((init_height, init_width, 3), dtype=np.uint8)
         self.view_center: complex = 0j
         self.scale: float = 1.0
         self.is_left_pressed: bool = False
@@ -197,6 +203,10 @@ class FractalViewer(QWidget):
     def redraw(self) -> None:
         """Render a frame on the device and show it."""
         self.draw()
+        # The framebuffer stays on the device between frames -- every pixel is written, so
+        # nothing about the last one has to be uploaded again -- and this is the one copy
+        # the window needs. A gnp array is what keeps it there; see __init__.
+        self.image.to_host(wait=True)
         self._frame = _qimage_from_array(self.image)
         self.setWindowTitle(f"{self._title}  {self.status_text()}")
         self.update()
@@ -275,7 +285,7 @@ class FractalViewer(QWidget):
         if size.width() < 1 or size.height() < 1 or not self._ready:
             return
         # The frame is always the widget size, so a resize renders a new one.
-        self.image = np.zeros((size.height(), size.width(), 3), dtype=np.uint8)
+        self.image = gnp.zeros((size.height(), size.width(), 3), dtype=np.uint8)
         self.update_params()
         self.redraw()
 

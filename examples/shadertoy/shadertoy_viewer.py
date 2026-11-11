@@ -37,6 +37,12 @@ body must not write them: a uniform is not the shader's to change. Assigning a w
 vector is the viewer's job -- and the one spelling device code cannot use anyway (a component
 store like ``self.i_mouse.x = ...`` is refused; see
 ``tests/known_failures/vector_component_store.py``).
+
+The frame buffer is a ``pygpgpu.numpy`` array, so it lives on the device between frames: the
+kernel overwrites every pixel, so nothing about the previous frame has to be uploaded again,
+and ``redraw`` asks for the one copy the window needs (the read-back). A plain numpy array
+would be copied up on every launch -- the launch path always uploads a written argument,
+because its read-back is whole-buffer -- which is half the traffic for no result.
 """
 
 import sys
@@ -51,6 +57,7 @@ from PySide6.QtGui import (QHideEvent, QImage, QMouseEvent, QPainter, QPaintEven
 from PySide6.QtWidgets import QApplication, QWidget
 
 from pygpgpu import config, kernel
+from pygpgpu import numpy as gnp
 from pygf import color3f, float2, float4
 
 config.print_info = False
@@ -115,7 +122,12 @@ class ShadertoyViewer(QWidget):
 
     def __init__(self, width: int = 640, height: int = 360, title: str = "shadertoy") -> None:
         super().__init__()
-        self.image = np.zeros((height, width, 3), dtype=np.uint8)
+        # A gnp array keeps its bytes on the device between launches. The framebuffer only
+        # ever travels one way -- the kernel overwrites every pixel, so nothing about the
+        # previous frame has to be uploaded -- and a plain numpy array would be copied up
+        # again on every launch (the launch path always uploads a written argument, because
+        # its read-back is whole-buffer). Only the read-back the window needs stays.
+        self.image = gnp.zeros((height, width, 3), dtype=np.uint8)
         # The uniforms, in Shadertoy's names and packings: i_mouse is the float4 Shadertoy
         # passes (xy the pointer, z the click position, w the button state), the rest are
         # scalars. They are plain attributes: a body reads them, the host rebinds them before
@@ -176,6 +188,10 @@ class ShadertoyViewer(QWidget):
         self.i_time = frame_start - self._started
         self.i_frame += 1
         self.draw()
+        # The framebuffer lived on the device across the launch; this is the one copy that
+        # has to happen -- the pixels the window shows. Asked for explicitly so the wait is
+        # here, where the frame's cost is measured, rather than implicit in the QImage.
+        self.image.to_host(wait=True)
         self._frame = _qimage_from_array(self.image)
         # The readout is the render cost, not the event rate: redraws fire on show, resize
         # and pointer events, so an idle window renders nothing and an interval would read
@@ -206,7 +222,7 @@ class ShadertoyViewer(QWidget):
         size = event.size()
         if size.width() < 1 or size.height() < 1:
             return
-        self.image = np.zeros((size.height(), size.width(), 3), dtype=np.uint8)
+        self.image = gnp.zeros((size.height(), size.width(), 3), dtype=np.uint8)
         self.i_resolution = float2(float(size.width()), float(size.height()))
         self.redraw()
 
