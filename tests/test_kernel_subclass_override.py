@@ -1,13 +1,15 @@
 """The subclass-override shapes that already compile, kept as the boundary of the fixes.
 
 `tests/test_kernel_known_failures.py` describes two shapes that do not compile yet: an override
-calling a helper of the base class, and one calling a module-level function. These two tests are
+calling a helper of the base class, and one calling a module-level function. These tests are
 the other side of that line, and they pass today:
 
 * an override calling a helper of *its own* class;
-* a base class's own default calling a base helper and a subclass hook.
+* a base class's own default calling a base helper and a subclass hook;
+* a pygf vector as a self member of the kernel's own class (see
+  `known_failures/vector_self_member.py` for why this file carries it).
 
-A fix for the failing shapes must keep both of these working -- the natural one is to extend the
+A fix for the failing shapes must keep all of these working -- the natural one is to extend the
 walk that collects device functions, not to change how a call is resolved.
 """
 from __future__ import annotations
@@ -16,6 +18,7 @@ import numpy as np
 
 from _helpers.test_kernel_subclass_override_helpers import (BaseWithDefault,
                                                             BaseWithHook)
+from known_failures.vector_self_member import VectorMember
 
 
 def _grid(factor: float) -> np.ndarray:
@@ -55,3 +58,15 @@ def test_a_base_default_may_call_a_base_helper_and_a_subclass_hook(gpu_backend):
     viewer = _CountOnly()
     viewer.draw[gpu_backend]()
     np.testing.assert_allclose(viewer.image, _grid(2.0))
+
+
+def test_a_pygf_vector_may_be_a_self_member(gpu_backend):
+    """`self.origin.x` from a device method reads the receiver's vector member.
+
+    Found while writing the shadertoy viewer: the uniforms are naturally vectors
+    (`self.i_mouse`), and the object scan accepts a pygf vector as a member -- the refusal its
+    neighbouring file once documented does not exist. Pinned here so it stays that way.
+    """
+    viewer = VectorMember()
+    viewer.draw[gpu_backend]()
+    np.testing.assert_allclose(viewer.image, _grid(1.0))

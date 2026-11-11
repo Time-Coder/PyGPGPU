@@ -179,9 +179,7 @@ class MandelbrotViewer(FractalViewer):
         n: int = 0
         while abs_zn <= 2 and n < max_iter:
             zn = ref_z[n]
-            # `2*zn` rather than `2.0*zn`: scaling a complex value by a float currently emits a
-            # helper the complex header does not define.
-            delta = 2 * zn * delta + delta * delta + dc
+            delta = 2.0 * zn * delta + delta * delta + dc
             n += 1
             abs_zn = abs(ref_z[n] + delta)
 

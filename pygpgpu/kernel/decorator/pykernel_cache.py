@@ -1,5 +1,6 @@
 # The cache folder, the backend compile, and the launch-argument helpers.
 from __future__ import annotations
+import os
 from typing import (
     List,
     Optional,
@@ -69,6 +70,30 @@ class _PykernelCacheMixin:
         for param_index, dim in shape_sources:
             launch_args.append(int(args[param_index].shape[dim]))
         return launch_args
+
+
+    @staticmethod
+    def _source_files_changed(launch_meta:object)->bool:
+        """Whether a generated file this entry was built from changed on disk.
+
+        The in-process `_cache` outlives the compile, so a file damaged *after* the entry
+        was built -- a previous package version's shape, a crashed write, a truncated
+        copy, an indexer's partial save -- would be served by every later launch forever:
+        the digest sidecar describes the python, not the generated text, so it cannot see
+        any of these. The entry records one stat per file it was built from; a change
+        invalidates the entry and the next launch re-renders, whose merge (and whose
+        build-failure rewrite, see _compile_kernels) restores the current shape.
+        """
+        mtimes:object = getattr(launch_meta, "get", lambda key, default=None: None)("source_mtimes", None)
+        if not mtimes:
+            return False
+        for path, recorded in mtimes.items():
+            try:
+                if os.stat(path).st_mtime_ns != recorded:
+                    return True
+            except OSError:
+                return True
+        return False
 
 
     def _bind_images(self, full_values:List[object], backend:str)->None:

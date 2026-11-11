@@ -1,4 +1,4 @@
-"""Known-failure regressions found by rendering a deep-zoom Mandelbrot on the GPU.
+﻿"""Known-failure regressions found by rendering a deep-zoom Mandelbrot on the GPU.
 
 Every test here fails today, on purpose: they are the specification for the fixes, written
 as failing tests first (TDD). Each one names the repro that found it and what the right
@@ -7,6 +7,9 @@ where the interpreter runs numpy) already computes for the same source. The kern
 one module per bug in `known_failures/`, because the generated source of one python module
 is one translation unit: a kernel whose bug is a compile error would otherwise take every
 other kernel in the module down with it.
+
+This file holds the arithmetic groups; the object-shaped ones (subclass overrides, refused
+spellings, the pygf vectors' store side) live in `test_kernel_known_failures_objects.py`.
 
 The failures fall into four groups:
 
@@ -24,10 +27,6 @@ The failures fall into four groups:
   double, `min`/`max` capped at two arguments, ndindex extents held in locals read as a
   "second magic loop", an ndenumerate index that cannot be subscripted, and a float
   carried scalar accumulated through an int atomic (which truncates every contribution).
-* **a subclass override and its helpers**: a method a subclass overrides may not call a
-  helper of the base class, nor a module-level function -- the generated source calls it
-  without defining it -- and two subclasses of one `@kernel` share the first one's
-  compiled binary, so the second silently answers the first one's colours.
 """
 from __future__ import annotations
 
@@ -50,10 +49,6 @@ from known_failures.ndindex_locals import ndindex_with_local_bounds
 from known_failures.np_int_math import numpy_math_on_ints
 from known_failures.pow_integers import builtin_pow_integers
 from known_failures.scalar_cast_loop import scalar_cast_inside_the_loop
-from known_failures.subclass_calls_base_helper import Base as SubclassBaseHelperBase
-from known_failures.subclass_calls_module_helper import Base as SubclassModuleHelperBase
-from known_failures.subclass_calls_module_helper import scaled
-from known_failures.subclass_kernel_identity import Base as SubclassIdentityBase
 from known_failures.widen_to_double import variable_widens_from_float_to_double
 
 # ---------------------------------------------------------------------------
@@ -324,90 +319,3 @@ def test_a_float_carried_scalar_accumulates_in_its_own_width(runner):
     assert out[0] == pytest.approx(0.75)
 
 
-# ---------------------------------------------------------------------------
-# Group 5 -- a subclass override and the helpers it calls
-#
-# Found by writing `examples/fractal/fractal_viewer.py`: a base class owns the @kernel and
-# its body calls an overridable hook, and three viewers in other modules write that hook.
-# Two of the three compile; the one whose override reaches a helper of the base does not.
-# ---------------------------------------------------------------------------
-
-
-def _sample_grid(factor: float) -> np.ndarray:
-    """What `sample(i, j)` answers when it is `factor * (i + j + 1)`."""
-    rows = np.arange(2, dtype=np.float32)[:, None]
-    columns = np.arange(3, dtype=np.float32)[None, :]
-    return factor * (rows + columns + 1.0)
-
-
-class _UsesInheritedHelper(SubclassBaseHelperBase):
-    """The override colours through a helper it inherits, the way the examples do."""
-
-    def sample(self, i: int, j: int) -> np.float32:
-        return self.scale(np.float32(i + j + 1))
-
-
-def test_a_subclass_override_can_call_an_inherited_helper(gpu_backend):
-    """`self.scale(...)` from an override must compile, exactly as from the kernel body.
-
-    The generated source calls the base's device function and never defines it, so the module
-    is refused with `identifier "Base_scale_<hash>" is undefined`. Nothing about the call is
-    ambiguous -- the receiver is the instance, the class is known at translation time -- and
-    the same helper is emitted correctly when the *kernel body* calls it directly, so the walk
-    that collects device functions simply has to reach through an override too. The expected
-    numbers are python's: `sample(i, j)` is `2 * (i + j + 1)`.
-    """
-    viewer = _UsesInheritedHelper()
-    viewer.draw[gpu_backend]()
-    np.testing.assert_allclose(viewer.image, _sample_grid(2.0))
-
-
-class _UsesModuleHelper(SubclassModuleHelperBase):
-    """The override colours through a module-level function."""
-
-    def sample(self, i: int, j: int) -> np.float32:
-        return scaled(np.float32(i + j + 1))
-
-
-def test_a_subclass_override_can_call_a_module_level_function(gpu_backend):
-    """A module-level device helper is reachable from a kernel body and from an override alike.
-
-    Same failure as the inherited helper above (`identifier "scaled_<hash>" is undefined`), and
-    the same reason: the helpers an override reaches are not walked for emission. The expected
-    numbers are python's: `sample(i, j)` is `3 * (i + j + 1)`.
-    """
-    viewer = _UsesModuleHelper()
-    viewer.draw[gpu_backend]()
-    np.testing.assert_allclose(viewer.image, _sample_grid(3.0))
-
-
-class _AnswersOne(SubclassIdentityBase):
-    """The first subclass to launch."""
-
-    def sample(self, i: int, j: int) -> np.float32:
-        return np.float32(1)
-
-
-class _AnswersTwo(SubclassIdentityBase):
-    """A second subclass, whose hook answers differently."""
-
-    def sample(self, i: int, j: int) -> np.float32:
-        return np.float32(2)
-
-
-def test_two_subclasses_of_one_kernel_keep_their_own_hook(gpu_backend):
-    """The second subclass must not be served the first one's device code.
-
-    The compiled-launch cache is keyed by backend, device, the *argument* signature and the
-    type map; the class whose hook the kernel inlined is in none of them, so the second launch
-    reuses the first binary and every pixel comes back 1 instead of 2. That is the worst kind
-    of failure -- a wrong answer with no error -- and it is what a script showing two viewers
-    of one base class hits. Whatever supplies the identity, two different hooks must not share
-    one cached launch.
-    """
-    first = _AnswersOne()
-    second = _AnswersTwo()
-    first.draw[gpu_backend]()
-    second.draw[gpu_backend]()
-    np.testing.assert_allclose(first.image, 1.0)
-    np.testing.assert_allclose(second.image, 2.0)

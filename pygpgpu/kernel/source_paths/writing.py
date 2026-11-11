@@ -92,6 +92,31 @@ def append_source(path: str, header: List[str], definitions: List[str],
 
 
 
+def rewrite_source(path: str, header: List[str], definitions: List[str],
+                   source_python: str, source_digest: str = "") -> str:
+    """Rebuild one generated file from the render given, discarding what it held.
+
+    This is the *heal* path, for a build that just failed on a file whose digest still
+    matched: the damage a digest cannot see (a previous package version's shape, a crashed
+    write, a truncated copy) is only visible by rebuilding from the current render. The
+    file is replaced whole -- a foreign module's file is rebuilt from the entries this
+    compilation holds for it, which is everything any caller of that module rendered into
+    this unit -- and the digest is restamped, so the next launch compiles the rebuilt
+    text. `merge_source` deliberately does NOT apply here: merging is what kept the damage,
+    because the merge's digest short-circuit answered "keep".
+    """
+    with write_lock(path):
+        _ensure_directory(os.path.dirname(path))
+        source: str = assemble_source(
+            [piece.strip("\n") for piece in header if piece.strip()],
+            [piece for piece in definitions if piece and piece.strip()],
+            path)
+        _write_source_file(path, source)
+        _write_digest(path, source_digest)
+        return path
+
+
+
 def _append_source_locked(path: str, header: List[str], definitions: List[str],
                           source_python: str, source_digest: str) -> str:
     """`append_source`'s body, with the file's locks already held."""

@@ -220,6 +220,13 @@ class _PrepareLaunchMixin:
         plan.cache_key:str = (f"{plan.backend}|{plan.device_key}|{plan.sig}"
                           f"|{self._type_map_key()}|{owner_mark}")
         plan.entry = self._cache.get(plan.cache_key)
+        if plan.entry is not None and self._source_files_changed(plan.entry[8]):
+            # A generated file this entry was built from changed on disk (damage the
+            # digest sidecar cannot see -- it describes the python, not the generated
+            # text). Drop the entry: the re-render below rewrites the files from the
+            # current shape, and the build-failure rewrite covers whatever the merge
+            # cannot (see _compile_kernels).
+            plan.entry = None
         if plan.entry is None:
             # Create the device objects for any Image before compiling. On the driver
             # this was developed against, loading a module that contains texture or

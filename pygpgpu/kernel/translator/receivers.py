@@ -200,6 +200,31 @@ def _self_member_call_kind(owner:Optional[type], name:str)->Translated:
     return kind, target
 
 
+def _super_target(owner:Optional[type], attr:str)->Optional[Callable]:
+    """The function `super().attr` resolves to, from a method of ``owner``, or None.
+
+    Python's zero-argument `super()` from a method of `C` answers "the next class after
+    `C` in the MRO that defines `attr`". The MRO is a fact about the python classes, all
+    of them in hand at translation time, so the answer is a plain walk: every base after
+    the owner is asked in order, the first carrier decides. A @kernel method or a
+    classmethod is not a device helper, so it answers None -- the caller reports that no
+    base implementation can be called from device code.
+    """
+    if owner is None:
+        return None
+    for klass in owner.__mro__[1:]:
+        if attr not in getattr(klass, "__dict__", {}):
+            continue
+        raw:object = klass.__dict__[attr]
+        function:object = getattr(raw, "__func__", raw)
+        if isinstance(raw, classmethod):
+            return None
+        if getattr(function, "is_pykernel", False) or not inspect.isfunction(function):
+            return None
+        return function
+    return None
+
+
 def structs_name(dtype:object)->str:
     """The device type name of a structure dtype, registered on the way."""
     from ..structs import register  # noqa: PLC0415
@@ -280,6 +305,32 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
                        and isinstance(node.func.value, ast.Name)
                        and node.func.value.id == self_param
                        and not (host_lines and int(getattr(node, "lineno", 0) or 0) in host_lines)}
+    # `super().method(self, ...)` and `Base.method(self, ...)` reach the same helpers a
+    # `self.method(...)` call does: the base implementation is called on THIS receiver, so
+    # its own `self.xxx` reads are the instance's reads and collect the same way. The
+    # targets are resolved statically -- the MRO walk for super, the method's own module
+    # for a class-qualified name -- and followed with the same self_param, because the
+    # callee's receiver is the caller's.
+    follows:List[Callable] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if host_lines and int(getattr(node, "lineno", 0) or 0) in host_lines:
+            continue
+        value:object = node.func.value
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) \
+                and value.func.id == "super" and not value.args:
+            target:Optional[Callable] = _super_target(owner, node.func.attr)
+            if target is not None:
+                follows.append(target)
+        elif (isinstance(value, ast.Name) and value.id != self_param
+                and node.func.attr not in called):
+            holder:object = getattr(func, "__globals__", {}).get(value.id)
+            if isinstance(holder, type):
+                raw:object = getattr(holder, node.func.attr, None)
+                function:object = getattr(raw, "__func__", raw)
+                if inspect.isfunction(function):
+                    follows.append(function)
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and node.value.id == self_param):
@@ -301,6 +352,11 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
             continue
         if node.attr not in attrs:
             attrs.append(node.attr)
+    # The super()/class-qualified calls reached on this receiver: their targets' own
+    # self.xxx reads are the instance's reads, exactly as a `self.method(...)` target's
+    # are. `visited` guards the recursion, so a super chain that loops stops here.
+    for followed in follows:
+        _collect_self_attrs(followed, self_param, owner, attrs, visited, host_lines)
 
 
 # A python class can give an operator a meaning of its own, and device code has to keep

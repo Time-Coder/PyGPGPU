@@ -320,6 +320,12 @@ class _AssignMixin(_PrivateArrayMixin, _WorkGroupMixin):
             code = self._complex_store(base_t, t, code)
             self._emit(f"{base_code}[{index_code}] = {code};")
         elif isinstance(target, ast.Attribute):
+            # A CUDA swizzle store (`c.xy = uv`) has no lvalue in CUDA C, so it is the
+            # components' stores, one statement each (see _emit_vec_member_store). The
+            # plain component store and the whole-structure store follow through
+            # _visit_target below.
+            if self._emit_vec_member_store(target, code, t, node):
+                return
             # `p.x = ...`: a C member store on a structure value, the write twin of the
             # attribute read. The read/write analysis cannot attribute the field store to
             # the caller's argument (it sees a member expression, not a subscript), so this

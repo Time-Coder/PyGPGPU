@@ -4,6 +4,7 @@ from typing import (
     List,
     Optional,
     Set,
+    Tuple,
 )
 import numpy as np
 from .. import structs
@@ -52,6 +53,11 @@ class _CompileWriteMixin:
         # kernel file still calls -- "unresolved extern function" for a definition that was
         # on disk minutes earlier.
         plan.foreign_digests:Dict[str, str] = {}
+        # The rebuild recipe per generated file this compilation writes: path -> (header
+        # pieces, definitions, python source, digest). A build that fails on one of the
+        # files is answered by rebuilding that file from here before reporting -- the one
+        # way to repair damage no digest can see (see _compile_kernels).
+        plan.rewrite_plan:Dict[str, Tuple[List[str], List[str], str, str]] = {}
 
         def module_of(entry:Dict[str, object])->str:
             """The python file a device function came from, spelled as a cache path."""
@@ -267,7 +273,20 @@ class _CompileWriteMixin:
                 [entry["code"] for entry in plan.entries if entry["code"]],
                 plan.foreign_source_file,
                 source_digest=plan.foreign_digest)
+            # What the heal path needs for this foreign file, kept per path: the header
+            # pieces and the definitions, exactly as this render built them. A build that
+            # fails on the file is answered by rebuilding it from here (see
+            # _compile_kernels) -- the one shape that is always current.
+            plan.rewrite_plan[plan.path] = (list(plan.foreign_header),
+                                            [entry["code"] for entry in plan.entries
+                                             if entry["code"]],
+                                            plan.foreign_source_file, plan.foreign_digest)
 
         plan.source_path:str = source_paths.append_source(
             plan.own_path, plan.own_header, [piece for piece in plan.pieces if piece],
             plan.kernel_source_file, source_digest=plan.source_digest)
+        # The kernel's own file, for the same heal path: this render's header and pieces,
+        # restamped with the kernel module's own digest.
+        plan.rewrite_plan[plan.own_path] = (list(plan.own_header),
+                                            [piece for piece in plan.pieces if piece],
+                                            plan.kernel_source_file, plan.source_digest)

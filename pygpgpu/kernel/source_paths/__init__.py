@@ -94,5 +94,6 @@ from .writing import (
     append_source,
     digest_sidecar,
     python_source_digest,
+    rewrite_source,
     write_source,
 )

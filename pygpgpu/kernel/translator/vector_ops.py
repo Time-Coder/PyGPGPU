@@ -10,6 +10,7 @@ from .notation import (
 from .vectors import (
     _C_FIELD_TYPES,
     _vec_components,
+    _vec_component_name,
     _vec_field_names,
     _vec_registry,
     is_vec,
@@ -107,6 +108,46 @@ class _VectorOpsMixin:
             f"(({self._component(codes[0], types[0], c)}) * (1.0f - ({self._component(codes[2], types[2], c)})) + ({self._component(codes[1], types[1], c)}) * ({self._component(codes[2], types[2], c)}))"
             for c in components)
         return f"{maker}({inner})"
+
+
+    def _emit_vec_member_store(self, target:ast.Attribute, value_code:str,
+                               value_t:object, node:ast.AST)->bool:
+        """Emit a CUDA swizzle store (`c.xy = uv`), or False when this is not one.
+
+        CUDA C has no swizzle lvalue, so the components are stored one by one, in the
+        swizzle's own order -- exactly the writes python's spelling means. The plain
+        component store is one C statement and takes the `_visit_target` path (where the
+        assignment and both augassign spellings meet it); OpenCL C takes the swizzle as an
+        lvalue natively, so its stores never reach here.
+        """
+        if self._opencl_syntax or not isinstance(target, ast.Attribute):
+            return False
+        base_code:str
+        base_t:object
+        base_code, base_t = self._visit_expression(target.value)
+        if not (isinstance(base_t, str) and is_vec(base_t)):
+            return False
+        component:str = _vec_component_name(target.attr)
+        if len(component) == 1:
+            # One component: `_visit_target`'s own case handles it with the element type
+            # it knows; emitting here would bypass its bool/other member care.
+            return False
+        valid:Set[str] = set(_vec_field_names(_vec_registry()[base_t]))
+        if not set(component) <= valid:
+            self._error(
+                f"vector type {base_t} has no components '{target.attr}' "
+                f"(available: {''.join(sorted(valid))})", node)
+        if len(set(component)) != len(component):
+            self._error(
+                f"swizzle '{target.attr}' repeats a component: a store would assign one "
+                f"component twice and python gives no order for that", node)
+        if not is_vec(value_t) or len(_vec_field_names(_vec_registry()[value_t])) < len(component):
+            self._error(
+                f"a swizzle store needs a vector value of at least {len(component)} "
+                f"component(s) (this one is a {value_t})", node)
+        for char in component:
+            self._emit(f"{base_code}.{char} = {value_code}.{char};")
+        return True
 
 
     def _emit_vec_swizzle(self, code:str, vec:str, swizzle:str, node:ast.Attribute)->Translated:

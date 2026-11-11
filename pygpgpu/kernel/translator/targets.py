@@ -1,6 +1,6 @@
 from __future__ import annotations
 import ast
-from typing import (Dict, List, Optional, Tuple)
+from typing import (Dict, List, Optional, Set, Tuple)
 import numpy as np
 from ..structs import dtype_for as structs_dtype_for, member_types as structs_member_types
 from .notation import (
@@ -11,6 +11,10 @@ from .notation import (
     WORK_GROUP_VALUES,
 )
 from .vectors import (
+    _C_FIELD_TYPES,
+    _vec_component_name,
+    _vec_field_names,
+    _vec_registry,
     is_vec,
 )
 from .predicates import (
@@ -90,6 +94,44 @@ class _TargetsMixin:
                     # A method's own receiver, by address: a plain pointer store.
                     return f"({code})->{target.attr}", member_types[target.attr]
                 return f"({code}[0]).{target.attr}", member_types[target.attr]
+            if is_vec(t):
+                # A pygf vector's component store (`c.x = v`), the write twin of the
+                # component read the attribute path already answers. The record layout is
+                # the vector class's `_fields_`, and C spells the store on the value
+                # itself -- the same statement the host runs on the very same object.
+                component:str = _vec_component_name(target.attr)
+                valid:Set[str] = set(_vec_field_names(_vec_registry()[t]))
+                if len(component) == 1:
+                    if component not in valid:
+                        self._error(
+                            f"vector type {t} has no component '.{target.attr}' "
+                            f"(available: {''.join(sorted(valid))})", target)
+                    return (f"({code}.{component})",
+                            _C_FIELD_TYPES[(t, component)])
+                # A swizzle store (`c.xy = uv`). OpenCL C takes the swizzle as an lvalue
+                # natively; CUDA C has no swizzle lvalue at all -- a whole-vector
+                # assignment would re-build the vector (`c = make_float3(...)`, which
+                # cannot express a partial store without re-reading c twice), so the
+                # components are what a CUDA source stores, one statement each (see
+                # _emit_vec_member_store). A repeated component has no order python
+                # would agree to (`c.xx = a, b` assigns twice), so it is refused.
+                if len(set(component)) != len(component):
+                    self._error(
+                        f"swizzle '{target.attr}' repeats a component: a store would "
+                        f"assign one component twice and python gives no order for that",
+                        target)
+                if self._opencl_syntax:
+                    element:str = _C_FIELD_TYPES[(t, sorted(valid)[0])]
+                    candidate:str = f"{element}{len(component)}"
+                    if candidate not in _vec_registry():
+                        self._error(
+                            f"no vector type '{candidate}' to store through the swizzle "
+                            f"'.{target.attr}'", target)
+                    return (f"({code}.{component})", candidate)
+                self._error(
+                    f"cannot assign to '{ast.unparse(target)}': this backend has no "
+                    f"swizzle lvalue; store the components one by one "
+                    f"({code}.{component[0]} = ...; ...)", target)
             if is_vec(t) or not isinstance(t, str) or structs_dtype_for(t) is None:
                 self._error(
                     f"cannot assign to '{ast.unparse(target)}': member stores need a "

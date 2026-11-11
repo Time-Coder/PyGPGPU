@@ -21,6 +21,7 @@ from .receivers import (
     CONVERSION_METHODS,
     _receiver_param_of,
     _self_member_call_kind,
+    _super_target,
     self_attr_kind,
 )
 from .vectors import (
@@ -218,6 +219,30 @@ class _CallsMixin(_NestedLaunchMixin):
                 self._error(
                     f"calling self.{func.attr}() from device code is not supported: "
                     f"self.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
+            if isinstance(func.value, ast.Call) and isinstance(func.value.func, ast.Name) \
+                    and func.value.func.id == "super":
+                # `super().method(args)` inside a device method: python's own spelling for
+                # "the base implementation, called on this receiver". The base
+                # implementation is an ordinary device helper like any other -- the base's
+                # own body compiles `self.sample(i, j)` to a call to it -- so this resolves
+                # to the same emission. The MRO's next carrier of the method is known at
+                # translation time (the classes are python objects), and a zero-argument
+                # `super()` needs no `__class__` cell walk because the owner IS the class
+                # being translated. Zero-argument form only: the two-argument spellings
+                # add nothing a device reader needs, and refusing them says so.
+                if node.keywords or func.value.args:
+                    self._error(
+                        "only super().method(...) (no arguments) is supported from device "
+                        "code: it calls the base implementation on this receiver", node)
+                target:object = _super_target(self.self_owner, func.attr)
+                if target is None:
+                    self._error(
+                        f"super().{func.attr}() cannot be resolved from device code: no "
+                        f"base class of {self._owner_name(self.self_owner)} defines "
+                        f"{func.attr} as a plain method", node)
+                return self._emit_self_method_call("method", target, func.attr,
+                                                   [self._visit_expression(a)
+                                                    for a in node.args], node)
             module:object = (self.resolve_global(receiver_name)
                           if receiver_name is not None else None)
             if module is math or module is np:
@@ -236,17 +261,65 @@ class _CallsMixin(_NestedLaunchMixin):
                         return elementwise
                 return self._emit_math_call(func.attr, args, node, module_name=receiver_name or "")
             if isinstance(module, type):
-                # Class.static_method(...): a class name is not a device value, so the
-                # only reachable form is a staticmethod, resolved to its plain function.
+                # Class.method(...): a class name is not a device value. The staticmethod
+                # form is receiver-less; the *method* form carries an explicit receiver --
+                # `Base.sample(self, i, j)` inside an override, python's spelling for a
+                # one-off super-like call -- and the receiver is the instance this helper
+                # already holds, so the call is the base helper invoked on it, exactly as
+                # the base's own body spells it with `self.sample(...)`.
                 kind, target = self_attr_kind(module, func.attr)
-                if kind in ("staticmethod", "method"):
-                    # A plain function taken off its class is just a function; the
-                    # receiver of "method" stays an explicit first argument.
+                if kind == "staticmethod":
                     args = [self._visit_expression(a) for a in node.args]
                     return self._emit_device_call(func.attr, target, args, node)
+                if kind == "method":
+                    if not node.args:
+                        self._error(
+                            f"cannot call {receiver_name}.{func.attr}() from device code "
+                            f"without the receiver: an instance method is "
+                            f"{receiver_name}.{func.attr}(self, ...), or "
+                            f"self.{func.attr}(...) inside one of its methods", node)
+                    # The receiver may be spelled as this method's own receiver (`self`,
+                    # python's super-like spelling): the receiver is then already what the
+                    # callee should see, and the call takes the form `self.method(...)`
+                    # already builds. A receiver that travels as a named parameter (this
+                    # method received one as its own argument) is passed as the call's
+                    # first argument; one that travels as the struct parameter names the
+                    # struct; and one with no device representation at all (only `_self_`
+                    # attribute parameters) forwards those -- the callee's `self.xxx`
+                    # reads land on the same values either way.
+                    first:ast.expr = node.args[0]
+                    rest_args:List[Translated] = []
+                    if isinstance(first, ast.Name) and self.self_param \
+                            and first.id == self.self_param:
+                        rest_args = [self._visit_expression(a) for a in node.args[1:]]
+                        receiver_t:Optional[DeviceType] = self._lookup(self.self_param)
+                        if receiver_t is not None:
+                            return self._emit_device_call(
+                                func.attr, target,
+                                [(self.self_param, receiver_t)] + rest_args, node,
+                                self_param=(target.__code__.co_varnames[0]
+                                            if getattr(target, "__code__", None)
+                                            else "self"),
+                                receiver_as_argument=True)
+                        if self.self_struct_members:
+                            return self._emit_device_call(
+                                func.attr, target,
+                                [(self.self_param, self.self_struct_type)] + rest_args,
+                                node,
+                                self_param=(target.__code__.co_varnames[0]
+                                            if getattr(target, "__code__", None)
+                                            else "self"),
+                                receiver_as_argument=True)
+                        return self._emit_self_method_call("method", target, func.attr,
+                                                           rest_args, node)
+                    args = [self._visit_expression(a) for a in node.args]
+                    return self._emit_device_call(
+                        func.attr, target, args, node,
+                        self_param=(target.__code__.co_varnames[0]
+                                    if getattr(target, "__code__", None) else "self"),
+                        receiver_as_argument=True)
                 self._error(
                     f"cannot call {receiver_name}.{func.attr}() from device code: "
-                    f"only static methods of a class are usable there, and "
                     f"{receiver_name}.{func.attr} is {self._why_not_callable(kind, func.attr)}", node)
             if inspect.ismodule(module) and callable(getattr(module, func.attr, None)):
                 # module.function(...): a plain helper reached through its module.
@@ -407,3 +480,8 @@ class _CallsMixin(_NestedLaunchMixin):
                 % ("" if len(unknown) == 1 else "s", ", ".join(sorted(unknown))), node)
 
         return ast.Call(func=node.func, args=ordered, keywords=[])
+
+
+    def _owner_name(self, owner:Optional[type])->str:
+        """A class's name for an error message, or the placeholder when there is none."""
+        return owner.__name__ if owner is not None else "<unknown class>"

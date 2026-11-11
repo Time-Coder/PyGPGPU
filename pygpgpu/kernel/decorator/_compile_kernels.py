@@ -1,5 +1,6 @@
 from __future__ import annotations
 import ast
+import os
 from typing import (
     Dict,
     List,
@@ -43,9 +44,41 @@ class _CompileKernelsMixin:
         # the lock across both steps makes the file's content and the binary that describes
         # it change together.
         with source_paths.write_lock(plan.source_path):
-            plan.kernels:List[object] = [
-                self._backend_compile(plan.source_path, plan.name, backend, device_obj, linked=plan.linked)
-                for plan.name, plan._ in plan.rendered]
+            try:
+                plan.kernels:List[object] = [
+                    self._backend_compile(plan.source_path, plan.name, backend, device_obj, linked=plan.linked)
+                    for plan.name, plan._ in plan.rendered]
+            except KeyError:
+                # A missing entry point: the unit itself was accepted (the build ran) but
+                # does not export this kernel -- the stale-binary case, which the binary
+                # cache's own mtime check already answers by rebuilding from source.
+                # Rewriting the generated files here would discard the sibling kernels
+                # other compiles of this module accumulated, so a KeyError reports as it is.
+                raise
+            except Exception:
+                # A file can be damaged in ways the digest sidecar cannot see: text from a
+                # previous package version whose generated shape changed (the forward-
+                # declaration block did not exist before the owner-identity fix), a crashed
+                # or truncated write, an indexer that saved a partial copy. The sidecar
+                # describes the *python*, so all of these keep matching and the merge keeps
+                # the damage forever. The one answer that is always right is the render this
+                # process just built: rebuild every file this compilation writes from it
+                # (headers, definitions and digests, discarding what the files held), then
+                # retry once inside the same critical section. A build that fails again is
+                # a real problem in the source or the backend, and its own error reports.
+                plan.rewrite_plan = getattr(plan, "rewrite_plan", {}) or {}
+                if plan.rewrite_plan:
+                    for rewrite_path, (rewrite_header, rewrite_definitions, rewrite_python,
+                                       rewrite_digest) in plan.rewrite_plan.items():
+                        source_paths.rewrite_source(rewrite_path, rewrite_header,
+                                                    rewrite_definitions, rewrite_python,
+                                                    source_digest=rewrite_digest)
+                    plan.kernels = [
+                        self._backend_compile(plan.source_path, plan.name, backend,
+                                              device_obj, linked=plan.linked)
+                        for plan.name, plan._ in plan.rendered]
+                else:
+                    raise
         # A phase kernel declares only the shapes it indexes itself, so its launch needs its
         # own trailing extent arguments rather than the ones the first kernel wants.
         plan.extra_shapes:List[List[Tuple[int, int]]] = []
@@ -88,6 +121,18 @@ class _CompileKernelsMixin:
                 plan.phase_carried.append(list(plan.translator.carried_scalars))
                 plan.phase_param_names.append(list(dict(plan.translator.params)))
                 plan.phase_claims.append(bool(plan.translator._claims_on_device))
+
+        # The launch description records what the generated files looked like when this
+        # entry was built: one stat per file, keyed by the paths this compilation wrote.
+        # A later launch consults it (see _source_files_changed) -- the digest sidecar
+        # describes the *python*, so it cannot see a file that lost text on disk another
+        # way, and a cached entry served from it would outlive the damage forever.
+        plan.source_mtimes:Dict[str, int] = {}
+        for plan.mtime_path in plan.rewrite_plan:
+            try:
+                plan.source_mtimes[plan.mtime_path] = os.stat(plan.mtime_path).st_mtime_ns
+            except OSError:
+                plan.source_mtimes[plan.mtime_path] = 0
 
         plan.launch:object = plan.kernels[0]
 
@@ -258,4 +303,7 @@ class _CompileKernelsMixin:
                  "loop_names": len(plan.translator.work_item_indices),
                  # The array behind a `np.ndindex(arr.shape)` domain (index into the device
                  # parameter list, or -1), whose rank the loop must name one index per.
-                 "whole_shape_index": plan.param_index.get(plan.translator.nd_whole_shape_param, -1)})
+                 "whole_shape_index": plan.param_index.get(plan.translator.nd_whole_shape_param, -1),
+                 # path -> st_mtime_ns of every generated file this entry was built from
+                 # (see _source_files_changed, which answers "did a file change on disk").
+                 "source_mtimes": dict(plan.source_mtimes)})
