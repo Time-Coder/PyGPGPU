@@ -10,16 +10,17 @@ for the light bars and accumulated volumetric glow for the air between them.
 Two spellings differ from the GLSL, both forced by the device subset rather than chosen:
 
 * there is no ``mat2``, so ``rot`` takes the vector it rotates and answers the rotated one;
-* ``abs``/``min``/``max``/``smoothstep`` on vectors are refused today (see
+* ``abs``/``min``/``max`` on vectors are refused by the interpreter today (see
   ``tests/known_failures/``), so the helpers expand that arithmetic per component -- the maths
-  is unchanged, and scalar spellings stay exactly as the GLSL wrote them.
+  is unchanged, and scalar spellings stay exactly as the GLSL wrote them. ``smoothstep`` is a
+  real builtin now and is called exactly as the GLSL calls it, vectors included.
 """
 
 import math
 
 import numpy as np
 
-from pygpgpu import clamp, config, cross, dot, fract, mix, normalize
+from pygpgpu import clamp, config, cross, dot, fract, mix, normalize, smoothstep
 from pygf import color3f, float2, float3
 
 from shadertoy_viewer import ShadertoyViewer
@@ -61,18 +62,6 @@ def _rot2(v: float2, a: float) -> float2:
     s = math.sin(a)
     c = math.cos(a)
     return float2(c * v.x - s * v.y, s * v.x + c * v.y)
-
-
-def _smoothstep1(e0: float, e1: float, x: float) -> float:
-    """GLSL ``smoothstep`` for scalars (the device cannot walk pygf's own today)."""
-    t = clamp((x - e0) / (e1 - e0), 0.0, 1.0)
-    return t * t * (3.0 - 2.0 * t)
-
-
-def _smoothstep3(e0: float, e1: float, v: float3) -> float3:
-    """GLSL ``smoothstep(e0, e1, vec3)`` -- component-wise."""
-    return float3(_smoothstep1(e0, e1, v.x), _smoothstep1(e0, e1, v.y),
-                  _smoothstep1(e0, e1, v.z))
 
 
 def _sd_box(p: float3, b: float3) -> float:
@@ -213,7 +202,7 @@ class LightCycle(ShadertoyViewer):
         if abs(p.y) > abs(p.x):
             n_abs = float3(n_abs.y, n_abs.x, n_abs.z)
 
-        s_axis = _smoothstep3(0.35, 0.65, n_abs)
+        s_axis = smoothstep(0.35, 0.65, n_abs)
         axis_weight = float3(1.0 - s_axis.x, 1.0 - s_axis.y, 1.0 - s_axis.z)
 
         cos_theta = max(abs(dot(n_world, rd)), 0.15)
@@ -321,11 +310,11 @@ class LightCycle(ShadertoyViewer):
             grid_color = self.col_cyan * (grid * 1.5)
             col = base_color + rim_color + grid_color
 
-            cyan_coverage = 1.0 - _smoothstep1(-0.5, 1.2, min_cyan_cone)
+            cyan_coverage = 1.0 - smoothstep(-0.5, 1.2, min_cyan_cone)
             cyan_surf = self.col_cyan * 2.4 + float3(0.75, 0.75, 0.75)
             col = mix(col, cyan_surf, cyan_coverage)
 
-            orange_coverage = 1.0 - _smoothstep1(-0.5, 1.2, min_orange_cone)
+            orange_coverage = 1.0 - smoothstep(-0.5, 1.2, min_orange_cone)
             packet = math.pow(math.sin(hit_z * 0.25 + self.i_time * 10.0) * 0.5 + 0.5, 2.5)
             orange_surf = mix(self.col_orange * 1.0,
                               self.col_orange * 2.8 + float3(0.95, 0.65, 0.25), packet)
