@@ -51,10 +51,16 @@ def _max3(v: float3, s: float) -> float3:
 
 
 def _rot2(v: float2, a: float) -> float2:
-    """GLSL ``v * rot(a)`` for the column-major ``mat2(c, -s, s, c)``."""
+    """GLSL ``v * rot(a)`` for the column-major ``mat2(c, -s, s, c)``.
+
+    The GLSL multiplies the vector on the LEFT of the matrix (``p.xy *= rot(..)``), which is
+    the row-vector form: ``(c*x - s*y, s*x + c*y)`` -- a plain counter-clockwise turn. The
+    matrix-times-vector spelling would turn the other way, and the difference shows: the
+    tunnel's roll and the grid's normal un-rotation must use the same direction.
+    """
     s = math.sin(a)
     c = math.cos(a)
-    return float2(c * v.x + s * v.y, -s * v.x + c * v.y)
+    return float2(c * v.x - s * v.y, s * v.x + c * v.y)
 
 
 def _smoothstep1(e0: float, e1: float, x: float) -> float:
