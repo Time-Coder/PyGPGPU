@@ -43,6 +43,7 @@ from known_failures.extra_arg_override import ExtraArg, FlipSin
 from known_failures.float_mod_floored import mod_four
 from known_failures.pow_width_mixing import MixedWidthPow
 from known_failures.smoothstep_builtin import fades_one_edge
+from known_failures.swizzle_store_aliasing import swap_through_swizzle
 from known_failures.vector_hoist_zero import HoistedVector
 from known_failures.vector_minmax_abs import vector_abs_and_minmax
 
@@ -192,3 +193,25 @@ def test_a_self_reading_call_expression_keeps_the_override_scan(gpu_backend):
     value = _math.sin(0.5) / 3.0
     expected = np.array([[0.0] * 3, [value] * 3], dtype=np.float32)
     np.testing.assert_allclose(viewer.image, expected, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Group 14 -- a swizzle store that reads the vector it writes
+# ---------------------------------------------------------------------------
+
+
+def test_a_swizzle_store_reads_its_value_before_writing(gpu_backend):
+    """``p.xy = p.yx`` is a swap, and a swap with an aliased read is not one.
+
+    Today CUDA emits two component stores, each re-evaluating the value expression:
+    ``p.x = make_float2(p.y, p.x).x`` overwrites ``p.x``, and the second store then reads
+    the overwritten component, so ``float2(1, 2).xy = .yx`` answers (2, 2) on the device
+    and (2, 1) on the interpreter. The value has to land in a temporary first -- python
+    evaluates the right-hand side once -- the way every other aliasing-sensitive store in
+    the translation already does. Found by the Light Cycle port, whose ``foldSquare``
+    swaps the folded coordinates exactly this way; with the bug the tunnel's quadrant fold
+    collapses and the corner light streams flood every wall.
+    """
+    out = np.zeros(2, dtype=np.float64)
+    swap_through_swizzle[gpu_backend](out)
+    np.testing.assert_allclose(out, [2.0, 1.0])

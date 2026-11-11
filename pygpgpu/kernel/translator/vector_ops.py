@@ -202,8 +202,16 @@ class _VectorOpsMixin:
             self._error(
                 f"a swizzle store needs a vector value of at least {len(component)} "
                 f"component(s) (this one is a {value_t})", node)
+        # The value lands in a temporary FIRST: python evaluates the right-hand side once,
+        # and a swizzle whose value reads the vector it writes (`p.xy = p.yx`) corrupts
+        # every store after the first without it -- the later statements would read the
+        # components the earlier ones just overwrote, turning a swap into a duplication.
+        index:int = getattr(self, "_swizzle_store_temps", 0) + 1
+        self._swizzle_store_temps = index
+        temporary:str = f"_swizzle_store_{index}"
+        self._emit(f"{value_t} {temporary} = {value_code};")
         for char in component:
-            self._emit(f"{base_code}.{char} = {value_code}.{char};")
+            self._emit(f"{base_code}.{char} = {temporary}.{char};")
         return True
 
 
