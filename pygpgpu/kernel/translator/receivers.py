@@ -348,7 +348,13 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
             # (a staticmethod, a @kernel method, a classmethod) is decided at the
             # call site, where a clear error can name the reason.
             if kind == "method":
-                _collect_self_attrs(target, self_param, owner, attrs, visited, host_lines)
+                # The host lines are the KERNEL's own numbering: they say which
+                # statements the interpreter already ran in *this* body. A followed
+                # method is device work by construction (the call into it was checked
+                # against those lines above), so its own body is scanned with none --
+                # reusing the kernel's numbers here would drop any read whose line
+                # happens to collide with one of them.
+                _collect_self_attrs(target, self_param, owner, attrs, visited, None)
             continue
         if node.attr not in attrs:
             attrs.append(node.attr)
@@ -356,7 +362,7 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
     # self.xxx reads are the instance's reads, exactly as a `self.method(...)` target's
     # are. `visited` guards the recursion, so a super chain that loops stops here.
     for followed in follows:
-        _collect_self_attrs(followed, self_param, owner, attrs, visited, host_lines)
+        _collect_self_attrs(followed, self_param, owner, attrs, visited, None)
 
 
 # A python class can give an operator a meaning of its own, and device code has to keep

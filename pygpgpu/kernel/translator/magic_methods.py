@@ -1,6 +1,8 @@
 from __future__ import annotations
 import ast
-from typing import (Any, Callable, List, Optional, Tuple)
+import typing
+from typing import (Any, Callable, Dict, List, Optional, Tuple)
+import numpy as np
 from ..structs import dtype_for as structs_dtype_for
 from .notation import (
     DeviceType,
@@ -20,6 +22,9 @@ from .vectors import (
     is_vec,
 )
 from .predicates import (
+    infer_ctype,
+    is_float,
+    is_int,
     is_ptr,
 )
 
@@ -275,8 +280,109 @@ class _MagicMethodsMixin:
             self._error(
                 f"self.{attr} is a @kernel method and cannot be called from device code; "
                 f"move the shared logic into a plain method or function", node)
+        args = self._satisfy_override_signature(attr, target, args, node,
+                                                receiver_first=(kind == "method"))
         return self._emit_device_call(attr, target, args, node,
                                       self_param=self.self_param if kind == "method" else "")
+
+
+    def _satisfy_override_signature(self, attr:str, target:object, args:List[Translated],
+                                    node:ast.Call, receiver_first:bool)->List[Translated]:
+        """Satisfy the resolved override's signature from the call the body spells.
+
+        A call site is written against the hook the base declares, but the device call
+        resolves to the receiver's class's override -- whose signature it has (see
+        `_self_member_call_kind`) -- and an override may take more parameters than the
+        base call passes. Python would raise TypeError for the missing one; a device has
+        no exception to raise, and the reads the override makes are what the launch is
+        for, so a trailing parameter the call does not supply is bound from its declared
+        default when it has one, and otherwise from its annotation's zero -- the same
+        rule a hoisted local follows (python raises UnboundLocalError, a device reads the
+        hoisted zero). A parameter with neither a default nor an int/float annotation has
+        no device value to bind, and the call then refuses, naming the hook and both
+        arities, rather than silently shortening the scan; so does a call that passes
+        more arguments than the override declares.
+        """
+        code:object = getattr(target, "__code__", None)
+        if code is None:
+            return args
+        declared:Tuple[str, ...] = tuple(
+            code.co_varnames[:code.co_argcount][1 if receiver_first else 0:])
+        if len(args) == len(declared):
+            return args
+        if len(args) > len(declared):
+            self._error(
+                f"self.{attr}() takes {len(declared)} device arguments but the call "
+                f"passes {len(args)}: the hook the receiver's class supplies declares "
+                f"{len(declared)} parameters, and python would raise TypeError here too",
+                node)
+        defaults:Tuple[object, ...] = (target.__defaults__ or ())
+        # Defaults bind to the LAST parameters, python's own rule.
+        first_default:int = len(declared) - len(defaults)
+        # Annotations come back as strings under `from __future__ import annotations`,
+        # so they are resolved the way python itself would resolve them at runtime
+        # (typing.get_type_hints reads the function's own globals). A file that names
+        # something unresolvable keeps its raw strings, which the zero rule below then
+        # refuses with the parameter named.
+        try:
+            hints:Dict[str, object] = typing.get_type_hints(target)
+        except Exception:
+            hints = dict(getattr(target, "__annotations__", {}) or {})
+        filled:List[Translated] = list(args)
+        for ordinal in range(len(args), len(declared)):
+            name:str = declared[ordinal]
+            if ordinal >= first_default:
+                value:object = defaults[ordinal - first_default]
+                filled.append(self._zero_argument_for(name, value, node))
+                continue
+            zero:Optional[Translated] = self._zero_argument_for(name, hints.get(name), node) \
+                if hints.get(name) is not None else None
+            if zero is None:
+                self._error(
+                    f"self.{attr}() takes {len(declared)} device arguments but the call "
+                    f"passes {len(args)}: the hook the receiver's class supplies declares "
+                    f"{len(declared)} parameters while the base call site passes "
+                    f"{len(args)}, and '{name}' has neither a default nor an int/float "
+                    f"annotation to bind a device value from", node)
+            filled.append(zero)
+        return filled
+
+
+    def _zero_argument_for(self, name:str, value:object, node:ast.AST)->Translated:
+        """The device constant one unsupplied parameter binds, or a refusal.
+
+        A python default or annotation is a *value* or a *type*: a number binds as the
+        constant it is (typed the way an argument of that value would travel), and an
+        int/float annotation binds the width's zero. Anything else -- a string, a
+        vector class, an ndarray -- has no device constant to stand for, and the caller
+        turns None into the arity refusal.
+        """
+        if isinstance(value, bool):
+            return ("true" if value else "false"), "bool"
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            t:object = infer_ctype(value, self.type_map)
+            if is_float(t):
+                return self._real_literal(float(value), t), t
+            if is_int(t):
+                return str(int(value)), t
+        if value is float:
+            t = infer_ctype(0.0, self.type_map)
+            return self._real_literal(0.0, t), t
+        if value is int:
+            t = infer_ctype(0, self.type_map)
+            return "0", t
+        if isinstance(value, type) and issubclass(value, (np.integer, np.floating)):
+            # A numpy scalar annotation: the zero travels the way a *value* of that
+            # type would, which `infer_ctype` already decides (a float64 argument is
+            # narrowed to float on the device, and the annotation follows it).
+            t = infer_ctype(value(0), self.type_map)
+            if is_float(t):
+                return self._real_literal(0.0, t), t
+            if is_int(t):
+                return "0", t
+        self._error(
+            f"the annotation for '{name}' is a {type(value).__name__}, which has no device "
+            f"constant to bind an unsupplied parameter from", node)
 
 
     def _why_not_callable(self, kind:str, name:str)->str:

@@ -169,7 +169,7 @@ def test_an_override_with_extra_parameters_collects_its_members(gpu_backend):
     # sample(i, j, y) ignores y and answers sin(0.5) * (i + j).
     import math as _math
 
-    expected = _math.sin(0.5) * np.arange(6, dtype=np.float32).reshape(2, 3)
+    expected = _math.sin(0.5) * np.array([[0, 1, 2], [1, 2, 3]], dtype=np.float32)
     np.testing.assert_allclose(viewer.image, expected, rtol=1e-5)
 
 
