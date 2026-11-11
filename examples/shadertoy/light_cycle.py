@@ -25,7 +25,10 @@ from pygf import color3f, float2, float3
 from shadertoy_viewer import ShadertoyViewer
 
 config.print_info = False
-config.type_map = {float: np.float64}
+# The viewer's own import has already chosen GLSL's float32 for this folder; restating it
+# keeps the file honest when it is read on its own, and a raymarcher is the one shader
+# family that cannot afford the 1:64 fp64 rate a double would cost.
+config.type_map = {float: np.float32}
 
 MAX_STEPS: int = 110
 MAX_DIST: float = 80.0

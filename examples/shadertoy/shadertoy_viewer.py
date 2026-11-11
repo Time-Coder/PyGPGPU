@@ -14,7 +14,9 @@ would spell any attribute of its viewer. The vectors are pygf vectors, not loose
 * ``self.i_resolution`` -- ``float2``: the frame size, ``(width, height)``;
 * ``self.i_mouse`` -- ``float4``: xy is the pointer position in pixels, z the click position,
   w the button state (1.0 held, 0.0 up) -- Shadertoy's own packing;
-* ``self.i_time`` -- seconds since the viewer was constructed;
+* ``self.i_time`` -- seconds since the viewer was constructed, advancing frame by frame
+  while the window is shown (the animation tick); a viewer that wants stills stops
+  ``self._timer``;
 * ``self.i_frame`` -- frames rendered so far.
 
     class MyShader(ShadertoyViewer):
@@ -26,7 +28,8 @@ would spell any attribute of its viewer. The vectors are pygf vectors, not loose
 
 The names follow Shadertoy's GLSL uniforms where one exists (``iResolution`` spelled with an
 underscore, to read as one name here); ``frag_coord`` is the launch's own per-pixel input.
-Everything is a plain double, an int or a pygf vector, so the interpreter backend and every
+Everything is a single-precision float (GLSL's own width), an int or a pygf vector, so the
+interpreter backend and every
 device backend run the same body.
 
 The uniforms are rebound by the host before each launch and read by the device during it. A
@@ -42,15 +45,20 @@ import weakref
 
 import numpy as np
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QMouseEvent, QPainter, QPaintEvent, QResizeEvent, QWheelEvent
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import (QHideEvent, QImage, QMouseEvent, QPainter, QPaintEvent, QResizeEvent,
+                           QShowEvent, QWheelEvent)
 from PySide6.QtWidgets import QApplication, QWidget
 
 from pygpgpu import config, kernel
 from pygf import color3f, float2, float4
 
 config.print_info = False
-config.type_map = {float: np.float64}
+# GLSL is float32 and so is Shadertoy; the deep-zoom fractal viewers want float64, but a
+# raymarcher under double precision costs a consumer GPU its fp32-to-fp64 rate (1:64 on the
+# development machine's GeForce) and the animation crawls. The shaders here live in a small
+# coordinate range, so single precision is both the faithful and the fast choice.
+config.type_map = {float: np.float32}
 
 
 def _qimage_from_array(array: np.ndarray) -> QImage:
@@ -86,6 +94,12 @@ class ShadertoyViewer(QWidget):
     :meth:`mainImage`, so a shader body uses them as ordinary attributes of ``self``.
     """
 
+    # Pixels per unit at scale 1.0 is the fractal viewer's idea; here the one number is
+    # the animation cadence: ~60 fps, Shadertoy's own. A shader whose render costs more
+    # than the interval simply runs slower -- the title's fps readout shows the honest
+    # number, and a subclass that wants stills stops `self._timer`.
+    frame_interval_ms: int = 16
+
     def __new__(cls, *args: object, **kwargs: object) -> "ShadertoyViewer":
         """Create the ``QApplication`` if the caller has none, before the widget is built.
 
@@ -113,6 +127,14 @@ class ShadertoyViewer(QWidget):
         self.i_mouse = float4(0.0, 0.0, 0.0, 0.0)
         self._started = time.perf_counter()
         self._frame: QImage | None = None
+        # The seconds the last few redraws cost, oldest first; the readout takes the median.
+        self._frame_times: list[float] = []
+        # The animation: while the window is shown, a tick renders the next frame, which is
+        # what makes i_time advance -- Shadertoy's shaders are animations by default, and a
+        # viewer whose clock only moves when the pointer does would freeze them.
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.frame_interval_ms)
+        self._timer.timeout.connect(self.redraw)
         self._title = title
         self.setWindowTitle(title)
 
@@ -150,11 +172,24 @@ class ShadertoyViewer(QWidget):
 
     def redraw(self) -> None:
         """Advance the clock, launch one frame, and show it."""
-        self.i_time = time.perf_counter() - self._started
+        frame_start = time.perf_counter()
+        self.i_time = frame_start - self._started
         self.i_frame += 1
         self.draw()
         self._frame = _qimage_from_array(self.image)
-        self.setWindowTitle(f"{self._title}  t={self.i_time:.1f}s  frame={self.i_frame}")
+        # The readout is the render cost, not the event rate: redraws fire on show, resize
+        # and pointer events, so an idle window renders nothing and an interval would read
+        # as zero. What the number answers is how many frames a second this shader costs at
+        # this size. The median over the last few frames, not a mean: the first launch of
+        # a size compiles (about a second), and one outlier must not pin the readout for
+        # the frames a running average needs to forget it.
+        self._frame_times.append(time.perf_counter() - frame_start)
+        if len(self._frame_times) > 5:
+            del self._frame_times[0]
+        middle = sorted(self._frame_times)[len(self._frame_times) // 2]
+        fps = 1.0 / middle if middle > 0.0 else 0.0
+        self.setWindowTitle(
+            f"{self._title}  t={self.i_time:.1f}s  frame={self.i_frame}  {fps:.0f} fps")
         self.update()
 
     # -- painting ---------------------------------------------------------
@@ -174,6 +209,17 @@ class ShadertoyViewer(QWidget):
         self.image = np.zeros((size.height(), size.width(), 3), dtype=np.uint8)
         self.i_resolution = float2(float(size.width()), float(size.height()))
         self.redraw()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        # The clock runs while the window does: starting on show (not in __init__) means an
+        # invisible viewer renders nothing, and hideEvent is the matching stop.
+        super().showEvent(event)
+        self._timer.start()
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        # Closing hides the window first, so this one stop covers close, minimize and hide.
+        self._timer.stop()
+        super().hideEvent(event)
 
     # -- pointer and wheel ------------------------------------------------
 
