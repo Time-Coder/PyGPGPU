@@ -58,6 +58,7 @@ from ...vec_types.funcs import rhadd as rhadd
 from ...vec_types.funcs import rsqrt as rsqrt
 from ...vec_types.funcs import saturate as saturate
 from ...vec_types.funcs import select as select
+from ...vec_types.funcs import smoothstep as smoothstep
 from ...vec_types.funcs import step as step
 from ...vec_types.funcs import sqrt as sqrt
 from ...vec_types.funcs import sin as sin
@@ -191,7 +192,7 @@ __all__ = [
     "atomic_add", "atomic_sub", "atomic_min", "atomic_max",
     "atomic_and", "atomic_or", "atomic_xor", "atomic_xchg", "atomic_cas",
     # math and vector builtins (defined in pygpgpu.vec_types.funcs)
-    "rsqrt", "exp2", "clamp", "mix", "mad", "saturate", "step", "select",
+    "rsqrt", "exp2", "clamp", "mix", "mad", "saturate", "step", "smoothstep", "select",
     "any", "all",
     "isequal", "isnotequal", "isgreater", "isgreaterequal",
     "isless", "islessequal", "isordered", "isunordered",

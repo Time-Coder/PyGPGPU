@@ -278,6 +278,42 @@ class _BuiltinPythonMixin:
                 return f"{maker}({inner})", vec_t
             return f"((({x_code}) < ({edge_code})) ? 0.0f : 1.0f)", "float"
 
+        if name == "smoothstep":
+            if len(args) != 3:
+                self._error("gpu.smoothstep(edge0, edge1, x) takes exactly 3 arguments", node)
+            (e0_code, e0_t), (e1_code, e1_t), (x_code, x_t) = args
+            vec_t:object = next((t for t in (e0_t, e1_t, x_t) if is_vec(t)), None)
+            for t in (e0_t, e1_t, x_t):
+                if is_vec(t) and t != vec_t:
+                    self._error(
+                        f"gpu.smoothstep() vector operands must have the same type, "
+                        f"got {vec_t} and {t}", node)
+            if vec_t is not None:
+                if self._opencl_syntax:
+                    # The native name has a vector overload, but every argument must be
+                    # that one vector type, so a scalar operand is broadcast by the cast.
+                    def broadcast(arg_code:str, arg_t:object)->str:
+                        return (arg_code if is_vec(arg_t) else f"({vec_t})({arg_code})")
+                    return (f"smoothstep({broadcast(e0_code, e0_t)}, "
+                            f"{broadcast(e1_code, e1_t)}, {broadcast(x_code, x_t)})"), vec_t
+                element:str = self._vec_element_type(vec_t)
+                terms:List[str] = []
+                for component in _vec_field_names(_vec_registry()[vec_t]):
+                    terms.append(self._smoothstep_expression(
+                        self._component(e0_code, e0_t, component),
+                        self._component(e1_code, e1_t, component),
+                        self._component(x_code, x_t, component),
+                        element))
+                return self._vec_maker(vec_t, ", ".join(terms)), vec_t
+            width:str = "double" if any(t == "double" for _, t in args) else "float"
+            if self._opencl_syntax:
+                # The native call takes one width throughout: mixed operands would leave
+                # the compiler no gentype to resolve (OpenCL converts float to double
+                # only inside arithmetic, not inside a call).
+                return (f"smoothstep(({width})({e0_code}), ({width})({e1_code}), "
+                        f"({width})({x_code}))"), width
+            return self._smoothstep_expression(e0_code, e1_code, x_code, width), width
+
         if name == "dot":
             if len(args) != 2:
                 self._error("gpu.dot(a, b) takes exactly 2 arguments", node)
@@ -386,3 +422,23 @@ class _BuiltinPythonMixin:
             return f"((({a}) * ({b})) + ({c}))", args[0][1]
 
         self._error(f"unknown gpu builtin: gpu.{name}", node)
+
+
+    def _smoothstep_expression(self, e0:str, e1:str, x:str, width:str)->str:
+        """The clamp-and-fade as one expression, in the width the call promotes to.
+
+        CUDA and HIP have no smoothstep intrinsic to call (their headers declare none),
+        so the device reads the formula the GLSL name stands for -- the same shape the
+        CUDA path already spells for `step` and `clamp`. The inner value is clamped by
+        the pair the width picks (`fminf`/`fmaxf` for floats, `fmin`/`fmax` for
+        doubles), and the constants take the width so the expression stays in it.
+        """
+        minimum:str = "fmin" if width == "double" else "fminf"
+        maximum:str = "fmax" if width == "double" else "fmaxf"
+        zero:str = self._real_literal(0.0, width)
+        one:str = self._real_literal(1.0, width)
+        t:str = (f"{minimum}({maximum}((({x}) - ({e0})) / (({e1}) - ({e0})), {zero}),"
+                 f" {one})")
+        three:str = self._real_literal(3.0, width)
+        two:str = self._real_literal(2.0, width)
+        return f"(({t}) * ({t}) * ({three} - ({two}) * ({t})))"

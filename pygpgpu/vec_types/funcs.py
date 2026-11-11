@@ -31,6 +31,7 @@ from pygf.funcs import (
     mix,
     normalize,
     saturate,
+    smoothstep,
     step,
     sqrt,
     sin,
@@ -96,7 +97,7 @@ Component = Union["HostVector", Scalar]
 __all__ = [
     "fract", "sign", "ldexp",
     "dot", "cross", "normalize", "length", "distance",
-    "clamp", "mix", "mad", "saturate", "step", "rsqrt", "exp2",
+    "clamp", "mix", "mad", "saturate", "step", "smoothstep", "rsqrt", "exp2",
     "select", "any", "all",
     "isequal", "isnotequal", "isgreater", "isgreaterequal", "isless", "islessequal",
     "isordered", "isunordered", "abs_diff", "hadd", "rhadd", "mad24", "mul24",

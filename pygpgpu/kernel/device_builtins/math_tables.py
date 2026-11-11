@@ -17,6 +17,7 @@ GENERIC_BUILTINS:Dict[str, Tuple[str, str]] = {
     "mad": ("mad", ""),          # cuda (a*b+c)
     "saturate": ("clamp", ""),   # cuda needs special codegen (clamp to 0..1)
     "step": ("step", ""),        # cuda needs special codegen (x < edge ? 0 : 1)
+    "smoothstep": ("smoothstep", ""),  # cuda needs special codegen (the clamp-and-fade)
     "select": ("select", ""),    # cuda needs special codegen (per-component cond ? b : a)
     "any": ("any", ""),          # vector reduction, cuda needs special codegen
     "all": ("all", ""),          # vector reduction, cuda needs special codegen
