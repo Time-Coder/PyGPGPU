@@ -9,7 +9,8 @@ The uniforms a Shadertoy shader reads are ``self`` attributes, so a body spells 
 would spell any attribute of its viewer. The vectors are pygf vectors, not loose floats:
 
 * ``mainImage(self, frag_coord)`` -- the hook itself; ``frag_coord`` is the pixel's centre
-  ``(x + 0.5, y + 0.5)`` in pixels;
+  ``(x + 0.5, y + 0.5)`` in pixels, with the origin at the bottom-left and y up, exactly the
+  GLSL ``fragCoord`` convention;
 * ``self.i_resolution`` -- ``float2``: the frame size, ``(width, height)``;
 * ``self.i_mouse`` -- ``float4``: xy is the pointer position in pixels, z the click position,
   w the button state (1.0 held, 0.0 up) -- Shadertoy's own packing;
@@ -132,8 +133,17 @@ class ShadertoyViewer(QWidget):
     @kernel
     def draw(self):
         """One frame: every pixel's centre goes to ``mainImage``, the colour to the buffer."""
+        # frag_coord follows GLSL: origin at the bottom-left, y up. The buffer's row 0 is
+        # the top, so the centre handed to the shader is measured from the bottom -- a
+        # shader ported from Shadertoy needs no flip of its own. The y flip is computed
+        # here rather than passed as a separate argument: a hook whose signature carries
+        # an argument the base call does not pass loses the self-attribute scan (see
+        # tests/known_failures/extra_arg_override.py), so mainImage keeps the GLSL
+        # signature and receives the flipped coordinate inside its one float2.
         for i, j in np.ndindex(self.image.shape[0], self.image.shape[1]):
-            color = self.mainImage(float2(float(j) + 0.5, float(i) + 0.5))
+            frag_coord = float2(float(j) + 0.5,
+                                float(self.image.shape[0]) - float(i) - 0.5)
+            color = self.mainImage(frag_coord)
             self.image[i, j, 0] = 255 * color.r
             self.image[i, j, 1] = 255 * color.g
             self.image[i, j, 2] = 255 * color.b
