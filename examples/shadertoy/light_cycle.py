@@ -7,13 +7,12 @@ camera flies down the same endless square tunnel -- cyan ribs and rings on the w
 streams in the corners, an anti-aliased grid that fades with distance, cone-traced coverage
 for the light bars and accumulated volumetric glow for the air between them.
 
-Two spellings differ from the GLSL, both forced by the device subset rather than chosen:
-
-* there is no ``mat2``, so ``rot`` takes the vector it rotates and answers the rotated one;
-* ``abs``/``min``/``max`` on vectors are refused by the interpreter today (see
-  ``tests/known_failures/``), so the helpers expand that arithmetic per component -- the maths
-  is unchanged, and scalar spellings stay exactly as the GLSL wrote them. ``smoothstep`` is a
-  real builtin now and is called exactly as the GLSL calls it, vectors included.
+The GLSL's spellings all work as written: ``abs``/``min``/``max`` are pygf's, imported here
+under their own names (the device expands a vector argument per component, the interpreter
+runs pygf's implementation, and both answer the same numbers), and ``smoothstep``/``clamp``/
+``mix`` come from the package as registered builtins. One spelling differs because the
+device subset has no ``mat2``: ``rot`` takes the vector it rotates and answers the rotated
+one.
 """
 
 import math
@@ -21,7 +20,7 @@ import math
 import numpy as np
 
 from pygpgpu import clamp, config, cross, dot, fract, mix, normalize, smoothstep
-from pygf import color3f, float2, float3
+from pygf import abs, color3f, float2, float3, max, min
 
 from shadertoy_viewer import ShadertoyViewer
 
@@ -34,21 +33,6 @@ config.type_map = {float: np.float32}
 MAX_STEPS: int = 110
 MAX_DIST: float = 80.0
 SURF_DIST: float = 0.001
-
-
-def _abs2(v: float2) -> float2:
-    """GLSL ``abs(vec2)`` -- component-wise; a vector argument is refused today."""
-    return float2(abs(v.x), abs(v.y))
-
-
-def _abs3(v: float3) -> float3:
-    """GLSL ``abs(vec3)``."""
-    return float3(abs(v.x), abs(v.y), abs(v.z))
-
-
-def _max3(v: float3, s: float) -> float3:
-    """GLSL ``max(vec3, float)`` -- the component-wise maximum against one scalar."""
-    return float3(max(v.x, s), max(v.y, s), max(v.z, s))
 
 
 def _rot2(v: float2, a: float) -> float2:
@@ -88,7 +72,7 @@ def _sd_box2d(p: float2, b: float2) -> float:
 
 def _fold_square(p: float2) -> float2:
     """GLSL foldSquare: mirror into the first quadrant, keeping the greater coordinate first."""
-    p = _abs2(p)
+    p = abs(p)
     if p.y > p.x:
         p.xy = p.yx
     return p
@@ -198,7 +182,7 @@ class LightCycle(ShadertoyViewer):
         n_local = n_world
         rotated = _rot2(float2(n_local.x, n_local.y), p.z * 0.02 + self.i_time * 0.05)
         n_local = float3(rotated.x, rotated.y, n_local.z)
-        n_abs = _abs3(n_local)
+        n_abs = abs(n_local)
         if abs(p.y) > abs(p.x):
             n_abs = float3(n_abs.y, n_abs.x, n_abs.z)
 
