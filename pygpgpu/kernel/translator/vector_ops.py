@@ -16,6 +16,7 @@ from .vectors import (
     is_vec,
 )
 from .predicates import (
+    is_int,
     is_ptr,
 )
 
@@ -24,6 +25,62 @@ class _VectorOpsMixin:
 
     def _is_scalar(self, t:object)->bool:
         return isinstance(t, str) and not is_vec(t)
+
+
+    def _vec_element_type(self, vec:str)->str:
+        """The C scalar type of one vector component (`float3` -> `float`)."""
+        return _C_FIELD_TYPES[(vec, _vec_components(vec)[0][0])]
+
+
+    def _emit_vec_abs(self, code:str, vec:str)->str:
+        """`abs(v)` over a whole vector, per component.
+
+        GLSL spells it on the vector and pygf's host answers per slot, so the device
+        expands into the per-component form the +/* paths generate: the floating widths
+        take `fabs`, the integer widths `abs`.
+        """
+        device:str = "abs" if is_int(self._vec_element_type(vec)) else "fabs"
+        return self._vec_componentwise(device, code, vec)
+
+
+    def _emit_vec_minmax(self, name:str, args:List[Translated], vec:str,
+                         node:ast.Call)->Translated:
+        """`min(v, w)` / `max(v, 0.0)` over a vector operand, per component.
+
+        The scalar spelling's own rule decides the callee: the floating widths take the
+        `fmin`/`fmax` pair, the integer widths `min`/`max` -- the same pick the scalar
+        chain makes, so one name means one thing on both paths. python's builtin takes
+        any arity and folds left to right, which this chain keeps.
+        """
+        for _, t in args:
+            if is_vec(t) and t != vec:
+                self._error(
+                    f"{name}() vector operands must have the same type, got {vec} "
+                    f"and {t}", node)
+        element:str = self._vec_element_type(vec)
+        pick:str = (("fmin" if name == "min" else "fmax")
+                    if element in ("float", "double")
+                    else ("min" if name == "min" else "max"))
+        left:str = ""
+        left_t:object = None
+        for rcode, rt in args:
+            if is_vec(rt):
+                # The mismatch check above already proved every vector arg is `vec`.
+                if is_vec(left_t):
+                    left = self._vec_componentwise(pick, left, vec, right=rcode)
+                elif left:
+                    left = self._vec_componentwise(pick, rcode, vec, scalar=left)
+                else:
+                    left = rcode
+            elif is_vec(left_t):
+                left = self._vec_componentwise(pick, left, vec, scalar=rcode)
+            else:
+                # A leading scalar pair waits for the vector that decides the shape
+                # (`min(2.0, v, w)` starts folding on the vector's terms).
+                left = rcode
+                continue
+            left_t = vec
+        return left, vec
 
 
     def _component(self, code:str, t:object, c:str)->str:

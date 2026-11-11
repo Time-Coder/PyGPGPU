@@ -67,6 +67,10 @@ class _BuiltinPythonMixin:
             if len(args) != 1:
                 self._error("abs() takes exactly 1 argument", node)
             code, t = args[0]
+            if is_vec(t):
+                # GLSL's spelling on a whole vector, and pygf's host answers per slot:
+                # the device expands component-wise like the +/* paths do.
+                return self._emit_vec_abs(code, t), t
             if is_float(t):
                 return f"fabs({code})", t
             if is_int(t):
@@ -83,6 +87,12 @@ class _BuiltinPythonMixin:
         if name in ("min", "max"):
             if len(args) < 2:
                 self._error(f"{name}() takes at least 2 arguments", node)
+            vec_t:object = next((t for _, t in args if is_vec(t)), None)
+            if vec_t is not None:
+                # GLSL spells the component-wise comparison on whole vectors, and pygf's
+                # host answers one the same way; expand like the +/* paths (the scalar
+                # chain below keeps refusing a vector through promote()'s rule).
+                return self._emit_vec_minmax(name, args, vec_t, node)
             # python's builtin takes any arity and folds left to right
             # (`min(a, b, c)` is `min(min(a, b), c)`), so the pairs chain. The mixed
             # complex pair reaches _emit_complex_builtin before this branch.
