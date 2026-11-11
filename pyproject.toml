@@ -77,7 +77,10 @@ dependencies = [
     # exactly what the `python` backend runs for a body that calls one of them. `0.2.1` does
     # not have it -- its commit holds only the `np.asarray` fix -- and a container slot cannot
     # hold a complex value, so the helpers are the whole boundary.
-    "pygf>=0.3.0",
+    # 0.4.0 spells its smoothstep helper branch-free so the device translator can
+    # walk it (the early-return form referenced a module-private helper the walk
+    # cannot resolve, which left smoothstep with no device spelling at all).
+    "pygf>=0.4.0",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",
