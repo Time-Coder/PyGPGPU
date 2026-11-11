@@ -196,6 +196,7 @@ EXPORTED_NAMES = [
     "_shape0_range_param",
     "_shape_holder_param",
     "_shape_var",
+    "_tail_var",
     "_shared_math_call",
     "_site_slots",
     "_slot_for_type",

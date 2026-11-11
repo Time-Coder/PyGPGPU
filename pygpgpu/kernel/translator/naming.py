@@ -174,6 +174,21 @@ class _NamingMixin:
         # parameter is built by this call.
         return f"_{device_name(array_name)}_shape{dim}"
 
+    def _tail_var(self, array_name:str, count:int)->str:
+        """The launch parameter holding a sub-array's extent after a partial index.
+
+        A tuple index naming fewer axes than the array has selects a sub-array in python;
+        its elements are the ``prod(shape[count:])`` contiguous words that follow the
+        named flattening. The rank is a launch fact a pointer cannot carry, so the product
+        travels as one parameter named after the array and the index count -- ``1`` when
+        the index is full-rank. The registration rides in `shapes_used` with a negative
+        dim marker, so the parameter is declared and bound exactly where the extents are.
+        """
+        key = (array_name, -count - 2)
+        if key not in self.shapes_used:
+            self.shapes_used.append(key)
+        return f"_{device_name(array_name)}_tail{count}"
+
 
     def _array_pointer_root(self, name:str)->str:
         """The array a local pointer variable was assigned from, or the name itself.

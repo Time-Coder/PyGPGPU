@@ -197,6 +197,10 @@ class _InitMixin:
             # name -> how many indices the body subscripts that array with (see
             # _record_subscript_indices); checked against the real shape at launch.
             self.subscript_indices:Dict[str, int] = {}
+            # name -> how many indices a *store* subscripts that array with, kept apart
+            # from the reads: a partial store is python's broadcast (the tail parameter
+            # carries the sub-array's extent), while a partial read stays refused.
+            self.subscript_store_indices:Dict[str, int] = {}
             # name -> the line of the widest such subscript, so the launch can blame that
             # statement rather than the loop when the count exceeds the array's rank.
             self.subscript_lines:Dict[str, int] = {}

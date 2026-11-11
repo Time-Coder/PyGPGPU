@@ -120,7 +120,9 @@ def _check_shape_indices(kernel_name:str, full:List[object],
         else:
             # Python raises nothing here -- `out[i, j]` on a 3-D array selects a sub-array --
             # so this is a device limit, not a mirror of the interpreter's. A ValueError
-            # keeps it apart from the indexing errors above.
+            # keeps it apart from the indexing errors above. A *store* through a partial
+            # index is python's broadcast and is legal (see the store loop below); a read
+            # has no device value to name, so it stays refused.
             error = ValueError(
                 f"too few indices for '{name}': python would select a sub-array from its "
                 f"shape {shape}, which a work item cannot represent. Index every dimension, "
@@ -128,6 +130,34 @@ def _check_shape_indices(kernel_name:str, full:List[object],
         if subscript_line:
             # `_body_frame` reads these back to place a frame on that line, and the column
             # decides where CPython starts the caret -- on the subscript expression.
+            error.lineno = first_line + subscript_line - 1  # type: ignore[attr-defined]
+            error.column = int(  # type: ignore[attr-defined]
+                launch_meta.get("subscript_columns", {}).get(name, 0) or 0)
+        raise error from None
+
+    # A *store* is recorded apart from a read, because its partial form is legal:
+    # `image[0, 0] = value` on a 3-D array is python's broadcast, and the generated
+    # store walks the sub-array's contiguous elements through the tail parameter. Only
+    # the too-many direction is a mistake here -- numpy raises its own IndexError for it.
+    for name, count in sorted(launch_meta.get("subscript_store_indices", {}).items()):
+        param_index = name_to_index.get(name, -1)
+        if param_index < 0:
+            continue
+        shape = shape_of(param_index)
+        if shape is None:
+            continue
+        rank = len(shape)
+        if count <= rank:
+            continue
+        subscript_line = int(launch_meta.get("subscript_lines", {}).get(name, 0) or 0)
+        first_line = int(launch_meta.get("source_first_line", 1) or 1)
+        error = IndexError(
+            f"too many indices for array: array is {rank}-dimensional, "
+            f"but {count} were indexed")
+        error.subscript_text = launch_meta.get(  # type: ignore[attr-defined]
+            "subscript_texts", {}).get(name, "")
+        error.array_rank = rank  # type: ignore[attr-defined]
+        if subscript_line:
             error.lineno = first_line + subscript_line - 1  # type: ignore[attr-defined]
             error.column = int(  # type: ignore[attr-defined]
                 launch_meta.get("subscript_columns", {}).get(name, 0) or 0)

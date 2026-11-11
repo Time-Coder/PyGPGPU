@@ -215,11 +215,17 @@ class _KernelLaunchMixin:
                     arg_shape = tuple(arg_shape)
                 else:
                     arg_shape = (mem_obj.data.shape if mem_obj.data is not None else mem_obj.shape)
-                if ((
-                        arg.base_type_str in HIPInfo.vec_types and
-                        len(arg_shape) >= 2 and
-                        arg_shape[-1] == HIPInfo.vec_types[arg.base_type_str].component_count()
-                    )
+                # The vec_types table carries the scalar basics too (`uchar` is in it, a
+                # setdefault of basic_types), so membership alone does not make a base
+                # type a vector: only a class that answers component_count is one, and a
+                # uint8 image's last axis (its channels) must not be read as a component
+                # count of a scalar that has none.
+                vec_cls:object = HIPInfo.vec_types.get(arg.base_type_str)
+                components:object = (getattr(vec_cls, "component_count", None)
+                                     if vec_cls is not None else None)
+                if (components is not None
+                        and len(arg_shape) >= 2
+                        and arg_shape[-1] == components()
                 ):
                     arg_shape = arg_shape[:-1]
 

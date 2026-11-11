@@ -172,7 +172,7 @@ class _TargetsMixin:
         return code, t[1]
 
 
-    def _record_subscript_indices(self, node:ast.Subscript)->None:
+    def _record_subscript_indices(self, node:ast.Subscript, store:bool=False)->None:
         """Remember how many indices each array is subscripted with.
 
         A pointer parameter carries no rank, so the translator cannot tell whether
@@ -180,6 +180,11 @@ class _TargetsMixin:
         time can. Recording the count here lets the launch compare it with the array's
         real shape instead of silently writing one element of a 3-D array (which is what
         ``out[i, j] = v`` used to compile into).
+
+        A **store** is recorded apart from a read, because the two have different limits:
+        a partial *read* selects a sub-array, which a work item cannot represent and is
+        refused, while a partial *store* is python's broadcast -- the sub-array's elements
+        are contiguous and the tail parameter carries their count (see `_tail_var`).
         """
         base:ast.expr = node.value
         name:str = ""
@@ -193,7 +198,9 @@ class _TargetsMixin:
         if not is_ptr(self._lookup(name)):
             return
         count:int = len(node.slice.elts) if isinstance(node.slice, ast.Tuple) else 1
-        previous:int = self.subscript_indices.get(name, 0)
+        counts:Dict[str, int] = (self.subscript_store_indices if store
+                                 else self.subscript_indices)
+        previous:int = counts.get(name, 0)
         if count > previous:
             # The widest subscript is the one that decides; among equally wide ones the
             # FIRST is the one python would raise at, because it is the first the body
@@ -204,16 +211,16 @@ class _TargetsMixin:
             self.subscript_lines[name] = getattr(node, "lineno", 0) or 0
             self.subscript_columns[name] = getattr(node, "col_offset", 0) or 0
             self.subscript_texts[name] = ast.get_source_segment(self.source_text, node) or ""
-        self.subscript_indices[name] = max(previous, count)
+        counts[name] = max(previous, count)
 
 
-    def _visit_subscript_index(self, node:ast.Subscript)->Translated:
-        self._record_subscript_indices(node)
-        return self._flatten_index(node.slice, node.value, node)
+    def _visit_subscript_index(self, node:ast.Subscript, tail:bool=False)->Translated:
+        self._record_subscript_indices(node, store=tail)
+        return self._flatten_index(node.slice, node.value, node, tail=tail)
 
 
     def _flatten_index(self, index:ast.expr, target:ast.expr,
-                       node:ast.AST)->Translated:
+                       node:ast.AST, tail:bool=False)->Translated:
         """One flat offset for an index that may name several axes.
 
         A tuple index (`a[i, j]`) is row-major flattening over the *declared* shape, which is
@@ -273,7 +280,13 @@ class _TargetsMixin:
                 for inner in range(d + 1, len(dims)):
                     term = f"{term} * {self._shape_var(array_name, inner)}"
                 terms.append(term)
-            return " + ".join(terms), "int"
+            named:str = " + ".join(terms)
+            if not tail:
+                return named, "int"
+            # A store through a partial index broadcasts: the named flattening is the
+            # sub-array's first element, and the tail parameter carries the count of the
+            # contiguous elements that follow it (1 when the index is full-rank).
+            return f"(({named}) * {self._tail_var(array_name, len(dims))})", "int"
         code, t = self._visit_expression(index)
         if not is_int(t):
             self._error("array index must be an integer", node)

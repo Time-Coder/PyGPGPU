@@ -65,7 +65,16 @@ class _BuildPhaseArgsMixin:
                 # parameter list, in order.
                 phase_args:List[object] = prefix_values
             for param_index, dim in extents:
-                phase_args.append(int(plan.full[param_index].shape[dim]))
+                if dim >= 0:
+                    phase_args.append(int(plan.full[param_index].shape[dim]))
+                else:
+                    # A negative dim is a sub-array extent (see translator `_tail_var`):
+                    # the product of the axes a partial store's index leaves. A full-rank
+                    # index leaves none, so the empty product binds 1.
+                    tail:int = 1
+                    for extent in tuple(plan.full[param_index].shape[-dim - 2:]):
+                        tail *= int(extent)
+                    phase_args.append(tail)
             # The signature declares the sampler and local-memory arguments right after the
             # shape extents, and the outer/created values last (see render_kernel), so they
             # are appended in that order here. Getting this wrong shifts every later

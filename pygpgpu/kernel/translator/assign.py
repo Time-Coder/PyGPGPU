@@ -316,6 +316,23 @@ class _AssignMixin(_PrivateArrayMixin, _WorkGroupMixin):
             if is_image(base_t):
                 self._emit_image_write(base_code, base_t, target, code)
                 return
+            if isinstance(target.slice, ast.Tuple):
+                # A tuple-indexed store broadcasts across the sub-array python's partial
+                # index selects: `image[0, 0] = value` on a 3-D array writes the whole
+                # row. The flattening carries the tail parameter (see `_tail_var`), so
+                # the store walks the contiguous elements the named flattening starts.
+                index_code, _ = self._visit_subscript_index(target, tail=True)
+                self._record_element_write(target.value)
+                code = self._complex_store(base_t, t, code)
+                tail_var:str = self._tail_var(self._array_name(target.value),
+                                              len(target.slice.elts))
+                counter:str = f"_tail_spread{self._next_temp()}"
+                self._emit(f"for (int {counter} = 0; {counter} < {tail_var}; {counter}++) {{")
+                self._indent += 1
+                self._emit(f"{base_code}[{index_code} + {counter}] = {code};")
+                self._indent -= 1
+                self._emit("}")
+                return
             index_code, _ = self._visit_subscript_index(target)
             code = self._complex_store(base_t, t, code)
             self._emit(f"{base_code}[{index_code}] = {code};")

@@ -135,7 +135,8 @@ class _DeviceCallMixin:
             for array_name, dim in shape_params:
                 if (array_name, dim) not in self.shapes_used:
                     self.shapes_used.append((array_name, dim))
-            shape_codes:List[str] = [self._shape_var(array_name, dim)
+            shape_codes:List[str] = [self._shape_var(array_name, dim) if dim >= 0
+                                     else self._tail_var(array_name, -dim - 2)
                                      for array_name, dim in shape_params]
             # A helper reaches outer-scope names the same way the kernel does, so it gets
             # the same parameters: the call site forwards its own (see below).

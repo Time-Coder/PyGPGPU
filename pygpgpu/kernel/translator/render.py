@@ -111,7 +111,12 @@ class _RenderMixin:
             if dtype is not None and dtype not in self.private_structs:
                 self.private_structs.append(dtype)
         for array_name, dim in (shape_params or []):
-            params.append(f"const int {self._shape_var(array_name, dim)}")
+            if dim >= 0:
+                params.append(f"const int {self._shape_var(array_name, dim)}")
+            else:
+                # A negative dim is a sub-array extent (see _tail_var): the product of
+                # the axes a partial store's index leaves, bound per launch.
+                params.append(f"const int {self._tail_var(array_name, -dim - 2)}")
         # Outer-scope parameters come last, matching the call site (see _emit_device_call),
         # which forwards them after the helper's own arguments and shape extents.
         params.extend(self._outer_param_declarations(device=True))
@@ -239,7 +244,12 @@ class _RenderMixin:
             else:
                 params.append(f"{self._kernel_scalar_type(t)} {device_name(name)}")
         for array_name, dim in self.shapes_used:
-            params.append(f"const int {self._shape_var(array_name, dim)}")
+            if dim >= 0:
+                params.append(f"const int {self._shape_var(array_name, dim)}")
+            else:
+                # A negative dim is a sub-array extent (see _tail_var): the product of
+                # the axes a partial store's index leaves, bound per launch.
+                params.append(f"const int {self._tail_var(array_name, -dim - 2)}")
         # OpenCL sampling takes the sampler as a kernel argument; one per sampled
         # image, right after that image. The host binds a matching sampler per image,
         # so the Python-visible signature stays (image) only. Metal has no sampler

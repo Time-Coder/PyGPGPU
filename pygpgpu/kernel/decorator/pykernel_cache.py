@@ -68,7 +68,15 @@ class _PykernelCacheMixin:
     def _build_launch_args(self, args:List[object], arg_types:List[object], shape_sources:List[Tuple[int, int]])->List[object]:
         launch_args:List[object] = list(args)
         for param_index, dim in shape_sources:
-            launch_args.append(int(args[param_index].shape[dim]))
+            if dim >= 0:
+                launch_args.append(int(args[param_index].shape[dim]))
+            else:
+                # A negative dim is a sub-array extent (see translator `_tail_var`): the
+                # product of the axes a partial store's index leaves, 1 for a full rank.
+                tail:int = 1
+                for extent in tuple(args[param_index].shape[-dim - 2:]):
+                    tail *= int(extent)
+                launch_args.append(tail)
         return launch_args
 
 

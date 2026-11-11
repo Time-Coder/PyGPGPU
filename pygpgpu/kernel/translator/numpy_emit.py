@@ -415,7 +415,13 @@ class _NumpyEmitMixin:
             return f"((int){device}((float)({code})))", "int"
 
         for (code, t) in args:
-            arg_codes.append(code if (t == ret or (is_float(t) and is_float(ret))) else f"(({ret})({code}))")
+            # Everything but the exact width is cast to the call's own width, INCLUDING a
+            # float32 argument beside a double one. Leaving it uncast spelled bare
+            # `pow(float, double)` -- two half-width candidates, and C++ refuses the call
+            # ("more than one instance of overloaded function pow matches") where python's
+            # math.pow is double throughout and simply widens. The all-double spelling
+            # compiles and answers python's number.
+            arg_codes.append(code if t == ret else f"(({ret})({code}))")
         c_func:str = _math_device_name(attr, self.backend, ret)
         return f"{c_func}({', '.join(arg_codes)})", ret
 

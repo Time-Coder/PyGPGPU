@@ -284,6 +284,10 @@ class _CompileKernelsMixin:
                                         in self.host_region_snapshot.items()
                                         if plan.name in plan.translator.host_scalars},
                  "subscript_indices": dict(plan.translator.subscript_indices),
+                 # name -> the widest *store* subscript, kept apart from the reads: a
+                 # partial store is python's broadcast and is legal, so only the
+                 # too-many direction is checked for it (see _check_shape_indices).
+                 "subscript_store_indices": dict(plan.translator.subscript_store_indices),
                  # name -> the line of its widest subscript, and the offset that turns a
                  # parsed-copy line into the user's own: the launch blames that statement,
                  # not the loop, when a subscript names more indices than the rank.
