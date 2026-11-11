@@ -113,6 +113,15 @@ PYTHON_FLOOR_QUALIFIERS:Dict[str, str] = {
 # (`int`, `long`, `uint`, ...) and `%(q)s` the qualifier, so one body serves every width.
 # The `%(`/`%%` spellings matter: this text goes through `%`-formatting, so a literal
 # remainder operator has to be doubled.
+#
+# `float_mod` is the floating-width `%`: C has no `%` for floats at all (the emitter used
+# to spell plain `fmod`, whose result carries the *dividend's* sign where python's
+# remainder carries the *divisor's*), and the correction is CPython's own float remainder
+# -- take fmod's result and add the divisor once when the two signs disagree. The empty
+# `r != 0` guard keeps a zero remainder untouched (python keeps fmod's signed zero), and a
+# NaN stays a NaN through both tests. `%(f)s` is the fmod spelling the width and backend
+# use: OpenCL C and Metal name the plain `fmod` for both widths, CUDA and HIP spell the
+# float form `fmodf` and keep `fmod` for doubles.
 PYTHON_FLOOR_SOURCES:Dict[str, str] = {
     "floor_div": """
 %(q)s %(t)s __pygpgpu_floor_div_%(n)s(%(t)s a, %(t)s b)
@@ -138,6 +147,27 @@ PYTHON_FLOOR_SOURCES:Dict[str, str] = {
     }
     return r;
 }""",
+    "float_mod": """
+%(q)s %(t)s __pygpgpu_float_mod_%(n)s(%(t)s a, %(t)s b)
+{
+    %(t)s r = %(f)s(a, b);
+    // Python's remainder carries the divisor's sign; fmod's carries the dividend's.
+    if (r != 0 && ((r < 0) != (b < 0)))
+    {
+        r += b;
+    }
+    return r;
+}""",
+}
+
+
+
+# The fmod spelling per backend for the floating-width helper (see `float_mod` above).
+FLOAT_FMOD_NAMES:Dict[str, str] = {
+    "opencl": "fmod",
+    "cuda": "fmodf",
+    "hip": "fmodf",
+    "metal": "fmod",
 }
 
 
@@ -169,10 +199,19 @@ def python_floor_name(operation:str, ctype:str)->str:
 def python_floor_source(operation:str, ctype:str, backend:str)->str:
     """The device function that gives `//` or `%` python's floor semantics for one width.
 
-    Returns "" for an unsigned width, whose C operator already matches python.
+    Returns "" for an unsigned width, whose C operator already matches python. The float
+    form (`float_mod`) is only asked for a floating width: C has no `%` for floats, so it
+    has no unsigned case to skip either.
     """
     if ctype in UNSIGNED_C_TYPES:
         return ""
     qualifier:str = PYTHON_FLOOR_QUALIFIERS.get(backend, PYTHON_FLOOR_QUALIFIERS["opencl"])
+    if operation == "float_mod":
+        fmod_name:str = FLOAT_FMOD_NAMES.get(backend, "fmod")
+        if ctype == "double":
+            fmod_name = "fmod"
+        return PYTHON_FLOOR_SOURCES[operation] % {"q": qualifier, "t": ctype,
+                                                  "n": c_identifier_suffix(ctype),
+                                                  "f": fmod_name}
     return PYTHON_FLOOR_SOURCES[operation] % {"q": qualifier, "t": ctype,
                                               "n": c_identifier_suffix(ctype)}

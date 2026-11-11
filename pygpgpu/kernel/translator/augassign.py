@@ -21,6 +21,7 @@ from .predicates import (
     is_image,
     is_int,
     is_ptr,
+    promote,
 )
 
 
@@ -284,8 +285,14 @@ class _AugassignMixin:
                                              value_t, node)
                 self._emit(f"{target_code} = {code};")
             else:
-                symbol = "%"
-                self._emit(f"{target_code} {symbol}= {value_code};")
+                # A float remainder is python's floored one too -- and C's `%` is an
+                # integer operator anyway, so the augmented spelling goes through the
+                # same helper the binary operator uses (see `float_mod` in
+                # device_builtins.PYTHON_FLOOR_SOURCES).
+                code, _ = self._emit_floored(("floor_div", "floor_mod"), "float_mod",
+                                             target_code, promote(target_t, value_t),
+                                             value_code, value_t, node)
+                self._emit(f"{target_code} = {code};")
         else:
             self._error(f"unsupported operator: {name}", node)
 

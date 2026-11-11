@@ -14,6 +14,7 @@ from .vectors import (
     is_vec,
 )
 from .predicates import (
+    is_float,
     is_int,
     promote,
 )
@@ -124,6 +125,14 @@ class _OperatorsMixin:
                 # Same discrepancy as `//`: C's `%` takes the dividend's sign and python's
                 # takes the divisor's.
                 return self._emit_floored(("floor_div", "floor_mod"), "floor_mod",
+                                          left, t, right, rt, node)
+            if is_float(t):
+                # C's `%` is an integer operator, so the old emission was a bare `fmod`
+                # call -- whose result carries the *dividend's* sign, where python's
+                # remainder carries the *divisor's* (`-1.0 % 4.0` is 3.0 in python and
+                # -1.0 from fmod). The helper is CPython's own float remainder: fmod's
+                # result, plus the divisor once when the two signs disagree.
+                return self._emit_floored(("floor_div", "floor_mod"), "float_mod",
                                           left, t, right, rt, node)
             return f"fmod(({t})({left}), ({t})({right}))", t
 
