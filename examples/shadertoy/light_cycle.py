@@ -7,10 +7,11 @@ camera flies down the same endless square tunnel -- cyan ribs and rings on the w
 streams in the corners, an anti-aliased grid that fades with distance, cone-traced coverage
 for the light bars and accumulated volumetric glow for the air between them.
 
-The GLSL's spellings all work as written: ``abs``/``min``/``max`` are pygf's, imported here
-under their own names (the device expands a vector argument per component, the interpreter
-runs pygf's implementation, and both answer the same numbers), and ``smoothstep``/``clamp``/
-``mix`` come from the package as registered builtins. One spelling differs because the
+The GLSL's spellings all work as written: ``min``/``max`` are pygf's objects, registered as
+builtins and imported from the package, and ``abs`` is python's own builtin reaching the
+vectors' ``__abs__`` -- the device expands a vector argument per component, the interpreter
+runs the same arithmetic in python, and both answer the same numbers. ``smoothstep``/
+``clamp``/``mix`` come from the package the same way. One spelling differs because the
 device subset has no ``mat2``: ``rot`` takes the vector it rotates and answers the rotated
 one.
 """
@@ -19,8 +20,8 @@ import math
 
 import numpy as np
 
-from pygpgpu import clamp, config, cross, dot, fract, mix, normalize, smoothstep
-from pygf import abs, color3f, float2, float3, max, min
+from pygpgpu import clamp, config, cross, dot, fract, max, min, mix, normalize, smoothstep
+from pygf import color3f, float2, float3
 
 from shadertoy_viewer import ShadertoyViewer
 

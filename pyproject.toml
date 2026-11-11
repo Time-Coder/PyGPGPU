@@ -80,7 +80,7 @@ dependencies = [
     # 0.4.0 spells its smoothstep helper branch-free so the device translator can
     # walk it (the early-return form referenced a module-private helper the walk
     # cannot resolve, which left smoothstep with no device spelling at all).
-    "pygf>=0.4.0",
+    "pygf>=0.5.0",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",

@@ -127,6 +127,12 @@ class _BuiltinEmitMixin(_BuiltinPythonMixin):
         if any(self._complex_dtype_of(t) is not None for _, t in args):
             return self._emit_complex_builtin(name, args, node)
 
+        if name in ("min", "max"):
+            # pygf's ordering pair, registered: the same emission the bare-name python
+            # builtins take, vector expansion included (see _emit_builtin). One name, one
+            # code, however the callee was imported.
+            return self._emit_builtin(name, args, node)
+
         if name in INDEX_BUILTINS:
             if len(args) != 1 or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, int):
                 self._error(f"gpu.{name}(dim) requires a constant integer dimension (0, 1 or 2)", node)

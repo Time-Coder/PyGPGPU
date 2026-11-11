@@ -98,6 +98,10 @@ from ..sci_math import fmax as fmax
 from ..sci_math import fdim as fdim
 from ..sci_math import copysign as copysign
 from ..sci_math import nextafter as nextafter
+# pygf's ordering pair, registered: a kernel may spell them through the import
+# (`from pygf import min`), and the registry recognizes the object either way.
+from pygf.funcs import max as max
+from pygf.funcs import min as min
 from ..sci_math import native_recip as native_recip
 from ..sci_math import native_divide as native_divide
 from ..sci_math import native_sqrt as native_sqrt
@@ -226,6 +230,7 @@ __all__ = [
     # have, and the ones only CUDA has
     "erf", "erfc", "tgamma", "lgamma", "rint", "remainder", "fmin", "fmax",
     "fdim", "copysign", "nextafter", "ldexp", "fract", "sign",
+    "min", "max",
     "native_recip", "native_divide", "native_sqrt", "native_rsqrt", "native_exp",
     "native_log", "native_sin", "native_cos", "native_tan", "native_exp2", "native_log2",
     "native_exp10", "native_powr",
