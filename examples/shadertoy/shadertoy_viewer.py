@@ -68,24 +68,6 @@ config.print_info = False
 config.type_map = {float: np.float32}
 
 
-def _qimage_from_array(array: np.ndarray) -> QImage:
-    """An ``(height, width, 3)`` uint8 array as a ``QImage`` that owns its pixels.
-
-    Qt expects every scanline to start on a 32-bit boundary, so a row whose byte length is not
-    a multiple of four is padded first -- an image 3, 5, ... pixels wide would otherwise read
-    past the end of the buffer and show garbage.
-    """
-    height, width = int(array.shape[0]), int(array.shape[1])
-    packed = np.ascontiguousarray(array)
-    stride = (width * 3 + 3) & ~3
-    if stride != width * 3:
-        padded = np.zeros((height, stride), dtype=np.uint8)
-        padded[:, :width * 3] = packed.reshape(height, width * 3)
-        packed = padded
-    # copy() detaches the pixels from the temporary buffer, so they outlive this call.
-    return QImage(packed.tobytes(), width, height, stride, QImage.Format.Format_RGB888).copy()
-
-
 # The windows are kept alive here: Python would otherwise collect a window with no parent.
 _WINDOWS: list["ShadertoyViewer"] = []
 # Whether this module created the application (then ``show`` runs the loop), and whether the
@@ -128,6 +110,10 @@ class ShadertoyViewer(QWidget):
         # again on every launch (the launch path always uploads a written argument, because
         # its read-back is whole-buffer). Only the read-back the window needs stays.
         self.image = gnp.zeros((height, width, 3), dtype=np.uint8)
+        # The QImage wraps the array's own memory -- one wrapper per size, no per-frame
+        # image construction and no pixel copy at display time; the read-back writes
+        # into the bytes the painter reads. See `_wrap_frame`.
+        self._frame = self._wrap_frame()
         # The uniforms, in Shadertoy's names and packings: i_mouse is the float4 Shadertoy
         # passes (xy the pointer, z the click position, w the button state), the rest are
         # scalars. They are plain attributes: a body reads them, the host rebinds them before
@@ -182,6 +168,18 @@ class ShadertoyViewer(QWidget):
             self.image[i, j, 1] = 255 * color.g
             self.image[i, j, 2] = 255 * color.b
 
+    def _wrap_frame(self) -> QImage:
+        """A ``QImage`` over the frame buffer's own memory.
+
+        ``QImage`` does not copy the buffer it is handed, so the pixels stay owned by
+        ``self.image`` (kept alive by the attribute) and the device read-back's writes are
+        visible to the painter as they land. One wrapper per size: only a resize allocates
+        a new framebuffer, hence a new image.
+        """
+        height, width = int(self.image.shape[0]), int(self.image.shape[1])
+        return QImage(memoryview(self.image), width, height, width * 3,
+                      QImage.Format.Format_RGB888)
+
     def redraw(self) -> None:
         """Advance the clock, launch one frame, and show it."""
         frame_start = time.perf_counter()
@@ -189,11 +187,10 @@ class ShadertoyViewer(QWidget):
         self.i_frame += 1
         self.draw()
         # The framebuffer lived on the device across the launch; this is the one copy that
-        # has to happen -- the pixels the window shows. It is ASKED for without waiting: the
-        # read below is what waits for it (a gnp array blocks any host access until the copy
-        # lands), which lets the copy start before the QImage work instead of after it.
-        self.image.to_host()
-        self._frame = _qimage_from_array(self.image)
+        # has to happen -- the pixels the window shows. It must land BEFORE the paint below:
+        # nothing reads the array through numpy any more, so nothing waits implicitly, and
+        # the painter would otherwise show the previous frame's bytes.
+        self.image.to_host(wait=True)
         # The readout is the render cost, not the event rate: redraws fire on show, resize
         # and pointer events, so an idle window renders nothing and an interval would read
         # as zero. What the number answers is how many frames a second this shader costs at
@@ -224,6 +221,7 @@ class ShadertoyViewer(QWidget):
         if size.width() < 1 or size.height() < 1:
             return
         self.image = gnp.zeros((size.height(), size.width(), 3), dtype=np.uint8)
+        self._frame = self._wrap_frame()
         self.i_resolution = float2(float(size.width()), float(size.height()))
         self.redraw()
 

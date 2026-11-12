@@ -57,24 +57,6 @@ config.print_info = False
 config.type_map = {float: np.float64}
 
 
-def _qimage_from_array(array: np.ndarray) -> QImage:
-    """An ``(height, width, 3)`` uint8 array as a ``QImage`` that owns its pixels.
-
-    Qt expects every scanline to start on a 32-bit boundary, so a row whose byte length is not
-    a multiple of four is padded first -- an image 3, 5, ... pixels wide would otherwise read
-    past the end of the buffer and show garbage.
-    """
-    height, width = int(array.shape[0]), int(array.shape[1])
-    packed = np.ascontiguousarray(array)
-    stride = (width * 3 + 3) & ~3
-    if stride != width * 3:
-        padded = np.zeros((height, stride), dtype=np.uint8)
-        padded[:, :width * 3] = packed.reshape(height, width * 3)
-        packed = padded
-    # copy() detaches the pixels from the temporary buffer, so they outlive this call.
-    return QImage(packed.tobytes(), width, height, stride, QImage.Format.Format_RGB888).copy()
-
-
 class FractalViewer(QWidget):
     """Camera + GPU draw + window, with the colouring left to the subclass.
 
@@ -106,6 +88,7 @@ class FractalViewer(QWidget):
         # argument, because its read-back is whole-buffer). Only the read-back the window
         # needs in redraw() stays.
         self.image = gnp.zeros((init_height, init_width, 3), dtype=np.uint8)
+        self._frame = self._wrap_frame()
         self.view_center: complex = 0j
         self.scale: float = 1.0
         self.is_left_pressed: bool = False
@@ -200,14 +183,26 @@ class FractalViewer(QWidget):
         """The centre/scale readout, shown in the window title."""
         return f"center: {self.view_center:.4f}, scale: {self.scale:.2g}"
 
+    def _wrap_frame(self) -> QImage:
+        """A ``QImage`` over the frame buffer's own memory.
+
+        ``QImage`` does not copy the buffer it is handed, so the pixels stay owned by
+        ``self.image`` and this one wrapper serves every frame until a resize allocates
+        a new framebuffer (and a new image with it).
+        """
+        height, width = int(self.image.shape[0]), int(self.image.shape[1])
+        return QImage(memoryview(self.image), width, height, width * 3,
+                      QImage.Format.Format_RGB888)
+
     def redraw(self) -> None:
         """Render a frame on the device and show it."""
         self.draw()
         # The framebuffer stays on the device between frames -- every pixel is written, so
         # nothing about the last one has to be uploaded again -- and this is the one copy
-        # the window needs. Asked for without waiting: the read below is what waits for it.
-        self.image.to_host()
-        self._frame = _qimage_from_array(self.image)
+        # the window needs. It must land BEFORE the paint below: nothing reads the array
+        # through numpy any more, so nothing waits implicitly, and the painter would
+        # otherwise show the previous frame's bytes.
+        self.image.to_host(wait=True)
         self.setWindowTitle(f"{self._title}  {self.status_text()}")
         self.update()
 
@@ -286,6 +281,7 @@ class FractalViewer(QWidget):
             return
         # The frame is always the widget size, so a resize renders a new one.
         self.image = gnp.zeros((size.height(), size.width(), 3), dtype=np.uint8)
+        self._frame = self._wrap_frame()
         self.update_params()
         self.redraw()
 
