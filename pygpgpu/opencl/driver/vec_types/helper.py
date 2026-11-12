@@ -47,21 +47,21 @@ _SINGLE_LENGTHS:List[int] = [1]
 
 def write_wide_pyi() -> None:
     self_folder:str = os.path.dirname(os.path.abspath(__file__))
-    pyi_in_contents:dict = {}
 
     for name, scalar, char_sets in VEC_INFOS:
         num:str = re.search(r"\d+$", name).group()
-        basename:str = name[:-len(num)]
-        in_file_name:str = f"{self_folder}/genVec{num}.pyi.in"
-        if in_file_name not in pyi_in_contents:
-            with open(in_file_name) as in_file:
-                pyi_in_contents[in_file_name] = in_file.read()
+        header:str = (
+            "from typing import Union\n\n"
+            f"from .genVec{num} import genVec{num}\n\n\n"
+            f"class {name}(genVec{num}):\n\n"
+            "    def __len__(self)->int: ...\n\n"
+            "    def __repr__(self)->str: ...\n\n"
+            "    def __str__(self)->str: ...\n\n")
 
         with open(f"{self_folder}/{name}.pyi", "w", newline="\n") as out_file:
             swizzle_defines:str = generate_swizzle_defines(
                 name, scalar, char_sets, _SINGLE_LENGTHS)
-            pyi_in_content:str = pyi_in_contents[in_file_name].format(basename=basename)
-            out_file.write(pyi_in_content + swizzle_defines)
+            out_file.write(header + swizzle_defines)
 
 
 if __name__ == "__main__":
