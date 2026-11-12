@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List
+from typing import Dict, List
 
 from pygf.helper import generate_getter_swizzles as _pygf_getter_swizzles
 from pygf.helper import generate_setter_swizzles as _pygf_setter_swizzles
