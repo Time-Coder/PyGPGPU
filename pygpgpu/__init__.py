@@ -64,6 +64,13 @@ from .vec_types import (
     float2, float3, float4,
     double2, double3, double4,
     genVec, genVec2, genVec3, genVec4,
+    # the semantic aliases pygf gives the shared vectors (half variants stay
+    # pygf-only: the device backends do not carry fp16 vectors)
+    color3d, color3f, color4d, color4f,
+    normal3d, normal3f, point3d, point3f,
+    texCoord2d, texCoord2f, texCoord3d, texCoord3f,
+    vector3d, vector3f,
+    vec2, vec3, vec4,
 )
 # The 8/16-wide vectors are NOT top-level exports: they are OpenCL storage
 # types, not kernel types -- no CUDA or HIP C declares them, and a type one
@@ -196,6 +203,11 @@ __all__ = [
     "float2", "float3", "float4",
     "double2", "double3", "double4",
     "genVec", "genVec2", "genVec3", "genVec4",
+    "color3d", "color3f", "color4d", "color4f",
+    "normal3d", "normal3f", "point3d", "point3f",
+    "texCoord2d", "texCoord2f", "texCoord3d", "texCoord3f",
+    "vector3d", "vector3f",
+    "vec2", "vec3", "vec4",
     # the import hook for handwritten kernel files (same-named .cl/.cu/.hip sources)
     "kernel_import",
     # the host-side CUDA libraries (cuBLAS, cuSOLVER, cuFFT, cuSPARSE, the runtime);

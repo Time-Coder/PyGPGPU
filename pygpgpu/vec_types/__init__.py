@@ -27,6 +27,23 @@ from pygf.uint2 import uint2
 from pygf.uint3 import uint3
 from pygf.uint4 import uint4
 
+# The semantic aliases pygf gives the shared vectors: a kernel may spell a
+# colour `color3f` or a position `point3f`, and the translator resolves the
+# alias through the class's bases (`color3f` -> `float3`). They are defined in
+# `pygf.alias` (module-per-name would not fit -- one object per alias) and are
+# re-exported here so a user never has to know pygf exists. The half variants
+# (`color3h` and friends) stay pygf-only -- the device backends do not carry
+# fp16 vectors. The matrix/quaternion aliases (`matrix4f`, `quatf`,
+# `frame4d`) are their own shapes and are not re-exported here.
+from pygf.alias import (
+    color3d, color3f, color4d, color4f,
+    normal3d, normal3f, point3d, point3f,
+    texCoord2d, texCoord2f, texCoord3d, texCoord3f,
+    vector3d, vector3f,
+)
+# ec2/3/4 are pygf's own spellings of float2/3/4 (plain module-level aliases).
+from pygf import vec2, vec3, vec4
+
 # The base classes are pygf's: one vector implementation serves both libraries.
 # The width bases below are PyGPGPU's thin subclasses that turn the OpenCL
 # numeric swizzles on; genVec itself is re-exported unchanged. The 8/16-wide
