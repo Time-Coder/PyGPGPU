@@ -1,6 +1,6 @@
 from ctypes import c_int16
 
-from .genVec2 import genVec2
+from pygf.genVec2 import genVec2
 
 
 class short2(genVec2):

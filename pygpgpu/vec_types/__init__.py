@@ -34,9 +34,9 @@ from pygf.uint4 import uint4
 # (`pygpgpu.opencl.driver.vec_types`): a kernel refuses the width everywhere,
 # and a host user of the numeric swizzles imports from there.
 from pygf.genVec import genVec
-from .genVec2 import genVec2
-from .genVec3 import genVec3
-from .genVec4 import genVec4
+from pygf.genVec2 import genVec2
+from pygf.genVec3 import genVec3
+from pygf.genVec4 import genVec4
 
 # pygf owns the numpy patches and the `VectorArray` view they produce (see
 # pygf/vector_array.py). It knows the types it defines; the char/uchar/short/ushort

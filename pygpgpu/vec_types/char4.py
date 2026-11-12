@@ -1,6 +1,6 @@
 from ctypes import c_int8
 
-from .genVec4 import genVec4
+from pygf.genVec4 import genVec4
 
 
 class char4(genVec4):

@@ -1,6 +1,6 @@
 from ctypes import c_uint16
 
-from .genVec4 import genVec4
+from pygf.genVec4 import genVec4
 
 
 class ushort4(genVec4):

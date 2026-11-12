@@ -1,6 +1,6 @@
-from typing import Union
+﻿from typing import Union
 
-from .genVec4 import genVec4
+from pygf.genVec4 import genVec4
 from .char2 import char2
 
 
@@ -12,6 +12,7 @@ class char4(genVec4):
 
     def __str__(self)->str: ...
     
+
     @property
     def x(self)->int: ...
 

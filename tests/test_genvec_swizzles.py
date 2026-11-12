@@ -173,11 +173,10 @@ def test_a_numeric_swizzle_beyond_the_charset_is_refused() -> None:
         char2(1, 2).s01234
 
 
-def test_pygf_classes_keep_their_letter_only_surface() -> None:
-    """The gate stays off for the classes pygf owns: no numeric swizzles there."""
+def test_pygf_classes_carry_the_numeric_surface_too() -> None:
+    """The gate is on by default in pygf 0.7.0: `float2().s01` reads like any swizzle."""
     value: object = float2(1.0, 2.0)
-    with pytest.raises(AttributeError):
-        value.s0
+    assert list(value.s01) == [1.0, 2.0]
 
 # ---------------------------------------------------------------------------
 # Swizzle writes

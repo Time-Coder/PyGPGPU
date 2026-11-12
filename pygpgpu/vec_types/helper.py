@@ -104,10 +104,17 @@ def write_clmath_pyi():
     self_folder = os.path.dirname(os.path.abspath(__file__))
     pyi_in_contents:dict = {}
 
+    # The width bases live in pygf now: the stub's base import names pygf's module
+    # (`from pygf.genVec2 import genVec2`) instead of a local file, and the template's
+    # own local import line is dropped.
+    base_imports:Dict[int, str] = {
+        2: "from pygf.genVec2 import genVec2",
+        4: "from pygf.genVec4 import genVec4",
+    }
+
     for name, scalar, char_sets in VEC_INFOS:
         num:str = re.search(r'\d+$', name).group()
         basename:str = name[:-len(num)]
-        narrow:bool = num in ('2', '4')
         in_file_name:str = f"{self_folder}/genVec{num}.pyi.in"
         if in_file_name not in pyi_in_contents:
             with open(in_file_name) as in_file:
@@ -117,17 +124,19 @@ def write_clmath_pyi():
             swizzle_defines:str = generate_swizzle_defines(
                 name, scalar, char_sets, _NARROW_LENGTHS)
             pyi_in_content:str = pyi_in_contents[in_file_name].format(basename=basename)
-            if narrow:
-                # the sibling width the swizzle results name: a 2-wide vector
-                # answers 4-component repeats, a 4-wide one answers 2-component
-                # reads -- and neither names a 3-wide, which does not exist here
-                sibling:str = '4' if num == '2' else '2'
-                lines:List[str] = pyi_in_content.split("\n")
-                last_import:int = max(i for i, line in enumerate(lines)
-                                      if line.startswith("from "))
-                lines.insert(last_import + 1,
-                             f"from .{basename}{sibling} import {basename}{sibling}")
-                pyi_in_content = "\n".join(lines)
+            old_import:str = f"from .genVec{num} import genVec{num}"
+            pyi_in_content:str = pyi_in_content.replace(old_import,
+                                                        base_imports[int(num)])
+            # the sibling width the swizzle results name: a 2-wide vector answers
+            # 4-component repeats, a 4-wide one answers 2-component reads -- and
+            # neither names a 3-wide, which does not exist beside these classes
+            sibling:str = '4' if num == '2' else '2'
+            lines:List[str] = pyi_in_content.split("\n")
+            last_import:int = max(i for i, line in enumerate(lines)
+                                  if line.startswith("from "))
+            lines.insert(last_import + 1,
+                         f"from .{basename}{sibling} import {basename}{sibling}")
+            pyi_in_content = "\n".join(lines)
             out_file.write(pyi_in_content + swizzle_defines)
 
 if __name__ == "__main__":
