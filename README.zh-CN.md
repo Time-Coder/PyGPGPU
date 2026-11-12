@@ -118,7 +118,7 @@ def matrix_scale(m: np.ndarray, out: np.ndarray, k: float) -> None:
     for y, x in np.ndindex(out.shape):    # 二维 NDRange
         out[y, x] = m[y, x] * k
 
-@kernel(backend="cuda", domain="data")
+@kernel(default_device="cuda", domain="data")
 def histogram(data: np.ndarray, counts: np.ndarray) -> None:
     i = get_global_id(0)
     atomic_add(counts, data[i], 1)    # 原子操作, 结果自动回读
@@ -1123,7 +1123,20 @@ config.default_device = None                     # 恢复内置顺序
 使用与中括号相同的选择器写法, 逐项尝试直到某一项可用, 不可用的项会被跳过。该列表在
 调用时读取, 因此对赋值之前装饰的 kernel 同样生效; 读取 `config.default_device` 得到生效
 的列表 —— 未设置时就是内置探测顺序 `cuda -> hip -> metal -> opencl`。
-用 `@kernel(backend=...)` 显式指定后端的 kernel 不受影响。
+
+单个 kernel 也可以自带一份列表, 它会替该 kernel 的无中括号调用取代
+`config.default_device` —— 接受的写法、选择器、按序尝试的规则都相同:
+
+```python
+@kernel(default_device=["opencl:cpu", "cuda"])   # 只属于这个 kernel 的顺序
+def add(a, b, out): ...
+
+@kernel(default_device="cuda")                   # 单项列表: 不会回退到列表之外
+def scale(a, out, k): ...
+```
+
+当决定这次调用的列表里所有项都不可用时, 启动会直接报错, 而不是落到列表没有提到的设备上;
+带中括号的调用(`k["opencl:1"](...)`)仍然优先于这两份列表。
 
 ## 缓存
 

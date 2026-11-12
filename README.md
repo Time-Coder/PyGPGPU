@@ -118,7 +118,7 @@ def matrix_scale(m: np.ndarray, out: np.ndarray, k: float) -> None:
     for y, x in np.ndindex(out.shape):    # 2D NDRange
         out[y, x] = m[y, x] * k
 
-@kernel(backend="cuda", domain="data")
+@kernel(default_device="cuda", domain="data")
 def histogram(data: np.ndarray, counts: np.ndarray) -> None:
     i = get_global_id(0)
     atomic_add(counts, data[i], 1)    # atomics, results read back automatically
@@ -1225,7 +1225,21 @@ The same selector strings the brackets accept are used, and each entry is tried 
 resolves; an unusable entry is skipped. The list is read at call time, so it also applies
 to kernels decorated before the assignment, and reading `config.default_device` reports the
 effective list — the configured one, or `cuda -> hip -> metal -> opencl` while nothing is set.
-A kernel decorated with an explicit `@kernel(backend=...)` keeps that backend.
+
+A kernel can carry its own list, which replaces `config.default_device` for its bracket-less
+calls — the same shapes, the same strings, the same try-in-order rule:
+
+```python
+@kernel(default_device=["opencl:cpu", "cuda"])   # this kernel's own order
+def add(a, b, out): ...
+
+@kernel(default_device="cuda")                   # a single entry: no fallback beyond it
+def scale(a, out, k): ...
+```
+
+When every entry of the list that governs a call is unusable, the launch reports it rather
+than falling through to a device the list did not name; a call with a bracket
+(`k["opencl:1"](...)`) still overrides both lists.
 
 ## Caching
 

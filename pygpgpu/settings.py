@@ -160,8 +160,8 @@ class Config:
         back to the next when one is unusable. Reading it gives the effective list -- the
         built-in probe order (``cuda -> hip -> metal -> opencl``) until one is set -- and
         assigning ``None`` restores that order. It is read at call time, so it applies to
-        kernels that were already decorated; a kernel declared ``@kernel(backend=...)``
-        keeps that backend and is unaffected.
+        kernels that were already decorated; a kernel declared with its own
+        ``@kernel(default_device=...)`` walks that list instead and is unaffected.
 
     ``kernel_import``
         The import hook's settings (see :class:`KernelImportConfig`).
@@ -232,17 +232,12 @@ class Config:
 
     @default_device.setter
     def default_device(self, value: Optional[Union[str, Sequence[str]]]) -> None:
-        from .kernel.decorator.devices import _install_default_devices
-        if value is None:
-            _install_default_devices(None)
-        elif isinstance(value, str):
-            _install_default_devices([value])
-        elif isinstance(value, (list, tuple)):
-            _install_default_devices(list(value))
-        else:
-            raise TypeError(
-                "config.default_device takes a selector string like 'cuda:0', a list "
-                "of them, or None; got %s" % type(value).__name__)
+        from .kernel.decorator.devices import (
+            _install_parsed_default_devices,
+            _parse_default_device_value,
+        )
+        _install_parsed_default_devices(
+            _parse_default_device_value(value, "config.default_device"))
 
     def __repr__(self) -> str:
         return ("Config(print_info=%r, type_map=%r, default_device=%r, kernel_import=%r)"

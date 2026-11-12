@@ -5,6 +5,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Sequence,
     Tuple,
 )
 
@@ -26,15 +27,57 @@ DEFAULT_BACKEND_ORDER:Tuple[str, ...] = ("cuda", "hip", "metal", "opencl")
 
 _probed_backend:Optional[str] = None
 
-# The selector list a bracketed-less call walks, installed through
-# ``config.default_device``. None means "use DEFAULT_BACKEND_ORDER". Each entry is
-# (backend, device-or-None).
-_default_devices:Optional[List[Tuple[Optional[str], Optional[str]]]] = None
+# The parsed shape of one default-device configuration: each entry is one selector with
+# the backend and the device parts it named, None where the selector left a part open (a
+# bare "cuda" names only the backend, a bare "gfx1036" only the device).
+DefaultDeviceEntries = List[Tuple[Optional[str], Optional[str]]]
+
+# The selector list a bracket-less call walks, installed through ``config.default_device``.
+# None means "use DEFAULT_BACKEND_ORDER".
+_default_devices:Optional[DefaultDeviceEntries] = None
 _default_device_lock = threading.Lock()
 
 
-def _install_default_devices(selectors:Optional[List[str]])->None:
-    """Choose what a kernel call without a bracket runs on, in order of preference.
+def _parse_default_devices(selectors:Sequence[str], setting:str)->DefaultDeviceEntries:
+    """Parse and validate default-device selector strings -- the same strings a bracket takes.
+
+    ``setting`` names the configuration in the refusals: the process-wide
+    ``config.default_device`` and the per-kernel ``@kernel(default_device=...)`` accept the
+    same strings, and each error names its own.
+    """
+    parsed:DefaultDeviceEntries = []
+    for selector in selectors:
+        if not isinstance(selector, str):
+            raise TypeError(
+                "%s takes selector strings like 'opencl:cpu', got %s"
+                % (setting, type(selector).__name__))
+        backend, device = _parse_selector(selector)
+        if backend is None and device is None:
+            raise ValueError("empty device selector")
+        parsed.append((backend, device))
+    return parsed
+
+
+def _parse_default_device_value(value:object, setting:str)->Optional[DefaultDeviceEntries]:
+    """One default-device assignment in either accepted shape, parsed.
+
+    A selector string is a one-entry list, a list/tuple is taken in order, ``None`` means
+    "not configured" (whatever is less specific then decides), and anything else is
+    refused with the setting's own name in the message.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _parse_default_devices([value], setting)
+    if isinstance(value, (list, tuple)):
+        return _parse_default_devices(list(value), setting)
+    raise TypeError(
+        "%s takes a selector string like 'cuda:0', a list of them, or None; got %s"
+        % (setting, type(value).__name__))
+
+
+def _install_parsed_default_devices(entries:Optional[DefaultDeviceEntries])->None:
+    """Install what a kernel call without a bracket runs on, in order of preference.
 
     ``config.default_device = ["opencl:cpu", "cuda"]`` makes a plain ``k(...)`` try the CPU
     OpenCL device first and fall back to cuda when that is unusable. Entries are the same
@@ -44,29 +87,21 @@ def _install_default_devices(selectors:Optional[List[str]])->None:
     ``None`` (or an empty list) restores the built-in order (``cuda -> hip -> metal ->
     opencl``).
 
-    A kernel decorated with an explicit ``@kernel(backend=...)`` keeps that backend and is
-    unaffected; this only decides what an unspecified call means. The list is read at call
-    time, so it applies to kernels that were already decorated.
+    A kernel decorated with its own ``@kernel(default_device=...)`` walks that list
+    instead; this setting decides what an unspecified call means for kernels that did not
+    name one. The list is read at call time, so it applies to kernels that were already
+    decorated.
     """
     global _default_devices
-    if not selectors:
-        with _default_device_lock:
-            _default_devices = None
-        return
-
-    parsed:List[Tuple[Optional[str], Optional[str]]] = []
-    for selector in selectors:
-        if not isinstance(selector, str):
-            raise TypeError(
-                "config.default_device takes selector strings like 'opencl:cpu', got %s"
-                % type(selector).__name__)
-        backend, device = _parse_selector(selector)
-        if backend is None and device is None:
-            raise ValueError("empty device selector")
-        parsed.append((backend, device))
-
     with _default_device_lock:
-        _default_devices = parsed
+        _default_devices = (entries or None)
+
+
+def _selectors_of(entries:DefaultDeviceEntries)->List[str]:
+    """Render parsed entries back to the selector strings they came from."""
+    return [("%s:%s" % (backend, device)) if backend and device
+            else (backend or device or "")
+            for backend, device in entries]
 
 
 def _default_device_selectors()->List[str]:
@@ -75,9 +110,7 @@ def _default_device_selectors()->List[str]:
         entries = _default_devices
     if entries is None:
         return list(DEFAULT_BACKEND_ORDER)
-    return [("%s:%s" % (backend, device)) if backend and device
-            else (backend or device or "")
-            for backend, device in entries]
+    return _selectors_of(entries)
 
 
 def _entry_usable(backend:Optional[str], device:Optional[str])->Optional[Tuple[str, Optional[str]]]:
@@ -86,6 +119,12 @@ def _entry_usable(backend:Optional[str], device:Optional[str])->Optional[Tuple[s
     A backend-less entry (a bare device name) is looked up across the standard order, so
     ``config.default_device = ["gfx1036"]`` finds it whichever backend owns it.
     """
+    if backend == "python":
+        # The interpreter backend has no devices to enumerate, so the probe cannot vouch
+        # for it -- but it runs wherever this package imports, so it is usable by
+        # definition. Only a device part in the same selector ("python:0") is skipped,
+        # the way a device that does not resolve is.
+        return ("python", None) if device is None else None
     candidates:List[str] = [backend] if backend is not None else list(DEFAULT_BACKEND_ORDER)
     for candidate in candidates:
         if _probe_backend(candidate) is None:
@@ -100,35 +139,43 @@ def _entry_usable(backend:Optional[str], device:Optional[str])->Optional[Tuple[s
     return None
 
 
-def _default_target()->Tuple[str, Optional[str]]:
+def _walk_entries(entries:DefaultDeviceEntries)->Optional[Tuple[str, Optional[str]]]:
+    """Walk parsed default entries in order; the first usable one answers."""
+    for backend, device in entries:
+        resolved:Optional[Tuple[str, Optional[str]]] = _entry_usable(backend, device)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _default_target(kernel_entries:Optional[DefaultDeviceEntries]=None)->Tuple[str, Optional[str]]:
     """The backend (and device) a call without a bracket should use.
 
-    Walks the configured list first, then the built-in order; the result is cached only
-    while the configuration is unchanged, because ``config.default_device`` may change it
-    at any time.
+    ``kernel_entries`` is the kernel's own ``@kernel(default_device=...)`` list, and it
+    replaces the walk entirely: a kernel that named one never consults
+    ``config.default_device``. Without one the configured list is walked, and the built-in
+    probe order is the last resort. The walk runs per call, because either list may change
+    and devices may come and go.
     """
-    global _probed_backend
     with _default_device_lock:
-        entries = _default_devices
+        entries:Optional[DefaultDeviceEntries] = (
+            kernel_entries if kernel_entries is not None else _default_devices)
     if entries is not None:
-        for backend, device in entries:
-            resolved = _entry_usable(backend, device)
-            if resolved is not None:
-                return resolved
-        raise RuntimeError(
-            "none of the devices in config.default_device is usable: %s. "
-            "Check the names against list_devices(), or assign None to "
-            "config.default_device to restore the built-in order."
-            % ", ".join(_default_device_selectors()))
-
-    if _probed_backend is None:
-        for backend in DEFAULT_BACKEND_ORDER:
-            if _probe_backend(backend) is not None:
-                _probed_backend = backend
-                break
+        resolved:Optional[Tuple[str, Optional[str]]] = _walk_entries(entries)
+        if resolved is not None:
+            return resolved
+        if kernel_entries is not None:
+            setting:str = "@kernel(default_device=...)"
+            advice:str = ("remove the @kernel(default_device=...) argument to follow "
+                          "config.default_device")
         else:
-            _probed_backend = "opencl"
-    return _probed_backend, None
+            setting = "config.default_device"
+            advice = "assign None to config.default_device to restore the built-in order"
+        raise RuntimeError(
+            "none of the devices in %s is usable: %s. "
+            "Check the names against list_devices(), or %s."
+            % (setting, ", ".join(_selectors_of(entries)), advice))
+    return _builtin_probe_backend(), None
 
 
 def _backend_devices(backend:str)->List[object]:
@@ -159,6 +206,43 @@ def _probe_backend(backend:str)->Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _builtin_probe_backend()->str:
+    """The first backend in DEFAULT_BACKEND_ORDER that enumerates a device, probed once.
+
+    The answer is cached in-process: probing imports the backend packages, and the order
+    itself does not change at runtime.
+    """
+    global _probed_backend
+    if _probed_backend is None:
+        for backend in DEFAULT_BACKEND_ORDER:
+            if _probe_backend(backend) is not None:
+                _probed_backend = backend
+                break
+        else:
+            _probed_backend = "opencl"
+    return _probed_backend
+
+
+def _snapshot_backend(kernel_entries:Optional[DefaultDeviceEntries]=None)->str:
+    """The backend the decorator reports for a kernel that has not launched yet.
+
+    The real backend/device choice happens per call (``_default_target``); this only fills
+    ``PyKernel.backend`` until the first launch overwrites it, so it never raises -- an
+    all-unusable list decorates fine and fails at the launch that needs it, where the
+    error can name the call. A kernel that named entries walks its own list here, one that
+    did not walks the configured global, and the built-in probe order answers when neither
+    resolves.
+    """
+    with _default_device_lock:
+        entries:Optional[DefaultDeviceEntries] = (
+            kernel_entries if kernel_entries is not None else _default_devices)
+    if entries is not None:
+        resolved:Optional[Tuple[str, Optional[str]]] = _walk_entries(entries)
+        if resolved is not None:
+            return resolved[0]
+    return _builtin_probe_backend()
 
 
 def _default_backend()->str:

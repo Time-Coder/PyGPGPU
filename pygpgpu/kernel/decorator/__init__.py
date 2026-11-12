@@ -49,6 +49,7 @@ from .. import source_paths
 from .binding import _native_argument_errors
 from .devices import (
     DEFAULT_BACKEND_ORDER,
+    DefaultDeviceEntries,
     _BACKEND_ALIASES,
     _VENDOR_ALIASES,
     _backend_devices,
@@ -166,7 +167,8 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
                _PykernelOuterMixin, _PykernelReturnsMixin, _PykernelIdentityMixin,
                _PykernelCacheMixin, _PykernelCompileMixin):
 
-    def __init__(self, func:Callable[..., Any], backend:str, explicit_backend:bool=False,
+    def __init__(self, func:Callable[..., Any], backend:str,
+                 default_devices:Optional[DefaultDeviceEntries]=None,
                  domain:Optional[str]=None,
                  type_map:Optional[Dict[str, object]]=None):
         if isinstance(func, classmethod):
@@ -176,9 +178,11 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
 
         self.raw_func:Callable = func
         self.backend:str = backend
-        # True when the decorator named a backend, so config.default_device must not
-        # override it. A backend chosen by probing is only a snapshot, not a binding.
-        self._explicit_backend:bool = explicit_backend
+        # The kernel's own ``@kernel(default_device=...)`` entries, parsed when the
+        # decorator ran: a kernel that named them walks this list at call time instead of
+        # config.default_device. None follows the process-wide setting. ``backend`` above
+        # is only a snapshot, not a binding -- every launch records what it used.
+        self._default_devices:Optional[DefaultDeviceEntries] = default_devices
         # The parameter whose shape declares the iteration domain, or None. A gid-style body
         # has no magic loop to read a domain from, and naming the array here says so as part
         # of the signature rather than as a statement inside the body that the device never

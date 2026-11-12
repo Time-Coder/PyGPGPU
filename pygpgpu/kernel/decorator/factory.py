@@ -1,29 +1,33 @@
 """The `@kernel` decorator: the factory the package publishes."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, overload
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence, Union, overload
 
 from ._typing import _P
-from .devices import _default_backend
+from .devices import DefaultDeviceEntries, _parse_default_device_value, _snapshot_backend
 
 if TYPE_CHECKING:
     from . import PyKernel
 
 
 @overload
-def kernel(func:Callable[_P, Any], *, backend:Optional[str]=None,
+def kernel(func:Callable[_P, Any], *,
+           default_device:Optional[Union[str, Sequence[str]]]=None,
            domain:Optional[str]=None,
            int:object=None, float:object=None)->PyKernel[_P]: ...
 @overload
-def kernel(func:None=None, *, backend:Optional[str]=None,
+def kernel(func:None=None, *,
+           default_device:Optional[Union[str, Sequence[str]]]=None,
            domain:Optional[str]=None,
            int:object=None, float:object=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
-def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None,
+def kernel(func:Optional[Callable[..., Any]]=None, *,
+           default_device:Optional[Union[str, Sequence[str]]]=None,
            domain:Optional[str]=None, int:object=None, float:object=None):
     """The `@kernel` decorator.
 
-    When backend is not specified, probe in DEFAULT_BACKEND_ORDER (cuda -> hip -> opencl)
-    and take the first backend that enumerates at least one device; the result is cached in-process.
+    A call without a bracket runs on the first usable entry of the kernel's own
+    `default_device` list, then of `config.default_device`, then of the built-in probe
+    order (cuda -> hip -> metal -> opencl). The choice is made per call, not here.
 
     Usage::
 
@@ -46,9 +50,26 @@ def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None
     - unsupported syntax raises SyntaxError.
 
     Both spellings are declared as overloads so the decorated name keeps the function's own
-    parameters: ``@kernel`` and ``@kernel(backend=...)`` return one and the same
+    parameters: ``@kernel`` and ``@kernel(default_device=...)`` return one and the same
     ``PyKernel[...]``, and a checker reports a call's missing or extra argument against the
     author's ``def`` rather than against a ``*args``-only decorator.
+
+    `default_device=` names what this kernel's bracket-less calls run on, accepting the
+    same shapes and the same selector strings `config.default_device` takes -- one
+    (``"cuda:0"``, ``"opencl:cpu"``, a bare device name) or a list tried in order, each
+    entry used when the entries before it are unusable::
+
+        @kernel(default_device="cuda")                   # plain calls use cuda
+        def add(a, b, out): ...
+
+        @kernel(default_device=["opencl:cpu", "cuda"])   # ... and fall back to cuda
+        def add(a, b, out): ...
+
+    A kernel that names one walks its own list and ignores the process-wide setting;
+    a bracket on the call (``k["opencl:1"](...)``) still overrides both. The entries are
+    resolved at call time -- an unusable one is skipped, and a device attached later is
+    found -- while a wrong selector is refused when the decorator runs. ``None`` (or an
+    empty list) leaves the choice to `config.default_device`.
 
     `int=` / `float=` choose the device width a python ``int`` / ``float`` travels as, because
     neither has a width of its own::
@@ -77,15 +98,19 @@ def kernel(func:Optional[Callable[..., Any]]=None, *, backend:Optional[str]=None
         if float is not None:
             type_map["float"] = float
 
+    # The kernel's own default-device entries, parsed where the decorator runs: a wrong
+    # selector is a decoration-time refusal, not a launch-time surprise. None leaves the
+    # bracket-less call to config.default_device.
+    default_entries:Optional[DefaultDeviceEntries] = (
+        _parse_default_device_value(default_device, "@kernel(default_device=...)") or None)
+
     def decorator(f:Callable[..., Any])->"PyKernel[object]":
         # The facade defines the class; a top-level import here would be a cycle.
         from . import PyKernel  # noqa: PLC0415
-        if backend is not None:
-            return PyKernel(f, backend, explicit_backend=True, domain=domain,
-                            type_map=type_map)
-        # No backend named: the call-time default decides, so this snapshot is only used
-        # for reporting until config.default_device (or a bracket) has a say.
-        return PyKernel(f, _default_backend(), explicit_backend=False, domain=domain,
+        # The backend argument is a reporting snapshot only: the walk runs per call, and
+        # every launch records the backend it actually used.
+        return PyKernel(f, _snapshot_backend(default_entries),
+                        default_devices=default_entries, domain=domain,
                         type_map=type_map)
 
     if func is not None:

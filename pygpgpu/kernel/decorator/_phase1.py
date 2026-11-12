@@ -46,13 +46,12 @@ class _PrepareLaunchMixin:
         """
         if backend_sel is not None:
             plan.backend:str = backend_sel
-        elif getattr(self, "_explicit_backend", False):
-            # Decorated as @kernel(backend=...): that backend wins over any default.
-            plan.backend = self.backend
         else:
-            # No bracket and no explicit backend: consult config.default_device, read now
-            # rather than at decoration time so a later call takes effect.
-            _backend, _default_device = _default_target()
+            # No bracket: the kernel's own @kernel(default_device=...) entries, when the
+            # decorator named any, replace the walk; otherwise config.default_device
+            # decides and the built-in probe order is the last resort. Read now rather
+            # than at decoration time so a later assignment takes effect.
+            _backend, _default_device = _default_target(self._default_devices)
             plan.backend = _backend
             plan.default_device = _default_device
             if device_sel is None:
