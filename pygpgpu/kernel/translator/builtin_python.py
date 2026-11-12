@@ -188,7 +188,8 @@ class _BuiltinPythonMixin:
             if is_vec(t):
                 if self._opencl_syntax:
                     return f"{name}({code})", t
-                return self._vec_componentwise(name, code, t), t
+                return self._vector_device_call(
+                    name, "call", GENERIC_BUILTINS[name][1], args, t, t)
             code = f"{GENERIC_BUILTINS[name][1]}({code})" if self.backend == "cuda" else f"{name}({code})"
             return code, t
 
@@ -203,20 +204,8 @@ class _BuiltinPythonMixin:
             if self._opencl_syntax:
                 return f"{name}({', '.join(arg_codes)})", result_t
             if vec_t is not None:
-                if len(args) == 1:
-                    return self._vec_componentwise(cuda_name, arg_codes[0], vec_t), vec_t
-                if is_vec(arg_types[0]):
-                    if is_vec(arg_types[1]):
-                        return self._vec_componentwise(cuda_name, arg_codes[0], vec_t,
-                                                       right=arg_codes[1]), vec_t
-                    return self._vec_componentwise(cuda_name, arg_codes[0], vec_t,
-                                                   scalar=arg_codes[1]), vec_t
-                # The vector is the second operand (`pow(2.0, v)`): expand on that side, and
-                # keep the operand order, which a non-commutative pair depends on.
-                components:List[str] = _vec_field_names(_vec_registry()[vec_t])
-                terms:str = ", ".join(
-                    f"{cuda_name}({arg_codes[0]}, {arg_codes[1]}.{c})" for c in components)
-                return self._vec_maker(vec_t, terms), vec_t
+                return self._vector_device_call(name, "call", cuda_name, args,
+                                                vec_t, vec_t)
             return f"{cuda_name}({', '.join(arg_codes)})", result_t
 
         if name == "clamp":
@@ -225,7 +214,7 @@ class _BuiltinPythonMixin:
             if vec_t is not None:
                 if self._opencl_syntax:
                     return f"clamp({', '.join(arg_codes)})", vec_t
-                return self._emit_vec_clamp(arg_codes, arg_types, vec_t), vec_t
+                return self._vector_device_call("clamp", "clamp", "", args, vec_t, vec_t)
             if self._opencl_syntax:
                 return f"clamp({', '.join(arg_codes)})", args[0][1]
             # The CUDA spelling is the fmin/fmax pair, and the pair follows the promoted
@@ -245,7 +234,7 @@ class _BuiltinPythonMixin:
             if vec_t is not None:
                 if self._opencl_syntax:
                     return f"mix({', '.join(arg_codes)})", vec_t
-                return self._emit_vec_mix(arg_codes, arg_types, vec_t), vec_t
+                return self._vector_device_call("mix", "mix", "", args, vec_t, vec_t)
             a, b, t = arg_codes
             return f"(({a}) * (1.0f - ({t})) + ({b}) * ({t}))", args[0][1]
 
@@ -255,7 +244,7 @@ class _BuiltinPythonMixin:
             if vec_t is not None:
                 if self._opencl_syntax:
                     return f"mad({', '.join(arg_codes)})", vec_t
-                return self._emit_vec_mad(arg_codes, arg_types, vec_t), vec_t
+                return self._vector_device_call("mad", "mad", "", args, vec_t, vec_t)
             a, b, c = arg_codes
             return f"((({a}) * ({b})) + ({c}))", args[0][1]
 
@@ -266,7 +255,7 @@ class _BuiltinPythonMixin:
             if vec_t is not None:
                 if self._opencl_syntax:
                     return f"clamp({code}, 0.0f, 1.0f)", vec_t
-                return self._emit_vec_clamp([code], [t], vec_t), vec_t
+                return self._vector_device_call("clamp", "clamp", "", args, vec_t, vec_t)
             if self._opencl_syntax:
                 return f"clamp({code}, 0.0f, 1.0f)", t
             # The pair follows the argument's width, the same rule the clamp branch
@@ -286,13 +275,7 @@ class _BuiltinPythonMixin:
             if vec_t is not None and self.backend == "opencl":
                 return f"step({edge_code}, {x_code})", vec_t
             if vec_t is not None:
-                cls:object = _vec_registry()[vec_t]
-                components:List[str] = _vec_field_names(cls)
-                maker:str = f"make_{vec_t}"
-                inner:str = ", ".join(
-                    f"(({self._component(x_code, x_t, c)}) < ({self._component(edge_code, edge_t, c)})) ? 0.0f : 1.0f"
-                    for c in components)
-                return f"{maker}({inner})", vec_t
+                return self._vector_device_call("step", "step", "", args, vec_t, vec_t)
             return f"((({x_code}) < ({edge_code})) ? 0.0f : 1.0f)", "float"
 
         if name == "smoothstep":
@@ -313,15 +296,8 @@ class _BuiltinPythonMixin:
                         return (arg_code if is_vec(arg_t) else f"({vec_t})({arg_code})")
                     return (f"smoothstep({broadcast(e0_code, e0_t)}, "
                             f"{broadcast(e1_code, e1_t)}, {broadcast(x_code, x_t)})"), vec_t
-                element:str = self._vec_element_type(vec_t)
-                terms:List[str] = []
-                for component in _vec_field_names(_vec_registry()[vec_t]):
-                    terms.append(self._smoothstep_expression(
-                        self._component(e0_code, e0_t, component),
-                        self._component(e1_code, e1_t, component),
-                        self._component(x_code, x_t, component),
-                        element))
-                return self._vec_maker(vec_t, ", ".join(terms)), vec_t
+                return self._vector_device_call("smoothstep", "smoothstep", "", args,
+                                                vec_t, vec_t)
             width:str = "double" if any(t == "double" for _, t in args) else "float"
             if self._opencl_syntax:
                 # The native call takes one width throughout: mixed operands would leave

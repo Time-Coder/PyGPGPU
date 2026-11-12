@@ -25,10 +25,13 @@ from pygpgpu import (
     barrier,
     clamp,
     dot,
+    float2,
     float3,
+    fract,
     get_global_id,
     kernel,
     local_array_per_group,
+    sign,
 )
 from pygpgpu.kernel import builtins as namespace
 from pygpgpu.kernel import device_builtins as builtin_tables
@@ -301,3 +304,31 @@ def test_an_atomic_builtin_resolves_on_every_backend(runner):
     out = np.zeros(3, dtype=np.int32)
     runner(atomic_through_gpu, x, out)
     np.testing.assert_array_equal(out, np.array([1, 2, 1], dtype=np.int32))
+
+
+@kernel
+def fract_through_gpu(v: float2, out: np.ndarray):
+    # An expression argument (`v * 1.5`), not a name: the template lands on the whole
+    # `make_float2(...)` text, which is the shape that once compiled into
+    # `floorf(make_float2(...))` on CUDA and failed there.
+    out[0] = fract(v * 1.5).x
+
+
+@kernel
+def sign_through_gpu(v: float2, out: np.ndarray):
+    out[0] = sign(v).y
+
+
+def test_a_template_builtin_takes_a_vector_expression(runner):
+    """`fract`/`sign` on a vector argument expand per component on every backend.
+
+    The emitter's vector branch keys on the argument's *type*; a regression there
+    unpacked the pair the wrong way round, tested the code text for vector-ness and
+    handed the scalar template the whole `make_float2(...)` -- which OpenCL's vector
+    `floor` overload happened to compile, so only CUDA and HIP failed, at the call.
+    """
+    out = np.zeros(1, dtype=np.float32)
+    runner(fract_through_gpu, float2(0.3, 0.7), out)
+    assert float(out[0]) == pytest.approx(0.45, abs=1e-5)
+    runner(sign_through_gpu, float2(-1.0, 2.0), out)
+    assert float(out[0]) == pytest.approx(1.0, abs=1e-6)

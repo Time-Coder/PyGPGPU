@@ -1,9 +1,11 @@
 from __future__ import annotations
 import ast
-from typing import (List, Optional, Set)
+from typing import (List, Optional, Set, Tuple)
 from ..device_builtins import (
     GENERIC_BUILTINS,
 )
+from ..device_builtins.vector_helpers import (ARITH_HELPERS, helper_call, helper_name,
+                                              helper_source)
 from .notation import (
     Translated,
 )
@@ -88,6 +90,30 @@ class _VectorOpsMixin:
         return f"{code}.{c}" if is_vec(t) else code
 
 
+    def _vector_device_call(self, name:str, kind:str, spell:str,
+                            args:List[Translated], vec:str, result_t:object)->Translated:
+        """Call one `pygpgpu_*` device helper, emitting its definition on first use.
+
+        Every vector operation the CUDA/HIP spellings have no native form of -- the
+        math builtins, the clamp family, arithmetic, comparison -- goes through one
+        overloaded device function instead of a per-component expansion, so an
+        argument expression appears exactly once in the generated source and the
+        compiler inlines the helper back to the same instructions. `vec` is the
+        vector whose components the body walks (the operand's own type; a
+        comparison returns the int vector of it, which `result_t` carries). The
+        definition is built from the same formulas the expansion spelled (see
+        `device_builtins.vector_helpers`) and travels in the `device_helpers`
+        channel, the one the HIP round-toward-zero helpers use.
+        """
+        shape:Tuple[str, ...] = tuple("v" if is_vec(t) else "s" for _, t in args)
+        param_types:Tuple[str, ...] = tuple(t for _, t in args)
+        call_name:str = helper_name(name, param_types)
+        source:str = helper_source(name, spell, kind, result_t, vec, shape, param_types)
+        if source not in self.device_helpers:
+            self.device_helpers.append(source)
+        return helper_call(call_name, [code for code, _ in args]), result_t
+
+
     def _emit_vector_inplace(self, target_code:str, op_name:str,
                              left:str, lt:object, right:str, rt:object)->Optional[str]:
         """`v += w` on a vector as `v = v + w`, or None when that form does not apply.
@@ -105,26 +131,24 @@ class _VectorOpsMixin:
             if self._opencl_syntax:
                 return f"{target_code} = ({left} {symbol} {right});"
             # The right operand can be a call with side effects (`pixel_color +=
-            # scene.ray_color(...)`), and the per-component form names it once per
-            # component: evaluating it three times would be wrong and wasteful, so it goes
-            # into a temporary first, which the caller emits to get a name back.
-            return f"{target_code} = {self._vec_componentwise(symbol, left, lt, right=right)};"
+            # scene.ray_color(...)`), so the operation goes through the device
+            # helper: the operand expression appears exactly once, in the call.
+            return (f"{target_code} = "
+                    f"{self._vector_device_call(ARITH_HELPERS[symbol], 'arith', symbol, [(left, lt), (right, rt)], lt, lt)[0]};")
         # A vector with a scalar broadcast: the vector side decides which is which.
         vector_type:object = lt if is_vec(lt) else rt
-        vector_operand:str = left if is_vec(lt) else right
-        scalar_operand:str = right if is_vec(lt) else left
         if self._opencl_syntax:
             return f"{target_code} = ({left} {symbol} {right});"
-        expanded:str = self._vec_componentwise(symbol, vector_operand, vector_type,
-                                               scalar=scalar_operand)
-        return f"{target_code} = {expanded};"
+        return (f"{target_code} = "
+                f"{self._vector_device_call(ARITH_HELPERS[symbol], 'arith', symbol, [(left, lt), (right, rt)], vector_type, vector_type)[0]};")
 
 
     def _vec_componentwise(self, op:str, left:str, vec:str, right:str="", scalar:str="")->str:
         """CUDA has no vector arithmetic/math overloads; expand into per-component form.
 
-        When op is an infix symbol (+ - * /) generate `l.c op r.c`; when it is a
-        function name (sqrt etc.) generate `op(l.c, r.c)`.
+        Kept for the OpenCL/Metal spellings and for callers outside the helper
+        path; the CUDA/HIP call sites go through `_vector_device_call` instead, so
+        an argument expression is not duplicated once per component.
         right is a vector operand, scalar is a broadcast scalar operand.
         """
         cls:object = _vec_registry()[vec]

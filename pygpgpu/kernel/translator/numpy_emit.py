@@ -389,7 +389,8 @@ class _NumpyEmitMixin:
                 self._error(f"{module_name}.{attr}() on vectors takes exactly 1 vector argument", node)
             if self._opencl_syntax:
                 return f"{attr}({args[0][0]})", vec_arg
-            return self._vec_componentwise(_math_device_name(attr, "cuda"), args[0][0], vec_arg), vec_arg
+            return self._vector_device_call(attr, "call", _math_device_name(attr, "cuda"),
+                                            args, vec_arg, vec_arg)
 
         if attr in ("degrees", "radians"):
             # No CUDA intrinsic for either; the conversion factor is the definition.

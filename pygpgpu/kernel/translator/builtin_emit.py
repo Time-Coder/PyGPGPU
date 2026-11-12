@@ -319,7 +319,14 @@ class _BuiltinEmitMixin(_BuiltinPythonMixin):
         if len(args) not in (1, 2, 3):
             self._error(f"gpu.{name}() takes 1 to 3 arguments", node)
         arg_codes:List[str] = [code for code, _ in args]
-        vec_t:object = next((t for t, _ in args if is_vec(t)), None)
+        # `(code, type)` pairs: the type is the SECOND element. Unpacking the first
+        # element here tested the *code* for vector-ness, which is always False, so
+        # every vector argument took the scalar path -- the template landed on the
+        # whole `make_float2(...)` text and the result was typed as the vector. CUDA
+        # and HIP never saw it as a bug while the argument stayed a name (the scalar
+        # `floorf` accepted nothing), and OpenCL's vector `floor` overload compiled
+        # the same wrong shape by accident.
+        vec_t:object = next((t for _, t in args if is_vec(t)), None)
         # The functions that are component-wise: they take a vector and answer one.
         component_wise:bool = name in ("fract", "sign", "fmin", "fmax", "ldexp")
         for code, t in args:
@@ -333,6 +340,16 @@ class _BuiltinEmitMixin(_BuiltinPythonMixin):
         if name in ("rint", "round", "trunc", "floor", "ceil"):
             result_t = "int"
         if vec_t is not None:
+            if not self._opencl_syntax:
+                # CUDA/HIP: one overloaded device function, the argument expression
+                # exactly once -- not a per-component expansion of it.
+                if name in SHARED_MATH_TEMPLATES:
+                    return self._vector_device_call(
+                        name, "template", SHARED_MATH_TEMPLATES[name][self.launch_backend],
+                        args, vec_t, vec_t)
+                return self._vector_device_call(
+                    name, "call", SHARED_MATH_BUILTINS[name][self.launch_backend],
+                    args, vec_t, vec_t)
             # The component-wise ones: expand per component and rebuild the vector.
             components:List[str] = _vec_field_names(_vec_registry()[vec_t])
             terms:List[str] = []

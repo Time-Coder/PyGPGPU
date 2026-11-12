@@ -1,6 +1,7 @@
 from __future__ import annotations
 import ast
 from typing import (Any, Dict, List, Optional, Tuple)
+from ..device_builtins.vector_helpers import ARITH_HELPERS, COMPARE_HELPERS
 from .type_map import (
     _check_integer_fits,
 )
@@ -76,17 +77,21 @@ class _OperatorsMixin:
                     result_t:object = (lt if name in ("Add", "Sub", "Mult", "Div") else self._get_int_vec_type(lt))
                     return f"({left} {symbol} {right})", result_t
                 if name in ("Add", "Sub", "Mult", "Div"):
-                    return self._vec_componentwise(symbol, left, lt, right=right), lt
-                return self._vec_componentwise_compare(symbol, left, lt, right), self._get_int_vec_type(lt)
+                    return self._vector_device_call(
+                        ARITH_HELPERS[symbol], "arith", symbol,
+                        [(left, lt), (right, rt)], lt, lt)
+                return self._vector_device_call(
+                    COMPARE_HELPERS[symbol], "compare", symbol,
+                    [(left, lt), (right, rt)], lt, self._get_int_vec_type(lt))
 
             # vector with scalar: broadcast per component
             vec, vec_side_left = (lt, True) if is_vec(lt) else (rt, False)
             if self._opencl_syntax:
                 code:str = f"({left} {symbol} {right})" if vec_side_left else f"({right} {symbol} {left})"
                 return code, vec
-            if vec_side_left:
-                return self._vec_componentwise(symbol, left, vec, scalar=right), vec
-            return self._vec_componentwise(symbol, right, vec, scalar=left), vec
+            return self._vector_device_call(
+                ARITH_HELPERS[symbol], "arith", symbol, [(left, lt), (right, rt)],
+                vec, vec)
 
         if name == "Div":
             t:object = promote(lt, rt) if not (is_int(lt) and is_int(rt)) else "float"
