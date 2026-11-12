@@ -100,44 +100,38 @@ VEC_INFOS:List[tuple] = [
 # three-component result does not exist beside them).
 _NARROW_LENGTHS:List[int] = [1, 2, 4]
 
+# The header a stub carries, now that the width bases live in pygf: the base
+# import names pygf's module, and the sibling width the swizzle results name
+# (a 2-wide vector answers 4-component repeats, a 4-wide one answers
+# 2-component reads -- neither names a 3-wide, which does not exist here).
+_NARROW_HEADERS:Dict[int, str] = {
+    2: ("from typing import Union\n\n"
+        "from pygf.genVec2 import genVec2\n"
+        "from pygf.genVec4 import genVec4\n\n\n"),
+    4: ("from typing import Union\n\n"
+        "from pygf.genVec4 import genVec4\n"
+        "from pygf.genVec2 import genVec2\n\n\n"),
+}
+
 def write_clmath_pyi():
     self_folder = os.path.dirname(os.path.abspath(__file__))
-    pyi_in_contents:dict = {}
-
-    # The width bases live in pygf now: the stub's base import names pygf's module
-    # (`from pygf.genVec2 import genVec2`) instead of a local file, and the template's
-    # own local import line is dropped.
-    base_imports:Dict[int, str] = {
-        2: "from pygf.genVec2 import genVec2",
-        4: "from pygf.genVec4 import genVec4",
-    }
 
     for name, scalar, char_sets in VEC_INFOS:
         num:str = re.search(r'\d+$', name).group()
-        basename:str = name[:-len(num)]
-        in_file_name:str = f"{self_folder}/genVec{num}.pyi.in"
-        if in_file_name not in pyi_in_contents:
-            with open(in_file_name) as in_file:
-                pyi_in_contents[in_file_name] = in_file.read()
+        sibling:str = '4' if num == '2' else '2'
+        header:str = (
+            "from typing import Union\n\n"
+            f"from pygf.genVec{num} import genVec{num}\n"
+            f"from pygf.genVec{sibling} import genVec{sibling}\n\n\n"
+            f"class {name}(genVec{num}):\n\n"
+            "    def __len__(self)->int: ...\n\n"
+            "    def __repr__(self)->str: ...\n\n"
+            "    def __str__(self)->str: ...\n\n")
 
         with open(f"{self_folder}/{name}.pyi", "w", newline="\n") as out_file:
             swizzle_defines:str = generate_swizzle_defines(
                 name, scalar, char_sets, _NARROW_LENGTHS)
-            pyi_in_content:str = pyi_in_contents[in_file_name].format(basename=basename)
-            old_import:str = f"from .genVec{num} import genVec{num}"
-            pyi_in_content:str = pyi_in_content.replace(old_import,
-                                                        base_imports[int(num)])
-            # the sibling width the swizzle results name: a 2-wide vector answers
-            # 4-component repeats, a 4-wide one answers 2-component reads -- and
-            # neither names a 3-wide, which does not exist beside these classes
-            sibling:str = '4' if num == '2' else '2'
-            lines:List[str] = pyi_in_content.split("\n")
-            last_import:int = max(i for i, line in enumerate(lines)
-                                  if line.startswith("from "))
-            lines.insert(last_import + 1,
-                         f"from .{basename}{sibling} import {basename}{sibling}")
-            pyi_in_content = "\n".join(lines)
-            out_file.write(pyi_in_content + swizzle_defines)
+            out_file.write(header + swizzle_defines)
 
 if __name__ == "__main__":
     write_clmath_pyi()

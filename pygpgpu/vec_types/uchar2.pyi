@@ -1,7 +1,7 @@
-﻿from typing import Union
+from typing import Union
 
 from pygf.genVec2 import genVec2
-from .uchar4 import uchar4
+from pygf.genVec4 import genVec4
 
 
 class uchar2(genVec2):
@@ -11,7 +11,7 @@ class uchar2(genVec2):
     def __repr__(self)->str: ...
 
     def __str__(self)->str: ...
-    
+
 
     @property
     def x(self)->int: ...
