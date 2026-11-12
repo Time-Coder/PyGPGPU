@@ -85,11 +85,13 @@ def helper_source(name:str, spell:str, kind:str, ret:str, vec:str,
     width:str = "double" if vec.startswith("double") else "float"
     # The per-component access for each argument at one component: `a.x`, `a.y`,
     # ... for a vector argument, or the scalar's own text (a scalar parameter is one
-    # value, shared by the components).
+    # value, shared by the components). The component letters are the field names
+    # the device structs actually declare -- spelled out, because `w` does not sit
+    # beside `z` in ASCII.
     def access(index:int, component:int)->str:
         if shape[index] != "v":
             return param_names[index]
-        return f"{param_names[index]}.{chr(ord('x') + component)}"
+        return f"{param_names[index]}.{'xyzw'[component]}"
     terms:List[str] = []
     for component in range(components):
         parts:List[str] = [access(index, component) for index in range(len(shape))]
