@@ -30,10 +30,15 @@ def test_a_numpy_scalar_is_a_scalar_not_a_vector_of_that_name(scalar_type, expec
 
 
 def test_the_vector_type_of_the_same_name_still_resolves():
-    """`int8` as a vector type is a real type, so the class itself must still map."""
-    from pygpgpu import vec_types
+    """`int8` as a vector type is a real host type, so the class itself still maps.
 
-    assert infer_ctype(vec_types.int8(*range(8))) == "int8"
+    The 8/16-wide classes moved beside the only backend that declares them
+    (`pygpgpu.opencl.driver.vec_types`), and a kernel refuses the width -- but the host
+    type still exists, and `infer_ctype` still names it for whoever holds a value.
+    """
+    from pygpgpu.opencl.driver.vec_types import int8
+
+    assert infer_ctype(int8(*range(8))) == "int8"
 
 
 def test_a_vector_alias_still_resolves():

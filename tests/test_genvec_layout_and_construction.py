@@ -23,6 +23,8 @@ from pygpgpu.vec_types import (
     genVec2,
     genVec3,
     genVec4,
+)
+from pygpgpu.opencl.driver.vec_types import (
     genVec8,
     genVec16,
 )

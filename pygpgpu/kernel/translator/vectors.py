@@ -1,7 +1,7 @@
 # The vector registry: the one place the vector types are looked up.
 from __future__ import annotations
 from .notation import Translated
-from typing import (Dict, List, Tuple)
+from typing import (Dict, List, Optional, Tuple)
 import numpy as np
 
 
@@ -72,3 +72,25 @@ _VEC_COLOR_ALIASES:Dict[str, str] = {"r": "x", "g": "y", "b": "z", "a": "w"}
 def _vec_component_name(text:str)->str:
     """`rgb` -> `xyz`: the device spelling of a component or swizzle."""
     return "".join(_VEC_COLOR_ALIASES.get(char, char) for char in text)
+
+
+# The vector widths a kernel may use, on every backend. C for CUDA and HIP stops at four
+# components, and a type only one backend declares would make the same body mean different
+# things per device -- which is exactly what this package exists to prevent. The 8/16-wide
+# classes stay OpenCL storage types beside the only backend that declares them
+# (`pygpgpu.opencl.driver.vec_types`), and a kernel refuses the width everywhere with a
+# message that names the replacements.
+KERNEL_VECTOR_WIDTHS:Tuple[int, ...] = (2, 3, 4)
+
+
+def kernel_vector_refusal(vec:str)->Optional[str]:
+    """Why a vector type is not a kernel type, or None when the kernel may use it."""
+    digits:str = vec[len(vec.rstrip("0123456789")):]
+    if int(digits) in KERNEL_VECTOR_WIDTHS:
+        return None
+    scalar:str = vec[:len(vec) - len(digits)]
+    return (
+        f"{vec} is not a kernel type: the widest vector every backend declares is 4 "
+        f"components, so an 8/16-wide vector would make one body mean different things "
+        f"per device. Build the values from {scalar}2/{scalar}3/{scalar}4 vectors, or pass "
+        f"an array of {scalar}")

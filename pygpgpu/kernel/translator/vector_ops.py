@@ -14,6 +14,7 @@ from .vectors import (
     _vec_field_names,
     _vec_registry,
     is_vec,
+    kernel_vector_refusal,
 )
 from .predicates import (
     is_int,
@@ -217,6 +218,9 @@ class _VectorOpsMixin:
 
     def _emit_vec_swizzle(self, code:str, vec:str, swizzle:str, node:ast.Attribute)->Translated:
         """Read a swizzle: opencl uses native v.xy; cuda generates per-component make_float2(v.x, v.y)."""
+        refusal:Optional[str] = kernel_vector_refusal(vec)
+        if refusal is not None:
+            self._error(refusal, node)
         components:List[Translated] = _vec_components(vec)
         valid:Set[str] = {f_name for f_name, _ in components}
         chars:Set[str] = set(swizzle)

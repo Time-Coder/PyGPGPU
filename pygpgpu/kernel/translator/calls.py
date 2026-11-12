@@ -26,6 +26,7 @@ from .receivers import (
 )
 from .vectors import (
     _vec_registry,
+    kernel_vector_refusal,
 )
 from .predicates import (
     is_ptr,
@@ -147,6 +148,9 @@ class _CallsMixin(_NestedLaunchMixin):
 
             vec_name:Optional[str] = self._vec_type_name(name)
             if vec_name is not None:
+                refusal:Optional[str] = kernel_vector_refusal(vec_name)
+                if refusal is not None:
+                    self._error(refusal, node)
                 return self._emit_vec_constructor(vec_name, args, node)
             reason:Optional[str] = self._unsupported_vec_reason(self.resolve_global(name))
             if reason is not None:

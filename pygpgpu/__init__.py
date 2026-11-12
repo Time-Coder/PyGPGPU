@@ -55,16 +55,22 @@ from .kernel.device_library import device_function
 # ---------- Top-level exports: public API of vec_types ----------
 
 from .vec_types import (
-    char2, char4, char8, char16,
-    uchar2, uchar4, uchar8, uchar16,
-    short2, short4, short8, short16,
-    ushort2, ushort4, ushort8, ushort16,
-    int2, int3, int4, int8, int16,
-    uint2, uint3, uint4, uint8, uint16,
-    float2, float3, float4, float8, float16,
-    double2, double3, double4, double8, double16,
-    genVec, genVec2, genVec3, genVec4, genVec8, genVec16,
+    char2, char4,
+    uchar2, uchar4,
+    short2, short4,
+    ushort2, ushort4,
+    int2, int3, int4,
+    uint2, uint3, uint4,
+    float2, float3, float4,
+    double2, double3, double4,
+    genVec, genVec2, genVec3, genVec4,
 )
+# The 8/16-wide vectors are NOT top-level exports: they are OpenCL storage
+# types, not kernel types -- no CUDA or HIP C declares them, and a type one
+# backend has would make one body mean different things per device. They live
+# beside the only backend that declares them, and a kernel refuses the width
+# everywhere (see kernel.translator.vectors.KERNEL_VECTOR_WIDTHS). A host user
+# of the numeric swizzles imports from pygpgpu.opencl.driver.vec_types.
 from .vec_types import funcs          # dual-purpose function library: runs on the host, translates to device builtins inside @kernel
 
 # ---------- Top-level export: the backend-neutral image type ----------
@@ -178,17 +184,18 @@ __all__ = [
     "device_function",
     # images
     "Image", "ImageFilter", "ImageAddress",
-    # vec_types
+    # vec_types (the 8/16-wide vectors are OpenCL's, beside that backend --
+    # see the import block above)
     "funcs",
-    "char2", "char4", "char8", "char16",
-    "uchar2", "uchar4", "uchar8", "uchar16",
-    "short2", "short4", "short8", "short16",
-    "ushort2", "ushort4", "ushort8", "ushort16",
-    "int2", "int3", "int4", "int8", "int16",
-    "uint2", "uint3", "uint4", "uint8", "uint16",
-    "float2", "float3", "float4", "float8", "float16",
-    "double2", "double3", "double4", "double8", "double16",
-    "genVec", "genVec2", "genVec3", "genVec4", "genVec8", "genVec16",
+    "char2", "char4",
+    "uchar2", "uchar4",
+    "short2", "short4",
+    "ushort2", "ushort4",
+    "int2", "int3", "int4",
+    "uint2", "uint3", "uint4",
+    "float2", "float3", "float4",
+    "double2", "double3", "double4",
+    "genVec", "genVec2", "genVec3", "genVec4",
     # the import hook for handwritten kernel files (same-named .cl/.cu/.hip sources)
     "kernel_import",
     # the host-side CUDA libraries (cuBLAS, cuSOLVER, cuFFT, cuSPARSE, the runtime);

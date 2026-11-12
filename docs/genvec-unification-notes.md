@@ -1,13 +1,16 @@
-# The genVec → pygf base-class unification: before and after
+# The genVec to pygf base-class unification: before and after
 
 `pygpgpu/vec_types/genVec.py` (392 lines) was a second, parallel implementation of the
 vector base pygf already carries. Every vector class now inherits pygf's `genVec`/`genType`,
 the width bases (`genVec2/3/4/8/16`) are thin subclasses of pygf's, and the file is deleted.
 This is the review record: what each type answers, before versus after.
 
-The comparison spec is `tests/test_genvec_unification.py` (510 checks, golden values over
-every dtype family and width). pygf's side of the change is release 0.6.0; its own suite
-(`pygf/tests/test_pygf.py`) pins the shared behaviors standalone.
+The comparison specs are `tests/test_genvec_{arithmetic,swizzles,layout_and_construction,
+numpy_view}.py` (510 checks, golden values over every dtype family and width).
+pygf's side of the change is release 0.6.0; its own suite (`pygf/tests/test_pygf.py`) pins
+the shared behaviors standalone. After this record was written, the 8/16-wide families moved
+beside the only backend that declares them (`pygpgpu/opencl/driver/vec_types/`) and kernels
+refuse the width everywhere -- see `tests/test_kernel_wide_vector_refusal.py`.
 
 ## 1. Layout: byte-identical, for all 64 classes
 
@@ -33,7 +36,7 @@ invariants per class. The identity checks:
 - Kernel-side behavior: the translator reads `_fields_` and emits device swizzles from the
   registered names; nothing in code generation moved.
 
-## 3. Swizzle behavior, before → after
+## 3. Swizzle behavior, before -> after
 
 | expression | before (pygpgpu base) | after (unified) |
 | --- | --- | --- |
@@ -54,7 +57,7 @@ invariants per class. The identity checks:
 | `char4(...).xx = 5` (duplicate) | `AttributeError: no setter` | same message |
 | `float2(...).rg = 7` (pygf class) | fields untouched, python shadow attrs set (the bug) | fields written: `(7.0, 7.0)` |
 
-## 4. Construction, before → after
+## 4. Construction, before -> after
 
 | expression | before | after |
 | --- | --- | --- |
@@ -65,7 +68,7 @@ invariants per class. The identity checks:
 | `char2(1, 2, 3)` | `ValueError: char2.__init__ accepts 2 values, got 3` | `ValueError: invalid arguments for char2()` (pygf's message) |
 | `float4(...)` on pygf classes | unchanged | unchanged (plus sequence arguments) |
 
-## 5. Arithmetic, comparison, unary: before → after
+## 5. Arithmetic, comparison, unary: before -> after
 
 | expression | before | after |
 | --- | --- | --- |
@@ -83,7 +86,7 @@ invariants per class. The identity checks:
 | `abs(char2(-1, 2))` | `TypeError` (no `__abs__` on the old base) | `char2(1, 2)` |
 | `int8 ** 2` | n/a (`is_number` mistook the class for a numpy `np.int8` scalar and broadcast it as an operand) | `int8(9, ...)` -- `is_number` excludes anything carrying `math_form` |
 
-## 6. dtype surface, before → after
+## 6. dtype surface, before -> after
 
 | expression | before | after |
 | --- | --- | --- |

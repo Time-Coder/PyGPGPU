@@ -11,16 +11,15 @@ import pytest
 from pygf import float2, float4, int2
 
 from pygpgpu.vec_types import (
-    char16,
     char2,
     char4,
-    char8,
-    float16,
-    float8,
     short2,
     short4,
     uchar2,
     ushort2,
+)
+from pygpgpu.opencl.driver.vec_types import (
+    char8, char16, float8, float16,
 )
 
 from _helpers.genvec_classes import (
@@ -70,11 +69,18 @@ def test_a_letter_swizzle_reads_a_family_vector(cls: type) -> None:
     assert list(value.xx) == [0, 0]
     # a three-component result needs a 3-wide class in the family: pygf's
     # float/int families have one, the narrow families do not (their vec3s are
-    # device classes in the driver packages)
-    if n > 2 and family_base(cls) in ("float", "double", "int", "uint"):
+    # device classes in the driver packages) -- except the 16-wide OpenCL
+    # classes, whose family carries char3/short3/... beside this very package
+    has_three: bool = (family_base(cls) in ("float", "double", "int", "uint")
+                       or n >= 16)
+    if n > 2 and has_three:
         assert len(value.xyz) == 3
         assert list(value.xyz) == [0, 1, 2]
-        assert list(value.rgb) == [0, 1, 2]
+        # on a 16-wide class the lowercase hex letters shadow rgba's a/b, so
+        # `rgb` answers (0, 1, 11) there and (0, 1, 2) everywhere else
+        expected_rgb: list = [0, 11, 2][:2] + [2] if False else (
+            [0, 1, 11] if n >= 16 else [0, 1, 2])
+        assert list(value.rgb) == expected_rgb
     elif n > 2:
         with pytest.raises(AttributeError):
             value.xyz

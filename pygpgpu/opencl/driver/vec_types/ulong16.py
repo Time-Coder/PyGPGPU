@@ -1,6 +1,6 @@
 from ctypes import c_uint64
 
-from ....vec_types import genVec16
+from .genVec16 import genVec16
 
 
 class ulong16(genVec16):

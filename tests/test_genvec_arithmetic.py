@@ -13,16 +13,18 @@ from pygf import double2, float2, float4, int2, int4, uint2
 from pygpgpu.vec_types import (
     char2,
     char4,
+    short2,
+    uchar2,
+    ushort2,
+    ushort4,
+)
+from pygpgpu.opencl.driver.vec_types import (
     char8,
     double16,
     float16,
     float8,
     int8,
-    short2,
-    uchar2,
     uint8,
-    ushort2,
-    ushort4,
 )
 
 from _helpers.genvec_classes import (

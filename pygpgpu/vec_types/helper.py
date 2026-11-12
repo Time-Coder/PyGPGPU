@@ -81,41 +81,24 @@ def generate_swizzle_defines(type_name:str, scalar:str, char_sets:List[str],
 
 
 # The classes whose .py lives beside this module: the narrow integer families at
-# widths 2/4/8/16 and the int/uint/float/double widths pygf does not carry. Each
-# entry names the scalar annotation the components answer and the letter sets the
-# components are spelled by.
+# widths 2 and 4. Each entry names the scalar annotation the components answer and
+# the letter sets the components are spelled by. The 8/16-wide families live beside
+# the only backend that declares them (`pygpgpu/opencl/driver/vec_types/`), with
+# their own copy of this table and writer.
 VEC_INFOS:List[tuple] = [
     ('char2',   'int', ['xy', 'rg', '01']),
     ('char4',   'int', ['xyzw', 'rgba', '0123']),
-    ('char8',   'int', ['xyzw', 'rgba', '01234567']),
-    ('char16',  'int', ['xyzw', 'rgba', '0123456789ABCDEFabcdef']),
     ('uchar2',   'int', ['xy', 'rg', '01']),
     ('uchar4',   'int', ['xyzw', 'rgba', '0123']),
-    ('uchar8',   'int', ['xyzw', 'rgba', '01234567']),
-    ('uchar16',  'int', ['xyzw', 'rgba', '0123456789ABCDEFabcdef']),
     ('short2',   'int', ['xy', 'rg', '01']),
     ('short4',   'int', ['xyzw', 'rgba', '0123']),
-    ('short8',   'int', ['xyzw', 'rgba', '01234567']),
-    ('short16',  'int', ['xyzw', 'rgba', '0123456789ABCDEFabcdef']),
     ('ushort2',  'int', ['xy', 'rg', '01']),
     ('ushort4',  'int', ['xyzw', 'rgba', '0123']),
-    ('ushort8',  'int', ['xyzw', 'rgba', '01234567']),
-    ('ushort16', 'int', ['xyzw', 'rgba', '0123456789ABCDEFabcdef']),
-    ('int8',    'int', ['xyzw', 'rgba', '01234567']),
-    ('int16',   'int', ['xyzw', 'rgba', '0123456789ABCDEFabcdef']),
-    ('uint8',   'int', ['xyzw', 'rgba', '01234567']),
-    ('uint16',  'int', ['xyzw', 'rgba', '0123456789ABCDEFabcdef']),
-    ('float8',    'float', ['xyzw', 'rgba', '01234567']),
-    ('float16',   'float', ['xyzw', 'rgba', '0123456789ABCDEFabcdef']),
-    ('double8',   'float', ['xyzw', 'rgba', '01234567']),
-    ('double16',  'float', ['xyzw', 'rgba', '0123456789ABCDEFabcdef']),
 ]
 
 # The swizzle lengths a stub declares. Two and four for the narrow families (a
-# three-component result does not exist beside them), and -- for the 8/16-wide
-# types -- only the single components, which is what those stubs always showed.
+# three-component result does not exist beside them).
 _NARROW_LENGTHS:List[int] = [1, 2, 4]
-_SINGLE_LENGTHS:List[int] = [1]
 
 def write_clmath_pyi():
     self_folder = os.path.dirname(os.path.abspath(__file__))
@@ -132,8 +115,7 @@ def write_clmath_pyi():
 
         with open(f"{self_folder}/{name}.pyi", "w", newline="\n") as out_file:
             swizzle_defines:str = generate_swizzle_defines(
-                name, scalar, char_sets,
-                _NARROW_LENGTHS if narrow else _SINGLE_LENGTHS)
+                name, scalar, char_sets, _NARROW_LENGTHS)
             pyi_in_content:str = pyi_in_contents[in_file_name].format(basename=basename)
             if narrow:
                 # the sibling width the swizzle results name: a 2-wide vector

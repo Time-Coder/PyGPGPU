@@ -14,13 +14,15 @@ import pytest
 from pygf import float2, float4
 
 from pygpgpu.vec_types import (
-    char16,
     char2,
     char4,
-    double16,
-    float8,
     uchar2,
     ushort2,
+)
+from pygpgpu.opencl.driver.vec_types import (
+    char16,
+    double16,
+    float8,
 )
 
 from _helpers.genvec_classes import (

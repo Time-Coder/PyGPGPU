@@ -134,6 +134,7 @@ from .vectors import (
     _vec_field_names,
     _vec_registry,
     is_vec,
+    kernel_vector_refusal,
 )
 from .builtins import (
     COMPLEX_ABS_FUNCTIONS,

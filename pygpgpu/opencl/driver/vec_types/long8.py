@@ -1,6 +1,6 @@
 from ctypes import c_int64
 
-from ....vec_types import genVec8
+from .genVec8 import genVec8
 
 
 class long8(genVec8):

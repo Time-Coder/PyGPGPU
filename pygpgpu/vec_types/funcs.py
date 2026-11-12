@@ -158,14 +158,15 @@ def _check_same_shape(a:object, b:object)->None:
 def _int_vector_type(size:int)->type:
     """The int vector class of a given width, for a component-wise predicate's result.
 
-    Every width this package can see has one: pygf supplies int2/int3/int4 and the wider
-    int8/int16 are PyGPGPU's own. Deriving the class from the *name* of the operand used to
-    fall back to int4 for anything that was not two components, so a three-component vector
-    built an `int4` from three values and raised.
+    Every width a kernel may use has one: pygf supplies int2/int3/int4. The 8/16-wide
+    vectors are OpenCL storage types that kernels refuse, so no predicate can produce one
+    and the table stops at four (see translator.vectors.KERNEL_VECTOR_WIDTHS). Deriving the
+    class from the *name* of the operand used to fall back to int4 for anything that was not
+    two components, so a three-component vector built an `int4` from three values and raised.
     """
-    from . import int2, int3, int4, int8, int16
+    from . import int2, int3, int4
 
-    return {2: int2, 3: int3, 4: int4, 8: int8, 16: int16}.get(size, int4)
+    return {2: int2, 3: int3, 4: int4}.get(size, int4)
 
 
 def select(a:Component, b:Component, cond:Component)->Component:

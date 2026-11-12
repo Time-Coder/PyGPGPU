@@ -57,9 +57,9 @@ owns a disjoint set. Measured on the current tree:
 | where | classes | what it owns |
 | --- | ---: | --- |
 | **pygf** | 12 | `float2/3/4`, `int2/3/4`, `uint2/3/4`, `double2/4` -- the layouts every backend agrees on |
-| **`pygpgpu/vec_types/`** | 24 | every width pygf has no class for: all 8- and 16-wide, and the `char`/`uchar`/`short`/`ushort` families |
+| **`pygpgpu/vec_types/`** | 8 | the `char`/`uchar`/`short`/`ushort` families at widths 2 and 4 -- every host width the backends agree on that pygf has no class for |
 | **`{cuda,hip}/driver/vec_types/`** | 14 | only what the CUDA/HIP ABI spells differently: every **3-component** type (`char3`, `double3`, `float3`, `int3`, `short3`, `uchar3`, `uint3`, `ushort3`, `long3`, `ulong3`) plus `long2`/`long4`/`ulong2`/`ulong4` |
-| **`opencl/driver/vec_types/`** | 18 | the same 14 in OpenCL's padded layout, plus `long8`/`long16`/`ulong8`/`ulong16`, widths CUDA does not have |
+| **`opencl/driver/vec_types/`** | 34 | the same 14 in OpenCL's padded layout, plus the **8/16-wide families** (`char8..double16`, `long8`/`long16`/`ulong8`/`ulong16`) -- widths only OpenCL C declares, and the `genVec8`/`genVec16` width bases |
 
 Two facts make that table checkable rather than asserted: the 14 names a backend defines are
 **exactly** the 14 whose dtype differs from the others', and the other **32** are already the
@@ -74,21 +74,44 @@ and 42 ms off the first call) and broke five OpenCL tests, because the 3-compone
 genuinely differ. The cheaper-looking fix was the wrong one. (2) **HIP reuses CUDA's 14**,
 since HIP's ABI is CUDA's, and additionally borrows `long8`/`long16`/`ulong8`/`ulong16` from
 the OpenCL package -- the only table that has them. That borrow is **layout-identical** (same
-itemsize, same `s0..s7`/`s0..sF` field names), so it is correct today, and it is the one entry
-in this area that reads as accidental; if HIP ever needs those widths for real, they belong in
-the neutral layer rather than in a second OpenCL import. (3) **`CLInfo.vec_types` is not "the
-OpenCL vector table"** -- 24 of its 50 entries are the neutral classes. A question about
-"OpenCL's vector types" has to be asked per name, not per table.
+itemsize, same `s0..s7`/`s0..sF` field names), so it is correct today. (3) **`CLInfo.vec_types`
+is not "the OpenCL vector table"** -- 16 of its 50 entries are the shared classes (8 pygf's
+top-level names and the 8 narrow-family classes of `pygpgpu.vec_types`), and 34 are the
+driver package's own (the 14 layout-different classes plus the 20 8/16-wide ones). A question
+about "OpenCL's vector types" has to be asked per name, not per table.
+
+**The 8/16-wide vectors are OpenCL storage types, not kernel types.** No CUDA or HIP C
+declares them, and a type only one backend has would make the same body mean different things
+per device -- the one thing this package exists to prevent. Three facts carry the boundary:
+
+- **The classes live beside the only backend that declares them**
+  (`pygpgpu/opencl/driver/vec_types/`, with the `genVec8`/`genVec16` width bases, the
+  `genVecN.pyi.in` templates and the stub writer's wide half of the table). The shared
+  `pygpgpu.vec_types` surface and the top-level exports stop at four components; a host user
+  of the numeric swizzles imports from the OpenCL package, which registers its classes with
+  pygf (`register_vector_type`) so an array of them answers `a[i].s0`.
+- **A kernel refuses the width on every device backend** (`translator.vectors.KERNEL_VECTOR_WIDTHS`
+  is the one whitelist -- 2/3/4 -- and `kernel_vector_refusal` the one refusal): a parameter,
+  a constructor, a component or swizzle read and a string subscript all fail with a message
+  naming the width and the replacements. The **interpreter backend is not part of the
+  refusal**: it executes the body as plain python -- no translation, no device types -- so a
+  wide value still travels and computes there. This matches the `half` precedent
+  (`_unsupported_vec_reason`): the host and the device agree on what a *kernel* accepts, and
+  python's own execution is python's.
+- **Metal's table filter is the precedent for the shape** (`kernel_import._METAL_VECTOR_WIDTHS`
+  = `("2", "3", "4")`): a backend that lacks a width filters it out of its tables rather than
+  accepting a source the compiler would reject.
 
 **The base classes are pygf's, and `pygpgpu/vec_types/genVec.py` is gone.** Every vector class
 the package owns or borrows inherits pygf's `genVec`/`genType` -- one host implementation of
 construction, arithmetic, comparison, swizzle and the numpy view serves both libraries. What
 PyGPGPU adds lives in two thin layers. (1) **The width bases** (`vec_types/genVec2.py` ...
-`genVec16.py`) are subclasses of pygf's `genVecN`/`genVec` that do exactly two things: set
-`_numeric_swizzles = True` (the OpenCL `s0`-style component spelling -- `char2().s01`,
-`float16().sA`; pygf's own GLSL-shaped surface keeps the gate off) and, for 8/16, declare the
-width (`__len__`), because a padded vec3's `_` field must not make `len` answer 4. (2) **The
-concrete and driver classes** keep their own `_fields_` and nothing else -- the plain
+`genVec4.py`, and the 8/16 pair beside the OpenCL driver) are subclasses of pygf's
+`genVecN`/`genVec` that do exactly two things: set `_numeric_swizzles = True` (the OpenCL
+`s0`-style component spelling -- `char2().s01`, `float16().sA`; pygf's own GLSL-shaped surface
+keeps the gate off) and, for 8/16, declare the width (`__len__`), because a padded vec3's `_`
+field must not make `len` answer 4. (2) **The concrete and driver classes** keep their own
+`_fields_` and nothing else -- the plain
 `dtype = np.dtype(_fields_)` attribute is deleted, because pygf's `dtype` descriptor answers
 the structured dtype on the *class* and the ctypes scalar type on the *instance*, which is
 what pygf's type arithmetic (`vec.dtype`) reads. Four rules are load-bearing:
@@ -124,9 +147,12 @@ the width's own full length (8 for `float8`, 16 for `float16`); anything else is
 a name over the numeric charset never mixes with GLSL letters (`s0x` is an AttributeError,
 where the old base's strip-the-`s` rule accidentally accepted it). The narrow families have
 no host 3-wide class (their `char3`/`ushort3` are device classes in the driver packages), so
-a three-component swizzle on them is refused with an AttributeError instead of resolving.
-`tests/test_genvec_unification.py` pins all of it with golden values over every dtype family
-and width, and the before/after divergence list is in its module docstring.
+a three-component swizzle on them is refused with an AttributeError instead of resolving -- a
+three-component *read* on the 16-wide OpenCL classes resolves, because those families carry a
+`char3` beside the 16-wide class, and the lowercase hex letters shadow rgba's `a`/`b` there
+(`char16().rgb` is components (0, 1, 11)). `tests/test_genvec_{arithmetic,swizzles,
+layout_and_construction,numpy_view}.py` pin all of it with golden values over every dtype
+family and width, and `docs/genvec-unification-notes.md` holds the review record.
 
 ## File size policy (hard rule)
 
