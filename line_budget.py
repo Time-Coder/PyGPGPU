@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """The file-size budget: no first-party source file may pass 500 lines.
 
-`docs/file-split-plan.md` records the policy. This script is the part that makes it true: it
-walks the first-party sources, applies the exemptions the plan names, and fails when a file is
-over the ceiling without being on the allowlist below.
+This script is the whole policy: it walks the first-party sources, applies the exemptions
+named in AGENTS.md, and fails when a file is over the ceiling without being on the allowlist
+below.
 
 The allowlist is the backlog, and it is deliberately explicit and countable. Finishing a split
 means deleting its entry here, in the same commit, so the remaining work is always the length
@@ -125,7 +125,7 @@ def main(argv: List[str]) -> int:
             print(f"{count:6}  {relative}")
 
     if violations or grown:
-        print("\nFAILED: see docs/file-split-plan.md (the backlog is ALLOWLIST in line_budget.py).")
+        print("\nFAILED: the backlog is the ALLOWLIST below in this script.")
         return 1
 
     stale: List[str] = [name for name in ALLOWLIST if not os.path.isfile(os.path.join(root, name))]

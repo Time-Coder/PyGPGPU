@@ -1,5 +1,4 @@
 from ctypes import c_int8
-import numpy as np
 
 from .genVec16 import genVec16
 
@@ -25,4 +24,3 @@ class char16(genVec16):
         ('sF', c_int8),
     ]
     
-    dtype = np.dtype(_fields_)

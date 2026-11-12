@@ -7,7 +7,7 @@ component stores (CUDA C has no swizzle lvalue):
     p.y = make_float2((p.y), (p.x)).y;
 
 The first statement overwrites `p.x`, and the second RE-READS the value expression, so it
-sees the overwritten component: the swap lands `(p.y, p.y)` instead of `(p.y, p.x)`. Today
+sees the overwritten component: the swap lands `(p.y, p.y)` instead of `(p.y, p.x)`. Once,
 `float2(1, 2).xy = .yx` answers (2, 2) on CUDA and (2, 1) on the interpreter -- a silent
 wrong answer, the kind that turns a quadrant fold into a smear.
 

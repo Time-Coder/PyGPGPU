@@ -166,6 +166,9 @@ class MandelbrotViewer(FractalViewer):
             if escaped_at >= self.max_iter:
                 break
 
+        # `points` always holds at least the 25-point grid above, so the loop has
+        # set `best`; the assertion states that invariant for the reader as well.
+        assert best is not None
         self.ref_z, self.ref_escaped_at, self.ref_re, self.ref_im = best
         self.reference_offsets()
 

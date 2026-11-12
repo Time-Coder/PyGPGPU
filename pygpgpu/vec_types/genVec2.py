@@ -1,13 +1,14 @@
-from .genVec import genVec
+"""The two-component width base: pygf's, with the OpenCL numeric swizzles on.
+
+The base classes come from pygf -- one vector implementation serves both
+libraries -- and this subclass carries the one thing PyGPGPU adds: the
+``s0``-style numeric component spelling OpenCL's narrow and wide types use
+(``char2().s01``, ``ushort8().s7``). pygf's own GLSL-shaped surface keeps that
+gate off.
+"""
+from pygf.genVec2 import genVec2 as _PygfGenVec2
 
 
-class genVec2(genVec):
+class genVec2(_PygfGenVec2):
 
-    swizzle_map = {
-        'x': 0, 'y': 1,
-        'r': 0, 'g': 1,
-        '0': 0, '1': 1
-    }
-
-    def __len__(self)->int:
-        return 2
+    _numeric_swizzles = True

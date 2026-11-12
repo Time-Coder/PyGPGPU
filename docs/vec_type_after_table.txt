@@ -1,0 +1,129 @@
+source   name        size dtype base       module
+opencl   char16        16    16 genVec     pygpgpu.vec_types.char16
+                                         fields: s0:(dtype('int8'), 0), s1:(dtype('int8'), 1), s2:(dtype('int8'), 2), s3:(dtype('int8'), 3), s4:(dtype('int8'), 4), s5:(dtype('int8'), 5), s6:(dtype('int8'), 6), s7:(dtype('int8'), 7), s8:(dtype('int8'), 8), s9:(dtype('int8'), 9), sA:(dtype('int8'), 10), sB:(dtype('int8'), 11), sC:(dtype('int8'), 12), sD:(dtype('int8'), 13), sE:(dtype('int8'), 14), sF:(dtype('int8'), 15)
+opencl   char2          2     2 genVec2    pygpgpu.vec_types.char2
+                                         fields: x:(dtype('int8'), 0), y:(dtype('int8'), 1)
+opencl   char3          4     4 genVec3    pygpgpu.opencl.driver.vec_types.char3
+                                         fields: x:(dtype('int8'), 0), y:(dtype('int8'), 1), z:(dtype('int8'), 2), _:(dtype('int8'), 3)
+opencl   char4          4     4 genVec4    pygpgpu.vec_types.char4
+                                         fields: x:(dtype('int8'), 0), y:(dtype('int8'), 1), z:(dtype('int8'), 2), w:(dtype('int8'), 3)
+opencl   char8          8     8 genVec     pygpgpu.vec_types.char8
+                                         fields: s0:(dtype('int8'), 0), s1:(dtype('int8'), 1), s2:(dtype('int8'), 2), s3:(dtype('int8'), 3), s4:(dtype('int8'), 4), s5:(dtype('int8'), 5), s6:(dtype('int8'), 6), s7:(dtype('int8'), 7)
+opencl   double16     128   128 genVec     pygpgpu.vec_types.double16
+                                         fields: s0:(dtype('float64'), 0), s1:(dtype('float64'), 8), s2:(dtype('float64'), 16), s3:(dtype('float64'), 24), s4:(dtype('float64'), 32), s5:(dtype('float64'), 40), s6:(dtype('float64'), 48), s7:(dtype('float64'), 56), s8:(dtype('float64'), 64), s9:(dtype('float64'), 72), sA:(dtype('float64'), 80), sB:(dtype('float64'), 88), sC:(dtype('float64'), 96), sD:(dtype('float64'), 104), sE:(dtype('float64'), 112), sF:(dtype('float64'), 120)
+opencl   double2       16    16 Structure  pygf.double2
+                                         fields: x:(dtype('float64'), 0), y:(dtype('float64'), 8)
+opencl   double3       32    32 genVec3    pygpgpu.opencl.driver.vec_types.double3
+                                         fields: x:(dtype('float64'), 0), y:(dtype('float64'), 8), z:(dtype('float64'), 16), _:(dtype('float64'), 24)
+opencl   double4       32    32 Structure  pygf.double4
+                                         fields: x:(dtype('float64'), 0), y:(dtype('float64'), 8), z:(dtype('float64'), 16), w:(dtype('float64'), 24)
+opencl   double8       64    64 genVec     pygpgpu.vec_types.double8
+                                         fields: s0:(dtype('float64'), 0), s1:(dtype('float64'), 8), s2:(dtype('float64'), 16), s3:(dtype('float64'), 24), s4:(dtype('float64'), 32), s5:(dtype('float64'), 40), s6:(dtype('float64'), 48), s7:(dtype('float64'), 56)
+opencl   float16       64    64 genVec     pygpgpu.vec_types.float16
+                                         fields: s0:(dtype('float32'), 0), s1:(dtype('float32'), 4), s2:(dtype('float32'), 8), s3:(dtype('float32'), 12), s4:(dtype('float32'), 16), s5:(dtype('float32'), 20), s6:(dtype('float32'), 24), s7:(dtype('float32'), 28), s8:(dtype('float32'), 32), s9:(dtype('float32'), 36), sA:(dtype('float32'), 40), sB:(dtype('float32'), 44), sC:(dtype('float32'), 48), sD:(dtype('float32'), 52), sE:(dtype('float32'), 56), sF:(dtype('float32'), 60)
+opencl   float2         8     8 Structure  pygf.float2
+                                         fields: x:(dtype('float32'), 0), y:(dtype('float32'), 4)
+opencl   float3        16    16 genVec3    pygpgpu.opencl.driver.vec_types.float3
+                                         fields: x:(dtype('float32'), 0), y:(dtype('float32'), 4), z:(dtype('float32'), 8), _:(dtype('float32'), 12)
+opencl   float4        16    16 Structure  pygf.float4
+                                         fields: x:(dtype('float32'), 0), y:(dtype('float32'), 4), z:(dtype('float32'), 8), w:(dtype('float32'), 12)
+opencl   float8        32    32 genVec     pygpgpu.vec_types.float8
+                                         fields: s0:(dtype('float32'), 0), s1:(dtype('float32'), 4), s2:(dtype('float32'), 8), s3:(dtype('float32'), 12), s4:(dtype('float32'), 16), s5:(dtype('float32'), 20), s6:(dtype('float32'), 24), s7:(dtype('float32'), 28)
+opencl   int16         64    64 genVec     pygpgpu.vec_types.int16
+                                         fields: s0:(dtype('int32'), 0), s1:(dtype('int32'), 4), s2:(dtype('int32'), 8), s3:(dtype('int32'), 12), s4:(dtype('int32'), 16), s5:(dtype('int32'), 20), s6:(dtype('int32'), 24), s7:(dtype('int32'), 28), s8:(dtype('int32'), 32), s9:(dtype('int32'), 36), sA:(dtype('int32'), 40), sB:(dtype('int32'), 44), sC:(dtype('int32'), 48), sD:(dtype('int32'), 52), sE:(dtype('int32'), 56), sF:(dtype('int32'), 60)
+opencl   int2           8     8 Structure  pygf.int2
+                                         fields: x:(dtype('int32'), 0), y:(dtype('int32'), 4)
+opencl   int3          16    16 genVec3    pygpgpu.opencl.driver.vec_types.int3
+                                         fields: x:(dtype('int32'), 0), y:(dtype('int32'), 4), z:(dtype('int32'), 8), _:(dtype('int32'), 12)
+opencl   int4          16    16 Structure  pygf.int4
+                                         fields: x:(dtype('int32'), 0), y:(dtype('int32'), 4), z:(dtype('int32'), 8), w:(dtype('int32'), 12)
+opencl   int8          32    32 genVec     pygpgpu.vec_types.int8
+                                         fields: s0:(dtype('int32'), 0), s1:(dtype('int32'), 4), s2:(dtype('int32'), 8), s3:(dtype('int32'), 12), s4:(dtype('int32'), 16), s5:(dtype('int32'), 20), s6:(dtype('int32'), 24), s7:(dtype('int32'), 28)
+opencl   long16       128   128 genVec16   pygpgpu.opencl.driver.vec_types.long16
+                                         fields: s0:(dtype('int64'), 0), s1:(dtype('int64'), 8), s2:(dtype('int64'), 16), s3:(dtype('int64'), 24), s4:(dtype('int64'), 32), s5:(dtype('int64'), 40), s6:(dtype('int64'), 48), s7:(dtype('int64'), 56), s8:(dtype('int64'), 64), s9:(dtype('int64'), 72), sA:(dtype('int64'), 80), sB:(dtype('int64'), 88), sC:(dtype('int64'), 96), sD:(dtype('int64'), 104), sE:(dtype('int64'), 112), sF:(dtype('int64'), 120)
+opencl   long2         16    16 genVec2    pygpgpu.opencl.driver.vec_types.long2
+                                         fields: x:(dtype('int64'), 0), y:(dtype('int64'), 8)
+opencl   long3         32    32 genVec3    pygpgpu.opencl.driver.vec_types.long3
+                                         fields: x:(dtype('int64'), 0), y:(dtype('int64'), 8), z:(dtype('int64'), 16), _:(dtype('int64'), 24)
+opencl   long4         32    32 genVec4    pygpgpu.opencl.driver.vec_types.long4
+                                         fields: x:(dtype('int64'), 0), y:(dtype('int64'), 8), z:(dtype('int64'), 16), w:(dtype('int64'), 24)
+opencl   long8         64    64 genVec8    pygpgpu.opencl.driver.vec_types.long8
+                                         fields: s0:(dtype('int64'), 0), s1:(dtype('int64'), 8), s2:(dtype('int64'), 16), s3:(dtype('int64'), 24), s4:(dtype('int64'), 32), s5:(dtype('int64'), 40), s6:(dtype('int64'), 48), s7:(dtype('int64'), 56)
+opencl   short16       32    32 genVec     pygpgpu.vec_types.short16
+                                         fields: s0:(dtype('int16'), 0), s1:(dtype('int16'), 2), s2:(dtype('int16'), 4), s3:(dtype('int16'), 6), s4:(dtype('int16'), 8), s5:(dtype('int16'), 10), s6:(dtype('int16'), 12), s7:(dtype('int16'), 14), s8:(dtype('int16'), 16), s9:(dtype('int16'), 18), sA:(dtype('int16'), 20), sB:(dtype('int16'), 22), sC:(dtype('int16'), 24), sD:(dtype('int16'), 26), sE:(dtype('int16'), 28), sF:(dtype('int16'), 30)
+opencl   short2         4     4 genVec2    pygpgpu.vec_types.short2
+                                         fields: x:(dtype('int16'), 0), y:(dtype('int16'), 2)
+opencl   short3         8     8 genVec3    pygpgpu.opencl.driver.vec_types.short3
+                                         fields: x:(dtype('int16'), 0), y:(dtype('int16'), 2), z:(dtype('int16'), 4), _:(dtype('int16'), 6)
+opencl   short4         8     8 genVec4    pygpgpu.vec_types.short4
+                                         fields: x:(dtype('int16'), 0), y:(dtype('int16'), 2), z:(dtype('int16'), 4), w:(dtype('int16'), 6)
+opencl   short8        16    16 genVec     pygpgpu.vec_types.short8
+                                         fields: s0:(dtype('int16'), 0), s1:(dtype('int16'), 2), s2:(dtype('int16'), 4), s3:(dtype('int16'), 6), s4:(dtype('int16'), 8), s5:(dtype('int16'), 10), s6:(dtype('int16'), 12), s7:(dtype('int16'), 14)
+opencl   uchar16       16    16 genVec     pygpgpu.vec_types.uchar16
+                                         fields: s0:(dtype('uint8'), 0), s1:(dtype('uint8'), 1), s2:(dtype('uint8'), 2), s3:(dtype('uint8'), 3), s4:(dtype('uint8'), 4), s5:(dtype('uint8'), 5), s6:(dtype('uint8'), 6), s7:(dtype('uint8'), 7), s8:(dtype('uint8'), 8), s9:(dtype('uint8'), 9), sA:(dtype('uint8'), 10), sB:(dtype('uint8'), 11), sC:(dtype('uint8'), 12), sD:(dtype('uint8'), 13), sE:(dtype('uint8'), 14), sF:(dtype('uint8'), 15)
+opencl   uchar2         2     2 genVec2    pygpgpu.vec_types.uchar2
+                                         fields: x:(dtype('uint8'), 0), y:(dtype('uint8'), 1)
+opencl   uchar3         4     4 genVec3    pygpgpu.opencl.driver.vec_types.uchar3
+                                         fields: x:(dtype('uint8'), 0), y:(dtype('uint8'), 1), z:(dtype('uint8'), 2), _:(dtype('uint8'), 3)
+opencl   uchar4         4     4 genVec4    pygpgpu.vec_types.uchar4
+                                         fields: x:(dtype('uint8'), 0), y:(dtype('uint8'), 1), z:(dtype('uint8'), 2), w:(dtype('uint8'), 3)
+opencl   uchar8         8     8 genVec     pygpgpu.vec_types.uchar8
+                                         fields: s0:(dtype('uint8'), 0), s1:(dtype('uint8'), 1), s2:(dtype('uint8'), 2), s3:(dtype('uint8'), 3), s4:(dtype('uint8'), 4), s5:(dtype('uint8'), 5), s6:(dtype('uint8'), 6), s7:(dtype('uint8'), 7)
+opencl   uint16        64    64 genVec     pygpgpu.vec_types.uint16
+                                         fields: s0:(dtype('uint32'), 0), s1:(dtype('uint32'), 4), s2:(dtype('uint32'), 8), s3:(dtype('uint32'), 12), s4:(dtype('uint32'), 16), s5:(dtype('uint32'), 20), s6:(dtype('uint32'), 24), s7:(dtype('uint32'), 28), s8:(dtype('uint32'), 32), s9:(dtype('uint32'), 36), sA:(dtype('uint32'), 40), sB:(dtype('uint32'), 44), sC:(dtype('uint32'), 48), sD:(dtype('uint32'), 52), sE:(dtype('uint32'), 56), sF:(dtype('uint32'), 60)
+opencl   uint2          8     8 Structure  pygf.uint2
+                                         fields: x:(dtype('uint32'), 0), y:(dtype('uint32'), 4)
+opencl   uint3         16    16 genVec3    pygpgpu.opencl.driver.vec_types.uint3
+                                         fields: x:(dtype('uint32'), 0), y:(dtype('uint32'), 4), z:(dtype('uint32'), 8), _:(dtype('uint32'), 12)
+opencl   uint4         16    16 Structure  pygf.uint4
+                                         fields: x:(dtype('uint32'), 0), y:(dtype('uint32'), 4), z:(dtype('uint32'), 8), w:(dtype('uint32'), 12)
+opencl   uint8         32    32 genVec     pygpgpu.vec_types.uint8
+                                         fields: s0:(dtype('uint32'), 0), s1:(dtype('uint32'), 4), s2:(dtype('uint32'), 8), s3:(dtype('uint32'), 12), s4:(dtype('uint32'), 16), s5:(dtype('uint32'), 20), s6:(dtype('uint32'), 24), s7:(dtype('uint32'), 28)
+opencl   ulong16      128   128 genVec16   pygpgpu.opencl.driver.vec_types.ulong16
+                                         fields: s0:(dtype('uint64'), 0), s1:(dtype('uint64'), 8), s2:(dtype('uint64'), 16), s3:(dtype('uint64'), 24), s4:(dtype('uint64'), 32), s5:(dtype('uint64'), 40), s6:(dtype('uint64'), 48), s7:(dtype('uint64'), 56), s8:(dtype('uint64'), 64), s9:(dtype('uint64'), 72), sA:(dtype('uint64'), 80), sB:(dtype('uint64'), 88), sC:(dtype('uint64'), 96), sD:(dtype('uint64'), 104), sE:(dtype('uint64'), 112), sF:(dtype('uint64'), 120)
+opencl   ulong2        16    16 genVec2    pygpgpu.opencl.driver.vec_types.ulong2
+                                         fields: x:(dtype('uint64'), 0), y:(dtype('uint64'), 8)
+opencl   ulong3        32    32 genVec3    pygpgpu.opencl.driver.vec_types.ulong3
+                                         fields: x:(dtype('uint64'), 0), y:(dtype('uint64'), 8), z:(dtype('uint64'), 16), _:(dtype('uint64'), 24)
+opencl   ulong4        32    32 genVec4    pygpgpu.opencl.driver.vec_types.ulong4
+                                         fields: x:(dtype('uint64'), 0), y:(dtype('uint64'), 8), z:(dtype('uint64'), 16), w:(dtype('uint64'), 24)
+opencl   ulong8        64    64 genVec8    pygpgpu.opencl.driver.vec_types.ulong8
+                                         fields: s0:(dtype('uint64'), 0), s1:(dtype('uint64'), 8), s2:(dtype('uint64'), 16), s3:(dtype('uint64'), 24), s4:(dtype('uint64'), 32), s5:(dtype('uint64'), 40), s6:(dtype('uint64'), 48), s7:(dtype('uint64'), 56)
+opencl   ushort16      32    32 genVec     pygpgpu.vec_types.ushort16
+                                         fields: s0:(dtype('uint16'), 0), s1:(dtype('uint16'), 2), s2:(dtype('uint16'), 4), s3:(dtype('uint16'), 6), s4:(dtype('uint16'), 8), s5:(dtype('uint16'), 10), s6:(dtype('uint16'), 12), s7:(dtype('uint16'), 14), s8:(dtype('uint16'), 16), s9:(dtype('uint16'), 18), sA:(dtype('uint16'), 20), sB:(dtype('uint16'), 22), sC:(dtype('uint16'), 24), sD:(dtype('uint16'), 26), sE:(dtype('uint16'), 28), sF:(dtype('uint16'), 30)
+opencl   ushort2        4     4 genVec2    pygpgpu.vec_types.ushort2
+                                         fields: x:(dtype('uint16'), 0), y:(dtype('uint16'), 2)
+opencl   ushort3        8     8 genVec3    pygpgpu.opencl.driver.vec_types.ushort3
+                                         fields: x:(dtype('uint16'), 0), y:(dtype('uint16'), 2), z:(dtype('uint16'), 4), _:(dtype('uint16'), 6)
+opencl   ushort4        8     8 genVec4    pygpgpu.vec_types.ushort4
+                                         fields: x:(dtype('uint16'), 0), y:(dtype('uint16'), 2), z:(dtype('uint16'), 4), w:(dtype('uint16'), 6)
+opencl   ushort8       16    16 genVec     pygpgpu.vec_types.ushort8
+                                         fields: s0:(dtype('uint16'), 0), s1:(dtype('uint16'), 2), s2:(dtype('uint16'), 4), s3:(dtype('uint16'), 6), s4:(dtype('uint16'), 8), s5:(dtype('uint16'), 10), s6:(dtype('uint16'), 12), s7:(dtype('uint16'), 14)
+cuda     char3          3     3 genVec3    pygpgpu.cuda.driver.vec_types.char3
+                                         fields: x:(dtype('int8'), 0), y:(dtype('int8'), 1), z:(dtype('int8'), 2)
+cuda     double3       24    24 genVec3    pygpgpu.cuda.driver.vec_types.double3
+                                         fields: x:(dtype('float64'), 0), y:(dtype('float64'), 8), z:(dtype('float64'), 16)
+cuda     float3        12    12 genVec3    pygpgpu.cuda.driver.vec_types.float3
+                                         fields: x:(dtype('float32'), 0), y:(dtype('float32'), 4), z:(dtype('float32'), 8)
+cuda     int3          12    12 genVec3    pygpgpu.cuda.driver.vec_types.int3
+                                         fields: x:(dtype('int32'), 0), y:(dtype('int32'), 4), z:(dtype('int32'), 8)
+cuda     long2          8     8 genVec2    pygpgpu.cuda.driver.vec_types.long2
+                                         fields: x:(dtype('int32'), 0), y:(dtype('int32'), 4)
+cuda     long3         12    12 genVec3    pygpgpu.cuda.driver.vec_types.long3
+                                         fields: x:(dtype('int32'), 0), y:(dtype('int32'), 4), z:(dtype('int32'), 8)
+cuda     long4         16    16 genVec4    pygpgpu.cuda.driver.vec_types.long4
+                                         fields: x:(dtype('int32'), 0), y:(dtype('int32'), 4), z:(dtype('int32'), 8), w:(dtype('int32'), 12)
+cuda     short3         6     6 genVec3    pygpgpu.cuda.driver.vec_types.short3
+                                         fields: x:(dtype('int16'), 0), y:(dtype('int16'), 2), z:(dtype('int16'), 4)
+cuda     uchar3         3     3 genVec3    pygpgpu.cuda.driver.vec_types.uchar3
+                                         fields: x:(dtype('uint8'), 0), y:(dtype('uint8'), 1), z:(dtype('uint8'), 2)
+cuda     uint3         12    12 genVec3    pygpgpu.cuda.driver.vec_types.uint3
+                                         fields: x:(dtype('uint32'), 0), y:(dtype('uint32'), 4), z:(dtype('uint32'), 8)
+cuda     ulong2         8     8 genVec2    pygpgpu.cuda.driver.vec_types.ulong2
+                                         fields: x:(dtype('uint32'), 0), y:(dtype('uint32'), 4)
+cuda     ulong3        12    12 genVec3    pygpgpu.cuda.driver.vec_types.ulong3
+                                         fields: x:(dtype('uint32'), 0), y:(dtype('uint32'), 4), z:(dtype('uint32'), 8)
+cuda     ulong4        16    16 genVec4    pygpgpu.cuda.driver.vec_types.ulong4
+                                         fields: x:(dtype('uint32'), 0), y:(dtype('uint32'), 4), z:(dtype('uint32'), 8), w:(dtype('uint32'), 12)
+cuda     ushort3        6     6 genVec3    pygpgpu.cuda.driver.vec_types.ushort3
+                                         fields: x:(dtype('uint16'), 0), y:(dtype('uint16'), 2), z:(dtype('uint16'), 4)

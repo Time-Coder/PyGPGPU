@@ -1,55 +1,57 @@
-﻿"""Known-failure regressions found by rendering a deep-zoom Mandelbrot on the GPU.
+﻿"""Regression tests for the kernel bugs found by rendering a deep-zoom Mandelbrot.
 
-Every test here fails today, on purpose: they are the specification for the fixes, written
-as failing tests first (TDD). Each one names the repro that found it and what the right
-answer is, and none of the answers invents a new rule -- each is what python (or numpy,
-where the interpreter runs numpy) already computes for the same source. The kernels live
-one module per bug in `known_failures/`, because the generated source of one python module
-is one translation unit: a kernel whose bug is a compile error would otherwise take every
-other kernel in the module down with it.
+Every test here once failed, on purpose: they were written as failing tests first (TDD),
+the specification for their fixes, and they have passed since the fixes landed -- they stay
+to keep each bug fixed. Each one names the repro that found it and what the right answer
+is, and none of the answers invents a new rule -- each is what python (or numpy, where the
+interpreter runs numpy) already computes for the same source. The kernels live one module
+per bug in `regressions/`, because the generated source of one python module is one
+translation unit: a kernel whose bug is a compile error would otherwise take every other
+kernel in the module down with it.
 
 This file holds the arithmetic groups; the object-shaped ones (subclass overrides, refused
-spellings, the pygf vectors' store side) live in `test_kernel_known_failures_objects.py`.
+spellings, the pygf vectors' store side) live in `test_kernel_regressions_objects.py`.
 
-The failures fall into four groups:
+The bugs fell into four groups:
 
-* **complex numbers**: `+=` on a complex value fails to compile, `z ** 2` goes through the
-  general exp-log power, `bool(z)` fails to compile, `complex(re, im)` truncates numpy
-  double parts, and an int multiply wraps silently.
-* **64-bit arithmetic**: under `float=np.float64` the transcendental functions are still
-  emitted with CUDA's float spellings (`sinf`, `log2f`, ...), a body literal is truncated
-  to a float32 constant, `np.sqrt(2)` computes in float32 against numpy's float64 answer,
-  a device helper cannot return a tuple, and `pow(2, 10)` (int arguments) fails to compile.
-* **the scalar cast refusal**: `two = np.float64(2.0)` below the magic loop is refused as
+* **complex numbers**: `+=` on a complex value failed to compile, `z ** 2` went through the
+  general exp-log power, `bool(z)` failed to compile, `complex(re, im)` truncated numpy
+  double parts, and an int multiply wrapped silently.
+* **64-bit arithmetic**: under `float=np.float64` the transcendental functions were still
+  emitted with CUDA's float spellings (`sinf`, `log2f`, ...), a body literal was truncated
+  to a float32 constant, `np.sqrt(2)` computed in float32 against numpy's float64 answer,
+  a device helper could not return a tuple, and `pow(2, 10)` (int arguments) failed to
+  compile.
+* **the scalar cast refusal**: `two = np.float64(2.0)` below the magic loop was refused as
   a "creation", although the same statement above the loop and inside a device helper are
-  both accepted -- the dtype-constructor names sit on the host-creation list.
-* **python semantics the translator owes**: a variable refused for widening float to
+  both accepted -- the dtype-constructor names sat on the host-creation list.
+* **python semantics the translator owed**: a variable refused for widening float to
   double, `min`/`max` capped at two arguments, ndindex extents held in locals read as a
-  "second magic loop", an ndenumerate index that cannot be subscripted, and a float
-  carried scalar accumulated through an int atomic (which truncates every contribution).
+  "second magic loop", an ndenumerate index that could not be subscripted, and a float
+  carried scalar accumulated through an int atomic (which truncated every contribution).
 """
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from known_failures.complex_ctor_parts import complex_constructor_double_parts
-from known_failures.complex_inplace import complex_inplace_add
-from known_failures.complex_square import complex_square_c64
-from known_failures.complex_truth import complex_truthiness
-from known_failures.double_literal import double_body_literal
-from known_failures.double_math import double_math_functions
-from known_failures.float_carried import float_carried_sum
-from known_failures.helper_tuple import unpacks_two_scalars
-from known_failures.int_overflow import (literal_multiply_overflows,
+from regressions.complex_ctor_parts import complex_constructor_double_parts
+from regressions.complex_inplace import complex_inplace_add
+from regressions.complex_square import complex_square_c64
+from regressions.complex_truth import complex_truthiness
+from regressions.double_literal import double_body_literal
+from regressions.double_math import double_math_functions
+from regressions.float_carried import float_carried_sum
+from regressions.helper_tuple import unpacks_two_scalars
+from regressions.int_overflow import (literal_multiply_overflows,
                                          parameter_multiply_wide)
-from known_failures.minmax_arity import min_with_three_arguments
-from known_failures.ndenumerate_index import ndenumerate_index_subscript
-from known_failures.ndindex_locals import ndindex_with_local_bounds
-from known_failures.np_int_math import numpy_math_on_ints
-from known_failures.pow_integers import builtin_pow_integers
-from known_failures.scalar_cast_loop import scalar_cast_inside_the_loop
-from known_failures.widen_to_double import variable_widens_from_float_to_double
+from regressions.minmax_arity import min_with_three_arguments
+from regressions.ndenumerate_index import ndenumerate_index_subscript
+from regressions.ndindex_locals import ndindex_with_local_bounds
+from regressions.np_int_math import numpy_math_on_ints
+from regressions.pow_integers import builtin_pow_integers
+from regressions.scalar_cast_loop import scalar_cast_inside_the_loop
+from regressions.widen_to_double import variable_widens_from_float_to_double
 
 # ---------------------------------------------------------------------------
 # Group 1 -- complex numbers
@@ -57,7 +59,7 @@ from known_failures.widen_to_double import variable_widens_from_float_to_double
 
 
 def test_complex_augassign_compiles_and_matches_the_plain_spelling(gpu_backend):
-    """`z += c` is `z = z + c`; today it fails with `no operator "+=" (c128 += c128)`.
+    """`z += c` is `z = z + c`; it used to fail with `no operator "+=" (c128 += c128)`.
 
     `_visit_augassign` (translator.py) has no complex path: the structure branch looks for
     a class `__iadd__`, finds none on the header's record, and the value falls through to
@@ -125,7 +127,7 @@ def test_a_wide_int_mapping_carries_the_parameter_product(gpu_backend):
 
 
 def test_bool_of_a_complex_value_is_its_non_zeroNESS(gpu_backend):
-    """`if z:` is `z != 0` in python (either part non-zero); today it is a compile
+    """`if z:` is `z != 0` in python (either part non-zero); it used to be a compile
     error: "expression must have bool type" -- the record is emitted into the condition
     verbatim.
     """
@@ -136,7 +138,7 @@ def test_bool_of_a_complex_value_is_its_non_zeroNESS(gpu_backend):
 
 
 def test_complex_constructor_keeps_numpy_parts_whole(gpu_backend):
-    """`complex(re, im)` with double parts truncates both to float32 today.
+    """`complex(re, im)` with double parts used to truncate both to float32.
 
     Under `float=np.float64` the two parts are doubles (a python float argument travels
     as the mapping's double), and numpy's own `complex(1.0000001234567890,
@@ -173,7 +175,7 @@ def test_math_functions_compute_at_the_mapped_width(gpu_backend):
 
 
 def test_a_body_literal_keeps_double_digits_under_a_double_mapping(gpu_backend):
-    """`0.1234567890123456789` arrives as float32(0.12345679) today.
+    """`0.1234567890123456789` used to arrive as float32(0.12345679).
 
     The complex literal already follows the mapping (a python complex is c128 under
     float=np.float64), so the real literal beside it should follow it too: python's float
@@ -203,7 +205,7 @@ def test_a_device_helper_can_return_two_scalars(gpu_backend):
     """`return a, b` from a helper, unpacked at the call site.
 
     `@kernel` itself supports tuple returns (the ReturnPosition machinery), so the helper
-    form is the same feature at a smaller scale -- but today the helper body is refused
+    form is the same feature at a smaller scale -- but the helper body used to be refused
     with "unsupported expression: Tuple" and the call site with "tuple assignment
     requires matching tuples".
     """
@@ -215,7 +217,7 @@ def test_a_device_helper_can_return_two_scalars(gpu_backend):
 
 
 def test_the_python_pow_builtin_takes_integer_arguments(runner):
-    """`pow(2, 10)` is 1024; today the device emits `pow((int)2, (int)10)`, which CUDA's
+    """`pow(2, 10)` is 1024; the device used to emit `pow((int)2, (int)10)`, which CUDA's
     NVRTC and OpenCL's clang refuse as ambiguous ("more than one instance of overloaded
     function pow"). HIP's clang accepts it by accident -- its `<cmath>` resolves the int
     overload -- so the same source answers on one backend and refuses on the others.
@@ -234,7 +236,7 @@ def test_the_python_pow_builtin_takes_integer_arguments(runner):
 
 
 def test_a_scalar_dtype_cast_below_the_magic_loop_is_not_a_creation(gpu_backend):
-    """`np.float64(2.0)` inside the loop is refused today as a per-work-item creation.
+    """`np.float64(2.0)` inside the loop used to be refused as a per-work-item creation.
 
     The dtype-constructor names (float64, complex64, ...) sit on _HOST_CREATION_FUNCTIONS,
     so a scalar cast trips the creation guard. The same statement above the loop is lifted
@@ -262,7 +264,7 @@ def test_a_variable_widens_from_float_to_double(gpu_backend):
 
     Python's variables are untyped, and the translator already widens int -> float
     (`_define` accepts that direction); float -> double is the same widening one step
-    further. Today it refuses with "variable 'scale' changes type from float to double",
+    further. It used to refuse with "variable 'scale' changes type from float to double",
     which forces every double kernel to pre-declare its accumulators as np.float64 above
     the loop -- and that spelling is refused inside the loop (the group-3 test).
     """
@@ -272,7 +274,7 @@ def test_a_variable_widens_from_float_to_double(gpu_backend):
 
 
 def test_min_and_max_take_three_arguments(runner):
-    """`min(x, 0.7, 0.9)` is refused today with "takes exactly 2 arguments".
+    """`min(x, 0.7, 0.9)` used to be refused with "takes exactly 2 arguments".
 
     python chains the comparisons (`min(min(a, b), c)`), numpy has no three-argument
     minimum, and a device has no reason to refuse the spelling.
@@ -285,7 +287,7 @@ def test_min_and_max_take_three_arguments(runner):
 def test_ndindex_accepts_extents_held_in_locals(runner):
     """`rows, columns = ...` bounds must not make the loop stop being the magic loop.
 
-    Today the loop is not recognized as the dispatch and the body is refused with "this
+    The loop used to go unrecognized as the dispatch and the body was refused with "this
     kernel body has more than one magic loop" -- although the source contains exactly one
     loop. The recognition should follow the data (the bounds are `out.shape` members), or
     the refusal should say "the loop bounds must be arr.shape", not count loops.
@@ -296,7 +298,7 @@ def test_ndindex_accepts_extents_held_in_locals(runner):
 
 
 def test_ndenumerate_index_can_be_subscripted(runner):
-    """`index[0]` on an ndenumerate index is refused today ("only array ... can be
+    """`index[0]` on an ndenumerate index used to be refused ("only array ... can be
     indexed"), although python hands the index over as a tuple and `out[index]` works.
     """
     out = np.array([1.0, 2.0, 3.0], dtype=np.float64)
@@ -305,7 +307,7 @@ def test_ndenumerate_index_can_be_subscripted(runner):
 
 
 def test_a_float_carried_scalar_accumulates_in_its_own_width(runner):
-    """`total = 0.0` above the loop, `total += x[i]` inside it -- the sum loses today.
+    """`total = 0.0` above the loop, `total += x[i]` inside it -- the sum used to lose every contribution.
 
     The carried-scalar machinery declares the shared slot `int*` for every type and emits
     `atomicAdd(total, x[i])`: an int atomic handed a double value. The contributions are

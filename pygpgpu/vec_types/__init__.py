@@ -47,7 +47,10 @@ from .int16 import int16
 from .uint8 import uint8
 from .uint16 import uint16
 
-from .genVec import genVec
+# The base classes are pygf's: one vector implementation serves both libraries.
+# The width bases below are PyGPGPU's thin subclasses that turn the OpenCL
+# numeric swizzles on; genVec itself is re-exported unchanged.
+from pygf.genVec import genVec
 from .genVec2 import genVec2
 from .genVec3 import genVec3
 from .genVec4 import genVec4
@@ -61,6 +64,10 @@ from .genVec16 import genVec16
 import pygf as _pygf
 
 for _value in list(globals().values()):
-    _pygf.register_vector_type(_value)
+    # `register_vector_type` reads `_fields_`, so only the concrete classes qualify; the
+    # modules and the base classes in this namespace are filtered out here rather than
+    # walked once more inside pygf.
+    if isinstance(_value, type):
+        _pygf.register_vector_type(_value)
 
 del _value, _pygf

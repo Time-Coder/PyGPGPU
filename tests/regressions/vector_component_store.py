@@ -1,7 +1,7 @@
 """Bug: a pygf vector's components cannot be assigned in device code.
 
 `ComponentStore.draw` builds a colour and then sets one component -- the shape every GLSL
-shader writes (`color.r = ...`). Today the translator refuses it:
+shader writes (`color.r = ...`). The translator used to refuse it:
 
     SyntaxError: cannot assign to 'c.x': member stores need a structure value, and float3 is
     not one
@@ -11,7 +11,7 @@ object freely (`v.x = 9.0` on a `float2` works), and the error's own wording say
 missing: a *structure value* is what member stores accept, and the pygf vectors are not
 recognised as one. The right answer is for the store to spell the component write the record
 layout already has -- not to send the shader author through "assign a whole new vector", which
-is what the shadertoy viewer has to document today.
+is what the shadertoy viewer has to document.
 """
 from __future__ import annotations
 

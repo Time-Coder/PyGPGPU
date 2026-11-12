@@ -1,5 +1,4 @@
 from ctypes import c_uint8
-import numpy as np
 
 from ....vec_types import genVec3
 
@@ -13,4 +12,3 @@ class uchar3(genVec3):
         ('_', c_uint8),
     ]
     
-    dtype = np.dtype(_fields_)

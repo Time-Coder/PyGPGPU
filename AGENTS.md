@@ -38,7 +38,7 @@ PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP,
 - Metal's MSL source is read by a small declaration scanner (`metal/oop/program_parser.py`), not by tree-sitter: none of the installed grammars accepts `kernel void f(...)` (the CUDA grammar tags the `void` an ERROR node), and this package *generates* that shape itself, so a full parser would buy nothing. The scanner reads exactly what a launch binds -- entry points and their parameter names/types -- and raises on anything it cannot read rather than guessing.
 - **Metal's shared memory and atomics are MSL's, not OpenCL's.** Two spellings differ and neither is cosmetic. (1) **A `local_array_per_group` buffer is `threadgroup`, not `__local`** -- `parameter_declarations()` emits `threadgroup uint* _local0` and `_metal_syntax` picks it, while the sampler parameters stay OpenCL's alone (`backend == "opencl"`, not `_opencl_syntax`, because MSL has no sampler argument). (2) **Atomics are the C++11 `atomic_fetch_*_explicit` family, never `atomicAdd`.** `emit_atomic` dispatches on `backend == "metal"` to `_emit_atomic_metal`, which casts the pointer to **the address space the buffer lives in** -- `(threadgroup atomic_uint*)` for a group scratch buffer, `(device atomic_uint*)` for an array argument -- because MSL overloads the atomics on that reference type and one address space cannot be cast to the other (the same rule OpenCL enforces with `__local`/`__global`). `atomic_cas` is `atomic_compare_exchange_weak_explicit`, which takes the expected value by pointer and answers a `bool`, so it is emitted as a small block holding that value rather than as an expression. Every operation passes `memory_order_relaxed`: the update is atomic, and a `barrier()` is what orders the group. `tests/test_metal_codegen.py` pins the per-operation spelling, the two address spaces, the CAS shape, and a real shared-memory histogram compiled through `PyKernel._compile`.
 - **Buffer parameters get their address-space qualifier from one place, `_buffer_qualifier()`.** A kernel signature names many buffers -- the caller's arrays, the returned-value slots, the return claim/site words, the outer-scope arrays and the host-created ones -- and all of them need the same space. Metal writes `device `, OpenCL writes `__global `, CUDA/HIP write nothing (a plain pointer is already global). Keeping that in one method is what stopped the return slots from being spelled `__global` in an MSL source: they were four separate `_opencl_syntax` tests before. The return **claim word** is Metal's other shape: MSL's compare-and-swap answers a `bool` and takes the expected value by pointer, so the claim is a `_claim_expected = 0` local, the exchange itself, and then a read-back (`_ret_claim[0] == 1`) -- where OpenCL uses `atomic_cmpxchg(...) == 0` and CUDA `atomicCAS(&x, 0, 1) == 0`. `tests/test_metal_codegen.py` pins the slots as `device`, both foreign spellings' absence, and each backend's own claim form.
-- **No packaging or lint config needed a change for Metal.** `[tool.setuptools.packages.find]` already uses `include = ["pygpgpu*"]`, so `find_packages` discovers `pygpgpu.metal`, `pygpgpu.metal.driver` and `pygpgpu.metal.oop` with no extra entry (verified: 23 packages, the three metal ones among them). The backend ships no data files of its own -- the generated MSL lives in the source-tree cache, not in the wheel -- so `[tool.setuptools.package-data]` needs nothing either. Ruff's `extend-exclude` and ty's `src.exclude` name only the vendored pcpp tree, the legacy cparser sources and generated `.pyi` stubs, so every metal module is checked like any other; both run clean on it.
+- **No packaging or lint config needed a change for Metal.** `[tool.setuptools.packages.find]` already uses `include = ["pygpgpu*"]`, so `find_packages` discovers `pygpgpu.metal`, `pygpgpu.metal.driver` and `pygpgpu.metal.oop` with no extra entry (verified: 23 packages, the three metal ones among them). The backend ships no data files of its own -- the generated MSL lives in the source-tree cache, not in the wheel -- so `[tool.setuptools.package-data]` needs nothing either. Ruff's `extend-exclude` and ty's `src.exclude` name only the vendored pcpp tree, the one-off cparser generator script and generated `.pyi` stubs, so every metal module is checked like any other; both run clean on it.
 - **Images are refused on Metal by the translator, exactly as HIP's are.** MSL does have texture objects (`texture2d<float, access::sample>` and `access::write`), so this is a missing implementation rather than a missing capability -- but the whole image path is Metal's own: the parameter type, the sampling call with its sampler state, the store, and the host-side `MTLTexture` binding all differ from the OpenCL formulation this backend reuses. Without them the generated source carries `__read_only image2d_t`, which MSL has no notion of, so `_reject_metal_image` refuses reads and writes with a message naming the backends that work. The check is `self._metal_syntax`, not `launch_backend`, because Metal is not HIP's reuse case -- it has its own code generation -- and it runs before `_reject_hip_image` so a Metal kernel reports its own reason. `tests/test_metal_codegen.py` pins both directions and confirms OpenCL/CUDA are unaffected.
 - **A Metal kernel launches asynchronously through a completion poller.** `submit`/`async_call` used to raise `NotImplementedError`; they now work, without Objective-C blocks. The launch encodes and commits (`BoundKernel._enqueue`), and a poller thread reads the command buffer's `status` until it reaches `MTLCommandBufferStatusCompleted` (3), then reads `error`, runs the copy-backs, and settles the future (`settle_future`, so a bare `await` wakes). Three facts are load-bearing. (1) **The bracket reaches the async launch**: `submit`/`async_call` go through `__getitem__(None)` -> `BoundKernel._launch_async`, and the decorator's async path brackets `phase_geometry` before calling them -- the automatic grid here is ONE threadgroup of ONE thread, so an unbracketed bracketed-shape kernel would silently visit one work item. (2) **The claim serial travels with the launch**: `_claim_entries` captures each buffer's serial at claim time and the release validates it (`Buffer.unuse(claim_serial)`), because the poller releases from another thread while the caller's next launch may have claimed the same pooled buffer. (3) **Per-launch bound entries**: `take_bound_entries()` consumes the list rather than leaving it on the kernel, so two in-flight launches of one kernel do not overwrite each other's copy-backs. The synchronous path is unchanged (`waitUntilCompleted` + inline `_finish_buffer`). Separately, `Device.vendor` answers `"Apple"`: the shared `_device_match_keys` reads `vendor` with a `getattr` fallback, so it *could* be absent, but then a selector like `metal:apple` would silently match nothing. `tests/test_metal_launch_path.py` pins the dispatch-shape plumbing and the vendor.
 
@@ -79,6 +79,54 @@ in this area that reads as accidental; if HIP ever needs those widths for real, 
 the neutral layer rather than in a second OpenCL import. (3) **`CLInfo.vec_types` is not "the
 OpenCL vector table"** -- 24 of its 50 entries are the neutral classes. A question about
 "OpenCL's vector types" has to be asked per name, not per table.
+
+**The base classes are pygf's, and `pygpgpu/vec_types/genVec.py` is gone.** Every vector class
+the package owns or borrows inherits pygf's `genVec`/`genType` -- one host implementation of
+construction, arithmetic, comparison, swizzle and the numpy view serves both libraries. What
+PyGPGPU adds lives in two thin layers. (1) **The width bases** (`vec_types/genVec2.py` ...
+`genVec16.py`) are subclasses of pygf's `genVecN`/`genVec` that do exactly two things: set
+`_numeric_swizzles = True` (the OpenCL `s0`-style component spelling -- `char2().s01`,
+`float16().sA`; pygf's own GLSL-shaped surface keeps the gate off) and, for 8/16, declare the
+width (`__len__`), because a padded vec3's `_` field must not make `len` answer 4. (2) **The
+concrete and driver classes** keep their own `_fields_` and nothing else -- the plain
+`dtype = np.dtype(_fields_)` attribute is deleted, because pygf's `dtype` descriptor answers
+the structured dtype on the *class* and the ctypes scalar type on the *instance*, which is
+what pygf's type arithmetic (`vec.dtype`) reads. Four rules are load-bearing:
+
+- **A swizzle or arithmetic result type resolves through the operand's own family.** pygf's
+  `gen_type` names pygf's modules, so a dtype pygf carries no module for (`char2`, `float8`)
+  falls back to the class's own package (`type(self).__module__`'s), and the result of
+  `char2 + char2` is a `char2` -- not the `ModuleNotFoundError` the old base raised for every
+  narrow multi-component swizzle. `ushort` is the one name that cannot come from pygf's table
+  (`c_uint16` maps to `half`), so the operand's family wins whenever the two disagree:
+  `ushort2 + ushort2` is a `ushort2`, never a `half2`. A comparison answers the `intN` of the
+  operand's own package, which is how `float8 < 2` returns pygpgpu's `int8`. One component is
+  always the scalar itself.
+- **A swizzle write stores through the component's own accessor** (`_component_attr`): `x` on
+  the x/y-named classes and on a half (whose `x` is the converting property), `s0` on the wide
+  ones. Writing through the field name alone would bypass the half property and store a raw
+  bit pattern; writing through the GLSL spelling on a wide class would name nothing -- and
+  writing through the GLSL spelling via plain `ctypes.Structure.__setattr__` is exactly the
+  bug pygf 0.6.0 fixed, where `v.rg = 7` on a `float2` silently set *python* shadow
+  attributes and the fields kept their old values.
+- **A float into a narrow integer slot truncates toward zero** (`_field_value`, the C
+  conversion), and an out-of-range integer wraps -- ctypes' own store rule. `char2(1.9, -1.5)`
+  is `(1, -1)`; `char2(-1, 300)` is `(-1, 44)`. The conversion is skipped for a converting
+  accessor (half), whose property owns its value.
+- **Construction flattens sequence arguments** (`char2([1, 2])` is `char2(1, 2)`), and a
+  scalar broadcast is accepted for a multi-component swizzle write -- both were pygpgpu-only
+  behaviors the old parallel base carried that pygf 0.6.0 adopted.
+
+The 16-wide numeric charset names the slots above nine in hex, either case (`sA` and `sa` are
+both slot 10), which shadows rgba's `a` and `b` on those classes exactly as OpenCL's layout
+does -- `char16().rgba` is components (0, 1, 11, 10). Numeric swizzle lengths are 1..4 plus
+the width's own full length (8 for `float8`, 16 for `float16`); anything else is refused, and
+a name over the numeric charset never mixes with GLSL letters (`s0x` is an AttributeError,
+where the old base's strip-the-`s` rule accidentally accepted it). The narrow families have
+no host 3-wide class (their `char3`/`ushort3` are device classes in the driver packages), so
+a three-component swizzle on them is refused with an AttributeError instead of resolving.
+`tests/test_genvec_unification.py` pins all of it with golden values over every dtype family
+and width, and the before/after divergence list is in its module docstring.
 
 ## File size policy (hard rule)
 
@@ -140,8 +188,6 @@ defined twice in a class (a property and its setter, an overload stub and the re
 must move **both** definitions, and a name the outside world reads by string -- a `globals()`
 lookup, a `getattr` with a computed name, a test that reads a module's source text -- has to
 follow the move.
-
-`docs/file-split-plan.md` is the full plan, with the per-area layouts and the risk register.
 
 ## Layout and ownership
 

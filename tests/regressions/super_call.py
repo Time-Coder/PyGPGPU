@@ -1,7 +1,7 @@
 """Bug: a device method cannot call its base implementation through ``super()``.
 
 `CallsSuper.sample` overrides the hook and reaches the base's answer through
-`super().sample(i, j)` -- the spelling python gives for exactly this. Today the translator
+`super().sample(i, j)` -- the spelling python gives for exactly this. The translator used to
 refuses the name: `SyntaxError: unknown function 'super'`. The base implementation is an
 ordinary device helper like any other, so the super call has to compile to the same emission
 the base's own body produces when it calls `self.sample`.

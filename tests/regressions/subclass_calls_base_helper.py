@@ -2,7 +2,7 @@
 
 This is the `FractalViewer` shape. The `@kernel` belongs to the base class and its body calls
 an overridable hook; a subclass in another module overrides that hook and computes through a
-helper it inherits from the base. Today the generated source contains the *call*
+helper it inherits from the base. The generated source used to contain the *call*
 
     Base_scale_<hash>(...)
 

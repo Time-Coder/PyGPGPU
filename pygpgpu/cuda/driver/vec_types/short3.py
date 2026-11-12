@@ -1,5 +1,4 @@
 from ctypes import c_int16
-import numpy as np
 
 from ....vec_types import genVec3
 
@@ -12,4 +11,3 @@ class short3(genVec3):
         ('z', c_int16)
     ]
     
-    dtype = np.dtype(_fields_)

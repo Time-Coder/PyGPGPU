@@ -1,5 +1,4 @@
 from ctypes import c_uint16
-import numpy as np
 
 from .genVec4 import genVec4
 
@@ -13,4 +12,3 @@ class ushort4(genVec4):
         ('w', c_uint16),
     ]
     
-    dtype = np.dtype(_fields_)

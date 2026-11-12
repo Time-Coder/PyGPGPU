@@ -1,14 +1,14 @@
-from .genVec import genVec
+"""The eight-component width base: pygf's genVec, with the width declared.
+
+pygf carries no 8-wide base (its GLSL surface stops at four), so this subclass
+declares the width over pygf's genVec and turns the OpenCL numeric swizzles on.
+"""
+from pygf.genVec import genVec as _PygfGenVec
 
 
-class genVec8(genVec):
-    
-    swizzle_map = {
-        'x': 0, 'y': 1, 'z': 2, 'w': 3,
-        'r': 0, 'g': 1, 'b': 2, 'a': 3,
-        '0': 0, '1': 1, '2': 2, '3': 3,
-        '4': 4, '5': 5, '6': 6, '7': 7
-    }
+class genVec8(_PygfGenVec):
+
+    _numeric_swizzles = True
 
     def __len__(self)->int:
         return 8

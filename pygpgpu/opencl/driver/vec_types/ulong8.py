@@ -1,5 +1,4 @@
 from ctypes import c_uint64
-import numpy as np
 
 from ....vec_types import genVec8
 
@@ -17,4 +16,3 @@ class ulong8(genVec8):
         ('s7', c_uint64),
     ]
     
-    dtype = np.dtype(_fields_)

@@ -1,5 +1,4 @@
 from ctypes import c_int32
-import numpy as np
 
 from ....vec_types import genVec3
 
@@ -13,4 +12,3 @@ class int3(genVec3):
         ('_', c_int32),
     ]
     
-    dtype = np.dtype(_fields_)

@@ -15,7 +15,7 @@ subprocess.check_call([sys.executable, "-m", "ruff", "check", "--fix"])
 # diagnostics should fail the run.
 subprocess.check_call([sys.executable, "-m", "ty", "check", "--exit-zero-on-warning"])
 # The two budgets are last because they are the cheapest: ruff and ty should have their say
-# about a file before it is judged on its length or its annotations. See
-# docs/file-split-plan.md and the type-annotation policy in AGENTS.md.
+# about a file before it is judged on its length or its annotations. The policies live in
+# AGENTS.md and in the two scripts themselves.
 subprocess.check_call([sys.executable, "line_budget.py"])
 subprocess.check_call([sys.executable, "any_budget.py"])

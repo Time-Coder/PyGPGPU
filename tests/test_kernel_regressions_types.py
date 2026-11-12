@@ -1,30 +1,31 @@
-"""Known-failure regressions about types: vector builtins, the hoist, widths, and ``%``.
+"""Regression tests about types: vector builtins, the hoist, widths, and ``%``.
 
-Every test here fails today, on purpose: they are the specification for the fixes, written
-as failing tests first (TDD). Each one names the repro that found it and what the right
-answer is, and none of the answers invents a new rule -- each is what python (or numpy,
-where the interpreter runs numpy) already computes for the same source. The kernels live
-one module per bug in `known_failures/` (one python module is one translation unit, so a
-compile error would otherwise take every kernel in the module down with it). The
-object-shaped groups live in `test_kernel_known_failures_objects.py`.
+Every test here once failed, on purpose: they were written as failing tests first (TDD),
+the specification for their fixes, and they have passed since the fixes landed -- they stay
+to keep each bug fixed. Each one names the repro that found it and what the right answer
+is, and none of the answers invents a new rule -- each is what python (or numpy, where the
+interpreter runs numpy) already computes for the same source. The kernels live one module
+per bug in `regressions/` (one python module is one translation unit, so a compile error
+would otherwise take every kernel in the module down with it). The object-shaped groups
+live in `test_kernel_regressions_objects.py`.
 
 These groups were found by porting the Shadertoy of the Week to
 `examples/shadertoy/light_cycle.py` -- a ray-marched tunnel whose GLSL is ordinary shader
 vocabulary -- and by the shadertoy viewer itself:
 
-* **the vector-wide builtins**: ``abs``/``min``/``max`` on whole vectors are refused
+* **the vector-wide builtins**: ``abs``/``min``/``max`` on whole vectors were refused
   ("requires a numeric argument", "vector arithmetic is handled separately") although the
   scalar spellings work and the component arithmetic they expand to works;
-* **``smoothstep``**: not exported, and pygf's own cannot be walked ("unknown name
+* **``smoothstep``**: was not exported, and pygf's own could not be walked ("unknown name
   '_smoothstep'") -- a GLSL name with no device spelling at all;
-* **the hoisted vector local**: a local first assigned inside a block is hoisted with the
+* **the hoisted vector local**: a local first assigned inside a block was hoisted with the
   scalar zero-init ``(T)0``, which CUDA C++ refuses for a vector struct ("no suitable
-  constructor exists to convert from int to float3") -- the record path already knows to
-  use ``{0}``, the vector path falls between the two;
-* **``math.pow`` width mixing**: a float32 vector component against a python exponent emits
-  ``pow(float, double)`` and no C++ overload matches ("more than one instance of overloaded
+  constructor exists to convert from int to float3") -- the record path already knew to
+  use ``{0}``, the vector path fell between the two;
+* **``math.pow`` width mixing**: a float32 vector component against a python exponent emitted
+  ``pow(float, double)`` and no C++ overload matched ("more than one instance of overloaded
   function pow matches") -- python promotes to double and answers;
-* **``%`` on floats**: the device emits C's ``fmod`` (dividend's sign) where python floors
+* **``%`` on floats**: the device emitted C's ``fmod`` (dividend's sign) where python floors
   by the divisor's sign -- ``-1.0 % 4.0`` is 3.0 in python and -1.0 on the device, so the
   same source answers differently per backend;
 * **an override with extra parameters**: a hook whose signature does not match the base
@@ -39,13 +40,13 @@ import math
 import numpy as np
 import pytest
 
-from known_failures.extra_arg_override import ExtraArg, FlipSin
-from known_failures.float_mod_floored import mod_four
-from known_failures.pow_width_mixing import MixedWidthPow
-from known_failures.smoothstep_builtin import fades_one_edge
-from known_failures.swizzle_store_aliasing import swap_through_swizzle
-from known_failures.vector_hoist_zero import HoistedVector
-from known_failures.vector_minmax_abs import vector_abs_and_minmax
+from regressions.extra_arg_override import ExtraArg, FlipSin
+from regressions.float_mod_floored import mod_four
+from regressions.pow_width_mixing import MixedWidthPow
+from regressions.smoothstep_builtin import fades_one_edge
+from regressions.swizzle_store_aliasing import swap_through_swizzle
+from regressions.vector_hoist_zero import HoistedVector
+from regressions.vector_minmax_abs import vector_abs_and_minmax
 
 # ---------------------------------------------------------------------------
 # Group 9 -- the vector-wide builtins
@@ -55,7 +56,7 @@ from known_failures.vector_minmax_abs import vector_abs_and_minmax
 def test_abs_min_and_max_expand_component_wise_over_vectors(gpu_backend):
     """``abs(v)``, ``max(v, s)`` and ``min(v, w)`` are the component-wise GLSL semantics.
 
-    Today each is refused at translation time ("abs() requires a numeric argument", "vector
+    Each used to be refused at translation time ("abs() requires a numeric argument", "vector
     arithmetic is handled separately"). The scalar spellings work, and the component
     arithmetic these expand to works, so the emission is known: expand per component and
     emit, exactly like the +/* paths already do. The expected numbers are python's:
@@ -70,7 +71,7 @@ def test_abs_min_and_max_expand_component_wise_over_vectors(gpu_backend):
 def test_smoothstep_interpolates_the_midpoint(gpu_backend):
     """``smoothstep(0.2, 0.6, 0.4)`` is 0.5 -- the clamp-and-fade every shader uses.
 
-    Today: not exported from the package, and pygf's own is refused in translation with
+    Used to be: not exported from the package, and pygf's own was refused in translation with
     ``unknown name '_smoothstep'`` -- pygf's source calls a private helper the walk cannot
     resolve. The emission is three lines (the GLSL formula), scalar here and per component
     once the vector builtins land. The expected number is python's: t = (0.4 - 0.2) / 0.4 =
@@ -89,7 +90,7 @@ def test_smoothstep_interpolates_the_midpoint(gpu_backend):
 def test_a_vector_local_assigned_in_a_block_answers_the_branch(gpu_backend):
     """A float3 local whose first assignment sits inside a branch must compile and answer.
 
-    Today: the hoisted declaration is spelled ``(float3)0`` -- the scalar zero -- which CUDA
+    Used to be: the hoisted declaration was spelled ``(float3)0`` -- the scalar zero -- which CUDA
     C++ refuses ("no suitable constructor exists to convert from int to float3"). The record
     path already initialises hoisted declarations ``{0}`` for exactly this reason; the vector
     needs the same treatment (a ``make_float3(0, 0, 0)`` spelling, or declaring at first
@@ -114,7 +115,7 @@ def test_a_vector_local_assigned_in_a_block_answers_the_branch(gpu_backend):
 def test_pow_widens_a_vector_component_to_double(gpu_backend):
     """``math.pow(v.x, 2.2)`` -- a float32 component against a python exponent -- is python's.
 
-    Today: emitted as ``pow(float, double)`` and no C++ overload matches ("more than one
+    Used to be: emitted as ``pow(float, double)`` and no C++ overload matched ("more than one
     instance of overloaded function pow matches"). python's math.pow is double throughout, so
     the device widens the float32 argument and emits ``pow(double, double)`` -- the
     two-double spelling already compiles, so this is purely the width-mixing case. The
@@ -136,7 +137,7 @@ def test_pow_widens_a_vector_component_to_double(gpu_backend):
 def test_float_mod_is_floored_like_python(gpu_backend, x, expected):
     """``x % 4.0`` floors by the divisor's sign on the host, takes the dividend's on the device.
 
-    Today the emission is C's ``fmod``: ``-1.0 % 4.0`` answers -1.0 on the device where python
+    The emission used to be C's ``fmod``: ``-1.0 % 4.0`` answers -1.0 on the device where python
     answers 3.0, and ``-5.5 % 4.0`` answers -1.5 where python answers 2.5 -- the same source
     disagreeing between the interpreter backend and every device backend. The fix is the
     floored-mod emission python semantics owe (``x - y * floor(x / y)``) in the operands' own
@@ -156,7 +157,7 @@ def test_float_mod_is_floored_like_python(gpu_backend, x, expected):
 def test_an_override_with_extra_parameters_collects_its_members(gpu_backend):
     """The extra-parameter shape must not silently drop the subclass's uniform reads.
 
-    Today the launch surfaces an arity error (``sample() takes 5 device arguments but 4
+    The launch used to surface an arity error (``sample() takes 5 device arguments but 4
     types were given``) -- honest, but it should not reach the launch at all: the base call
     does not match the override's signature, and that is a translation-time fact. The right
     answer is either a clear refusal naming the mismatch, or (the useful one) collecting the
@@ -177,7 +178,7 @@ def test_an_override_with_extra_parameters_collects_its_members(gpu_backend):
 def test_a_self_reading_call_expression_keeps_the_override_scan(gpu_backend):
     """The flip shape: the base call's third argument is built from ``self.image.shape[0]``.
 
-    Today the launch builds without a single member the override reads -- ``discovered
+    The launch used to build without a single member the override reads -- ``discovered
     attributes: image`` -- and the refusal names the first missing one. The scan followed the
     call into the override and came back empty; the arity between the base call and the
     override matches here (both three), so the defect is the base call expression reading
@@ -203,7 +204,7 @@ def test_a_self_reading_call_expression_keeps_the_override_scan(gpu_backend):
 def test_a_swizzle_store_reads_its_value_before_writing(gpu_backend):
     """``p.xy = p.yx`` is a swap, and a swap with an aliased read is not one.
 
-    Today CUDA emits two component stores, each re-evaluating the value expression:
+    CUDA used to emit two component stores, each re-evaluating the value expression:
     ``p.x = make_float2(p.y, p.x).x`` overwrites ``p.x``, and the second store then reads
     the overwritten component, so ``float2(1, 2).xy = .yx`` answers (2, 2) on the device
     and (2, 1) on the interpreter. The value has to land in a temporary first -- python

@@ -1,13 +1,14 @@
 """The subclass-override shapes that already compile, kept as the boundary of the fixes.
 
-`tests/test_kernel_known_failures.py` describes two shapes that do not compile yet: an override
+`tests/test_kernel_regressions.py` holds the two shapes that once did not compile: an override
 calling a helper of the base class, and one calling a module-level function. These tests are
-the other side of that line, and they pass today:
+the other side of that line -- the spellings that always worked, kept so a fix for the broken
+ones cannot break these:
 
 * an override calling a helper of *its own* class;
 * a base class's own default calling a base helper and a subclass hook;
 * a pygf vector as a self member of the kernel's own class (see
-  `known_failures/vector_self_member.py` for why this file carries it).
+  `regressions/vector_self_member.py` for why this file carries it).
 
 A fix for the failing shapes must keep all of these working -- the natural one is to extend the
 walk that collects device functions, not to change how a call is resolved.
@@ -18,7 +19,7 @@ import numpy as np
 
 from _helpers.test_kernel_subclass_override_helpers import (BaseWithDefault,
                                                             BaseWithHook)
-from known_failures.vector_self_member import VectorMember
+from regressions.vector_self_member import VectorMember
 
 
 def _grid(factor: float) -> np.ndarray:

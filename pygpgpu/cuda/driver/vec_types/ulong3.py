@@ -1,5 +1,4 @@
 from ctypes import c_ulong
-import numpy as np
 
 from ....vec_types import genVec3
 
@@ -12,4 +11,3 @@ class ulong3(genVec3):
         ('z', c_ulong)
     ]
     
-    dtype = np.dtype(_fields_)

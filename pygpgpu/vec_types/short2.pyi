@@ -1,7 +1,6 @@
 from typing import Union
 
 from .genVec2 import genVec2
-from .short3 import short3
 from .short4 import short4
 
 
@@ -42,30 +41,6 @@ class short2(genVec2):
 
     @property
     def yy(self)->short2: ...
-
-    @property
-    def xxx(self)->short3: ...
-
-    @property
-    def xxy(self)->short3: ...
-
-    @property
-    def xyx(self)->short3: ...
-
-    @property
-    def xyy(self)->short3: ...
-
-    @property
-    def yxx(self)->short3: ...
-
-    @property
-    def yxy(self)->short3: ...
-
-    @property
-    def yyx(self)->short3: ...
-
-    @property
-    def yyy(self)->short3: ...
 
     @property
     def xxxx(self)->short4: ...
@@ -146,30 +121,6 @@ class short2(genVec2):
     def gg(self)->short2: ...
 
     @property
-    def rrr(self)->short3: ...
-
-    @property
-    def rrg(self)->short3: ...
-
-    @property
-    def rgr(self)->short3: ...
-
-    @property
-    def rgg(self)->short3: ...
-
-    @property
-    def grr(self)->short3: ...
-
-    @property
-    def grg(self)->short3: ...
-
-    @property
-    def ggr(self)->short3: ...
-
-    @property
-    def ggg(self)->short3: ...
-
-    @property
     def rrrr(self)->short4: ...
 
     @property
@@ -246,30 +197,6 @@ class short2(genVec2):
 
     @property
     def s11(self)->short2: ...
-
-    @property
-    def s000(self)->short3: ...
-
-    @property
-    def s001(self)->short3: ...
-
-    @property
-    def s010(self)->short3: ...
-
-    @property
-    def s011(self)->short3: ...
-
-    @property
-    def s100(self)->short3: ...
-
-    @property
-    def s101(self)->short3: ...
-
-    @property
-    def s110(self)->short3: ...
-
-    @property
-    def s111(self)->short3: ...
 
     @property
     def s0000(self)->short4: ...

@@ -1,7 +1,7 @@
 """Bug: a `raise` statement inside a device method is refused.
 
 `RaisingHelper.augmented` guards its arithmetic: on impossible input it raises, the way any
-python helper would. Today the translator refuses the statement outright:
+python helper would. The translator used to refuse the statement outright:
 `SyntaxError: unsupported statement: Raise`. The right emission is a device-side abort of the
 whole launch -- CUDA's NVRTC takes the PTX trap (`asm("trap;")`), HIP's clang takes
 `__builtin_trap()` (ROCm's HIP headers declare no trap function, and inline PTX would be

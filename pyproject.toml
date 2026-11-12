@@ -80,7 +80,20 @@ dependencies = [
     # 0.4.0 spells its smoothstep helper branch-free so the device translator can
     # walk it (the early-return form referenced a module-private helper the walk
     # cannot resolve, which left smoothstep with no device spelling at all).
-    "pygf>=0.5.0",
+    # 0.5.0 publishes the vector base classes PyGPGPU now inherits: `genVec`/`genType`
+    # carry the whole host surface (operators, comparisons, swizzles, numpy views), so
+    # `pygpgpu/vec_types/genVec.py` is gone and the width bases subclass pygf's.
+    # 0.6.0 is what that needs: the dtype tables rank the narrow integer ctypes
+    # classes (char/uchar/short, c_long for the CUDA `long` family) and convert a
+    # float component the way C does; swizzle and arithmetic result types resolve
+    # through the operand's own family (a `char2` swizzle answers a `char2`, a
+    # `ushort2` stays a `ushort2` instead of becoming a `half2`); a swizzle write
+    # stores through the component's own accessor (rgba letters on x/y-named
+    # classes used to set a python shadow attribute); `__init__` flattens sequence
+    # arguments; `__pos__`/`__invert__` exist; a swizzle setter declaration
+    # accepts a sequence; `is_number` does not mistake a container class that
+    # shares a numpy scalar's name (`int8`, `float16`) for a scalar.
+    "pygf>=0.6.0",
     # TypeAlias is imported from typing_extensions in the driver ctypes layers so that the
     # source tree can also parse/import on Python 3.7 (where typing.TypeAlias is absent).
     "typing_extensions>=4.4.0",
@@ -168,9 +181,9 @@ ignore = [
 
 # ---------------------------------------------------------------------------
 # ty -- Python type checking. Run: python -m ty check
-#   Auto-generated .pyi stubs, the vendored pcpp and the legacy cparser sources
-#   are skipped at the file-discovery stage via src.exclude (src.exclude only
-#   takes effect during discovery, unlike overrides.trim.globs which change rules).
+#   Auto-generated .pyi stubs and the vendored pcpp are skipped at the
+#   file-discovery stage via src.exclude (src.exclude only takes effect during
+#   discovery, unlike overrides.trim.globs which change rules).
 # ---------------------------------------------------------------------------
 [tool.ty]
 environment.python-version = "3.12"
@@ -179,6 +192,8 @@ environment.python-version = "3.12"
 # on its own type-checks without a sibling pygf tree. It is deliberately NOT named as an
 # `environment.extra-paths` entry: that hard-fails the whole run when the directory is absent,
 # and it can shadow the installed distribution with whatever a local checkout happens to hold.
+# (A finder-style editable install is opaque to static resolvers; pygf's own pyproject now
+# pins `editable_mode = "compat"`, whose plain-path .pth every tool resolves.)
 src.exclude = [
     # auto-generated stubs
     "**/*.pyi",
@@ -188,6 +203,13 @@ src.exclude = [
     # network via requests/bs4 to regenerate the atom-type tables. Not part of the runtime, and
     # its third-party deps are deliberately not required by this package.
     "pygpgpu/cparser/generate_code.py",
+    # The per-framework comparison scripts under benchmarks/compare. Each one imports a
+    # third-party framework (taichi, warp, numba, quadrants) that is deliberately NOT a
+    # dependency of this package -- they are standalone measurement processes, run one per
+    # framework by run_compare.py on a machine that has that framework. ty sees their
+    # imports as unresolved and their build()/make() module-global handshake as a None
+    # unpack; both are honest about an environment this package does not pin.
+    "benchmarks/compare/bench_*.py",
     # ctypes binding layer. These modules build call signatures from the runtime's function
     # tables (dynamically created restype/argtypes, pointer arithmetic over ctypes buffers), so
     # the checker cannot model them and reports thousands of invalid-argument-type /

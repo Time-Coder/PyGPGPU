@@ -83,7 +83,7 @@ class _PykernelIdentityMixin:
         `@kernel` supply different hooks over the identical signature. The class is
         therefore part of what the kernel *is* -- its absence is what let a second subclass
         reuse the first one's compiled binary, and silently answer the first one's numbers
-        (see tests/known_failures/subclass_kernel_identity.py). The in-memory cache key
+        (see tests/regressions/subclass_kernel_identity.py). The in-memory cache key
         carries the same mark, so the two halves cannot disagree.
         """
         source_file:str = getattr(getattr(self.raw_func, "__code__", None),

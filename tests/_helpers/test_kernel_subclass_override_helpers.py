@@ -3,7 +3,7 @@
 The `@kernel` lives here and the subclasses live in the test module, on purpose: the interesting
 case is a subclass in *another* module, which is the shape `examples/fractal/` uses. Two shapes
 compile today and bound the gap that
-`tests/test_kernel_known_failures.py::test_a_subclass_override_can_call_an_inherited_helper`
+`tests/test_kernel_regressions.py::test_a_subclass_override_can_call_an_inherited_helper`
 describes -- an override calling a helper of its own class, and a base's own default calling a
 base helper plus a subclass hook. A fix for the failing ones must leave both alone.
 """

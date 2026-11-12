@@ -213,7 +213,7 @@ class _PrepareLaunchMixin:
         # compiles against the hook the *receiver's* class supplies, and two subclasses of
         # one `@kernel` declare the same argument types -- without the class here the
         # second subclass to launch reused the first one's binary and silently answered its
-        # numbers (see tests/known_failures/subclass_kernel_identity.py). The kernel's C
+        # numbers (see tests/regressions/subclass_kernel_identity.py). The kernel's C
         # name carries the same mark (see `_c_kernel_name`), so the two halves agree.
         owner_mark:str = (f"{plan.owner.__module__}.{plan.owner.__qualname__}"
                        if plan.owner is not None else "")

@@ -1,13 +1,7 @@
-from .genVec import genVec
+"""The four-component width base: pygf's, with the OpenCL numeric swizzles on."""
+from pygf.genVec4 import genVec4 as _PygfGenVec4
 
 
-class genVec4(genVec):
-    
-    swizzle_map = {
-        'x': 0, 'y': 1, 'z': 2, 'w': 3,
-        'r': 0, 'g': 1, 'b': 2, 'a': 3,
-        '0': 0, '1': 1, '2': 2, '3': 3
-    }
+class genVec4(_PygfGenVec4):
 
-    def __len__(self)->int:
-        return 4
+    _numeric_swizzles = True

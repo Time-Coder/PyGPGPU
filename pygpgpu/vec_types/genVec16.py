@@ -1,18 +1,16 @@
-from .genVec import genVec
+"""The sixteen-component width base: pygf's genVec, with the width declared.
+
+Like genVec8, this exists because pygf's GLSL-shaped surface stops at four
+components while OpenCL's does not. The numeric swizzles name the slots above
+nine in hex, either case (``sA`` and ``sa`` are both slot 10), which shadows
+rgba's ``a`` and ``b`` on these classes exactly as OpenCL's layout does.
+"""
+from pygf.genVec import genVec as _PygfGenVec
 
 
-class genVec16(genVec):
-    
-    swizzle_map = {
-        'x': 0, 'y': 1, 'z': 2, 'w': 3,
-        'r': 0, 'g': 1, 'b': 2, 'a': 3,
-        '0': 0, '1': 1, '2': 2, '3': 3,
-        '4': 4, '5': 5, '6': 6, '7': 7,
-        '8': 8, '9': 9, 'A': 10, 'B': 11,
-        'C': 12, 'D': 13, 'E': 14, 'F': 15,
-        'a': 10, 'b': 11,
-        'c': 12, 'd': 13, 'e': 14, 'f': 15
-    }
+class genVec16(_PygfGenVec):
+
+    _numeric_swizzles = True
 
     def __len__(self)->int:
         return 16

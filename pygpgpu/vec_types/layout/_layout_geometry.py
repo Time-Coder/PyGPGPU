@@ -2,6 +2,7 @@
 # the alignment, and the components a vector really has (a 3-component vector
 # carries a trailing padding field).
 from __future__ import annotations
+import ctypes
 from ._layout_classes import _device_class, _host_classes
 
 from typing import Callable, List, Optional, Tuple
@@ -106,8 +107,14 @@ def _record_device_dtype(dtype:np.dtype, backend:str)->Tuple[np.dtype, bool]:
 
 
 def vector_name_of(value:object)->Optional[str]:
-    """The vector type name of a vector instance, or None."""
-    if not isinstance(value, type(value)):
+    """The vector type name of a vector instance, or None.
+
+    Every vector class is a ``ctypes.Structure``, so anything else -- a scalar
+    argument, an ndarray -- answers None without walking the registry: ``pack``
+    asks this once per launch argument, and a kernel with scalar parameters
+    would otherwise pay a fifty-class scan each launch.
+    """
+    if not isinstance(value, ctypes.Structure):
         return None
     # A numpy scalar is not a vector, even when its class name collides with a vector type
     # name (`np.uint8` is `numpy.uint8`, and the registry has an eight-component `uint8`).

@@ -71,20 +71,26 @@ from pygf.funcs import notEqual as isnotequal
 from pygf.funcs import any as any
 from pygf.funcs import all as all
 
-from .genVec import genVec
+from pygf.genVec import genVec
 
-# What a component-wise builtin accepts. A **host vector** is either a pygf vector type
-# (a `genType` subclass) or one of this package's own `genVec` classes, and `_is_vec` is
-# what tells the two apart from a scalar; the shape they share is `_fields_` plus a
-# length, so that is what the Protocol says.
+# What a component-wise builtin accepts. A **host vector** is a ``genVec`` subclass --
+# every vector class in this package inherits pygf's base, so one isinstance covers
+# both the classes pygf owns and the ones PyGPGPU adds; the duck-typed branch in
+# ``_is_vec`` keeps a caller's own ctypes structure (``_fields_`` plus a length)
+# accepted at runtime, which is why the annotations below still name the protocol
+# shape rather than the concrete base.
 Scalar = Union[int, float]
-
 
 if TYPE_CHECKING:
     from typing_extensions import Protocol
 
     class HostVector(Protocol):
-        """A host vector: fixed component fields, indexable, with a length."""
+        """A host vector: fixed component fields, indexable, with a length.
+
+        Kept as a protocol, not spelled ``genVec``, because ``_is_vec`` accepts a
+        caller's own ctypes structure at runtime -- narrowing the annotation to
+        the base would claim more than the functions accept.
+        """
         _fields_: Tuple[Tuple[str, type], ...]
 
         def __len__(self) -> int: ...
@@ -130,8 +136,9 @@ __all__ = [
 def _is_vec(v:object)->bool:
     """Whether v is a host vector: a ctypes Structure with component fields.
 
-    Duck-typed so both PyGPGPU's own genVec types and the pygf vector types that
-    the shared float/int/double/uint 2/4 widths now re-export are recognised.
+    Every vector class in the package inherits pygf's genVec, so the isinstance
+    covers them all; the duck-typed branch keeps a caller's own ctypes structure
+    (a fixed set of component fields with a length) accepted beside them.
     """
     return isinstance(v, genVec) or (hasattr(v, "_fields_") and hasattr(v, "__len__"))
 

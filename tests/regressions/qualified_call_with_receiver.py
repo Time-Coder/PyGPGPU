@@ -1,7 +1,7 @@
 """Bug: a class-qualified call cannot pass the receiver explicitly.
 
 `CallsQualified.sample` reaches the base implementation with the one spelling python allows for
-a one-off super-like call, `Base.sample(self, i, j)`. Today the translator refuses the
+a one-off super-like call, `Base.sample(self, i, j)`. The translator used to refuse the
 receiver: `SyntaxError: unknown name 'self' (only parameters, local variables and int/float/bool
 global constants are supported)`. The call site knows the class and the instance -- it is the
 receiver's own body -- so the emission is the base helper called on `self`, which the base's

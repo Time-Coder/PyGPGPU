@@ -36,7 +36,7 @@ The uniforms are rebound by the host before each launch and read by the device d
 body must not write them: a uniform is not the shader's to change. Assigning a whole new
 vector is the viewer's job -- and the one spelling device code cannot use anyway (a component
 store like ``self.i_mouse.x = ...`` is refused; see
-``tests/known_failures/vector_component_store.py``).
+``tests/regressions/vector_component_store.py``).
 
 The frame buffer is a ``pygpgpu.numpy`` array, so it lives on the device between frames: the
 kernel overwrites every pixel, so nothing about the previous frame has to be uploaded again,
@@ -172,7 +172,7 @@ class ShadertoyViewer(QWidget):
         # shader ported from Shadertoy needs no flip of its own. The y flip is computed
         # here rather than passed as a separate argument: a hook whose signature carries
         # an argument the base call does not pass loses the self-attribute scan (see
-        # tests/known_failures/extra_arg_override.py), so mainImage keeps the GLSL
+        # tests/regressions/extra_arg_override.py), so mainImage keeps the GLSL
         # signature and receives the flipped coordinate inside its one float2.
         for i, j in np.ndindex(self.image.shape[0], self.image.shape[1]):
             frag_coord = float2(float(j) + 0.5,

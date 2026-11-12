@@ -1,4 +1,4 @@
-"""The kernels behind tests/test_kernel_known_failures.py, one module per bug.
+"""The kernels behind tests/test_kernel_regressions.py, one module per bug.
 
 The generated source of one python module is ONE translation unit, so a kernel whose bug
 is a compile error would take every other kernel in the module down with it. Each failing
