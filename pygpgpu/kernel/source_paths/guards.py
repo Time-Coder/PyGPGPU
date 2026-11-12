@@ -24,6 +24,13 @@ INCLUDE_FOLDER: str = "include"
 
 
 
+# The shared header the *synthesized* device helpers live in (see `writing.append_helpers`).
+# Unlike `complex.h` / `quat.h` it is not a file the package ships: its body is generated,
+# one definition per helper shape, merged the way a module's own file merges its kernels.
+HELPERS_HEADER_NAME: str = "device_helpers.h"
+
+
+
 def guard_macro(path: str) -> str:
     """The include guard a generated file's own path gives it.
 

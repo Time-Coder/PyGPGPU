@@ -380,13 +380,16 @@ def _prefer_class_name(structure:type, cls:Optional[type]) -> None:
 
 
 def _structure_for(fields:Sequence[Tuple[str, type]],
-                   methods:Sequence[Tuple[str, Any]])->type:
-    # Keyed by the member *set* alone -- not their order, and not the method list. The walk
-    # collects members through `ast.walk` (order not source order), and one path may see a
-    # method where another does not (`hitable.hit` is called in one place, only read in
-    # another). Two classes with one layout are still two ctypes types, so the class has to
-    # be one: a later call adds any method the first one did not know about.
-    key:Tuple[object, ...] = frozenset((member, kind) for member, kind in fields)
+                   methods:Sequence[Tuple[str, Any]], backend:str)->type:
+    # Keyed by the member *set* and the backend -- not their order, and not the method
+    # list. The walk collects members through `ast.walk` (order not source order), and
+    # one path may see a method where another does not (`hitable.hit` is called in one
+    # place, only read in another). Two classes with one layout are still two ctypes
+    # types, so the class has to be one: a later call adds any method the first one did
+    # not know about. The backend is part of the layout (a three-component vector
+    # occupies twelve bytes in CUDA C and sixteen in OpenCL C), so one member set under
+    # two backends is two structures.
+    key:Tuple[object, ...] = (frozenset((member, kind) for member, kind in fields), backend)
     cached:Optional[type] = _STRUCT_CACHE.get(key)
     if cached is not None:
         for method_name, function in methods:
@@ -398,7 +401,13 @@ def _structure_for(fields:Sequence[Tuple[str, type]],
     # make one value's structure incompatible with another's.
     ordered:List[Tuple[str, type]] = sorted(fields, key=lambda f: f[0])
     name:str = "Object" + "".join(member.capitalize() for member, _ in ordered)
-    namespace:Dict[str, object] = {"_fields_": [(member, kind) for member, kind in ordered]}
+    from ..structs import padded_member_fields  # noqa: PLC0415 (import cycle)
+
+    # The members are placed the way the backend's C would place them, with explicit
+    # padding where the two disagree: a vector member's device alignment (float4 sits
+    # at offset 16 after an int on CUDA) is what the launch packs and what the rendered
+    # declaration carries, so one layout computation serves both sides.
+    namespace:Dict[str, object] = {"_fields_": padded_member_fields(ordered, backend)}
     structure:type = type(name, (ctypes.Structure,), namespace)
     # A method the body calls has to be reachable from the synthesized class: the translator
     # resolves `p.method` from the class its dtype came from.

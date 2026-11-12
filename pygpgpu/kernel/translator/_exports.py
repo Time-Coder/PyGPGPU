@@ -85,6 +85,7 @@ EXPORTED_NAMES = [
     "_emit_vec_constructor",
     "_emit_vec_cross",
     "_emit_vec_dot",
+    "_emit_vec_floored",
     "_emit_vec_hadd",
     "_emit_vec_mad",
     "_emit_vec_mix",

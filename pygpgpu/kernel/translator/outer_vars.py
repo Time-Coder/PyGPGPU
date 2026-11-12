@@ -140,7 +140,7 @@ class _OuterVarsMixin:
                 raise SyntaxError(
                     f"outer object '{name}' cannot be a structure: its member '{member}' "
                     f"is not a value a field can hold ({error})") from None
-        structure:type = _structure_for(fields, scan.methods.get(name, []))
+        structure:type = _structure_for(fields, scan.methods.get(name, []), self.backend)
         _prefer_class_name(structure, type(value))
         dtype:np.dtype = np.dtype(structure)
         instruction:OuterObjectEntry = {

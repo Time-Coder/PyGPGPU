@@ -414,3 +414,56 @@ def test_a_stale_generated_file_is_refreshed_by_the_next_launch(tmp_path, gpu_ba
     repaired: str = generated.read_text(encoding="utf-8")
     assert "c128_make" not in repaired, repaired
     assert "c64_make" in repaired, repaired
+
+
+# ---------------------------------------------------------------------------
+# The shared header the synthesized device helpers merge into
+# ---------------------------------------------------------------------------
+
+
+_HELPER_A: str = ("__device__ float3 vec_sub_float3_float3(float3 a, float3 b)\n"
+                  "{\n    return make_float3((a.x - b.x), (a.y - b.y), (a.z - b.z));\n}\n")
+_HELPER_B: str = ("__device__ static inline float __pygpgpu_float_mod_float(float a, float b)\n"
+                  "{\n    float r = fmodf(a, b);\n    return r;\n}\n")
+# Same signature as _HELPER_A, a different body: the merge replaces, not skips.
+_HELPER_A_V2: str = _HELPER_A.replace("(a.x - b.x)", "(b.x - a.x)")
+
+
+def test_the_shared_header_merges_and_guards():
+    with tempfile.TemporaryDirectory() as directory:
+        path: str = str(pathlib.Path(directory) / "device_helpers.h")
+        source_paths.append_helpers(path, [_HELPER_A])
+        first: str = pathlib.Path(path).read_text(encoding="utf-8")
+        assert first.startswith("#ifndef __device_helpers_"), first
+        assert _HELPER_A in first
+        # A second render of the same definition is a no-op -- the byte-identical
+        # file is what keeps a later include from seeing a second copy.
+        source_paths.append_helpers(path, [_HELPER_A])
+        assert pathlib.Path(path).read_text(encoding="utf-8") == first
+
+
+def test_the_shared_header_declares_what_it_defines():
+    """A leading forward-declaration block: definitions may sit in any order."""
+    with tempfile.TemporaryDirectory() as directory:
+        path: str = str(pathlib.Path(directory) / "device_helpers.h")
+        # _HELPER_A first, the scalar helper it might call appended by a later module.
+        source_paths.append_helpers(path, [_HELPER_A, _HELPER_B])
+        text: str = pathlib.Path(path).read_text(encoding="utf-8")
+        prototype: str = ("__device__ static inline float "
+                          "__pygpgpu_float_mod_float(float a, float b);")
+        assert prototype in text
+        # The block leads: every call site reads it before any definition.
+        assert text.index("/* pygpgpu: device functions") < text.index(_HELPER_A)
+        assert text.index(prototype) < text.index(_HELPER_B)
+
+
+def test_the_shared_header_replaces_a_changed_definition():
+    with tempfile.TemporaryDirectory() as directory:
+        path: str = str(pathlib.Path(directory) / "device_helpers.h")
+        source_paths.append_helpers(path, [_HELPER_A])
+        source_paths.append_helpers(path, [_HELPER_A_V2])
+        text: str = pathlib.Path(path).read_text(encoding="utf-8")
+        assert _HELPER_A not in text
+        assert _HELPER_A_V2 in text
+        # One definition, not two: the identity is the signature line.
+        assert text.count("vec_sub_float3_float3(float3 a, float3 b)\n{") == 1

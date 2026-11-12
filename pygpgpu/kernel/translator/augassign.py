@@ -23,6 +23,9 @@ from .predicates import (
     is_ptr,
     promote,
 )
+from .vectors import (
+    is_vec,
+)
 
 
 class _AugassignMixin:
@@ -257,7 +260,14 @@ class _AugassignMixin:
                 self._error("integer /= integer changes type (use // or float operands)", node)
             self._emit(f"{target_code} /= {value_code};")
         elif name == "FloorDiv":
-            if is_int(target_t) and is_int(value_t):
+            if is_vec(target_t) or is_vec(value_t):
+                # `v //= w` on a vector stores the per-component floored quotient the
+                # binary spelling produces (see _emit_vec_floored); the wrapper call
+                # evaluates each operand once, so no temporary is needed here.
+                code, _ = self._emit_vec_floored("FloorDiv", target_code, target_t,
+                                                 value_code, value_t, node)
+                self._emit(f"{target_code} = {code};")
+            elif is_int(target_t) and is_int(value_t):
                 # `a //= b` must floor like python, not truncate like C (see _emit_floored).
                 code, _ = self._emit_floored(("floor_div", "floor_mod"), "floor_div",
                                              target_code, target_t, value_code,
@@ -278,7 +288,13 @@ class _AugassignMixin:
                           "Add": "+", "Sub": "-", "Mult": "*"}[name]
             self._emit(f"{target_code} {symbol}= {value_code};")
         elif name == "Mod":
-            if is_int(target_t) and is_int(value_t):
+            if is_vec(target_t) or is_vec(value_t):
+                # `v %= w` on a vector stores the per-component remainder with
+                # python's divisor-sign rule (see _emit_vec_floored).
+                code, _ = self._emit_vec_floored("Mod", target_code, target_t,
+                                                 value_code, value_t, node)
+                self._emit(f"{target_code} = {code};")
+            elif is_int(target_t) and is_int(value_t):
                 # `a %= b` must carry the divisor's sign like python's `%` (see _emit_floored).
                 code, _ = self._emit_floored(("floor_div", "floor_mod"), "floor_mod",
                                              target_code, target_t, value_code,

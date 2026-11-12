@@ -427,26 +427,52 @@ class _VectorOpsMixin:
         components:List[Translated] = [f for f in cls._fields_ if f[0] != "_"]
         expected:int = len(components)
         field_type:str = _C_FIELD_TYPES[(name, components[0][0])]
-        # `pygf` accepts three forms, and the device call has to mean the same thing:
-        # no arguments (all zeros), one argument (broadcast), or one per component.
+        # `pygf` accepts these forms, and the device call has to mean the same thing:
+        # no arguments (all zeros), one scalar (broadcast), or components filling the
+        # vector left to right -- GLSL's widening construction, where a vector argument
+        # supplies its components in order from the next slot and scalars fill the rest
+        # (`float3(float2(1.0, 2.0), 3.0)`, `float4(v, 1.0, 2.0)`). A single vector
+        # argument alone is the copy form: pygf truncates a *wider* one to the first
+        # `expected` components (`float2(float4(...))` answers `float2(x, y)`), while
+        # any other over- or under-supply is a ValueError there and refused here.
         if len(args) == 0:
-            codes:List[str] = [f"(({field_type})(0))"] * expected
-        elif len(args) == 1:
+            codes:List[str] = [f"(({self._device_type(field_type)})(0))"] * expected
+        elif len(args) == 1 and not is_vec(args[0][1]) and not is_ptr(args[0][1]):
             code, t = args[0]
-            if is_ptr(t) or is_vec(t):
-                self._error(f"{name}() components must be scalars", node)
-            codes = [code if t == field_type else f"(({field_type})({code}))"] * expected
-        elif len(args) == expected:
-            codes = []
-            for i, (code, t) in enumerate(args):
-                if is_ptr(t) or is_vec(t):
-                    self._error(f"{name}() components must be scalars", node)
-                component_type:str = _C_FIELD_TYPES[(name, components[i][0])]
-                codes.append(code if t == component_type else f"(({component_type})({code}))")
+            codes = [code if t == field_type
+                     else f"(({self._device_type(field_type)})({code}))"] * expected
         else:
-            self._error(
-                f"{name}() takes no arguments, one scalar to broadcast, or {expected} "
-                f"component the vector has; {len(args)} given", node)
+            pieces:List[Tuple[str, str]] = []
+            for code, t in args:
+                if is_ptr(t):
+                    self._error(f"{name}() components must be scalars or vectors", node)
+                if is_vec(t):
+                    elem:str = _C_FIELD_TYPES[(t, _vec_components(t)[0][0])]
+                    for component in _vec_field_names(_vec_registry()[t]):
+                        pieces.append((f"{code}.{component}", elem))
+                else:
+                    pieces.append((code, t))
+            if len(args) == 1 and is_vec(args[0][1]):
+                if len(pieces) < expected:
+                    self._error(
+                        f"{name}() from one {args[0][1]} gets {len(pieces)} component(s) "
+                        f"but the vector has {expected}", node)
+                pieces = pieces[:expected]
+            elif len(pieces) != expected:
+                self._error(
+                    f"{name}() takes no arguments, one scalar to broadcast, or components "
+                    f"filling exactly {expected} slots: a vector argument supplies its "
+                    f"components in order and scalars fill the rest; the arguments given "
+                    f"supply {len(pieces)}", node)
+            codes = []
+            for i, (code, source_type) in enumerate(pieces):
+                # The cast names the type the way the *backend* spells it: the internal
+                # names follow OpenCL (`uint`, `uchar`), and CUDA C -- which HIP shares --
+                # does not define those, so a `uint2(7, 9)` cast has to say
+                # `unsigned int` there.
+                slot_type:str = _C_FIELD_TYPES[(name, components[i][0])]
+                codes.append(code if source_type == slot_type
+                             else f"(({self._device_type(slot_type)})({code}))")
         if self._opencl_syntax:
             return f"({name})({', '.join(codes)})", name
         return f"make_{name}({', '.join(codes)})", name

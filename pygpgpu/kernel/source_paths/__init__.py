@@ -43,6 +43,7 @@ from .layout import (
     source_path,
 )
 from .guards import (
+    HELPERS_HEADER_NAME,
     INCLUDE_FOLDER,
     PROTOTYPE_MARKER,
     QUAT_DEFINE_PREFIX,
@@ -91,6 +92,7 @@ from .writing import (
     _write_digest,
     _write_source_file,
     _write_source_locked,
+    append_helpers,
     append_source,
     digest_sidecar,
     python_source_digest,

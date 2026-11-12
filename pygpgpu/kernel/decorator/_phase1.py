@@ -136,7 +136,7 @@ class _PrepareLaunchMixin:
 
                 plan.self_struct:type = _structure_for(
                     [(name, member_type(getattr(instance, name), name, self._type_map))
-                     for name in plan.struct_attrs], [])
+                     for name in plan.struct_attrs], [], plan.backend)
                 from ..structs import register_name_hint  # noqa: PLC0415 (import cycle)
 
                 register_name_hint(np.dtype(plan.self_struct), plan.owner)
@@ -179,7 +179,8 @@ class _PrepareLaunchMixin:
         plan.args = convert_object_arguments(self.raw_func, args, self._resolve_global,
                                              self._self_param, plan.object_binding,
                                              self_value=instance,
-                                             type_map=self._type_map)
+                                             type_map=self._type_map,
+                                             backend=plan.backend)
         plan.arg_types:List[DeviceType] = [infer_ctype(a, self._type_map) for a in plan.args]
         if not plan.self_struct_members:
             plan.self_types = []

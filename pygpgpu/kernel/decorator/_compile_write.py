@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from typing import (
     Dict,
     List,
@@ -78,39 +79,49 @@ class _CompileWriteMixin:
                 continue
             plan.foreign_entries.setdefault(plan.path, []).append(entry)
 
-        # A nested launch needs the callee's own `__global__` function in this same source:
-        # the launch statement names a device function, and C requires it before its caller.
-        # A built-in that a backend spells with a helper contributes one too, and it is a
-        # device function the kernel calls, so it goes in the same place.
-        plan.device_prefix:List[str] = (list(plan.translator.device_helpers)
-                                   + list(plan.translator.nested_helpers)
-                                   + list(plan.translator.nested_kernels))
+        # The *synthesized* device helpers -- the vector-operation family, the floor
+        # helpers, a HIP round-toward-zero helper, the float atomic -- have no python
+        # module that owns them, so they cannot live in a per-module file: two modules
+        # whose device code both does `float3` arithmetic would each write their own
+        # `vec_sub_float3_float3` definition, and a unit that includes both files reads
+        # the same definition twice ("has already been defined"). They all go to one
+        # shared header per cache (see source_paths.append_helpers), which every file
+        # this compilation writes includes; the per-module copies are nothing.
+        plan.helper_pieces:List[str] = []
+        for helper_source in plan.translator.device_helpers:
+            if helper_source not in plan.helper_pieces:
+                plan.helper_pieces.append(helper_source)
         # A multi-phase body translates its work-item code on the phase translators, whose
         # own device functions (a floored `%`, a HIP round-toward-zero helper) live on the
         # phase's list -- the main one never visits a loop, so its own list is empty for
-        # such a body. The phases render into this same file, so their helpers join the
-        # prefix here. The same question answers for this file's *callee* entries: their
-        # bodies may name a device function of their own, and the definition travels with
-        # the entry (see _emit_device_call), so it is emitted beside the code that names it.
+        # such a body. The same question answers for this file's *callee* entries: their
+        # bodies may name a synthesized helper, and the definition travels with the entry
+        # (see _emit_device_call).
         for phase in list(getattr(plan.translator, "phase_translators", ()) or ()):
-            helper_sources:List[str] = list(getattr(phase, "device_helpers", ()) or ())
-            for helper_source in helper_sources:
-                if helper_source not in plan.device_prefix:
-                    plan.device_prefix.append(helper_source)
-        for plan.own_entry in plan.own_entries:
-            entry_helpers:List[str] = list(plan.own_entry.get("device_helpers") or [])
-            for helper_source in entry_helpers:
-                if helper_source not in plan.device_prefix:
-                    plan.device_prefix.append(helper_source)
+            for helper_source in list(getattr(phase, "device_helpers", ()) or ()):
+                if helper_source not in plan.helper_pieces:
+                    plan.helper_pieces.append(helper_source)
+        for entry in plan.device_cache.values():
+            for helper_source in entry.get("device_helpers") or []:
+                if helper_source not in plan.helper_pieces:
+                    plan.helper_pieces.append(helper_source)
+
+        # A nested launch needs the callee's own `__global__` function in this same source:
+        # the launch statement names a device function, and C requires it before its caller.
+        plan.device_prefix:List[str] = (list(plan.translator.nested_helpers)
+                                   + list(plan.translator.nested_kernels))
         plan.device_prefix.extend(entry["code"] for entry in plan.own_entries)
 
         # One forward-declaration block for the compilation's whole callee set, carried by
         # every file this pass writes. An included file's definitions call functions this
         # unit defines *later* (the base-class helper an override reaches sits behind the
         # include), and C refuses a call it has not seen declared -- which is exactly the
-        # `identifier "Base_scale_<hash>" is undefined` this block removes.
+        # `identifier "Base_scale_<hash>" is undefined` this block removes. The
+        # synthesized helpers are declared here too, although the shared header declares
+        # them as well: a block that names them costs nothing and keeps every file's
+        # calls covered whatever order its includes land in.
         plan.prototype_lines:List[str] = source_paths.compilation_prototypes(
-            list(plan.device_cache.values()), plan.device_prefix)
+            list(plan.device_cache.values()), plan.device_prefix + plan.helper_pieces)
 
         plan.structure_dtypes:List[DeviceType] = list(plan.translator.structure_dtypes())
         for entry in plan.device_cache.values():
@@ -211,6 +222,19 @@ class _CompileWriteMixin:
         plan.pieces.extend(source.rstrip("\n") for _, source in plan.rendered)
 
         plan.own_path:str = module_of({"source_file": plan.kernel_source_file})
+        # The synthesized helpers go to the shared header now, before any file below is
+        # assembled: the include each file writes is spelled *relative to that file*
+        # (`include/device_helpers.h` from the cache root, `../include/...` from a
+        # subdirectory), which is what a quoted include resolves against.
+        plan.helpers_path:str = ""
+        plan.helper_include:str = ""
+        if plan.helper_pieces:
+            plan.helpers_path = source_paths.append_helpers(
+                os.path.join(self._cache_dir(backend), source_paths.INCLUDE_FOLDER,
+                             source_paths.HELPERS_HEADER_NAME),
+                plan.helper_pieces)
+            plan.helper_include = source_paths.include_line(plan.own_path,
+                                                            plan.helpers_path)
         # The includes come first: a callee from another module is a declaration this file
         # needs before anything that calls it. The order is the order the callees were
         # emitted, so a foreign helper that itself includes another is already covered.
@@ -246,6 +270,10 @@ class _CompileWriteMixin:
             # `quatf` or `c64`, and that declaration has to be in scope when the structure
             # is declared, not after it.
             plan.own_header.append(plan.include_lines)
+        if plan.helper_include:
+            # The shared helper definitions: declared by their own leading block, defined
+            # once for the whole cache, included before anything that calls them.
+            plan.own_header.append(plan.helper_include)
         if plan.typedefs:
             plan.own_header.append(plan.typedefs)
         if plan.prototype_lines:
@@ -272,6 +300,11 @@ class _CompileWriteMixin:
                 plan.foreign_header.append(source_paths.prototype_block(plan.prototype_lines))
             if plan.include_lines:
                 plan.foreign_header.append(plan.include_lines)
+            if plan.helper_include:
+                # Spelled from THIS file's directory, which is where its own include
+                # resolves against (`../include/device_helpers.h` from a subdirectory).
+                plan.foreign_header.append(
+                    source_paths.include_line(plan.path, plan.helpers_path))
             # A foreign module may itself call into a third module: every structure is
             # declared by the top-level file, but a *function* it calls has to be reached
             # from its own file, and only by the files that call it.
@@ -285,18 +318,11 @@ class _CompileWriteMixin:
             if plan.foreign_digest is None:
                 plan.foreign_digest = source_paths.python_source_digest(plan.foreign_source_file)
                 plan.foreign_digests[plan.foreign_source_file] = plan.foreign_digest
-            # A definition these entries' bodies call but no file defines yet -- a floored
-            # `%`, a HIP helper -- travels in the entry's own `device_helpers` (see
-            # _emit_device_call, which merges the callee's list). They are the foreign
-            # file's own prefix: the code that names one is in THIS file, so the
-            # definition has to be too.
-            plan.foreign_pieces:List[str] = []
-            for plan.entry in plan.entries:
-                for helper_source in plan.entry.get("device_helpers") or []:
-                    if helper_source not in plan.foreign_pieces:
-                        plan.foreign_pieces.append(helper_source)
-            plan.foreign_pieces.extend(entry["code"] for entry in plan.entries
-                                       if entry["code"])
+            # The synthesized helpers these entries' bodies call live in the shared
+            # header now, which this file's own include reaches (see helper_include
+            # above) -- they are no longer the foreign file's own prefix.
+            plan.foreign_pieces:List[str] = [entry["code"] for entry in plan.entries
+                                             if entry["code"]]
             plan.written[plan.path] = source_paths.append_source(
                 plan.path, plan.foreign_header,
                 [piece for piece in plan.foreign_pieces if piece],

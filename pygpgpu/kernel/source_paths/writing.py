@@ -13,6 +13,10 @@ from .merge import (
     assemble_source,
     merge_source,
 )
+from .prototypes import (
+    _prototypes_of,
+    prototype_block,
+)
 import contextlib
 import hashlib
 import os
@@ -114,6 +118,57 @@ def rewrite_source(path: str, header: List[str], definitions: List[str],
         _write_source_file(path, source)
         _write_digest(path, source_digest)
         return path
+
+
+
+def append_helpers(path: str, definitions: List[str]) -> str:
+    """Merge one render of synthesized device helpers into the shared header.
+
+    The helpers the translator *synthesizes* -- the vector-operation family, the floor
+    helpers, a HIP round-toward-zero helper -- have no python module that owns them, so
+    they cannot live in a per-module file: two modules whose device code both does
+    `float3` arithmetic each wrote their own `vec_sub_float3_float3` definition, and a
+    unit that `#include`s both files read the same definition twice, which the compiler
+    refuses with "has already been defined". They all live in one header per cache
+    instead (see `guards.HELPERS_HEADER_NAME`), whose include guard makes the several
+    inclusions read once.
+
+    The header is maintained by the same definition merge a module's file uses
+    (`_merge_definitions`, keyed on the signature line): a helper a later render spells
+    differently replaces the one held, so a package-side change to a generated body
+    propagates; there is no digest, because no single python file owns the file -- the
+    merge is the whole freshness story. A forward-declaration block rebuilt from the
+    merged definitions leads the file, so the definitions may sit in any order (a
+    wrapper appended by one module can call a scalar helper appended by another).
+    """
+    with write_lock(path):
+        return _append_helpers_locked(path, definitions)
+
+
+
+def _append_helpers_locked(path: str, definitions: List[str]) -> str:
+    """`append_helpers`'s body, with the file's lock already held."""
+    existing: Optional[str] = None
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                existing = file.read()
+        except OSError:
+            existing = None
+    kept_definitions: List[str] = []
+    if existing is not None:
+        # The prototype block the split's header half holds is regenerated from the
+        # merged definitions below, so only the definitions are carried over -- a
+        # helper source never starts with `#`, so everything but the block is one.
+        _kept_header, kept_definitions = _split_source(existing, path)
+    merged: List[str]
+    merged, _changed = _merge_definitions(kept_definitions, definitions)
+    pieces: List[str] = [piece.strip("\n") for piece in merged if piece.strip()]
+    source: str = assemble_source([prototype_block(_prototypes_of(pieces))], pieces, path)
+    if existing != source:
+        _ensure_directory(os.path.dirname(path))
+        _write_source_file(path, source)
+    return path
 
 
 

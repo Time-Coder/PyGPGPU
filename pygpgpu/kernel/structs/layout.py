@@ -1,8 +1,9 @@
 # Turning a dtype into the C the device compiles, member by member.
 from __future__ import annotations
 from .state import _NAME_BASES, _REGISTRY, _SETTLED_NAMES
+import ctypes
 import hashlib
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from numpy.typing import DTypeLike
 
@@ -133,13 +134,118 @@ def field_type(field_dtype:DTypeLike, backend:str)->Tuple[str, str]:
 
 
 
+def device_member_extent(field_dtype:DTypeLike, backend:str)->Tuple[int, int]:
+    """(size, alignment) the backend's C gives one member of this field's type.
+
+    A vector is the one type whose device layout differs from what `ctypes` computes
+    for the host class: CUDA C aligns a three- or four-component vector to 16 bytes
+    (`float4` sits at offset 16 after an `int`, where the host class puts it at 4),
+    and OpenCL C gives a three-component vector a fourth slot. The scalars agree
+    everywhere, and a nested structure's own dtype -- which carries this same
+    treatment in its recorded offsets -- is taken as it stands.
+
+    The table is what both sides of the launch are written against: the synthesized
+    host structure places its members with it (see `objects.kinds._structure_for`)
+    and the rendered C declaration carries padding members that make the compiler's
+    layout the same bytes, so the packed host value *is* the device's structure.
+    """
+    from ...vec_types.layout import _vector_dtype_name
+
+    dtype:np.dtype = np.dtype(field_dtype)
+    shape:Optional[Tuple[int, ...]] = None
+    if dtype.subdtype is not None:
+        dtype, shape = dtype.subdtype
+    count:int = 1
+    for extent in shape or ():
+        count *= int(extent)
+
+    vector:Optional[str] = _vector_dtype_name(dtype)
+    if vector is not None:
+        # The component width is the field count (the padding slot of a padded vec3 is
+        # named `_`), and the scalar size reads through `.base`: a dtype built from a
+        # ctypes class can spell its fields as sub-arrays, whose itemsize is not the
+        # component's.
+        component_kinds:List[np.dtype] = [np.dtype(dtype.fields[name][0]).base
+                                     for name in dtype.names or () if name != "_"]
+        scalar_size:int = component_kinds[0].itemsize if component_kinds else 4
+        width:int = len(component_kinds)
+        if backend in ("cuda", "hip"):
+            size:int = width * scalar_size
+            align:int = 2 * scalar_size if width == 2 else min(4 * scalar_size, 16)
+        else:
+            # OpenCL C and Metal: a three-component vector occupies four slots.
+            size = (4 if width == 3 else width) * scalar_size
+            align = size
+        return size * count, align
+    if is_record(dtype):
+        aligns:List[int] = [device_member_extent(dtype.fields[name][0], backend)[1]
+                            for name in dtype.names or ()]
+        return dtype.itemsize * count, max(aligns or [1])
+    return dtype.itemsize * count, max(1, int(dtype.itemsize))
+
+
+def padded_member_fields(fields:Sequence[Tuple[str, type]],
+                         backend:str)->List[Tuple[str, type]]:
+    """The host `_fields_` list whose offsets the backend's C would compute too.
+
+    The members are placed in the order given, each at the offset `device_member_extent`
+    says the compiler would give it, with an unsigned-byte array filling every gap and a
+    trailing one rounding the total to the structure's own alignment. A body never reads
+    a padding member -- the names are prefixed so a user's `pad` cannot collide -- and the
+    rendered C declaration carries the same arrays (see `structure_fields`), which is what
+    makes the declaration's layout explicit instead of compiler-implied.
+    """
+    padded:List[Tuple[str, type]] = []
+    cursor:int = 0
+    pad_index:int = 0
+    widest:int = 1
+    for name, member_class in fields:
+        size, align = device_member_extent(member_class, backend)
+        aligned:int = -(-cursor // align) * align
+        if aligned > cursor:
+            padded.append((f"_pgpgpu_pad_{pad_index}", ctypes.c_ubyte * (aligned - cursor)))
+            pad_index += 1
+            cursor = aligned
+        padded.append((name, member_class))
+        cursor += size
+        widest = max(widest, align)
+    total:int = -(-cursor // widest) * widest
+    if total > cursor:
+        padded.append((f"_pgpgpu_pad_{pad_index}", ctypes.c_ubyte * (total - cursor)))
+    return padded
+
+
 def structure_fields(dtype:np.dtype, backend:str)->List[str]:
-    """One C member declaration per field, in declaration order."""
+    """One C member declaration per field, in declaration order, with the layout explicit.
+
+    The dtype's recorded offsets are the layout the host packs (the synthesized
+    structures are built to the device's own alignment; a declared `ctypes` structure
+    keeps the offsets its writer chose), so the declaration says the same thing the
+    bytes do: an unsigned-byte array fills every gap the recorded offsets leave, and a
+    trailing one rounds the total out to the dtype's itemsize. Without them the compiler
+    would align a vector member by its own rules and read a different structure than
+    the launch packed.
+    """
+    from .unions import is_union_dtype  # noqa: PLC0415 (upward import)
+
     members:List[str] = []
+    cursor:int = 0
+    pad_index:int = 0
     for name in dtype.names or ():
         field_dtype:object = dtype.fields[name][0]
         base, suffix = field_type(field_dtype, backend)
-        members.append(f"{base} {name}{suffix}")
+        if not is_union_dtype(dtype):
+            offset:int = int(dtype.fields[name][1])
+            if offset > cursor:
+                members.append(f"unsigned char _pgpgpu_pad_{pad_index}[{offset - cursor}];")
+                pad_index += 1
+            members.append(f"{base} {name}{suffix}")
+            size, _ = device_member_extent(field_dtype, backend)
+            cursor = offset + size
+        else:
+            members.append(f"{base} {name}{suffix}")
+    if not is_union_dtype(dtype) and dtype.itemsize > cursor:
+        members.append(f"unsigned char _pgpgpu_pad_{pad_index}[{int(dtype.itemsize) - cursor}];")
     return members
 
 

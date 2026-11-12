@@ -31,7 +31,11 @@ vocabulary -- and by the shadertoy viewer itself:
 * **an override with extra parameters**: a hook whose signature does not match the base
   call loses the whole self-attribute scan -- an arity error for the mismatched shape, and
   a silent empty scan (``discovered attributes: image``) when the base call's expression
-  reads ``self`` -- so every uniform the subclass reads disappears from the launch.
+  reads ``self`` -- so every uniform the subclass reads disappears from the launch;
+* **the receiver struct's layout**: a synthesized receiver whose members mix widths
+  (float2 + float + int + float4, the promo viewer's uniform set) packed by `ctypes`
+  alignment where the compiler aligns by the device rules, so every member after the
+  first vector read the wrong bytes (group 15).
 """
 from __future__ import annotations
 
@@ -40,6 +44,7 @@ import math
 import numpy as np
 import pytest
 
+from regressions.attribute_layout_mix import ClassAndInstance, Float2BeforeInt, ViewerLike
 from regressions.extra_arg_override import ExtraArg, FlipSin
 from regressions.float_mod_floored import mod_four
 from regressions.pow_width_mixing import MixedWidthPow
@@ -216,3 +221,40 @@ def test_a_swizzle_store_reads_its_value_before_writing(gpu_backend):
     out = np.zeros(2, dtype=np.float64)
     swap_through_swizzle[gpu_backend](out)
     np.testing.assert_allclose(out, [2.0, 1.0])
+
+
+# ---------------------------------------------------------------------------
+# Group 15 -- the receiver struct's layout when its members mix widths
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_width_uniforms_read_their_own_bytes(gpu_backend):
+    """float2 + float + int + float4 as instance attributes: each member reads its own.
+
+    The synthesized receiver struct used `ctypes` alignment (a vector member at any
+    4-byte offset) while the compiler laid the same declaration out by the device rules
+    (`float4` is 16-byte aligned on CUDA), so every member after the first vector read
+    the wrong bytes. Found by the promo renderer's uniform set. The struct is now placed
+    with the device's own table and explicit padding, and the rendered declaration
+    carries the same padding, so the packed bytes are the device's structure.
+    """
+    viewer = ViewerLike()
+    out = np.zeros(4, dtype=np.float32)
+    viewer.read[gpu_backend](out)
+    np.testing.assert_allclose(out, [2000.0, 4.0, 7.0, 10.0], rtol=1e-5)
+
+
+def test_class_and_instance_attributes_bind_in_one_kernel(gpu_backend):
+    """Both attribute kinds read by one kernel answer their own values."""
+    probe = ClassAndInstance()
+    out = np.zeros(2, dtype=np.float32)
+    probe.read[gpu_backend](out)
+    np.testing.assert_allclose(out, [153.0, 18.0], rtol=1e-5)
+
+
+def test_a_narrower_member_before_a_wider_one_keeps_its_offset(gpu_backend):
+    """The int member between two float-width members is the alignment tripwire."""
+    probe = Float2BeforeInt()
+    out = np.zeros(1, dtype=np.float32)
+    probe.read[gpu_backend](out)
+    np.testing.assert_allclose(out, [6.0 + 8.0 + 5 + 1.5], rtol=1e-5)

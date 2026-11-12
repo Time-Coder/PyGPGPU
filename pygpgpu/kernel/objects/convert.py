@@ -96,12 +96,14 @@ def convert_object_arguments(func:object, args:Sequence[object],
                              self_param:str = '',
                              binding:object = None,
                              self_value:object = None,
-                             type_map:Optional[Dict[str, str]]=None)->Tuple[object, ...]:
+                             type_map:Optional[Dict[str, str]]=None,
+                             backend:str="")->Tuple[object, ...]:
     """Replace every object argument with an instance of its synthesized structure.
 
     Called before the argument types are inferred, because the structure *is* the type: the
     translator then sees a `ctypes.Structure`, so the device typedef, the member access, the
-    layout and the packing all work unchanged.
+    layout and the packing all work unchanged. ``backend`` decides the layout: the members
+    are placed the way that backend's C would place them (see `padded_member_fields`).
 
     ``self_param`` is the kernel's receiver name, when the kernel is a method: the receiver
     travels outside ``args``, so it is skipped when the parameters are lined up with the
@@ -228,7 +230,7 @@ def convert_object_arguments(func:object, args:Sequence[object],
                 fields.append((member, structure_of[member_path]))
             else:
                 fields.append((member, member_type(value, member, scan.type_map)))
-        structure_of[element_path] = _structure_for(fields, scan.methods[element_path])
+        structure_of[element_path] = _structure_for(fields, scan.methods[element_path], backend)
         _prefer_class_name(structure_of[element_path], scan.classes.get(element_path))
 
     # Second pass for the list members: their element structures exist now, so the parent's
@@ -266,7 +268,7 @@ def convert_object_arguments(func:object, args:Sequence[object],
                 fields.append((member, list_array_types[member_path]))
             else:
                 fields.append((member, member_type(value, member, scan.type_map)))
-        structure_of[path] = _structure_for(fields, scan.methods[path])
+        structure_of[path] = _structure_for(fields, scan.methods[path], backend)
         _prefer_class_name(structure_of[path], scan.classes.get(path))
         if "." in path:
             parent, member = path.rsplit(".", 1)
@@ -303,7 +305,7 @@ def convert_object_arguments(func:object, args:Sequence[object],
                                                    if len(specs) > 1 else specs[0])
         for name, fields in zip(names, specs):
             chosen:List[Tuple[str, type]] = merged if merged is not None else fields
-            structure:type = _structure_for(chosen, scan.methods[name])
+            structure:type = _structure_for(chosen, scan.methods[name], backend)
             _prefer_class_name(structure, type(holders[name]))
             if name in scan.constructed:
                 # A value the body built has no argument to replace: the structure is all it
@@ -436,7 +438,7 @@ def convert_object_arguments(func:object, args:Sequence[object],
             fields = list(_LIFTED_MEMBERS.get(cls) or ())
             if not fields:
                 continue
-            structure = _structure_for(fields, [])
+            structure = _structure_for(fields, [], backend)
             _prefer_class_name(structure, cls)
             from ..structs import register_declared_class  # noqa: PLC0415
 

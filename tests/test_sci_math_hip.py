@@ -174,21 +174,28 @@ def test_the_helper_reaches_the_generated_hip_source():
                           "__hipcache__", "pykernels")
     sources = glob.glob(os.path.join(folder, "*.hip"))
     assert sources, "the generated HIP source was not found"
+    helper = tables.HIP_ROUND_TOWARD_ZERO_HELPERS["recip"]
+    # The definition lives in the shared generated header now -- the synthesized
+    # helpers have no owning module, so one header per cache carries them all and
+    # every generated file includes it. The unit is the file *plus* that header.
+    header_path: str = os.path.join(folder, "include", "device_helpers.h")
+    assert os.path.isfile(header_path), "the shared helper header was not found"
+    with open(header_path, "r", encoding="utf-8") as file:
+        header_text: str = file.read()
+    assert f"__device__ float {helper}" in header_text, (
+        "the helper was not written into the shared header")
     text = ""
     for path in sources:
         with open(path, "r", encoding="utf-8") as file:
             text += file.read()
-    helper = tables.HIP_ROUND_TOWARD_ZERO_HELPERS["recip"]
-    assert helper in text, "the helper was not written into the generated source"
-
-    # C needs the definition before the kernel that calls it. The file holds several
-    # kernels and only one of them needs the helper, so the comparison is against the
-    # kernel that uses it rather than against the first kernel in the file.
-    definition = text.index(f"__device__ float {helper}")
+    # C needs the definition before the kernel that calls it: the include sits in
+    # the file's header, ahead of every kernel body, and the header's own
+    # forward-declaration block leads its definitions.
+    include = text.index('#include "include/device_helpers.h"')
     call = text.index(f"{helper}((float)")
     kernel = text.rindex("__global__ void", 0, call)
-    assert definition < kernel, (
-        "the helper is defined after the kernel that calls it")
+    assert include < kernel, (
+        "the helper header is included after the kernel that calls it")
 
 
 def test_the_conversions_answer_the_same_on_hip():

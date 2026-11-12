@@ -64,6 +64,11 @@ class _OperatorsMixin:
             self._error(self._structure_operator_message(name, lt, rt, node), node)
 
         if is_vec(lt) or is_vec(rt):
+            if name in ("Mod", "FloorDiv"):
+                # python floors both operators and C truncates, so the vector form
+                # goes through the same floored helpers the scalar spellings emit,
+                # one component at a time (see _emit_vec_floored).
+                return self._emit_vec_floored(name, left, lt, right, rt, node)
             symbol:str = {"Add": "+", "Sub": "-", "Mult": "*", "Div": "/",
                           "Lt": "<", "LtE": "<=", "Gt": ">", "GtE": ">=",
                           "Eq": "==", "NotEq": "!="}.get(name)

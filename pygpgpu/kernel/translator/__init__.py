@@ -220,6 +220,7 @@ from .complex_values import _ComplexValuesMixin
 from .quaternions import _QuaternionsMixin
 from .magic_methods import _MagicMethodsMixin
 from .vector_ops import _VectorOpsMixin
+from .vector_floor import _VectorFloorMixin
 from .structures import _StructuresMixin
 from .calls import _CallsMixin
 from .builtin_emit import _BuiltinEmitMixin
@@ -236,7 +237,7 @@ from .init import _InitMixin
 from .shared_shapes import baked_shared_shapes
 
 
-class FunctionTranslator(_InitMixin, _EmitMixin, _NamingMixin, _PhasesMixin, _MagicLoopMixin, _HostRegionsMixin, _OuterVarsMixin, _StatementsMixin, _ReturnsMixin, _AssignMixin, _AugassignMixin, _TargetsMixin, _TuplesMixin, _PrintEmitMixin, _ExpressionsMixin, _OperatorsMixin, _SubscriptsMixin, _ImagesMixin, _AttributesMixin, _ComplexValuesMixin, _QuaternionsMixin, _MagicMethodsMixin, _VectorOpsMixin, _StructuresMixin, _CallsMixin, _BuiltinEmitMixin, _NumpyEmitMixin, _DeviceCallMixin, _RenderMixin, _BuiltinPythonMixin, _NdIndexMixin, _PrivateArrayMixin, _NestedLaunchMixin):
+class FunctionTranslator(_InitMixin, _EmitMixin, _NamingMixin, _PhasesMixin, _MagicLoopMixin, _HostRegionsMixin, _OuterVarsMixin, _StatementsMixin, _ReturnsMixin, _AssignMixin, _AugassignMixin, _TargetsMixin, _TuplesMixin, _PrintEmitMixin, _ExpressionsMixin, _OperatorsMixin, _SubscriptsMixin, _ImagesMixin, _AttributesMixin, _ComplexValuesMixin, _QuaternionsMixin, _MagicMethodsMixin, _VectorOpsMixin, _VectorFloorMixin, _StructuresMixin, _CallsMixin, _BuiltinEmitMixin, _NumpyEmitMixin, _DeviceCallMixin, _RenderMixin, _BuiltinPythonMixin, _NdIndexMixin, _PrivateArrayMixin, _NestedLaunchMixin):
         PRIVATE_ARRAY_MAX_UNROLL = 64
 
 
