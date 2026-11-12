@@ -26,10 +26,9 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Dict, List, Tuple
 
-# The prefix every helper carries. One namespace, overloaded per shape: a generated
-# source can use `pygpgpu_mul` for float2, float3 and the scalar-broadcast forms
-# alike, and the C++ overload set picks by the argument types.
-PREFIX:str = "pygpgpu"
+# The prefix every helper carries, in complex.h's style (`c64_add` names the type
+# beside the operation): short, and not a name a kernel body is likely to define.
+PREFIX:str = "vec"
 
 # The helper name per infix symbol. A comparison returns the int vector of the
 # operands (0/1 per component, the form the expansion unified to), so its helper
