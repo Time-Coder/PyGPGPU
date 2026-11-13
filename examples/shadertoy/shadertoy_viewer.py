@@ -19,6 +19,11 @@ would spell any attribute of its viewer. The vectors are pygf vectors, not loose
   ``self._timer``;
 * ``self.i_frame`` -- frames rendered so far.
 
+The colour ``mainImage`` answers may lie anywhere -- the viewer saturates it into the
+uint8 framebuffer's ``[0, 1]`` before storing, the way GLSL saturates an RGBA8 target, so
+a shader carries no clamp of its own. A clamp written inside a shader is a shading
+choice, never a display-correctness duty.
+
     class MyShader(ShadertoyViewer):
         def mainImage(self, frag_coord: float2) -> color3f:
             uv = frag_coord / self.i_resolution
@@ -58,7 +63,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from pygpgpu import config, kernel
 from pygpgpu import numpy as gnp
-from pygf import color3f, float2, float4
+from pygf import clamp, color3f, float2, float4
 
 config.print_info = False
 # GLSL is float32 and so is Shadertoy; the deep-zoom fractal viewers want float64, but a
@@ -164,9 +169,14 @@ class ShadertoyViewer(QWidget):
             frag_coord = float2(float(j) + 0.5,
                                 float(self.image.shape[0]) - float(i) - 0.5)
             color = self.mainImage(frag_coord)
-            self.image[i, j, 0] = 255 * color.r
-            self.image[i, j, 1] = 255 * color.g
-            self.image[i, j, 2] = 255 * color.b
+            # The buffer is uint8, and a colour the shader let leave [0, 1] must saturate
+            # there, not wrap: GLSL answers an RGBA8 target the same way, so a shader
+            # ported from Shadertoy needs no clamp of its own. On the interpreter backend
+            # an unclamped value is worse than noise -- numpy 2 refuses the out-of-range
+            # store outright (OverflowError).
+            self.image[i, j, 0] = 255 * clamp(color.r, 0.0, 1.0)
+            self.image[i, j, 1] = 255 * clamp(color.g, 0.0, 1.0)
+            self.image[i, j, 2] = 255 * clamp(color.b, 0.0, 1.0)
 
     def _wrap_frame(self) -> QImage:
         """A ``QImage`` over the frame buffer's own memory.

@@ -1,5 +1,5 @@
 import math
-from pygf import color3f, float2, float3, fract, length
+from pygf import color3f, cos, float2, float3, fract, length
 from shadertoy_viewer import ShadertoyViewer
 
 
@@ -28,7 +28,7 @@ class ShaderArt(ShadertoyViewer):
         c: float3 = float3(1.0, 1.0, 1.0)
         d: float3 = float3(0.263,0.416,0.557)
 
-        return a + b*math.cos( 6.28318*(c*t+d) )
+        return a + b*cos(6.28318*(c*t+d))
 
 
 if __name__ == "__main__":
