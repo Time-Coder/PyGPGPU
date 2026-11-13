@@ -196,6 +196,25 @@ class _AugassignMixin:
             self._visit_atomic_augassign(node, op_name, atomic_name, pointer_code=pointer)
             return
 
+        # A CUDA swizzle target (`p.xz += w`) has no lvalue, the same refusal the plain
+        # store spells out -- so the update is rewritten into the plain store the
+        # member-store path already handles: the value is the binary operation on the
+        # target's own read, and `p.xz = p.xz + w` emits the components' stores. A
+        # symbol the vector dispatch does not carry (FloorDiv and friends) keeps the
+        # existing scalar tail, which handles those by name.
+        symbol:str = self._augassign_symbol(op_name)
+        if (isinstance(node.target, ast.Attribute) and symbol in ("+", "-", "*", "/")
+                and isinstance(node.target.value, (ast.Name, ast.Attribute))
+                and self._lookup(getattr(node.target.value, "id", ""), ) is not None
+                and isinstance(self._lookup(getattr(node.target.value, "id", "")), str)
+                and is_vec(self._lookup(getattr(node.target.value, "id", "")))):
+            self._visit_assign(ast.Assign(
+                targets=[node.target],
+                value=ast.BinOp(left=node.target, op=node.op, right=node.value,
+                                lineno=node.lineno, col_offset=node.col_offset),
+                lineno=node.lineno, col_offset=node.col_offset))
+            return
+
         target_code, target_t = self._visit_target(node.target)
         value_code, value_t = self._visit_expression(node.value)
 

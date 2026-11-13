@@ -234,9 +234,14 @@ class _VectorOpsMixin:
         index:int = getattr(self, "_swizzle_store_temps", 0) + 1
         self._swizzle_store_temps = index
         temporary:str = f"_swizzle_store_{index}"
+        # The store pairs the swizzle's OWN letters positionally: `p.xz = w` means
+        # p.x = w[0], p.z = w[1] -- the value's second component is read through its
+        # field at position 1 (`w.y`), never through the target's letters (`w.z`, which
+        # a two-component value does not even have).
+        value_fields:str = "".join(_vec_field_names(_vec_registry()[value_t]))
         self._emit(f"{value_t} {temporary} = {value_code};")
-        for char in component:
-            self._emit(f"{base_code}.{char} = {temporary}.{char};")
+        for position, char in enumerate(component):
+            self._emit(f"{base_code}.{char} = {temporary}.{value_fields[position]};")
         return True
 
 

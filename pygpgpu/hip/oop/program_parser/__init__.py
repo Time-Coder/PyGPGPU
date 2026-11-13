@@ -129,11 +129,22 @@ class ProgramParser(_StructBuilderMixin, TSParserMixin):
             error_message = error_message.decode("utf-8", errors="replace")
 
         def replace_handler(match:re.Match):
-            old_line_number = int(match.group(1))
-            file_name, new_line_number = self._line_map[old_line_number]
+            old_line_number:int = int(match.group(1) or match.group(2))
+            mapping = self._line_map.get(old_line_number)
+            if mapping is None:
+                # A line the compiler reports that the preprocessor's map does not
+                # carry stays as it was.
+                return match.group(0)
+            file_name, new_line_number = mapping
             return f"{file_name}:{new_line_number}"
 
-        return re.sub(r'<kernel>:(\d+)', replace_handler, error_message.strip("\r\n"))
+        # The compilers spell the program name two ways: `<kernel>(111)` -- a
+        # location in parentheses, the ordinary one, warnings included -- and
+        # `<kernel>:111`. The map keys on the number either way; only the spelling
+        # differs, and a pattern for the colon form alone left every parenthesized
+        # location untouched (the CUDA side carries the same fix).
+        return re.sub(r'<kernel>(?::(\d+)|\((\d+)\))', replace_handler,
+                      error_message.strip("\r\n"))
 
 
     def _save(self)->None:
