@@ -18,8 +18,7 @@ from ..transfer import Transfer
 
 class _TransferMixin:
 
-    def to_host(self, stream: object = None, *, backend: Optional[str] = None,
-                device: object = None, wait: bool = False) -> Transfer:
+    def to_host(self, *, wait: bool = False) -> Transfer:
         """Start copying this array's contents back to host memory.
 
         The copy is asynchronous: the returned :class:`Transfer` is already valid, and
@@ -29,6 +28,11 @@ class _TransferMixin:
 
         The host bytes the array already has are what the copy lands in, so a device that
         wrote the array does not disturb the rest of the family.
+
+        The download comes from whichever device holds the newest content, so it takes no
+        device choice: naming one would either repeat this default or ask for stale
+        bytes, and the copy runs on the engine's own channel. :meth:`to_device` is the
+        upload's counterpart and names the *destination* device.
         """
         family = self._state
         newest = family.newest_binding()
@@ -83,9 +87,9 @@ class _TransferMixin:
         return transfer
 
 
-    def to_device(self, target: object = None, stream: object = None, *,
-                  backend: Optional[str] = None, device: object = None,
-                  zero_copy: Optional[bool] = None, wait: bool = False) -> Transfer:
+    def to_device(self, target: object = None, *, backend: Optional[str] = None,
+                  device: object = None, zero_copy: Optional[bool] = None,
+                  wait: bool = False) -> Transfer:
         """Start copying this array's contents to a device.
 
         ``target`` is a selector string (``"cuda"``, ``"opencl:1"``), a
@@ -95,7 +99,8 @@ class _TransferMixin:
 
         When the array's bytes are already current on that device nothing is copied and the
         transfer is complete at once -- that is what makes a second kernel call on the same
-        device free.
+        device free. The channel the copy runs on is the engine's own pooled stream, so
+        there is no stream argument to pass.
 
         ``zero_copy=True`` asks the device to read and write the array's own host memory
         instead of a copy of it. That is honoured only where the backend's API guarantees

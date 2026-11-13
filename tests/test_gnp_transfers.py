@@ -239,6 +239,23 @@ def test_wait_through_a_future_gives_the_same_guarantee(gpu_backend):
     assert float(a[0]) == 1.0
 
 
+def test_to_host_takes_no_device_choice():
+    """``to_host`` downloads from whichever device holds the newest content.
+
+    A stream or a device/backend keyword would either repeat that default or ask for
+    stale bytes, and the copy channel is the engine's own -- so the signatures take none
+    of them, and a call that passes one is refused instead of silently ignored.
+    """
+    a = gnp.arange(64, dtype=np.float32)
+    for call in (lambda: a.to_host("cuda:0"),
+                 lambda: a.to_host(stream=None),
+                 lambda: a.to_host(backend="cuda"),
+                 lambda: a.to_host(device="0"),
+                 lambda: a.to_device("cuda:0", object())):
+        with pytest.raises(TypeError):
+            call()
+
+
 # ---------- cross-device ----------
 
 def _second_backend(backend: str):
