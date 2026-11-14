@@ -59,11 +59,20 @@ class _MagicLoopMixin(_NdIndexMixin):
         magic_index:Optional[int] = None
         enumerate_form:Optional[Translated] = None
         nd_form:Optional[Tuple[str, str, str]] = None
+        alias_form:bool = False
         for idx, stmt in enumerate(body):
             if not isinstance(stmt, ast.For):
                 continue
             if self._is_shape0_range(stmt.iter):
                 magic_index = idx
+                break
+            # `n = img.shape[0]` above the loop, then `for p in range(n)`: the local is
+            # the extent, recorded by the scan above, so this is the same dispatch the
+            # literal spelling is. The emission path below resolves the bound through the
+            # same table, which keeps the two spellings' launch sizes identical.
+            if self._shape0_range_param_of_local(stmt.iter) is not None:
+                magic_index = idx
+                alias_form = True
                 break
             enum_info:Optional[Translated] = self._enumerate_magic_target(stmt.iter)
             if enum_info is not None:
@@ -220,6 +229,18 @@ class _MagicLoopMixin(_NdIndexMixin):
         loop:ast.For = body[magic_index]
         range_call:ast.Call = loop.iter
         bound:ast.expr = range_call.args[0]
+        if alias_form:
+            # The bound is a local the scan registered as an extent alias: resolve it to
+            # the extent expression it was assigned from (`<array>.shape[0]`), so the
+            # emission below runs exactly the literal spelling's path. Nothing about the
+            # local is consumed: it still travels as a plain int and stays readable in the
+            # body, like any local.
+            resolved:Optional[ast.expr] = self._alias_extent_expr(bound)
+            if resolved is None:
+                self._error(
+                    "a magic loop's iteration domain must be `<array>.shape[0]`, directly "
+                    "or through a local it was assigned to", bound)
+            bound = resolved
 
         # Two names, because the two questions they answer have different answers for a
         # slice. `guard_name` is what the per-item bound is read from, which is the local
@@ -282,3 +303,57 @@ class _MagicLoopMixin(_NdIndexMixin):
                 and isinstance(base.value, ast.Name) and base.value.id == self.self_param):
             return f"_self_{base.attr}"
         return None
+
+
+    def _shape0_range_param_of_local(self, iter_node:ast.expr)->Optional[str]:
+        """The parameter a local-alias bound (`range(rows)`) sizes the dispatch from.
+
+        The alias table is the one source of the answer: it holds the extent a
+        `name = <array>.shape[d]` assignment bound (the scan at the top of
+        `_translate_magic_loop` fills it, before loop detection, so it is populated for
+        every caller). A name the table does not carry is not an extent alias -- a plain
+        counter, a caller's scalar -- and answers None, which keeps such a loop the serial
+        loop a work item runs itself.
+        """
+        if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
+                and iter_node.func.id == "range" and len(iter_node.args) == 1 and not iter_node.keywords):
+            return None
+        arg:ast.expr = iter_node.args[0]
+        if not isinstance(arg, ast.Name):
+            return None
+        binding:Optional[Tuple[str, int]] = self._shape_aliases.get(arg.id)
+        if binding is None or binding[1] != 0:
+            return None
+        holder_t:DeviceType = self._lookup(binding[0])
+        if not (is_ptr(holder_t) or is_image(holder_t)):
+            return None
+        return binding[0]
+
+
+    def _alias_extent_expr(self, node:ast.expr)->Optional[ast.expr]:
+        """The `<array>.shape[0]` expression a local-alias bound stands for.
+
+        `for p in range(rows)` with `rows = img.shape[0]` above the loop: the dispatch tail
+        needs the bound as the *expression* (`_loop_domain_name` reads `X` off it, and the
+        slice/guard split reads the local's own extent), so the alias is re-expanded here
+        rather than carried as a parameter name. A node that is not a name in the alias
+        table answers None.
+        """
+        if not isinstance(node, ast.Name):
+            return None
+        binding:Optional[Tuple[str, int]] = self._shape_aliases.get(node.id)
+        if binding is None:
+            return None
+        holder:str = binding[0]
+        dimension:int = binding[1]
+        holder_t:DeviceType = self._lookup(holder)
+        if not (is_ptr(holder_t) or is_image(holder_t)):
+            return None
+        # Rebuild the extent expression the assignment bound: `<holder>.shape[<d>]`. For a
+        # receiver attribute the holder is already the `_self_<attr>` parameter the
+        # assignment resolved to, and the expression spelling the tail expects for it is
+        # the same `<name>.shape[d]` form with that parameter's name.
+        attribute:ast.expr = ast.Attribute(value=ast.Name(id=holder, ctx=ast.Load),
+                                           attr="shape", ctx=ast.Load)
+        return ast.Subscript(value=attribute,
+                             slice=ast.Constant(value=dimension), ctx=ast.Load)

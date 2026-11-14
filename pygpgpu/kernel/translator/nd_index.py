@@ -469,6 +469,14 @@ class _NdIndexMixin:
 
 
     def _shape0_range_param(self, iter_node:ast.expr)->Optional[str]:
+        """The parameter `range(X.shape[0])` sizes the dispatch from, or None.
+
+        The literal spelling is the subscript form. A bound held in a local
+        (`rows = out.shape[0]` above the loop, then `for p in range(rows)`) is the same
+        dispatch -- see `_shape0_range_param_of_local`, which resolves it through
+        `_shape_aliases`. A name with no alias (a plain counter, a caller's scalar) answers
+        None and stays the serial loop a work item runs itself.
+        """
         if not (isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name)
                 and iter_node.func.id == "range" and len(iter_node.args) == 1 and not iter_node.keywords):
             return None
