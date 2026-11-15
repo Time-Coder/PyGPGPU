@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/logo/pygpgpu_256.png" alt="PyGPGPU logo" width="200"/>
+<img src="https://raw.githubusercontent.com/Time-Coder/PyGPGPU/main/docs/logo/pygpgpu_256.png" alt="PyGPGPU logo" width="200"/>
 
 # PyGPGPU
 
@@ -8,7 +8,7 @@
 
 </div>
 
-装饰一个 Python 函数, 它就运行在 GPU 上——同一份代码, 四个后端 (**OpenCL / CUDA / HIP / Metal**), 外加一个在 CPU 上串行执行的解释器后端。
+用 `@kernel` 装饰一个 Python 函数, 它就运行在 GPU 上——同一份代码, 四个后端 (**OpenCL / CUDA / HIP / Metal**), 外加一个在 CPU 上串行执行的解释器后端。
 
 ```python
 import numpy as np
@@ -32,6 +32,65 @@ out = saxpy["python"](x, x, 2.0)    # 同一个函数, 在解释器里串行运�
 ```
 
 不需要写任何 GPU 代码、不需要拷贝内存、不需要关心工作区尺寸，像普通函数一样使用，顶层 for 循环自动并行化在 GPU 上运行。首次调用时自动翻译/编译并缓存, 之后零开销调用。
+
+一个完整的 Mandelbrot 渲染器, 全部用普通 Python 写成 ([examples/fractal/Mandelbrot.py](examples/fractal/Mandelbrot.py)): 子函数就是普通函数, 调色板返回 `float3` 向量, `@kernel(float=np.float64)` 以双精度运行, 图像就是返回值:
+
+![examples/fractal/Mandelbrot.py 在 GPU 上渲染的 Mandelbrot 集](https://raw.githubusercontent.com/Time-Coder/PyGPGPU/main/docs/Mandelbrot.jpg)
+
+```python
+import numpy as np
+from numpy.typing import NDArray
+from pygpgpu import kernel, float3
+import imageio.v3 as iio
+import math
+
+
+def escape_steps(c: complex, max_iter: int) -> int:
+    zn = 0j
+    abs_zn = abs(zn)
+    n: int = 0
+    while abs_zn <= 2 and n < max_iter:
+        zn = zn**2 + c
+        abs_zn = abs(zn)
+        n += 1
+
+    return n
+
+def palette(x: float)->float3:
+    return float3(
+        math.exp( - 60 * abs(x-3/4)**3.2 ),
+        math.exp( - 60 * abs(x-2/4)**3.2 ),
+        math.exp( - 60 * abs(x-1/4)**3.2 )
+    )
+
+image_width, image_height = 600, 400
+default_pixels_per_value = 150
+max_iter = 890
+
+@kernel(float=np.float64)
+def draw_MandelbrotSet(view_center: complex, scale: float) -> NDArray[np.uint8]:
+    image = np.zeros((image_height, image_width, 3), dtype=np.uint8)
+    value_per_pixel = 1 / (scale * default_pixels_per_value)
+    left_top_complex = complex(
+        view_center.real - 0.5*value_per_pixel*image.shape[1],
+        view_center.imag + 0.5*value_per_pixel*image.shape[0]
+    )
+    for i, j in np.ndindex(image.shape[0], image.shape[1]):
+        c = complex(
+            left_top_complex.real + j*value_per_pixel,
+            left_top_complex.imag - i*value_per_pixel
+        )
+        steps = escape_steps(c, max_iter)
+        color = palette(steps/max_iter)
+        image[i, j, 0] = 255 * color.r
+        image[i, j, 1] = 255 * color.g
+        image[i, j, 2] = 255 * color.b
+
+    return image
+
+image = draw_MandelbrotSet(-0.74364 + 0.13183j, 8000)
+iio.imwrite("Mandelbrot.jpg", image)
+```
 
 另外，已有手写 kernel 也没关系——PyGPGPU 还支持将 `.cl`/`.cu`/`.hip`/`.metal` 文件像 Python 模块一样直接 `import`，然后像使用普通 Python 函数一样调用其中的内核函数。
 

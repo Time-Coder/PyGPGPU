@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pygpgpu"
-version = "0.2.2"
+version = "0.2.3"
 description = "Run Python functions as GPU kernels with the @kernel decorator (OpenCL / CUDA / HIP); handwritten .cl/.cu/.hip kernels import like Python modules"
 readme = "README.md"
 requires-python = ">=3.7"
@@ -12,7 +12,7 @@ license = { file = "LICENSE" }
 authors = [
     { name = "王炳辉 (Bing-Hui WANG)", email = "binghui.wang@foxmail.com" }
 ]
-keywords = ["gpu", "opencl", "cuda", "hip", "rocm", "kernel", "jit"]
+keywords = ["gpu", "opencl", "cuda", "hip", "rocm", "metal", "kernel", "jit"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -107,6 +107,8 @@ dev = [
     "pytest>=8",
     "ruff>=0.9",
     "ty>=0.0.60",
+    "PySide6",
+    "scikit-image"
 ]
 
 [tool.setuptools.packages.find]
@@ -127,8 +129,8 @@ pythonpath = ["tests"]
 pygpgpu = ["py.typed", "**/*.pyi", "**/*.pyi.in", "kernel/include/*.h"]
 
 # What the sdist carries beyond the package itself is declared in MANIFEST.in: the
-# numbered scripts under examples/ ship as worked examples, while doc/ (4.6 MB of
-# vendor reference PDFs) is excluded.
+# sdist ships the installable package only -- examples/ stays in the repository,
+# and doc/ (4.6 MB of vendor reference PDFs) is excluded.
 
 # ---------------------------------------------------------------------------
 # ruff -- Python static checks (lint). Run: python -m ruff check
