@@ -24,7 +24,7 @@ def saxpy(x: np.ndarray, y: np.ndarray, alpha: float) -> np.ndarray:
 
 x = np.arange(1_000_000, dtype=np.float32)
 
-out = saxpy(x, x, 2.0)              # no backend given: probe cuda -> hip -> metal -> opencl
+out = saxpy(x, x, 2.0)              # no backend given: probe in DEFAULT_BACKEND_ORDER (Metal first on macOS)
 out = saxpy["cuda:0"](x, x, 2.0)    # the bracket switches backend per call
 out = saxpy["hip:0"](x, x, 2.0)     # backend:device
 out = saxpy["opencl:0"](x, x, 2.0)
@@ -110,7 +110,7 @@ Python >= 3.7. Bring your own GPU runtime — any one of them is enough:
 | Metal | macOS on a real Apple GPU | Compiles through the framework's own runtime; a Mac VM has no Metal device |
 | Python | nothing | Selected explicitly with `k["python"]`, never probed |
 
-Without an explicit backend, `@kernel` probes **cuda -> hip -> metal -> opencl** and takes the first that enumerates a device.
+Without an explicit backend, `@kernel` probes **cuda -> hip -> metal -> opencl** and takes the first that enumerates a device — except on **macOS**, where **metal** leads (`metal -> cuda -> hip -> opencl`): Apple machines ship no CUDA or HIP runtime, and macOS's OpenCL is deprecated, so the native backend is what a Mac should find first.
 
 Each backend reads its sources with a tree-sitter grammar, installed automatically as a dependency: `tree-sitter-opencl`, `tree-sitter-cuda37`, and [tree-sitter-metal](https://github.com/Time-Coder/tree-sitter-metal) (our own distribution — no MSL grammar was published on PyPI). All of them are built against the tree-sitter ABI that CPython 3.7 can load, so one install works from 3.7 through the current release.
 

@@ -13,6 +13,7 @@ The `@kernel` brackets and these two helpers all accept the same
 Run:
     python examples/02_backend_device_selection.py
 """
+import sys
 import numpy as np
 
 from pygpgpu import kernel, list_devices, get_device, DEFAULT_BACKEND_ORDER
@@ -26,7 +27,9 @@ def one_fill(out: np.ndarray):
 
 
 def main():
-    print("Default backend probe order:", DEFAULT_BACKEND_ORDER)
+    print("Default backend probe order:",
+          " -> ".join(DEFAULT_BACKEND_ORDER),
+          "(Metal first on macOS)" if sys.platform == "darwin" else "")
 
     sel = list_devices()
     print("Available devices:", sel)

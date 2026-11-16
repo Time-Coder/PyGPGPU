@@ -5,8 +5,9 @@ One Python source drives all three backends (OpenCL / CUDA / HIP):
 - the outermost `for i in range(<array>.shape[0])` loop becomes the work-item
   loop, and the work size (total thread count) defaults to that array's first
   dimension;
-- with no backend specified, the first available one is probed in the order
-  `cuda -> hip -> metal -> opencl`.
+- with no backend specified, the first available one is probed in the
+  platform-dependent DEFAULT_BACKEND_ORDER order: `metal -> cuda -> hip ->
+  opencl` on macOS, `cuda -> hip -> metal -> opencl` elsewhere.
 
 Run:
     python examples/01_basic_kernel.py
@@ -29,7 +30,8 @@ def main():
     y = np.random.rand(n).astype(np.float32)
     out = np.zeros_like(y)
 
-    # 1) No backend specified: auto-probe (cuda -> hip -> metal -> opencl)
+    # 1) No backend specified: auto-probe, in DEFAULT_BACKEND_ORDER (Metal
+    #    first on macOS)
     saxpy(x, y, out, 2.0)
     assert np.allclose(out, x * 2.0 + y)
     print("Default backend:", saxpy.backend, "- OK")

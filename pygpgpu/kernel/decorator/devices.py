@@ -1,5 +1,6 @@
 # Backend and device selection: the probe order, the selectors, the defaults.
 from __future__ import annotations
+import sys
 import threading
 from typing import (
     Dict,
@@ -22,8 +23,20 @@ _BACKEND_ALIASES:Dict[str, str] = {
     "python": "python", "py": "python", "host": "python",
 }
 
-# Probe order when no backend is specified: take the first backend that enumerates at least one device
-DEFAULT_BACKEND_ORDER:Tuple[str, ...] = ("cuda", "hip", "metal", "opencl")
+# The order every backend is tried in when nothing better names one: the driver runtimes
+# are probed in this sequence and the first that enumerates a device answers. Metal can
+# never win the default table -- CUDA and HIP precede it -- but Metal is also the backend
+# an Apple machine actually has: macOS ships no CUDA or HIP runtime, and the OpenCL
+# runtime there is Apple's deprecated one, so with the platform-blind order a Mac fell
+# through three absent runtimes and landed on that OpenCL device while its native backend
+# was available all along.
+_DEFAULT_DEVICE_ORDER:Tuple[str, ...] = ("cuda", "hip", "metal", "opencl")
+_MACOS_DEVICE_ORDER:Tuple[str, ...] = ("metal", "cuda", "hip", "opencl")
+
+# Probe order when no backend is specified: platform-dependent, so an Apple machine tries
+# its native backend first. Fixed at import, like the probe result itself.
+DEFAULT_BACKEND_ORDER:Tuple[str, ...] = (
+    _MACOS_DEVICE_ORDER if sys.platform == "darwin" else _DEFAULT_DEVICE_ORDER)
 
 _probed_backend:Optional[str] = None
 
@@ -84,8 +97,9 @@ def _install_parsed_default_devices(entries:Optional[DefaultDeviceEntries])->Non
     selector strings the brackets accept -- ``"backend"``, ``"backend:device"`` or a bare
     device name -- and each is tried until one resolves.
 
-    ``None`` (or an empty list) restores the built-in order (``cuda -> hip -> metal ->
-    opencl``).
+    ``None`` (or an empty list) restores the platform-dependent built-in order
+    (``metal -> cuda -> hip -> opencl`` on macOS, ``cuda -> hip -> metal -> opencl``
+    elsewhere).
 
     A kernel decorated with its own ``@kernel(default_device=...)`` walks that list
     instead; this setting decides what an unspecified call means for kernels that did not
@@ -212,7 +226,8 @@ def _builtin_probe_backend()->str:
     """The first backend in DEFAULT_BACKEND_ORDER that enumerates a device, probed once.
 
     The answer is cached in-process: probing imports the backend packages, and the order
-    itself does not change at runtime.
+    itself does not change at runtime. The order is platform-dependent -- on macOS Metal
+    leads -- but it is fixed at import either way.
     """
     global _probed_backend
     if _probed_backend is None:
@@ -434,7 +449,8 @@ def get_device(selector:str)->object:
 
     The backend part supports aliases (opencl/ocl/cl, cuda/cu, hip/rocm/amd); the device part is an
     index or a name/vendor/arch substring ("name:ordinal" disambiguates); with only the device part,
-    the default backend (probed, cuda -> hip -> opencl) is used.
+    the default backend (probed, in DEFAULT_BACKEND_ORDER's platform-dependent
+    order) is used.
     """
     backend:Optional[str]
     device_sel:Optional[str]

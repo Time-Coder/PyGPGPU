@@ -22,7 +22,7 @@ import os
 
 import numpy as np
 
-from pygpgpu import kernel, list_devices
+from pygpgpu import DEFAULT_BACKEND_ORDER, kernel, list_devices
 
 
 @kernel
@@ -42,7 +42,7 @@ def main() -> None:
     devices = list_devices()
     metal_devices = [name for name in devices if name.startswith("metal:")]
 
-    print("Default probe order:", " -> ".join(("cuda", "hip", "metal", "opencl")))
+    print("Default probe order:", DEFAULT_BACKEND_ORDER)
     print("Devices on this machine:", devices or "(none)")
     print()
 

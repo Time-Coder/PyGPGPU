@@ -9,7 +9,7 @@ matching the rest of the repository.
 
 ## Dependencies
 
-- Any single GPU backend is enough to run `01`–`05` (with no backend specified, they probe `cuda -> hip -> metal -> opencl`);
+- Any single GPU backend is enough to run `01`–`05` (with no backend specified, they probe in `DEFAULT_BACKEND_ORDER` — Metal first on macOS);
 - `06` imports one handwritten `.cl` file (OpenCL by default, available on nearly every platform);
 - `07` uses the low-level OOP API, on the default OpenCL device;
 - `08` compares backends only across the backends actually present on your machine — a missing one is skipped, so it always produces results;

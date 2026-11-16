@@ -5,13 +5,18 @@ from typing import Dict, List, Tuple
 
 
 
-# The extension each backend's sources carry, in the probe order `@kernel` uses.
-_BACKEND_EXTENSIONS:Tuple[Tuple[str, str], ...] = (
-    ("cuda", ".cu"),
-    ("hip", ".hip"),
-    ("metal", ".metal"),
-    ("opencl", ".cl"),
-)
+# The extension each backend's sources carry, in the probe order `@kernel` uses --
+# the same platform-dependent table the device selection walks, imported rather than
+# spelled a second time, so a Mac's handwritten module also resolves a bare call to
+# Metal before anything else. `kernel_import` imports the decorator module for its
+# device resolver already, so the import is free.
+from ..kernel.decorator.devices import DEFAULT_BACKEND_ORDER as _PROBE_ORDER
+
+_BACKEND_EXTENSIONS_BY_NAME:Dict[str, str] = {
+    "cuda": ".cu", "hip": ".hip", "metal": ".metal", "opencl": ".cl",
+}
+_BACKEND_EXTENSIONS:Tuple[Tuple[str, str], ...] = tuple(
+    (backend, _BACKEND_EXTENSIONS_BY_NAME[backend]) for backend in _PROBE_ORDER)
 
 # Where each backend keeps the parser that reads its sources. Both are stated once, so the
 # four backends differ only by name.

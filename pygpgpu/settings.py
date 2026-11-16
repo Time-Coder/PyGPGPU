@@ -158,7 +158,8 @@ class Config:
         What a kernel call without a bracket runs on, as a selector string (``"cuda:0"``,
         ``"opencl:cpu"``, a bare device name) or a list of them tried in order, falling
         back to the next when one is unusable. Reading it gives the effective list -- the
-        built-in probe order (``cuda -> hip -> metal -> opencl``) until one is set -- and
+        platform-dependent built-in probe order (``cuda -> hip -> metal -> opencl`` on
+        Windows/Linux, ``metal -> cuda -> hip -> opencl`` on macOS) until one is set -- and
         assigning ``None`` restores that order. It is read at call time, so it applies to
         kernels that were already decorated; a kernel declared with its own
         ``@kernel(default_device=...)`` walks that list instead and is unaffected.

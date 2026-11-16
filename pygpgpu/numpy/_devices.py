@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional, Tuple
 
-# Backend names, in the same spelling the kernel brackets use.
+# Backend names, in the same spelling the kernel brackets use. The identity walk below
+# (which backend owns this Device object?) covers every backend, so the order here is
+# only about which probe fails first -- the probe itself is cheap and the answer is
+# cached, so the kernel decorator's platform-dependent order is not needed; every
+# backend appears either way.
 BACKENDS: Tuple[str, ...] = ("cuda", "hip", "opencl", "metal")
 
 
@@ -67,7 +71,7 @@ def default_target() -> Target:
     """The device a copy targets when the caller names none.
 
     It is the kernel call's own default -- ``config.default_device`` when configured,
-    otherwise the ``cuda -> hip -> metal -> opencl`` probe -- so an array's plain
+    otherwise the platform-dependent probe (Metal first on macOS) -- so an array's plain
     ``to_device()`` lands where a plain ``kernel(...)`` call would run.
     """
     from ..kernel.decorator import _default_target

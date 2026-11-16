@@ -24,7 +24,7 @@ def saxpy(x: np.ndarray, y: np.ndarray, alpha: float) -> np.ndarray:
 
 x = np.arange(1_000_000, dtype=np.float32)
 
-out = saxpy(x, x, 2.0)              # 未指定后端: 按 cuda -> hip -> metal -> opencl 探测
+out = saxpy(x, x, 2.0)              # 未指定后端: 按 DEFAULT_BACKEND_ORDER 探测 (macOS 上 Metal 优先)
 out = saxpy["cuda:0"](x, x, 2.0)    # 中括号在每次调用时切换后端
 out = saxpy["hip:0"](x, x, 2.0)     # 后端:设备
 out = saxpy["opencl:0"](x, x, 2.0)
@@ -110,7 +110,7 @@ Python >= 3.7。GPU 运行时按需自备——任一即可:
 | Metal | 真实 Apple GPU 上的 macOS | 走框架自带的运行期编译器; Mac 虚拟机没有 Metal 设备 |
 | Python | 无 | 用 `k["python"]` 显式选择, 不参与自动探测 |
 
-`@kernel` 未指定后端时, 按 **cuda -> hip -> metal -> opencl** 顺序探测, 取第一个枚举到设备的后端。
+`@kernel` 未指定后端时, 按 **cuda -> hip -> metal -> opencl** 顺序探测, 取第一个枚举到设备的后端 —— **macOS 上例外**: Metal 排在最前 (`metal -> cuda -> hip -> opencl`)。Apple 机器没有 CUDA/HIP 运行时, macOS 自带的 OpenCL 又已废弃, 所以原生后端才是 Mac 应该最先找到的。
 
 每个后端都用 tree-sitter 语法读取源码, 通过依赖自动安装: `tree-sitter-opencl`、`tree-sitter-cuda37`, 以及 [tree-sitter-metal](https://github.com/Time-Coder/tree-sitter-metal)(本项目自己的发行版 —— PyPI 上没有可用的 MSL 语法)。它们都按 CPython 3.7 也能加载的 tree-sitter ABI 构建, 因此同一份安装从 3.7 一直到当前版本都可用。
 

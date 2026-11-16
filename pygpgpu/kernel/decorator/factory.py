@@ -27,7 +27,8 @@ def kernel(func:Optional[Callable[..., Any]]=None, *,
 
     A call without a bracket runs on the first usable entry of the kernel's own
     `default_device` list, then of `config.default_device`, then of the built-in probe
-    order (cuda -> hip -> metal -> opencl). The choice is made per call, not here.
+    order: platform-dependent, ``metal -> cuda -> hip -> opencl`` on macOS,
+    ``cuda -> hip -> metal -> opencl`` elsewhere). The choice is made per call, not here.
 
     Usage::
 
