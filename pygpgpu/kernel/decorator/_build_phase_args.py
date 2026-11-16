@@ -113,4 +113,10 @@ class _BuildPhaseArgsMixin:
                 if claims if claims is not None else plan.main_claims:
                     phase_args.append(plan.return_state["claim"])
                     phase_args.append(plan.return_state["site"])
+            # The exception slot and stop flag come after the return slots, the same order
+            # `render_exception_params` declares them in.
+            exception_state = getattr(plan, "exception_state", None) or {}
+            if exception_state:
+                phase_args.append(exception_state["site"])
+                phase_args.append(exception_state["stop"])
             return phase_args

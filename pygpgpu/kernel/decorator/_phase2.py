@@ -183,6 +183,14 @@ class _BuildLaunchMixin:
         plan.runtime_values:List[object] = list(plan.outer_state["full"]) + _created_arguments(plan.created)
         plan.return_state:Dict[str, object] = (self._alloc_return_slots(plan.returns)
                                       if plan.returns else {})
+        # The exception slot and stop flag: two one-element int buffers the device writes a
+        # raise into. They are allocated per launch (a raise is a fact about this call, not
+        # about the kernel) and appended in the order `render_exception_params` declares
+        # them, which is right after the return slots.
+        plan.raise_sites:List[Dict[str, object]] = list(
+            plan.launch_meta.get("raise_sites") or [])
+        plan.exception_state:Dict[str, object] = (
+            self._alloc_exception_slots() if plan.raise_sites else {})
         # Whether this launch's first kernel declares the return claim/site words. A
         # single-phase body has one kernel -- the main translator's -- and this is its own
         # answer; with several phases each entry of `phase_claims` decides instead. The

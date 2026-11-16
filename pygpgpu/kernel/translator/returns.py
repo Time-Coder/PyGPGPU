@@ -218,10 +218,19 @@ class _ReturnsMixin:
                              node:ast.Return)->None:
         """Give each value position of this site a slot, extending the shared layout.
 
-        A slot is keyed by its C element type, so two sites returning a float share one
-        buffer while a site returning an int gets a buffer of its own. A returned array
-        occupies no slot: the host hands back the very object it passed in.
+        A slot is keyed by its C element type so two *different* sites returning a float
+        share one buffer while a site returning an int gets a buffer of its own. A returned
+        array occupies no slot: the host hands back the very object it passed in.
+
+        **Two positions of one site never share a slot**, and that is the rule that matters
+        here: a body returning `a[i], a[i] * 2.0` has two float values and each needs its own
+        storage. Sharing them by type made the second store overwrite the first, so the
+        caller received `(6.0, 6.0)` for an input of `3.0` -- the first position's value was
+        gone. Only the launch's own claim/site words distinguish positions, not the slot, so
+        a site that reused a slot could never answer both values.
         """
+        taken:set = {slot for _ordinal, slot in self._site_slot_map.get(site, [])
+                     if slot >= 0}
         for ordinal, position in enumerate(positions):
             if position["kind"] != "value":
                 continue
@@ -232,16 +241,24 @@ class _ReturnsMixin:
                 self._site_slot_map.setdefault(site, []).append((ordinal, -1))
                 continue
             ctype:str = self._return_param_type(position["type"])
-            slot:Optional[int] = self._slot_for_type(ctype)
+            slot:Optional[int] = self._slot_for_type(ctype, taken)
             if slot is None:
                 slot = len(self.return_layout)
                 self.return_layout.append({"ctype": ctype, "type": position["type"]})
+            taken.add(slot)
             self._site_slot_map.setdefault(site, []).append((ordinal, slot))
 
 
-    def _slot_for_type(self, ctype:str)->Optional[int]:
+    def _slot_for_type(self, ctype:str, taken:Optional[set]=None)->Optional[int]:
+        """A slot already holding this element type, when one site is not using it.
+
+        `taken` is the set of slots the *current* site has already claimed; a slot in it
+        cannot be reused, because the two positions would overwrite each other.
+        """
         for index, entry in enumerate(self.return_layout):
             if entry["ctype"] == ctype:
+                if taken is not None and index in taken:
+                    continue
                 return index
         return None
 
@@ -316,6 +333,26 @@ class _ReturnsMixin:
         params.append(f"{qualifier}int* {self.RETURN_CLAIM}")
         params.append(f"{qualifier}int* {self.RETURN_SITE}")
         return params
+
+
+    def render_exception_params(self)->List[str]:
+        """The two device parameters a raising kernel needs: the site id and the stop flag.
+
+        A raise cannot carry a python exception through the driver -- the launch reports one
+        status word -- so the failure travels as data: the slot holds the id of the raise
+        site (1-based, so 0 means "nothing failed"), and the flag tells every other work item
+        to stop. Both are one-element int buffers the host reads back after the launch and
+        turns into the exception the body asked for.
+
+        Declared **after** the return slots. The host appends them in the same order, so a
+        kernel with both a return and a raise keeps every earlier parameter position
+        unchanged.
+        """
+        if not self.has_raises:
+            return []
+        qualifier:str = self._buffer_qualifier()
+        return [f"{qualifier}int* {self.EXCEPTION_SLOT}",
+                f"{qualifier}int* {self.EXCEPTION_STOP}"]
 
 
     def _buffer_qualifier(self)->str:

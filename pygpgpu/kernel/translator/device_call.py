@@ -91,7 +91,13 @@ class _DeviceCallMixin:
                                     and not receiver_as_argument else [])
                                  + list(self_types.values()))
 
-        sig_key:Tuple[Callable, Tuple[object, ...]] = (raw_func, tuple(param_types))
+        # The helper's generated code embeds where its raise sites land in the *caller's*
+        # table (`EXCEPTION_BASE`), so two call sites with different bases are two different
+        # functions. Only a raising helper has a base at all, and a non-raising one keys
+        # exactly as it always did.
+        exception_base:int = len(self.raise_sites)
+        sig_key:Tuple[Callable, Tuple[object, ...], int] = (
+            raw_func, tuple(param_types), exception_base)
         entry:Optional[Dict[str, object]] = self.device_cache.get(sig_key)
         if entry is not None:
             if entry["status"] == "in_progress":
@@ -109,6 +115,14 @@ class _DeviceCallMixin:
                 # parameters; the caller passes its own (it has them, being a kernel or
                 # another helper that received them the same way).
                 argument_codes.extend(self._prologue_parameter_arguments())
+            if entry.get("needs_exception"):
+                # The callee can raise, so it declared the exception slot and stop flag; the
+                # caller forwards its own. The site ids the callee emitted are already
+                # absolute (its `raise_site_base` was this caller's total at render time), so
+                # adopting its table is a plain extend.
+                self._adopt_raise_sites(entry)
+                argument_codes.append(self.EXCEPTION_SLOT)
+                argument_codes.append(self.EXCEPTION_STOP)
             return (f"{entry['c_name']}({', '.join(argument_codes)})",
                     entry["return_type"])
 
@@ -134,6 +148,11 @@ class _DeviceCallMixin:
                 # `_python_complex_kind`). Without this the helper silently answered the
                 # default while its caller was mapped to a double.
                 type_map=self.type_map)
+            # A helper that raises writes `base + local id` into the slot, so it has to know
+            # where its sites land in *this* caller's table **before** it translates -- the
+            # number is baked into the emitted code, which is also why the base is part of
+            # the cache key above.
+            callee.raise_site_base = exception_base
             callee.translate()
             c_name:str = self._device_func_name(raw_func, param_types)
             # A helper that indexes a multi-dimensional array needs that array's extents, and
@@ -161,6 +180,14 @@ class _DeviceCallMixin:
                 # (render_device appends the matching declarations).
                 "tuple_return_types": list(callee.tuple_return_types or []),
                 "needs_prologue": callee._needs_prologue_parameters(),
+                # The callee can raise, so its signature carries the exception slot and stop
+                # flag; the call site forwards the caller's own (render_device appends the
+                # matching declarations after everything else).
+                "needs_exception": bool(getattr(callee, "has_raises", False)),
+                # The raise sites this helper owns, with ids local to it. The caller rebases
+                # them onto its own list when it forwards the call (see the call-site
+                # branches), because the id the device writes indexes the *kernel's* table.
+                "raise_sites": list(getattr(callee, "raise_sites", None) or []),
                 "code": callee.render_device(c_name, shape_params),
                 "shape_params": [list(shape) for shape in shape_params],
                 "outer_codes": outer_codes,
@@ -208,7 +235,27 @@ class _DeviceCallMixin:
             # A tuple return: the destinations the call site unpacks into, appended in
             # the helper's own order (see render_device, which declares them last).
             argument_codes.extend(tuple_targets)
+        if entry.get("needs_exception"):
+            # The callee can raise, so it declared the exception slot and stop flag; the
+            # caller forwards its own. Its ids are already absolute (see the cache-key note).
+            self._adopt_raise_sites(entry)
+            argument_codes.append(self.EXCEPTION_SLOT)
+            argument_codes.append(self.EXCEPTION_STOP)
         return (f"{entry['c_name']}({', '.join(argument_codes)})", entry["return_type"])
+
+
+    def _adopt_raise_sites(self, entry:Dict[str, object])->None:
+        """Take a raising helper's sites onto this translation unit's own table.
+
+        The helper emitted `raise_site_base + local id` into its code, and the base was this
+        caller's total when the helper was rendered -- so the ids already line up with the
+        positions the sites take here, and adopting them is a plain append.
+        """
+        if not entry.get("needs_exception"):
+            return
+        self.has_raises = True
+        for site in entry.get("raise_sites") or []:  # type: ignore[union-attr]
+            self.raise_sites.append(dict(site))  # type: ignore[arg-type]
 
 
     def _device_func_name(self, func:Callable, types:List[object])->str:

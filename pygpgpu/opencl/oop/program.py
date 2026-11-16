@@ -218,7 +218,13 @@ class Program(CLObject):
         CL.clGetProgramInfo(self.id, cl_program_info.CL_PROGRAM_BINARIES, result_size, binaries, None)
 
         for i in range(self.n_devices):
-            binary = string_at(binaries[0], binary_sizes[self.devices[i]])
+            # One buffer per device: `clGetProgramInfo` fills `binaries[i]` with the program
+            # built for `devices[i]`, so the bytes of a device are at its own index. Reading
+            # `binaries[0]` for every device copied device 0's program into every entry --
+            # a multi-device context then cached the wrong binary under the other devices'
+            # keys, and the next load handed the driver bytes for a device it was not built
+            # for.
+            binary = string_at(binaries[i], binary_sizes[self.devices[i]])
             self._binaries[self.devices[i]] = binary
 
         return self._binaries

@@ -21,9 +21,10 @@ from .predicates import (
     is_int,
     is_ptr,
 )
+from .print_fstring import _PrintFStringMixin
 
 
-class _PrintEmitMixin:
+class _PrintEmitMixin(_PrintFStringMixin):
 
     def _is_print_call(self, node:ast.expr)->bool:
         """True for a statement-level call of the builtin ``print``.
@@ -103,37 +104,6 @@ class _PrintEmitMixin:
         self._emit_print_leaves(leaves, selectors, call, terminator)
 
 
-    def _print_fstring(self, node:ast.JoinedStr)->List[Tuple[str, str, Any]]:
-        """An f-string as print pieces: its literal runs are text, its fields are values.
-
-        `f"slot {i}"` is the same output as `print("slot", i, sep="")`, and that is how it is
-        emitted -- python's f-string is a `JoinStr` of `Constant` and `FormattedValue` parts,
-        and the second sort is exactly one value. A conversion (`!r`/`!s`/`!a`) or a format
-        spec (`:>4`, `:.2f`) asks python's formatting machinery for text the device has no
-        formatter for, so each is refused with the reason rather than silently ignored.
-        """
-        pieces:List[Tuple[str, str, Any]] = []
-        for part in node.values:
-            if isinstance(part, ast.Constant) and isinstance(part.value, str):
-                pieces.append(("text", part.value, None))
-                continue
-            if not isinstance(part, ast.FormattedValue):
-                self._error(
-                    "an f-string part has no device form: use literal text and plain "
-                    "`{expression}` fields", part)
-            if part.conversion not in (-1, None):
-                self._error(
-                    "an f-string conversion (`!r`, `!s`, `!a`) formats through python's "
-                    "repr/str, which the device has no formatter for: print the value in a "
-                    "plain `{expression}` field instead", part)
-            if part.format_spec is not None:
-                self._error(
-                    "an f-string format spec (`{value:>4}`, `{value:.2f}`) needs python's "
-                    "formatting machinery, which the device does not have: print the value "
-                    "in a plain `{expression}` field instead", part)
-            pieces.extend(self._print_argument(part.value))
-        return pieces
-
 
     def _print_sep_end(self, call:ast.Call)->Tuple[str, str]:
         """The separator and terminator a print() call asks for.
@@ -174,7 +144,7 @@ class _PrintEmitMixin:
         return separator, terminator
 
 
-    def _print_argument(self, node:ast.expr)->List[Tuple[str, str, Any]]:
+    def _print_argument(self, node:ast.expr, spec:str="")->List[Tuple[str, str, Any]]:
         """Split one print() argument into pieces.
 
         A piece is one of:
@@ -183,6 +153,8 @@ class _PrintEmitMixin:
           ("bool", code, "bool")    a bool, printed as True/False
           ("real", code, type)      a float or double, printed like python's repr
           ("vec", code, type)       a vector, printed like its python repr
+          ("conversion", code, conv) a value printed through an explicit printf conversion
+                                    (an f-string's numeric format spec)
 
         An f-string is exactly a list of those pieces already: its literal runs are fixed
         text and each `{expression}` is one value, so it is expanded here rather than
@@ -199,6 +171,9 @@ class _PrintEmitMixin:
             return [("text", node.value, None)]
 
         code, t = self._visit_expression(node)
+        if spec:
+            conversion:str = self._printf_conversion(spec, t, node)
+            return [("conversion", code, conversion)]
         if is_vec(t):
             return [("vec", code, t)]
         if is_ptr(t):
@@ -213,6 +188,7 @@ class _PrintEmitMixin:
         if is_int(t):
             return [("int", code, t)]
         self._error(f"print() does not support a value of type {t}", node)
+
 
 
     def _expand_print_pieces(self, pieces:List[Tuple[str, str, Any]],
@@ -231,6 +207,12 @@ class _PrintEmitMixin:
                 conversion:str = "%" + self._int_format(extra)
                 argument:str = self._int_argument(code, extra)
                 leaves[:] = [(fmt + conversion, args + [argument]) for fmt, args in leaves]
+            elif kind == "conversion":
+                # An explicit printf conversion from an f-string's format spec: the text is
+                # fixed (the conversion was built at translation time), so every leaf takes
+                # the same one and no selector is involved.
+                argument = self._conversion_argument(code, extra)
+                leaves[:] = [(fmt + extra, args + [argument]) for fmt, args in leaves]
             elif kind == "bool":
                 # Python prints a bool as True/False, and no printf conversion produces
                 # that text from a computed value, so the line is split into the two
@@ -469,6 +451,19 @@ class _PrintEmitMixin:
         """The C expression the printf conversion for an integer type expects."""
         cast:str = PRINT_INT_CASTS[self.printf_backend].get(t, "int")
         return f"({cast})({code})"
+
+
+    def _conversion_argument(self, code:str, conversion:str)->str:
+        """The C argument an explicit printf conversion expects.
+
+        A `d` conversion needs the integer cast the other integer print paths use; every
+        real conversion takes a `double`, which is what printf's `%f`/`%e`/`%g` family
+        reads, so the value is widened exactly once here.
+        """
+        type_letter:str = conversion[-1]
+        if type_letter == "d":
+            return f"((long long)({code}))"
+        return f"((double)({code}))"
 
 
     def _c_string_text(self, text:str)->str:

@@ -322,6 +322,12 @@ def _parse_work_item(item:object)->Tuple[Optional[Tuple[int, ...]], Optional[Tup
             return blocks, threads
         return blocks_to_global(blocks, threads)
 
+    if item is None:
+        # The automatic work size, in the spelling the refusal below tells the caller to
+        # use. It used to reach that `raise` -- `norm` recognises None, but it is only
+        # called from the int and tuple branches, so the plain form was the one spelling of
+        # "automatic" that failed while `(None,)` and `(4, None)` both worked.
+        return None, None
     if isinstance(item, int):
         return norm(item), None
     if isinstance(item, tuple):
@@ -382,7 +388,12 @@ def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[object, str]:
             index = int(idx_part)
 
     if sel.isdigit():
-        i:int = int(sel)
+        # A numeric selector is an index, and a `:ordinal` after it is an offset into the
+        # single match it names -- so `"0:1"` is device 1, not a silently ignored suffix.
+        # The ordinal used to be read into `index` and then dropped here, which made
+        # `"0:0"` and `"0:1"` resolve to the same device: a caller asking for the second GPU
+        # ran on the first, and nothing said so.
+        i:int = int(sel) + index
         if not (0 <= i < len(devices)):
             raise ValueError(f"device index {i} out of range (0..{len(devices)-1}) for backend '{backend}'")
         return devices[i], devices[i].name

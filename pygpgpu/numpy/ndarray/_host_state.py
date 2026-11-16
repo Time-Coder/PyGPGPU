@@ -74,10 +74,23 @@ class _HostStateMixin:
             return family.data, 0
         view = self.view(np.ndarray)
         if view.flags["C_CONTIGUOUS"] and root is not None:
-            offset = int(view.__array_interface__["data"][0]) - int(
+            byte_offset = int(view.__array_interface__["data"][0]) - int(
                 root.view(np.ndarray).__array_interface__["data"][0])
-            if 0 <= offset <= family.data.nbytes - view.nbytes:
-                return family.data[offset:offset + view.nbytes], offset
+            if 0 <= byte_offset <= family.data.nbytes - view.nbytes:
+                # The difference above is a **byte** offset; indexing a numpy array takes an
+                # *element* one. Dividing by the itemsize is the whole conversion, and its
+                # absence put a float32 view of `a[2:7]` at element 8 instead of element 2 --
+                # so the kernel's write landed at `a[8:10]`, outside the caller's view, and
+                # the view itself never changed.
+                #
+                # The slice is taken from the *flat* buffer: the family's data may be
+                # multi-dimensional (a 2-D root's row view is offset 16 in a (3, 4) array),
+                # and `data[4:8]` on axis 0 of that array is empty, not the four elements the
+                # view occupies.
+                flat: np.ndarray = family.data.reshape(-1)
+                start: int = byte_offset // family.data.itemsize
+                stop: int = start + view.size
+                return flat[start:stop], byte_offset
         # A non-contiguous or unrepresentable view: keep its own contiguous copy.
         if self._staging is None or self._staging_epoch < family.current_epoch:
             self._staging = np.ascontiguousarray(view)

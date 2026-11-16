@@ -26,6 +26,60 @@ from ._typing import (
 
 class _PykernelReturnsMixin:
 
+    def _alloc_exception_slots(self)->Dict[str, object]:
+        """The two one-element buffers a raising kernel writes its failure into.
+
+        Both are zero-initialised: a site id of 0 means "nothing raised", so a launch that
+        never failed reads back as zero and the host raises nothing.
+        """
+        return {"site": np.zeros(1, dtype=np.int32),
+                "stop": np.zeros(1, dtype=np.int32)}
+
+    def _raise_from_exception_slot(self, exception_state:Dict[str, object],
+                                   raise_sites:List[Dict[str, object]],
+                                   full:List[object],
+                                   launch_meta:Dict[str, object],
+                                   raw_func:object = None)->None:
+        """Raise the exception the device recorded, or return when nothing failed.
+
+        A device launch cannot carry a python exception, so the failing work item writes the
+        id of its raise site into the slot and this rebuilds the class, the message and the
+        line the body named. The traceback is trimmed the way a body's failure always is
+        (see `_native_argument_errors`): the caller's frame, then the line that raised, so
+        the report reads exactly like the same `raise` running on the interpreter.
+        """
+        site_id:int = int(exception_state["site"][0])
+        if site_id <= 0:
+            return
+        index:int = site_id - 1
+        if index >= len(raise_sites):
+            raise RuntimeError(
+                f"the device reported raise site {site_id}, but this kernel declares "
+                f"{len(raise_sites)}; the compiled binary and the launch disagree")
+        site:Dict[str, object] = raise_sites[index]
+        class_name:str = str(site.get("class") or "Exception")
+        message:object = site.get("message")
+        error_class:type = self._exception_class_for(class_name)
+        exception:BaseException = (error_class(message) if message is not None
+                                   else error_class())
+        line:int = int(site.get("line") or 0)
+        if line:
+            first_line:int = int(launch_meta.get("source_first_line", 1) or 1)
+            exception.lineno = first_line + line - 1  # type: ignore[attr-defined]
+            exception.filename = getattr(raw_func, "__code__", None) and \
+                getattr(raw_func.__code__, "co_filename", "") or ""  # type: ignore[attr-defined]
+        raise exception
+
+    @staticmethod
+    def _exception_class_for(class_name:str)->type:
+        """The builtin exception class that name stands for, or `Exception`."""
+        import builtins
+
+        candidate:object = getattr(builtins, class_name, None)
+        if isinstance(candidate, type) and issubclass(candidate, BaseException):
+            return candidate
+        return Exception
+
     def _alloc_return_slots(self, returns:ReturnSlots)->ReturnState:
         """One device buffer per value slot, plus the shared claim and site words.
 

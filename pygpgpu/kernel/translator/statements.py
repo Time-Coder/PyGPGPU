@@ -15,9 +15,27 @@ from .predicates import (
     is_int,
     is_ptr,
 )
+from .raise_emit import _RaiseMixin
 
 
-class _StatementsMixin:
+# A `range()` step arrives as translated C text. A negative literal is wrapped in the
+# parentheses the unary-minus visitor emits (`(-1)`), so a plain `-?\d+` match refuses it --
+# and the refusal ("step must be a constant integer") is wrong, because the constant is
+# right there. Peeling whole-expression parentheses first makes the sign readable.
+_STEP_WRAPPER = re.compile(r"^\s*\(\s*(.*?)\s*\)\s*$")
+
+
+def _bare_integer_step(step:str)->str:
+    """The step's text with any whole-expression parentheses removed."""
+    text:str = step.strip()
+    while True:
+        match = _STEP_WRAPPER.match(text)
+        if match is None or match.group(1) == text:
+            return text
+        text = match.group(1).strip()
+
+
+class _StatementsMixin(_RaiseMixin):
 
     def _visit_statement(self, node:ast.stmt)->None:
         # A creation statement was executed by the interpreter and travels as a parameter,
@@ -74,6 +92,11 @@ class _StatementsMixin:
             # Same as the `if` above: the condition arrives with its own pair.
             self._emit(f"while {cond}")
             self._emit("{")
+            self._indent += 1
+            try:
+                self._emit_exception_checkpoint()
+            finally:
+                self._indent -= 1
             self._push_scope_block(node.body, is_loop=True)
             self._emit("}")
             self._emit_blank()
@@ -123,6 +146,8 @@ class _StatementsMixin:
             self._visit_loop_exit(node, "continue")
         elif isinstance(node, ast.Raise):
             self._visit_raise(node)
+        elif isinstance(node, ast.Assert):
+            self._visit_assert(node)
         elif isinstance(node, (ast.Nonlocal, ast.Global)):
             # The scope declarations themselves emit nothing: they were already read while
             # binding the outer variables (see _bind_outer_variables), so the name travels
@@ -223,15 +248,22 @@ class _StatementsMixin:
 
         if step is None:
             self._emit(f"for (int {counter} = {start}; {counter} < {stop}; {counter}++)")
-        elif re.fullmatch(r"-?\d+", step):
-            cond_op:str = (">" if step.startswith("-") else "<")
-            self._emit(f"for (int {counter} = {start}; {counter} {cond_op} {stop}; {counter} += {step})")
+        elif re.fullmatch(r"-?\d+", _bare_integer_step(step)):
+            # The step is a translated expression, and a *negative* literal arrives wrapped
+            # in the parentheses `_visit_unaryop` emits for `-1` -- `(-1)`, not `-1` -- so
+            # matching the raw text refused every descending `range()` with "step must be a
+            # constant integer" even though the constant was right there. The wrapper is
+            # peeled before the test, and the sign is read from what is left.
+            normalized:str = _bare_integer_step(step)
+            cond_op:str = (">" if normalized.startswith("-") else "<")
+            self._emit(f"for (int {counter} = {start}; {counter} {cond_op} {stop}; {counter} += {normalized})")
         else:
             self._error("range() step must be a constant integer", node.iter.args[-1])
         self._emit("{")
         self._indent += 1
         try:
             self._emit(f"{target} = {counter};")
+            self._emit_exception_checkpoint()
         finally:
             self._indent -= 1
         self._push_scope_block(node.body, is_loop=True)
@@ -303,34 +335,4 @@ class _StatementsMixin:
             self.loop_depth -= 1
             self._indent -= 1
         self._emit("}")
-        self._emit_blank()
-
-
-    def _visit_raise(self, node:ast.Raise)->None:
-        """`raise` as what it means on a device: abort the whole launch.
-
-        Python's raise unwinds into the caller; a device work item cannot unwind into
-        python at all, so the closest a device gets is the backend's own abort -- one
-        instruction that ends every work item of the launch. The exception object and its
-        message are lost, which is the price of the spelling: a device helper that needs
-        the *value* of a failure answers it through a slot the caller checks (the way the
-        return machinery answers a tuple). The interpreter backend runs python, so it
-        raises the real exception and needs none of this.
-
-        Backends differ in what the abort is: CUDA's NVRTC takes the PTX trap, HIP's clang
-        takes the compiler builtin (ROCm's HIP headers declare no trap function, and inline
-        PTX would be rejected on AMD), and OpenCL C and Metal have no portable abort at
-        all. There the statement is emitted as a comment naming the limitation, so a guard
-        that fires continues the work item instead of aborting the launch -- the one
-        spelling that still compiles everywhere, and the reason a raise should carry an
-        error slot rather than rely on the abort when OpenCL or Metal is a target.
-        """
-        if self.launch_backend == "cuda":
-            self._emit('asm("trap;");')
-        elif self.launch_backend == "hip":
-            self._emit("__builtin_trap();")
-        else:
-            self._emit("/* raise: no portable abort on this backend (OpenCL C / MSL); "
-                       "a fired guard continues this work item instead of ending the "
-                       "launch. Answer failures through a value the caller checks. */")
         self._emit_blank()

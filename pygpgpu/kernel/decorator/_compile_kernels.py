@@ -11,6 +11,30 @@ from typing import (
 from .. import source_paths
 
 
+def _merged_raise_sites(translator:object)->list:
+    """Every raise site of this kernel, in the order the device ids will index them.
+
+    A single-loop body has one translator; a body split into phases has one per phase, and
+    the phases run in order -- each phase's kernel numbers its own sites from zero, so the
+    ids have to be rebased onto the merged list for the host's lookup to land on the site
+    that actually raised.
+    """
+    merged:list = []
+    phase_translators = getattr(translator, "phase_translators", None) or []
+    translators = phase_translators if phase_translators else [translator]
+    for each in translators:
+        sites = getattr(each, "raise_sites", None) or []
+        if not sites:
+            continue
+        base = len(merged)
+        for site in sites:
+            entry = dict(site)
+            entry["local_id"] = int(entry.get("id", 0))
+            entry["id"] = base + entry["local_id"]
+            merged.append(entry)
+    return merged
+
+
 class _CompileKernelsMixin:
 
     def _compile_kernels(self, plan:object, args:List[object], arg_types:List[object],
@@ -253,6 +277,13 @@ class _CompileKernelsMixin:
                  "main_claims": (bool(plan.translator.phase_translators[0]._claims_on_device)
                                  if plan.translator.phase_translators
                                  else bool(plan.translator._claims_on_device)),
+                 # Every raise the generated code contains, in source order. Its index (plus
+                 # one) is the id the device writes into the exception slot, and the host
+                 # rebuilds the class, message and line from this table after the launch
+                 # (see _raise_from_exception_slot). Phases contribute their own sites, in
+                 # the order the phases run, so the id the device writes always indexes the
+                 # site that raised.
+                 "raise_sites": _merged_raise_sites(plan.translator),
                  # The statements after the last magic loop, for a body split into passes:
                  # `body_tail` above belongs to a single-loop body, whose translation never
                  # enters _translate_phase_kernels. The last phase's own tail is the one the

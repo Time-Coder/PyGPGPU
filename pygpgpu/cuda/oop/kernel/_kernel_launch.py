@@ -118,13 +118,17 @@ class _KernelLaunchMixin:
 
     def _after_call(self, stream:Stream, bound:Dict[str, object]):
         
-        def on_completed(arg_info:ArgInfo, arg_value:object, mem_obj:MemObject, stream:Stream, error_code:CUresult):
+        def on_completed(arg_info:ArgInfo, arg_value:object, mem_obj:MemObject, claim_serial:int,
+                         stream:Stream, error_code:CUresult):
             if error_code == CUresult.CUDA_SUCCESS:
                 self._copy_to_host(arg_value, mem_obj)
                 if CUDA.print_info:
                     print(f"copy data to host for argument '{arg_info.name}'")
 
-            mem_obj.unuse()
+            # The serial captured at claim time: the callback runs on a driver thread and
+            # the caller's next launch may already hold a new claim on this buffer, which a
+            # release without the serial would free (see MemObject.unuse).
+            mem_obj.unuse(claim_serial)
         
         for arg_info in self._args.values():
             entry = bound.get(arg_info.name)
@@ -149,8 +153,11 @@ class _KernelLaunchMixin:
             if not arg_info.need_read_back:
                 # Read-only/write-only arguments must also return their buffer to the pool once the kernel finishes, otherwise each call leaks one pooled object
                 if mem_obj is not None:
-                    def on_release(stream:Stream, error_code:CUresult, mem_obj:MemObject=mem_obj):
-                        mem_obj.unuse()
+                    release_serial:int = mem_obj.claim_serial
+
+                    def on_release(stream:Stream, error_code:CUresult, mem_obj:MemObject=mem_obj,
+                                   claim_serial:int=release_serial):
+                        mem_obj.unuse(claim_serial)
                     stream.add_callback(on_release)
                 continue
 
@@ -160,8 +167,9 @@ class _KernelLaunchMixin:
                 raise RuntimeError(
                     f"argument '{arg_info.name}' has no device buffer to read back")
 
+            read_serial:int = mem_obj.claim_serial
             mem_obj.read(stream)
-            callback = partial(on_completed, arg_info, arg_value, mem_obj)
+            callback = partial(on_completed, arg_info, arg_value, mem_obj, read_serial)
             stream.add_callback(callback)
 
 

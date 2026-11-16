@@ -5,6 +5,7 @@ from typing_extensions import override
 from ctypes import c_void_p
 from abc import abstractmethod
 import time
+import threading
 
 from ..driver import (
     CUdeviceptr,
@@ -28,6 +29,11 @@ class MemObject(CUObject):
         self._host_ptr:HostPointer = host_ptr
         self._size:int = size
         self._using:bool = False
+        # The claim's serial and the lock that guards it: a release arrives from a driver
+        # callback thread while the caller's next launch may already hold a new claim (see
+        # `use`/`unuse`). Four fields, same contract as the OpenCL pool's.
+        self._claim_serial:int = 0
+        self._claim_lock:threading.Lock = threading.Lock()
         self._dirty_on_device:bool = False
         self._dirty_on_host:bool = False
         self._device_dirty_time:float = 0.0
@@ -110,17 +116,44 @@ class MemObject(CUObject):
     def kernel_flags(self, flags:KernelFlags)->None:
         self._kernel_flags = flags
     
-    def use(self)->None:
-        if self._using:
-            raise RuntimeError("mem obj is still in using")
+    def use(self)->int:
+        """Claim the buffer and return the claim's serial for its release.
 
-        self._using = True
+        The serial is what makes a *late* release harmless. A pooled buffer is handed back
+        from a driver callback (the read-back completion), and a rapid caller can have the
+        same buffer handed out again before that callback fires. A release carrying the old
+        serial then belongs to a claim that has already ended, and returning it would free
+        the new holder's claim -- handing the buffer out twice. The OpenCL pool already
+        carried this; CUDA's `unuse()` raised instead, from a driver thread.
+        """
+        with self._claim_lock:
+            if self._using:
+                raise RuntimeError("mem obj is still in using")
 
-    def unuse(self)->None:
-        if not self._using:
-            raise RuntimeError("mem obj is not in using")
+            self._using = True
+            self._claim_serial += 1
+            return self._claim_serial
 
-        self._using = False
+    def unuse(self, claim_serial:Optional[int]=None)->None:
+        """Return the claim made by `use`, identified by its serial.
+
+        A stale serial (or none, from the synchronous path) is handled the way the OpenCL
+        pool handles it: a mismatch is a no-op, because the claim it names has already been
+        returned and the current holder must keep the buffer.
+        """
+        with self._claim_lock:
+            if not self._using:
+                return
+            if claim_serial is not None and claim_serial != self._claim_serial:
+                return
+
+            self._using = False
+
+    @property
+    def claim_serial(self)->int:
+        """The serial of the claim currently held, for a release that validates it."""
+        with self._claim_lock:
+            return self._claim_serial
     
     def __len__(self)->int:
         return self._size

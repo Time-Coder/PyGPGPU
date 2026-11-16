@@ -317,6 +317,12 @@ class _RunLaunchMixin:
                                                if plan.position < len(plan.phase_claims) else True))
         # The statements after the last loop are python: they run once, on the host, now that
         # every work item has finished -- the same moment python would run them.
+        # A raise recorded by a work item is checked *before* the host tail: the tail is the
+        # code after the loop, and a body that raised never reaches it. Checking here keeps
+        # the two in python's order.
+        if plan.exception_state:
+            self._raise_from_exception_slot(plan.exception_state, plan.raise_sites,
+                                            plan.full, plan.launch_meta, self.raw_func)
         plan.tail_writable:Dict[str, np.ndarray] = {
             plan.entry["name"]: plan.entry["buffer"] for plan.entry in plan.outer_state["writable"]} \
             if plan.outer_state else {}

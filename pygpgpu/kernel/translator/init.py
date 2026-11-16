@@ -328,6 +328,19 @@ class _InitMixin:
             # PyKernel._run_host_region), so it never claims, and the claim/site words it would
             # otherwise declare are two wasted uploads and two never-read parameters.
             self._claims_on_device:bool = False
+            # The raises this kernel contains, in source order. Each entry is
+            # {"class": <name>, "message": <literal or None>, "line": <user line>}, and its
+            # index in this list is the id the device writes into the exception slot. A
+            # device launch reports one status word and cannot carry a python object, so the
+            # *data* of the failure travels instead and the host rebuilds the exception from
+            # this table -- type, message and line all come back.
+            self.raise_sites:List[Dict[str, object]] = []
+            # True when a raise reached the generated code, so the render adds the exception
+            # slot and the host reads it after the launch.
+            self.has_raises:bool = False
+            # The line indexes where a raise left its exit statement, patched to the right
+            # `return` once this unit's return type is known (see patch_raise_exits).
+            self._raise_exit_lines:List[int] = []
             # How many real C loops enclose the statement being visited. Only a nested serial
             # `for`/`while` that is emitted as a loop counts: the magic loop itself does not,
             # because it becomes the work-item dispatch rather than a loop in the generated

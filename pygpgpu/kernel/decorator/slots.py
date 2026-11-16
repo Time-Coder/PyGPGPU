@@ -73,8 +73,31 @@ def _return_value(raw:object, dtype:object, kind:str)->object:
 
     ``kind`` is the translator's type name for the returned position, which is how a
     byte-valued slot is turned back into the bool or the char it came from.
+
+    A **record** is answered before the vector table is consulted, and the order is
+    load-bearing: that table is keyed on the dtype's string form, and a two-float user
+    structure spells exactly what a ``float2`` does. Looking the vector up first handed the
+    caller a ``pygf`` vector object for its own structure, so ``result["x"]`` -- the way the
+    body read the record -- raised. The layout alone cannot tell the two apart; being a
+    record (``dtype.fields``) can.
     """
     global _VEC_RETURN_TYPES
+    from ..structs.layout import is_record as _is_record_dtype
+    if _is_record_dtype(dtype):
+        # A structure slot holds a record: the caller gets the record itself, and reads its
+        # members exactly as the kernel body did (`result["i"]`).
+        #
+        # This branch comes FIRST, and both halves are load-bearing. `structs.is_record` is
+        # what tells a user structure from a vector -- `dtype.fields` alone cannot, because a
+        # vector's own numpy dtype is structured too (`float2` is `[('x','<f4'),('y','<f4')]`),
+        # which is exactly why the old vector-first lookup handed a `pygf.float2` back for a
+        # user's `[('x','<f4'),('y','<f4')]` record. And the slot buffer is a
+        # `pygf.VectorArray`, whose element access converts a record-shaped element into the
+        # matching vector, so `np.asarray(raw).reshape(())[()]` is already a vector by the
+        # time it answers: the record has to be read through `view(np.ndarray)`.
+        native:np.ndarray = np.asarray(raw).view(np.ndarray)
+        return native.reshape(())[()]
+    value:object = np.asarray(raw).reshape(())[()]
     if not _VEC_RETURN_TYPES:
         # The host's own classes: a value slot holds the host layout (a 3-component vector
         # has three components there), which is what the caller gets back.
@@ -85,11 +108,6 @@ def _return_value(raw:object, dtype:object, kind:str)->object:
     vector:object = _VEC_RETURN_TYPES.get(str(np.dtype(dtype)))
     if vector is not None:
         return vector.from_buffer_copy(np.asarray(raw).tobytes())
-    value:object = np.asarray(raw).reshape(())[()]
-    if isinstance(dtype, np.dtype) and dtype.fields is not None:
-        # A structure slot holds a record: the caller gets the record itself, and reads its
-        # members exactly as the kernel body did (`result["i"]`).
-        return value
     if kind == "c64" or kind == "c128":
         # A complex slot holds the complex layout, so the value is already a complex number.
         return complex(value)

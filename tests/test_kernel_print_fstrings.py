@@ -87,7 +87,7 @@ def conversation(out):
 
 
 def format_spec(out):
-    """A format spec asks python's formatter."""
+    """A numeric format spec maps to a printf conversion."""
     for i in range(out.shape[0]):
         print(f"slot {i:>4}")
         out[i] = i
@@ -134,12 +134,15 @@ def test_a_conversion_is_refused_with_the_reason():
     assert "expression" in message
 
 
-def test_a_format_spec_is_refused_with_the_reason():
-    """`:>4` is python's formatter, which the device does not have."""
-    with pytest.raises(SyntaxError) as refused:
-        generate(format_spec, np.zeros(2, np.float32))
-    message = str(refused.value)
-    assert "format spec" in message
+def test_a_numeric_format_spec_becomes_a_printf_conversion():
+    """`:>4` is printf's `%4d` -- the conversion exists, so it is emitted rather than refused.
+
+    The spec's supported shape is [[fill]align][sign][0][width][.precision][type]; see
+    tests/test_print_format_spec.py for the mapping and for the specs that stay refused (a
+    `,` separator, a `%` scale, a string field), which printf genuinely cannot spell.
+    """
+    source = generate(format_spec, np.zeros(2, np.float32))
+    assert "%4d" in source, source
 
 
 # ---------------------------------------------------------------------------

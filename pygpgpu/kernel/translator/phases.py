@@ -61,11 +61,17 @@ class _PhasesMixin:
                 self._translate_magic_loop(body)
             else:
                 self._translate_phase_kernels()
+            # A kernel is void, so its raise exits are plain `return;` -- but a *device
+            # helper* reached from here is patched in its own translate().
+            self.patch_raise_exits()
         else:
             for stmt in body:
                 self._visit_statement(stmt)
             if self.return_type is None:
                 self.return_type = "void"
+            # A raise's exit statement needs this unit's return type, which is known only
+            # now (it comes from the body's own `return`s) -- see patch_raise_exits.
+            self.patch_raise_exits()
 
 
     def _translate_phase_kernels(self)->None:

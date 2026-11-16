@@ -185,6 +185,19 @@ class _TargetsMixin:
         a partial *read* selects a sub-array, which a work item cannot represent and is
         refused, while a partial *store* is python's broadcast -- the sub-array's elements
         are contiguous and the tail parameter carries their count (see `_tail_var`).
+
+        The two therefore keep opposite extremes, and that is load-bearing:
+
+        * a **read** keeps the **narrowest** spelling. `a[i]` on a 2-D array reads a *row*,
+          and it is emitted as the flat offset `a.flat[i]` -- right only when the body never
+          proves the array is 2-D. Keeping the widest spelling (`a[i, 0]` beside it)
+          recorded 2, the launch's `count == rank` check passed, and the narrow read
+          silently answered a flat element where python answers a row.
+        * a **store** keeps the **widest** spelling, because only a count *above* the rank
+          is a mistake there; a narrower one is python's broadcast and is legal.
+
+        The line and column recorded are the ones the launch will blame, so for a read they
+        are the narrowest occurrence's -- the subscript the refusal is about.
         """
         base:ast.expr = node.value
         name:str = ""
@@ -200,18 +213,22 @@ class _TargetsMixin:
         count:int = len(node.slice.elts) if isinstance(node.slice, ast.Tuple) else 1
         counts:Dict[str, int] = (self.subscript_store_indices if store
                                  else self.subscript_indices)
-        previous:int = counts.get(name, 0)
-        if count > previous:
-            # The widest subscript is the one that decides; among equally wide ones the
-            # FIRST is the one python would raise at, because it is the first the body
-            # reaches. Its line is in the parsed copy's numbering, which _body_frame
+        previous:Optional[int] = counts.get(name)
+        if store:
+            replaced:bool = previous is None or count > previous
+            counts[name] = count if previous is None else max(previous, count)
+        else:
+            replaced = previous is None or count < previous
+            counts[name] = count if previous is None else min(previous, count)
+        if replaced:
+            # The spelling this record describes changed, so it is the one the launch must
+            # blame. Its line is in the parsed copy's numbering, which `_body_frame`
             # converts back to the user's file, and the column is where the subscript
-            # expression starts, so the caret underlines the indexing rather than the
-            # whole statement.
+            # expression starts, so the caret underlines the indexing rather than the whole
+            # statement.
             self.subscript_lines[name] = getattr(node, "lineno", 0) or 0
             self.subscript_columns[name] = getattr(node, "col_offset", 0) or 0
             self.subscript_texts[name] = ast.get_source_segment(self.source_text, node) or ""
-        counts[name] = max(previous, count)
 
 
     def _visit_subscript_index(self, node:ast.Subscript, tail:bool=False)->Translated:

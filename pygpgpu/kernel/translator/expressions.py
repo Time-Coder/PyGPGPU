@@ -1,6 +1,7 @@
 from __future__ import annotations
 import ast
 import enum
+import math
 from typing import (Any, Dict, List, Optional, Tuple)
 import numpy as np
 from ..device_builtins import (
@@ -21,6 +22,9 @@ from .receivers import (
 from .predicates import (
     promote,
 )
+from .type_map import (
+    _check_integer_fits,
+)
 
 
 class _ExpressionsMixin:
@@ -37,13 +41,39 @@ class _ExpressionsMixin:
         if isinstance(node, ast.Compare):
             return self._visit_compare(node)
         if isinstance(node, ast.BoolOp):
-            # Each operand is a *condition* in python (`and`/`or` read their operands as
-            # bools), so a complex operand reaches the truthiness rule instead of arriving
-            # at the compiler as a struct the operator cannot take.
-            parts:List[str] = [self._condition_code(v) for v in node.values]
-            symbol:str = ("&&" if isinstance(node.op, ast.And) else "||")
-            joined:str = f" {symbol} ".join(parts)
-            return f"({joined})", "bool"
+            # Python's `and`/`or` answer an **operand**, not a bool: `2.0 and 3.0` is 3.0 and
+            # `-5.0 or 3.0` is -5.0 (it is the truthiness that is tested, and the value that
+            # is returned). Emitting `&&`/`||` answered `1.0` for both, so a body using the
+            # result as a number (`(a and b) * 10.0`) computed with 1.0 where python used
+            # the operand -- a silent wrong answer, and one the condition position never
+            # showed because there only the truth value is read.
+            #
+            # The value form is the conditional operator python's own semantics reduce to:
+            # `a and b` is `a ? b : a`, `a or b` is `a ? a : b`. The test is spelled as an
+            # explicit comparison rather than the bare code: OpenCL C refuses a float as a
+            # conditional's condition ("used type 'float' where floating point type is not
+            # allowed"), while CUDA accepts it -- so a bare float test compiled on CUDA and
+            # failed on OpenCL for the same source. A comparison is a bool on both.
+            codes:List[Translated] = [self._visit_expression(v) for v in node.values]
+            parts:List[str] = [self._truth_of(code, t) for code, t in codes]
+            is_and:bool = isinstance(node.op, ast.And)
+            # Fold from the right: `a and b and c` is `a ? (b ? c : b) : a`.
+            folded_code, folded_t = codes[-1]
+            for index in range(len(codes) - 2, -1, -1):
+                _test_code, left_t = codes[index]
+                test:str = parts[index]
+                left_code = _test_code
+                if is_and:
+                    then_code, else_code = folded_code, left_code
+                else:
+                    then_code, else_code = left_code, folded_code
+                if left_t != folded_t:
+                    unified:object = promote(left_t, folded_t)
+                    folded_code = f"({test} ? ({unified})({then_code}) : ({unified})({else_code}))"
+                    folded_t = unified
+                else:
+                    folded_code = f"({test} ? {then_code} : {else_code})"
+            return folded_code, folded_t
         if isinstance(node, ast.IfExp):
             cond:str = self._condition_code(node.test)
             then_code, tt = self._visit_expression(node.body)
@@ -100,14 +130,13 @@ class _ExpressionsMixin:
             # (`1 + 2j` is a c128 under `float=np.float64`), and the same rule a python
             # float *argument* follows. Spelling every literal with the `f` suffix cut a
             # 17-digit constant down to float32 inside a double kernel.
-            if self.type_map.get("float", "float") == "double":
-                return self._real_literal(value, "double"), "double"
-            text:str = repr(value)
-            if not ("." in text or "e" in text or "E" in text or "inf" in text or "nan" in text):
-                text += ".0"
-            if not text.endswith(("f", "F", "y")) and "inf" not in text:
-                text += "f"
-            return text, "float"
+            #
+            # The text itself comes from `_real_literal`, which is also the one place that
+            # knows how to spell an infinity and a NaN: this branch had a second copy of the
+            # suffix rule and that copy emitted a bare `inf` (not a C token), so a kernel
+            # with an infinity did not build.
+            width:str = "double" if self.type_map.get("float", "float") == "double" else "float"
+            return self._real_literal(value, width), width
         if isinstance(value, complex):
             # A complex literal is written with its two parts, because C has no complex
             # constant: the header builds the value from the reals. A python complex has no
@@ -180,7 +209,24 @@ class _ExpressionsMixin:
             return self._visit_enum_constant(enum_value, node)
         if isinstance(value, bool):
             return self._visit_constant(ast.Constant(value=value))
-        if isinstance(value, (int, float)) and not isinstance(value, np.ndarray):
+        if isinstance(value, int) and not isinstance(value, np.ndarray):
+            # A python int read from the enclosing scope is a *value the caller wrote down
+            # somewhere else*, and it has no width of its own: it travels as the width this
+            # kernel chose for `int`, exactly like a scalar argument, so it gets the same
+            # range check. Without it the check existed only on the parameter path, and a
+            # module-level constant (`N = 2 ** 31`) was inlined as a bare literal -- the
+            # compiler turned it into `-2147483648` with a warning nobody reads, and the
+            # device computed with a number the caller never wrote.
+            #
+            # This is deliberately HERE and not in `_visit_constant`: a literal written
+            # *inside* the body keeps its old behaviour (`0xFFFFFFFF` in a hash mix is
+            # unsigned arithmetic on purpose, see tests/test_kernel_scalar_calls.py), while
+            # a named constant is the same value as passing it in, so the two paths must
+            # agree. A literal BinOp is range-checked by `_visit_binop`'s folded-int check.
+            int_type:str = self.type_map.get("int", "int")
+            _check_integer_fits(value, int_type)
+            return str(value), "int"
+        if isinstance(value, float) and not isinstance(value, np.ndarray):
             return self._visit_constant(ast.Constant(value=value))
         self._error(self._unknown_name_message(node), node)
 
@@ -205,13 +251,42 @@ class _ExpressionsMixin:
 
 
     def _real_literal(self, value:float, width:str)->str:
-        """A real literal of the given width, spelled so the C compiler reads it as one."""
+        """A real literal of the given width, spelled so the C compiler reads it as one.
+
+        Three values need a spelling of their own, because `repr` does not give one the C
+        compiler accepts:
+
+        * an infinity became the bare word ``inf``, which is not a C token -- the source did
+          not compile at all;
+        * a NaN became ``nanf``, a *call* into ``<math.h>``, and whether that header is in
+          the prelude is the backend's business, so one backend compiled a kernel another
+          refused;
+        * a value below the float32 range (``1e-40``) became ``1e-40f``, which the compiler
+          rounds to zero -- the device then computed 0.0 where python computes 1e-40.
+
+        All three are answered as self-contained expressions built from literals every C
+        dialect accepts: ``(1.0f/0.0f)``, ``(0.0f/0.0f)`` and a width-appropriate
+        division. No header, no compiler-specific macro, and the value the device sees is
+        the value python wrote.
+        """
+        if math.isinf(value):
+            sign:str = "-" if value < 0 else ""
+            return f"({sign}1.0{self._real_suffix(width)}/0.0{self._real_suffix(width)})"
+        if math.isnan(value):
+            suffix:str = self._real_suffix(width)
+            return f"(0.0{suffix}/0.0{suffix})"
         text:str = repr(float(value))
-        if not ("." in text or "e" in text or "E" in text or "inf" in text or "nan" in text):
+        if not ("." in text or "e" in text or "E" in text):
             text += ".0"
-        if width != "double" and not text.endswith(("f", "F", "y")) and "inf" not in text:
+        if width != "double" and not text.endswith(("f", "F", "y")):
             text += "f"
         return text
+
+
+    @staticmethod
+    def _real_suffix(width:str)->str:
+        """The literal suffix a real of this width needs (none for a double)."""
+        return "" if width == "double" else "f"
 
 
     def _condition_code(self, node:ast.expr)->str:
@@ -231,3 +306,26 @@ class _ExpressionsMixin:
         self._require_complex(dtype)
         kind:str = self._complex_side(t, dtype)
         return (f"({kind}_equal({code}, {kind}_from_real(0)) == 0)")
+
+
+    def _truth_of(self, code:str, t:object)->str:
+        """A translated scalar as a **bool** expression, for a conditional's condition.
+
+        `_condition_code` is right for an `if`/`while` on every backend, but a conditional
+        *expression* (`?:`) is stricter: OpenCL C refuses a floating-point condition
+        outright ("used type 'float' where floating point type is not allowed") while CUDA
+        accepts it, so the same source compiled on one backend and failed on the other. A
+        comparison against zero is a bool everywhere and is exactly python's truthiness for
+        a number.
+
+        A value that is already a bool needs no comparison -- `(x != 0)` on a bool is legal
+        but noisy, and this keeps the emitted text readable.
+        """
+        dtype:Optional[np.dtype] = self._complex_dtype_of(t)
+        if dtype is not None:
+            self._require_complex(dtype)
+            kind:str = self._complex_side(t, dtype)
+            return f"({kind}_equal({code}, {kind}_from_real(0)) == 0)"
+        if t == "bool":
+            return f"({code})"
+        return f"(({code}) != 0)"

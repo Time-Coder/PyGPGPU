@@ -90,10 +90,16 @@ class CUObject(ABC):
         return CUObject._instances[id]
 
     def __hash__(self)->int:
+        # A NULL handle is a real state -- a creation the driver refused -- and its
+        # `c_void_p.value` is `None`. Returning that made python refuse the object with
+        # "`__hash__` method should return an integer", which is a message about hashing
+        # for what is really a failed handle; and `__init__` itself hashes the object to
+        # record it in `_instances`, so the NULL case could not even be constructed. A NULL
+        # address hashes as 0, which is its own number.
         if isinstance(self._id, c_void_p):
-            return self._id.value
+            return self._id.value or 0
         elif hasattr(self._id, "value"):
-            return self._id.value
+            return self._id.value or 0
         else:
             return self._id
 

@@ -96,16 +96,20 @@ class _BuiltinPythonMixin:
             # python's builtin takes any arity and folds left to right
             # (`min(a, b, c)` is `min(min(a, b), c)`), so the pairs chain. The mixed
             # complex pair reaches _emit_complex_builtin before this branch.
-            pick:str = ("fmin" if name == "min" else "fmax") \
-                if is_float(promote(args[0][1], args[1][1])) \
-                else ("min" if name == "min" else "max")
+            #
+            # The float form is a **comparison on the second operand**, not `fmin`/`fmax`,
+            # and that is what makes the device agree with the host body. python's rule is
+            # "answer the *second* operand when it is strictly better, else the first", so a
+            # NaN in either place keeps the first operand (a comparison against NaN is
+            # false): `min(nan, 1.0)` is nan and `min(1.0, nan)` is 1.0. `fmin` answers the
+            # operand that is *not* NaN in both cases, which is a different rule -- the two
+            # families exist precisely because they differ here, so `fmin`/`fmax` keep their
+            # NaN-ignoring emission and `min`/`max` get this one.
+            better:str = "<" if name == "min" else ">"
             left, lt = args[0]
             for rcode, rt in args[1:]:
                 t:object = promote(lt, rt)
-                if is_float(t):
-                    left = f"{pick}(({t})({left}), ({t})({rcode}))"
-                else:
-                    left = f"{pick}(({t})({left}), ({t})({rcode}))"
+                left = f"((({t})({rcode}) {better} ({t})({left})) ? ({t})({rcode}) : ({t})({left}))"
                 lt = t
             return left, lt
 

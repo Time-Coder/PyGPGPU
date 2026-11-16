@@ -128,6 +128,15 @@ class _RenderMixin:
         # appends and passes them in the same order -- see _emit_device_call).
         for ordinal, element_t in enumerate(self.tuple_return_types or []):
             params.append(f"{self._device_type(element_t)}* _tuple_out{ordinal}")
+        # The exception slot and stop flag, when this helper can raise. A raise writes them,
+        # so the helper receives the kernel's own pointers from its caller -- a device
+        # function cannot reach a kernel parameter any other way (the call site passes them
+        # last; see _emit_device_call). The site ids themselves are already absolute: the
+        # caller set `raise_site_base` before translating this helper.
+        if self.has_raises:
+            qualifier = self._buffer_qualifier()
+            params.append(f"{qualifier}int* {self.EXCEPTION_SLOT}")
+            params.append(f"{qualifier}int* {self.EXCEPTION_STOP}")
         ret:str = (self.return_type or "void")
         header:str = f"{self._device_qualifier()}{self._device_type(ret)} {c_name}({', '.join(params)})"
         body:str = self._render_body()
@@ -273,6 +282,11 @@ class _RenderMixin:
         # Return slots come last, after every parameter the work size and samplers derive
         # from, so appending them at launch time cannot disturb those positions.
         params.extend(self.render_return_params())
+
+        # The exception slot and its stop flag, when the body raises: the same "appended
+        # after everything the work size derives from" contract the return slots follow, so
+        # the host appends these two buffers in the same order (see render_exception_params).
+        params.extend(self.render_exception_params())
 
         # Metal's work-item numbers arrive as attribute-decorated parameters, not as
         # `get_global_id()` calls (see kernel/metal_codegen.py). They are declared after
