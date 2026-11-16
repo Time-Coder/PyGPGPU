@@ -357,7 +357,7 @@ class _AssignMixin(_PrivateArrayMixin, _WorkGroupMixin):
             if member is not None:
                 # A member store makes the structure parameter writable: it must not be
                 # declared `const` (see render_kernel / render_device).
-                self._record_member_write(member[0])
+                self._record_member_write(target.value)
                 # The generated field assignment goes through a parenthesised member
                 # expression, which the static read/write analysis does not attribute to the
                 # array; record the target so the host still reads the array back.
@@ -418,7 +418,7 @@ class _AssignMixin(_PrivateArrayMixin, _WorkGroupMixin):
             # A member store on a structure parameter makes it writable, exactly as the
             # string-subscript store does; without this the parameter was declared `const`
             # and the generated store failed to compile.
-            self._record_member_write(target_code)
+            self._record_member_write(target)
             if isinstance(target.value, ast.Subscript):
                 # A record-array element store (`rows[i].i = ...`) writes the array the
                 # parameter names, so the parameter is not read-only either.

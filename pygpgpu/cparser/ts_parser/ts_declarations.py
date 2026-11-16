@@ -156,6 +156,31 @@ class _TsDeclarationsMixin:
         return base_desc, declarators
 
 
+    def _declared_extents(self, node:Node)->Tuple[int, ...]:
+        """The constant extents an `array_declarator` declares, outermost first.
+
+        The grammar nests one `array_declarator` per dimension, so `a[4][8]` is an
+        outer node whose extent (8) is a `number_literal` child and whose *first*
+        child is the inner `a[4]`. Reading the literals in tree order is what puts
+        the extents back in the order the declaration wrote them.
+
+        This used to be a regular expression over the declarator's text, which read
+        the right numbers but could not tell an extent from a digit inside anything
+        else it happened to match. The tree has the extent as its own node, so a
+        symbolic or absent extent (`a[]`, `a[N]`) is now simply not a
+        `number_literal` rather than a pattern that failed to match.
+        """
+        extents:List[int] = []
+        for child in node.children:
+            if child.type == "array_declarator":
+                extents.extend(self._declared_extents(child))
+                break
+            if child.type == "number_literal":
+                text:str = self._node_text(child).strip().replace("'", "")
+                if text.isdigit():
+                    extents.append(int(text))
+        return tuple(extents)
+
     def _walk_declarator(self, node:Node)->Tuple[str, bool, Tuple[int, ...]]:
         node_type:str = node.type
         if node_type in ("identifier", "field_identifier"):
@@ -169,7 +194,7 @@ class _TsDeclarationsMixin:
             return "", True, ()
 
         if node_type == "array_declarator":
-            dims:Tuple[int, ...] = tuple(int(x) for x in self._array_dim_pattern.findall(self._node_text(node)))
+            dims:Tuple[int, ...] = self._declared_extents(node)
             for child in node.named_children:
                 if child.type in _DECLARATOR_NODE_TYPES:
                     name, is_ptr, _ = self._walk_declarator(child)

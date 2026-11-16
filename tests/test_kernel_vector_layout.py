@@ -145,7 +145,7 @@ def test_an_array_member_aligns_like_its_element():
     host packed was too short for what the driver expected -- "Buffer size too small (112
     instead of at least 128 bytes)" for a structure holding an array of structures.
     """
-    from pygpgpu.opencl.oop.struct_layout import np_alignment
+    from pygpgpu.cparser.struct_layout import np_alignment
 
     class_array: np.dtype = np.dtype(_ArrayLeaf)
     vector: np.dtype = np.dtype(float3)

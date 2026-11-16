@@ -1,6 +1,5 @@
 from __future__ import annotations
 import ast
-import re
 from typing import (Any, Dict, List, Optional, Tuple, cast)
 from ..structs import dtype_for as structs_dtype_for
 from .notation import (
@@ -368,8 +367,14 @@ class _SubscriptsMixin:
         # argument always travels as one) goes through '->', a value through '.'. A record
         # array's element (`g[0]`) is a value, so its own store form is `.`, while the
         # parameter itself is the pointer.
+        #
+        # The ']' test reads the *node*: a record array reaches here as an
+        # `ast.Subscript`, which is the same fact spelled in the tree rather than in the
+        # text. The `&` test stays textual because the address is something the
+        # translator *emits* (a value receiver is handed over as `&(base)`), so it has
+        # no node of its own to read.
         if isinstance(base_t, tuple) and is_ptr(base_t) and not base_code.startswith("&"):
-            if re.search(r"\]\s*$", base_code):
+            if isinstance(node.value, ast.Subscript):
                 return f"({base_code}).{field}", members[field]
             return f"({base_code})->{field}", members[field]
         return f"({base_code}).{field}", members[field]

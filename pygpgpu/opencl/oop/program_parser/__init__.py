@@ -22,7 +22,7 @@ from ....utils import md5sums, save_var, modify_time, load_var
 from ....kernel import structs as kernel_structs
 from ..build_options import BuildOptions
 from ..program_info import KernelInfo, ArgInfo, StructInfo, VarInfo
-from ..struct_layout import align_struct
+from ....cparser.struct_layout import align_struct
 import ctypes
 import numpy as np
 from .... import numpy as gnp
@@ -497,3 +497,4 @@ __all__ = [
     "parse",
     "related_files",
 ]
+

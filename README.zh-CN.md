@@ -112,6 +112,8 @@ Python >= 3.7。GPU 运行时按需自备——任一即可:
 
 `@kernel` 未指定后端时, 按 **cuda -> hip -> metal -> opencl** 顺序探测, 取第一个枚举到设备的后端。
 
+每个后端都用 tree-sitter 语法读取源码, 通过依赖自动安装: `tree-sitter-opencl`、`tree-sitter-cuda37`, 以及 [tree-sitter-metal](https://github.com/Time-Coder/tree-sitter-metal)(本项目自己的发行版 —— PyPI 上没有可用的 MSL 语法)。它们都按 CPython 3.7 也能加载的 tree-sitter ABI 构建, 因此同一份安装从 3.7 一直到当前版本都可用。
+
 ## 基本用法
 
 **一种装饰器, 装饰所有函数。** `@kernel` 可以装饰普通函数、实例方法和静态方法; 函数体读取的 `self.xxx` 属性会自动成为 kernel 参数:

@@ -112,6 +112,8 @@ Python >= 3.7. Bring your own GPU runtime — any one of them is enough:
 
 Without an explicit backend, `@kernel` probes **cuda -> hip -> metal -> opencl** and takes the first that enumerates a device.
 
+Each backend reads its sources with a tree-sitter grammar, installed automatically as a dependency: `tree-sitter-opencl`, `tree-sitter-cuda37`, and [tree-sitter-metal](https://github.com/Time-Coder/tree-sitter-metal) (our own distribution — no MSL grammar was published on PyPI). All of them are built against the tree-sitter ABI that CPython 3.7 can load, so one install works from 3.7 through the current release.
+
 ## Basic usage
 
 **One decorator for every kind of function.** `@kernel` decorates plain functions, instance methods and static methods; `self.xxx` attributes the body reads become kernel arguments automatically:

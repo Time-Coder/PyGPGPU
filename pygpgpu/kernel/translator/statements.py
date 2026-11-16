@@ -1,6 +1,5 @@
 from __future__ import annotations
 import ast
-import re
 from typing import (List, Optional)
 import numpy as np
 from ..structs import dtype_for as structs_dtype_for
@@ -18,24 +17,47 @@ from .predicates import (
 from .raise_emit import _RaiseMixin
 
 
-# A `range()` step arrives as translated C text. A negative literal is wrapped in the
-# parentheses the unary-minus visitor emits (`(-1)`), so a plain `-?\d+` match refuses it --
-# and the refusal ("step must be a constant integer") is wrong, because the constant is
-# right there. Peeling whole-expression parentheses first makes the sign readable.
-_STEP_WRAPPER = re.compile(r"^\s*\(\s*(.*?)\s*\)\s*$")
-
-
-def _bare_integer_step(step:str)->str:
-    """The step's text with any whole-expression parentheses removed."""
-    text:str = step.strip()
-    while True:
-        match = _STEP_WRAPPER.match(text)
-        if match is None or match.group(1) == text:
-            return text
-        text = match.group(1).strip()
-
 
 class _StatementsMixin(_RaiseMixin):
+
+    def _constant_step(self, node: ast.expr) -> Optional[int]:
+        """The integer a `range()` step node denotes, or None when it is not constant.
+
+        Three spellings are constant: a literal, a negated literal, and a unary `+`.
+        Everything else -- a name, a subscript, an arithmetic expression -- is a value
+        the device computes, and a C `for` header cannot take a step it does not know.
+
+        A *negative* literal is the one that mattered: the translator emits `-1` as
+        `(-1)`, so reading the step back from the generated text needed a parenthesis
+        peeler. The node says `UnaryOp(USub, Constant(1))`, which is the constant
+        itself once the operator is applied.
+        """
+        constant: Optional[int] = self._integer_constant(node)
+        if constant is not None:
+            return constant
+        if isinstance(node, ast.UnaryOp):
+            operand: Optional[int] = self._integer_constant(node.operand)
+            if operand is None:
+                return None
+            if isinstance(node.op, ast.USub):
+                return -operand
+            if isinstance(node.op, ast.UAdd):
+                return operand
+            if isinstance(node.op, ast.Invert):
+                return ~operand
+        return None
+
+    @staticmethod
+    def _integer_constant(node: ast.expr) -> Optional[int]:
+        """The value of an integer literal node, or None for anything else.
+
+        `bool` is excluded on purpose: `True` is an `int` in python, but a boolean
+        step is a mistake rather than a count, so it falls through to the refusal.
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, int) \
+                and not isinstance(node.value, bool):
+            return int(node.value)
+        return None
 
     def _visit_statement(self, node:ast.stmt)->None:
         # A creation statement was executed by the interpreter and travels as a parameter,
@@ -246,17 +268,21 @@ class _StatementsMixin(_RaiseMixin):
         else:
             start, stop, step = values[0][0], values[1][0], values[2][0]
 
+        # A step is a *constant* only when the python node says so. Asking the translated
+        # text (`-?\d+`) meant peeling the parentheses `_visit_unaryop` emits around a
+        # negative literal, and it could not tell a constant from any expression that
+        # happened to render as digits. The node is the answer: `range(..., -1)` is an
+        # `ast.UnaryOp` over a constant, `range(..., n)` is a name, and only the first is
+        # a step a C `for` header can carry.
+        step_value:Optional[int] = (self._constant_step(args[2])
+                                    if len(args) == 3 else None)
         if step is None:
             self._emit(f"for (int {counter} = {start}; {counter} < {stop}; {counter}++)")
-        elif re.fullmatch(r"-?\d+", _bare_integer_step(step)):
-            # The step is a translated expression, and a *negative* literal arrives wrapped
-            # in the parentheses `_visit_unaryop` emits for `-1` -- `(-1)`, not `-1` -- so
-            # matching the raw text refused every descending `range()` with "step must be a
-            # constant integer" even though the constant was right there. The wrapper is
-            # peeled before the test, and the sign is read from what is left.
-            normalized:str = _bare_integer_step(step)
-            cond_op:str = (">" if normalized.startswith("-") else "<")
-            self._emit(f"for (int {counter} = {start}; {counter} {cond_op} {stop}; {counter} += {normalized})")
+        elif step_value is not None and step_value != 0:
+            cond_op:str = (">" if step_value < 0 else "<")
+            self._emit(
+                f"for (int {counter} = {start}; {counter} {cond_op} {stop}; "
+                f"{counter} += {step_value})")
         else:
             self._error("range() step must be a constant integer", node.iter.args[-1])
         self._emit("{")

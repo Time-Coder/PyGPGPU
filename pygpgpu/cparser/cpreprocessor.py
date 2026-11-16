@@ -1,9 +1,10 @@
-import os
+﻿import os
 import re
 import io
 from typing import Optional, List, Tuple, Dict, Set
 
 from .pcpp import pcmd
+from .includes import include_directives
 
 
 class CPreprocessor:
@@ -150,13 +151,11 @@ class CPreprocessor:
         except OSError:
             return
 
-        include_pattern = re.compile(r'^\s*#\s*include\s*(?:"(?P<quoted>[^"]+)"|<(?P<angled>[^>]+)>)', re.MULTILINE)
         search_paths:List[str] = [os.path.dirname(abs_file_name)] + list(include_paths)
-        for match in include_pattern.finditer(content):
-            name:str = (match.group("quoted") if match.group("quoted") is not None else match.group("angled"))
+        for name, quoted in include_directives(content):
             if os.path.isabs(name):
                 candidates:List[str] = [name]
-            elif match.group("quoted") is not None:
+            elif quoted:
                 candidates = [os.path.join(path, name) for path in search_paths]
             else:
                 candidates = [os.path.join(path, name) for path in include_paths]
@@ -165,7 +164,6 @@ class CPreprocessor:
                 if os.path.isfile(candidate):
                     CPreprocessor.__collect_includes(candidate, include_paths, related, processed)
                     break
-
     @staticmethod
     def macros_expand_file(filename: str, include_paths: Optional[List[str] ] = None, defines: Optional[Dict[str, str] ] = None)->Tuple[str, Dict[int, Tuple[str, int] ], Set[str]]:
         input = open(filename, 'r', encoding='utf-8')

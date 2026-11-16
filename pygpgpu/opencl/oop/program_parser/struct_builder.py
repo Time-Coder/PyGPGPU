@@ -13,7 +13,7 @@ from ...driver import (
 )
 from ....kernel import structs as kernel_structs
 from ..program_info import StructInfo, VarInfo
-from ..struct_layout import align_struct
+from ....cparser.struct_layout import align_struct
 
 if TYPE_CHECKING:
     from ..command_queue import CommandQueue
@@ -246,3 +246,4 @@ class _StructBuilderMixin:
         self._struct_types[struct_name] = struct_type
 
         return struct_type
+

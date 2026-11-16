@@ -47,6 +47,18 @@ dependencies = [
     # when it happens to be installed, and codegen coerces a PyCapsule to a
     # Language, so either grammar distribution works.
     "tree-sitter-cuda37>=0.21.3",
+    # The Metal backend parses MSL through a tree-sitter grammar, exactly as the
+    # other three backends parse theirs. No MSL grammar was installable from PyPI
+    # (the tree-sitter-metal names on GitHub are Neovim highlighting plugins with
+    # no grammar), so this dependency is our own distribution:
+    # https://github.com/Time-Coder/tree-sitter-metal, built from the
+    # save-buffer/tree-sitter-metal grammar plus one extension -- MSL lets an
+    # address space qualify a cast's type (`(device atomic_uint*)&x[0]`), which
+    # the base grammar accepted only in a declaration position. It is generated
+    # at ABI 13 and shipped as cp37-abi3, the one combination that both
+    # tree-sitter 0.20.x -- the last line with CPython 3.7 wheels -- and 0.21+
+    # accept, so a single wheel serves every supported interpreter.
+    "tree-sitter-metal>=0.1.0",
     # pygpgpu/__init__.py imports pygf for the numpy patches and re-exports its vector types,
     # so it is a hard requirement rather than an optional extra.
     # 0.1.5 owns the whole numpy boundary: the `VectorArray` view, the constructor patches,

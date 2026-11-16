@@ -139,8 +139,6 @@ class TSParserMixin(_TsDeclarationsMixin, _TsAnalysisMixin, _TsBodyMixin, _TsExp
 
     _kernel_infos:Dict[str, KernelInfoLike]
 
-    _array_dim_pattern:re.Pattern = re.compile(r"\[\s*(\d+)\s*\]")
-
     _address_qualifier_names:Dict[str, str] = {
         "global": "global",
         "constant": "constant",

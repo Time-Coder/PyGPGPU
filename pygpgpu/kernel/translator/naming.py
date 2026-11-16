@@ -127,25 +127,53 @@ class _NamingMixin:
             self.atomic_targets.add(root)
 
 
-    def _record_member_write(self, member_code:str)->None:
+    def _record_member_write(self, base:ast.expr)->None:
         """Remember that this structure parameter's members are written.
 
-        The generated expression is `(base)->field` or `(base[0]).field`; the base is the
-        parameter name, and that parameter must not be declared `const`.
-        """
-        import re as _re
+        The caller has the *python* node whose store this is, so the parameter's name
+        is read from the AST rather than recovered from the generated C text. Reading it
+        back out of the text meant matching identifiers inside `(g[0]).field` with a
+        pattern, which cannot tell a parameter name from any other leading identifier --
+        and it was re-parsing a string the translator had just built from the very node
+        it had in hand.
 
-        # The base is the parameter name, optionally wrapped and optionally indexed
-        # (`(g[0]).field` is a record-array element of the parameter `g`).
-        match = _re.search(r"(?:\*?&&?)?\(?([A-Za-z_]\w*)", member_code)
-        base:str = match.group(1) if match else ""
-        if base:
-            self.member_writes.add(base)
-            # The alias case (`q = p; q.a = ...`) writes the same buffer.
-            alias:Optional[DeviceType] = (self.scopes[-1].get(base)
-                                          if self.scopes else None)
-            if isinstance(alias, tuple) and len(alias) == 2 and alias[0] == "alias":
-                self.member_writes.add(alias[1])
+        A store to a member of a record-array element (`rows[i].field = v`) writes the
+        array the element belongs to, which is the name this resolves to.
+        """
+        name:str = self._member_store_root(base)
+        if not name:
+            return
+        self.member_writes.add(name)
+        # The alias case (`q = p; q.a = ...`) writes the same buffer.
+        alias:Optional[DeviceType] = (self.scopes[-1].get(name)
+                                      if self.scopes else None)
+        if isinstance(alias, tuple) and len(alias) == 2 and alias[0] == "alias":
+            self.member_writes.add(alias[1])
+
+    def _member_store_root(self, base:ast.expr)->str:
+        """The parameter name a member store ultimately writes.
+
+        The store's destination reaches here as the *python* node, so the name is read
+        from the tree instead of from the generated C. Two shapes matter:
+
+        * `region.left = i` -- an `ast.Attribute` whose value is the parameter itself.
+          `_array_name` refuses this shape (it resolves `self.x`, not `x.member`), so the
+          attribute's own base is walked to the bottom here.
+        * `rows[i].left = i` -- a subscript, which `_array_name` already follows.
+
+        The parameter whose declaration loses its `const` is the name at the bottom of
+        that chain. A shape with no single owning name answers empty: there is no
+        declaration to un-const, and guessing one would silently drop the write.
+        """
+        node:ast.expr = base
+        while isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        if isinstance(node, ast.Name):
+            return node.id
+        try:
+            return self._array_name(node)
+        except SyntaxError:
+            return ""
 
 
     def _shape_var(self, array_name:str, dim:int)->str:

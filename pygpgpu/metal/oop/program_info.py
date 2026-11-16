@@ -168,6 +168,39 @@ class ArgInfo(VarInfo):
                 f"argument '{self.name}' must be an integer, got {type(value).__name__}")
 
 
+class StructInfo:
+    """One `struct` an MSL source declares, and the members its layout is built from.
+
+    The Metal backend used to leave this empty: a handwritten `.metal` file's
+    structures had no host counterpart, so `kernel_import` published no ctypes type
+    for them and a structure parameter's dtype went unchecked. The grammar reads the
+    declaration now, so the layout is built the way every other backend builds it --
+    which is what makes a `.metal` module type-checked like the rest.
+    """
+
+    def __init__(self, name:str, is_union:bool=False)->None:
+        self.name: str = name
+        # MSL has no `union`, but the flag is part of the shared shape the layout
+        # builder and the stub generator both read.
+        self.is_union: bool = is_union
+        self.members: Dict[str, VarInfo] = {}
+
+    def declare(self)->str:
+        """The `.pyi` declaration of this structure's ctypes class."""
+        parameters: str = ", ".join(
+            f"{member.name}: {member.type_annotation}"
+            for member in self.members.values())
+        result = f"""
+class {self.name}(ctypes.Structure):
+
+    def __init__(self, {parameters})->None: ...
+
+"""
+        for member in self.members.values():
+            result += f"    {member.name}: {member.type_annotation}\n"
+        return result + "\n"
+
+
 class KernelInfo:
     """One entry point's parameters, name-matched to the device signature.
 

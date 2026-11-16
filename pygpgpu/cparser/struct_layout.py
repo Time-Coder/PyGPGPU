@@ -31,7 +31,7 @@ def np_alignment(dtype:object, vector_layout:bool=True) -> int:
     ("Buffer size too small (12 instead of at least 16 bytes)"). The member's *class* is the
     evidence, and `align_struct` passes it.
     """
-    from ...vec_types.layout import _vector_dtype_name
+    from ..vec_types.layout import _vector_dtype_name
 
     field:np.dtype = np.dtype(dtype)
     if field.subdtype is not None:
@@ -60,7 +60,7 @@ def _is_vector_field(ctype:object) -> bool:
     By identity, not by layout: a caller's two-float structure answers the same numpy dtype
     as `float2`, and only the class says which of the two the device declaration means.
     """
-    from ...vec_types.layout import _is_vector_class
+    from ..vec_types.layout import _is_vector_class
 
     return isinstance(ctype, type) and _is_vector_class(ctype) is not None
 
@@ -140,3 +140,4 @@ def align_struct(fields:List[Tuple[str, type]], spec:List[Tuple[object, ...]],
     dtype:np.dtype = np.dtype({"names": names, "formats": formats,
                                "offsets": offsets, "itemsize": itemsize})
     return aligned_fields, dtype
+
