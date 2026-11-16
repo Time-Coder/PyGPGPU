@@ -9,6 +9,7 @@ from ctypes import c_char_p, c_void_p, Structure, _Pointer, pointer
 from ctypes import Union as ctypes_union
 from typing import Tuple, TYPE_CHECKING, Dict, List, Optional, Set, Union
 from ....cparser import CPreprocessor
+from ....cparser.related_files import recorded_related_files, resolved_related_files
 from ....cparser.ts_parser import TSParserMixin
 from ...driver import (
     HIPInfo,
@@ -150,7 +151,10 @@ class ProgramParser(_StructBuilderMixin, TSParserMixin):
     def _save(self)->None:
         meta:"ParseMeta" = {
             "clean_code": self._clean_code,
-            "related_files": self._related_files,
+            # Recorded relative to the generated source's own directory, so the whole
+            # `__xxcache__` tree can be copied (or shipped inside a packaged application)
+            # and still validate. See pygpgpu.cparser.related_files.
+            "related_files": recorded_related_files(self._related_files, self._file_name),
             "line_map": self._line_map,
             "struct_infos": self._struct_infos,
             "kernel_infos": self._kernel_infos
@@ -226,19 +230,17 @@ class Kernel_{kernel_name}(Kernel):
         except (OSError, EOFError, pickle.UnpicklingError, ValueError, TypeError):
             # No usable cache (see the CUDA counterpart): re-parse instead of failing.
             return False
-        for related_file in meta["related_files"]:
+        for related_file in resolved_related_files(meta["related_files"], self._file_name):
             if not os.path.isfile(related_file):
                 return False
-
             related_file_mtime = modify_time(related_file)
             if related_file_mtime > newest_mtime:
                 newest_mtime = related_file_mtime
-
             if related_file_mtime > meta_mtime:
                 return False
-            
+
         self._clean_code = meta["clean_code"]
-        self._related_files = meta["related_files"]
+        self._related_files = resolved_related_files(meta["related_files"], self._file_name)
         self._line_map = meta["line_map"]
         self._kernel_infos = meta["kernel_infos"]
         self._struct_infos = meta["struct_infos"]

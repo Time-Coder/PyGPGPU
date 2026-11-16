@@ -33,16 +33,24 @@ if TYPE_CHECKING:
         type_qualifiers: List[str]
         kernel_flags: KernelFlags
 
-    class ParseMeta(TypedDict):
+    class ParseMeta(TypedDict, total=False):
         """What a parser caches beside a compiled source, and reads back on the next run.
 
-        `_save`/`load_var` round-trip it, so the five keys are the whole record: the
+        `_save`/`load_var` round-trip it, so the keys are the whole record: the
         preprocessed text, the files it pulled in, the line remapping for diagnostics,
         and the two tables the launch path needs. The value types are the per-backend
         records, named here by the shapes the walk relies on.
+
+        `total=False` because the record has grown: a meta file written by an older version
+        carries the original five keys and no `related_digests`, and that is a record the
+        loaders still accept (they fall back to comparing timestamps for it).
         """
         clean_code: str
         related_files: Set[str]
+        # A content digest per recorded file, keyed by its recorded (relative) name. Optional
+        # because a meta file written before this key existed carries only the names, and the
+        # loader then falls back to comparing timestamps.
+        related_digests: Dict[str, str]
         line_map: Dict[int, str]
         struct_infos: Dict[str, "StructInfoLike"]
         kernel_infos: Dict[str, "KernelInfoLike"]

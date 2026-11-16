@@ -18,14 +18,51 @@ def get_dedented_source(func:Callable)->str:
     `inspect.getsource` re-reads the file and re-tokenizes it on every call. A function's
     source cannot change after it is defined, so the answer is safe to keep; the bound keeps
     a program that creates kernels in a loop from growing the table without limit.
+
+    A frozen application has no `.py` to read, so a failed `getsource` falls back to the
+    module's source as remembered by the cache (`source_store`), which the build that first
+    translated this module wrote beside the generated device code. Only when neither exists
+    is the launch refused.
     """
     try:
         source:str = inspect.getsource(func)
     except OSError as e:
-        raise SyntaxError(f"cannot read source of {getattr(func, '__name__', '<function>')}: {e}") from e
+        remembered:str = _remembered_function_source(func)
+        if not remembered:
+            raise SyntaxError(
+                f"cannot read source of {getattr(func, '__name__', '<function>')}: {e}"
+            ) from e
+        source = remembered
     lines:List[str] = source.split("\n")
     start:int = next((i for i, line in enumerate(lines) if line.lstrip().startswith("def ")), 0)
     return textwrap.dedent("\n".join(lines[start:]))
+
+
+
+def _remembered_function_source(func:Callable)->str:
+    """A function's text from the cache's source store, or "" when it was never stored.
+
+    Imported here rather than at module scope: `source_store` imports `layout`, and
+    `translator` is on the path that imports this module, so a top-level import would close a
+    cycle at load time.
+    """
+    from ..source_paths import function_source, load_module_source  # noqa: PLC0415
+
+    code:object = getattr(func, "__code__", None)
+    kernel_file:str = getattr(code, "co_filename", "") or ""
+    module_name:str = getattr(func, "__module__", "") or ""
+    if not module_name and not kernel_file:
+        return ""
+    module_text:str = load_module_source(kernel_file, module_name) or ""
+    if not module_text:
+        return ""
+    qualname:str = getattr(func, "__qualname__", "") or getattr(func, "__name__", "") or ""
+    found = function_source(module_text, qualname,
+                            int(getattr(code, "co_firstlineno", 0) or 0))
+    if not found:
+        return ""
+    lines, _start = found
+    return "".join(lines)
 
 
 def _trimmed_source(func:Callable)->str:

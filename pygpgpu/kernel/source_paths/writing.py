@@ -1,5 +1,8 @@
 # Writing a generated file: the digest sidecar and the atomic replace.
 from __future__ import annotations
+from .digest import (
+    DIGEST_SUFFIX,
+)
 from .locks import (
     _SOURCE_WRITE_POLL,
     _SOURCE_WRITE_TIMEOUT,
@@ -238,10 +241,6 @@ def _append_source_locked(path: str, header: List[str], definitions: List[str],
 
 
 
-DIGEST_SUFFIX: str = ".source-digest"
-
-
-
 def digest_sidecar(path:str)->str:
     """Where a generated file's source digest is kept.
 
@@ -291,7 +290,12 @@ def _stored_digest(path:str, source:str="")->str:
 
 
 def python_source_digest(source_python:str)->str:
-    """A digest of the python text that produced a generated file.
+    """The md5 of one python file's text, or "" when it cannot be read.
+
+    Kept for the callers that hold a path and nothing else (a test fixture writing a fake
+    source, a module outside the process). Everything that has the object itself goes
+    through `object_source_digest`, which reads the code object and therefore also works in
+    a frozen application where no `.py` exists on disk.
 
     The freshness test used to be mtime alone, which assumes a file's timestamp moves
     forward when its text changes. Git breaks that assumption: `git checkout` and

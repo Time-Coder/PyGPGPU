@@ -19,6 +19,32 @@ from .host_regions import (
 )
 
 
+def _remember_module_source(func:object, backend:str)->None:
+    """Keep the module's python text in the cache, for a process with no source on disk.
+
+    Called on the way into a compilation, where the text has just been read. Failures are
+    swallowed on purpose: the store is what a *later* frozen process needs, and a cache that
+    cannot be written (a read-only install directory) must not fail the launch that is
+    already running.
+    """
+    try:
+        from ..source_paths import store_module_source  # noqa: PLC0415 (import cycle)
+        import inspect  # noqa: PLC0415
+
+        module = inspect.getmodule(func)
+        module_name:str = getattr(module, "__name__", "") or getattr(func, "__module__", "") or ""
+        if not module_name:
+            return
+        source_file:str = getattr(getattr(func, "__code__", None), "co_filename", "") or ""
+        module_file:str = getattr(module, "__file__", "") or source_file
+        with open(module_file, "r", encoding="utf-8") as handle:
+            text:str = handle.read()
+        store_module_source(source_file, backend, module_name, text)
+    except Exception:
+        return
+
+
+
 class _CompileWriteMixin:
 
     def _write_source(self, plan:object, args:List[object], arg_types:List[object],
@@ -42,10 +68,23 @@ class _CompileWriteMixin:
         # module, so a callee from another module still has to be reachable -- which is what
         # the include does (the preprocessor expands it before the compiler runs).
         plan.kernel_source_file:str = getattr(self.raw_func.__code__, "co_filename", "") or ""
+        # Remember this module's python text beside the device code it generates, so a later
+        # *frozen* process -- which has the bytecode but no `.py` -- can still translate. This
+        # process has just read that text (`inspect.getsource`), so the write costs one file
+        # read; a module translated for the first time in a build produces a cache tree that
+        # already carries what the packaged application will need.
+        _remember_module_source(self.raw_func, backend)
         # What the generated file records so a later call can tell whether it still
         # describes this module's text. mtime alone is not reliable (`git checkout` restores
         # the old stamp), so the digest is what actually decides.
-        plan.source_digest:str = source_paths.python_source_digest(plan.kernel_source_file)
+        #
+        # The digest is taken from the *code object*, not from the `.py` file, because a
+        # frozen application has no source on disk: `co_filename` is then a bare relative
+        # name and reading it raises. The code object is available either way (PyInstaller
+        # answers it from the PYZ archive), and its digest is byte-identical in both kinds
+        # of process -- which is what lets a cache warmed at build time be found at run
+        # time. See `source_paths.digest.code_digest`.
+        plan.source_digest:str = source_paths.object_source_digest(self.raw_func)
         # Each FOREIGN file's freshness is decided by *its own* python module's digest,
         # computed per write below (one compilation can touch several). The kernel's digest
         # stamped on them instead restarted a foreign file whenever a kernel from another
@@ -316,7 +355,12 @@ class _CompileWriteMixin:
             plan.foreign_source_file:str = plan.entries[0].get("source_file", "") or ""
             plan.foreign_digest:str = plan.foreign_digests.get(plan.foreign_source_file)
             if plan.foreign_digest is None:
-                plan.foreign_digest = source_paths.python_source_digest(plan.foreign_source_file)
+                # A foreign file's freshness is decided by the module that *owns* it, which
+                # this loop only knows by file name: the entry recorded which python file
+                # the helper was written in. `object_source_digest` prefers the module's code
+                # object, so this resolves the file back to its module rather than reading
+                # the `.py` -- a frozen application has no source to read.
+                plan.foreign_digest = source_paths.file_source_digest(plan.foreign_source_file)
                 plan.foreign_digests[plan.foreign_source_file] = plan.foreign_digest
             # The synthesized helpers these entries' bodies call live in the shared
             # header now, which this file's own include reaches (see helper_include

@@ -118,7 +118,12 @@ class NVRTCProgram(CUObject):
             return False
         
         cubin_file_name = self._cubin_file_name(device)
-        if self._program_parser.newest_mtime > modify_time(cubin_file_name):
+        # The file name already carries the generated source's md5, so an existing binary is
+        # the right one. Only a parse that had to fall back to a timestamp comparison also
+        # compares the binary's stamp -- that comparison is what a moved (or packaged) cache
+        # inverts, and it would rebuild a binary that is already correct on every start.
+        if not self._program_parser.validated_by_content \
+                and self._program_parser.newest_mtime > modify_time(cubin_file_name):
             return False
                        
         self._cubin[device] = load_bin(cubin_file_name)
@@ -130,7 +135,8 @@ class NVRTCProgram(CUObject):
             return False
         
         ptx_file_name = self._ptx_file_name(device)
-        if self._program_parser.newest_mtime > modify_time(ptx_file_name):
+        if not self._program_parser.validated_by_content \
+                and self._program_parser.newest_mtime > modify_time(ptx_file_name):
             return False
         
         self._ptx[device] = load_bin(ptx_file_name)

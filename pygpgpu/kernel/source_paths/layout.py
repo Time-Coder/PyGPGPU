@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import site
+import sys
 from typing import Dict, List, Optional, Tuple
 
 
@@ -195,6 +196,24 @@ def source_path(kernel_file: str, source_file: str, backend: str) -> str:
 
 
 def cache_root(kernel_file: str, backend: str) -> str:
-    """The `pykernels` folder a kernel's generated sources live in."""
+    """The `pykernels` folder a kernel's generated sources live in.
+
+    A frozen application is the one case where the derived directory is not writable: its
+    `co_filename` is a bare relative name, so the folder resolves against the process's
+    *working* directory, and a program started from `C:\\Program Files` (or any other
+    read-only location) cannot create a cache there. `_MEIPASS` is writable for the life of
+    the process -- it is the extraction directory the bundle was unpacked into -- so a
+    frozen process writes there instead, beside the cache tree a build may have shipped.
+
+    `PYGPGPU_CACHE_DIR`, when set, wins over both: it is the documented way to point the
+    cache at a fixed location (a temp directory, a per-user application folder).
+    """
+    override: str = os.environ.get("PYGPGPU_CACHE_DIR", "")
+    if override:
+        return os.path.join(override, CACHE_FOLDERS[backend], "pykernels")
+    if getattr(sys, "frozen", False):
+        bundle_root: str = getattr(sys, "_MEIPASS", "") or ""
+        if bundle_root:
+            return os.path.join(bundle_root, CACHE_FOLDERS[backend], "pykernels")
     return os.path.join(source_directory_of(kernel_file), CACHE_FOLDERS[backend],
                         "pykernels")

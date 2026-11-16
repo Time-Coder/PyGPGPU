@@ -38,14 +38,45 @@ def guard_macro(path: str) -> str:
     layout, therefore one C name), so a source that reaches both would define the type
     twice -- which C++ rejects. A guard per file fixes exactly that: the second inclusion
     is skipped whole, and its declarations come from the first.
+
+    The hash covers the file's path **inside the cache tree**, not its absolute path. The
+    guard has to be the same for a cache that was moved: a tree copied into another
+    directory (or shipped inside a packaged application) rewrites every absolute path, and a
+    guard that changed with it would make the new text differ from the old -- so the
+    generated source would no longer match its own digest, and the parse and binary caches
+    would both miss on every start. What the guard has to separate is two *modules*, and
+    their paths inside the tree already do that.
     """
+    relative: str = _tree_relative_path(path)
     digest: str = hashlib.md5(
         os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()[:12]
+    if relative:
+        digest = hashlib.md5(relative.encode("utf-8")).hexdigest()[:12]
     # `__<file>_<hash>__`: the file's own name is the readable half, the hash keeps two
     # same-named modules (both `scene.cu`, say) apart, and the trailing underscores mark
     # the end the way a leading pair marks the start.
     stem: str = os.path.splitext(os.path.basename(path))[0] or "source"
     return f"__{_sanitize(stem)}_{digest}__"
+
+
+
+#: The cache folder a generated file sits in, as a marker. A generated source always lives
+#: below one of these, so everything after it is the file's path inside the cache tree.
+_CACHE_MARKERS: tuple = ("__cucache__/", "__clcache__/", "__hipcache__/", "__metalcache__/")
+
+
+def _tree_relative_path(path: str) -> str:
+    """The part of a generated file's path below its cache folder, with `/` separators.
+
+    Empty when the path does not name a cache folder, which keeps `guard_macro` usable for a
+    caller that hands it an arbitrary file (a test's temporary source).
+    """
+    normalized: str = os.path.abspath(path).replace("\\", "/")
+    for marker in _CACHE_MARKERS:
+        position: int = normalized.find("/" + marker)
+        if position != -1:
+            return normalized[position + 1:]
+    return ""
 
 
 

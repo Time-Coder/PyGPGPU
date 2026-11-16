@@ -85,8 +85,20 @@ from .locks import (
     _path_lock,
     write_lock,
 )
-from .writing import (
+from .digest import (
     DIGEST_SUFFIX,
+    code_digest,
+    file_source_digest,
+    module_digest,
+    object_source_digest,
+)
+from .source_store import (
+    SOURCE_FOLDER,
+    function_source,
+    load_module_source,
+    store_module_source,
+)
+from .writing import (
     _append_source_locked,
     _stored_digest,
     _write_digest,

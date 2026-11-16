@@ -9,6 +9,12 @@ from ctypes import c_char_p, c_void_p, Structure, _Pointer, pointer
 from ctypes import Union as ctypes_union
 from typing import Tuple, TYPE_CHECKING, Dict, List, Optional, Set, Union
 from ....cparser import CPreprocessor
+from ....cparser.related_files import (
+    recorded_related_files,
+    related_digests,
+    related_files_are_current,
+    resolved_related_files,
+)
 from ....cparser.ts_parser import TSParserMixin
 from ...driver import (
     NVRTC,
@@ -61,6 +67,7 @@ class ProgramParser(_StructBuilderMixin, TSParserMixin):
         self._struct_infos:Dict[str, StructInfo] = {}
         self._struct_types:Dict[str, type] = {}
         self._newest_mtime:Union[float, bool] = False
+        self._validated_by_content:bool = False  # see _load_cubin
 
 
     def parse(self, file_name:str, includes:Optional[List[str]]=None, defines:Optional[Dict[str, object]]=None, options:Optional[BuildOptions]=None)->Union[float, bool]:
@@ -148,7 +155,13 @@ class ProgramParser(_StructBuilderMixin, TSParserMixin):
     def _save(self)->None:
         meta:"ParseMeta" = {
             "clean_code": self._clean_code,
-            "related_files": self._related_files,
+            # Recorded relative to the generated source's own directory, so the whole
+            # `__xxcache__` tree can be copied or shipped inside a packaged application and
+            # still validate (see pygpgpu.cparser.related_files). The content digest is what
+            # survives a copy rewriting every timestamp.
+            "related_files": recorded_related_files(self._related_files, self._file_name),
+            "related_digests": related_digests(
+                self._related_files, os.path.dirname(os.path.abspath(self._file_name))),
             "line_map": self._line_map,
             "struct_infos": self._struct_infos,
             "kernel_infos": self._kernel_infos
@@ -215,33 +228,42 @@ class Kernel_{kernel_name}(Kernel):
 
     def _load(self)->Union[bool, float]:
         meta_mtime = modify_time(self._meta_file_name)
-        if modify_time(self._file_name) > meta_mtime:
-            return False
-        
-        newest_mtime:float = 0
+        # The generated source's own stamp is only consulted when the meta file predates the
+        # digest record: comparing timestamps here first would reject a cache tree that was
+        # merely *moved* (a copy rewrites stamps), which is exactly what the digest below is
+        # there to survive. A meta file written by an older version carries no digests, so
+        # it keeps the original rule.
         try:
             meta:"ParseMeta" = load_var(self._meta_file_name)
         except (OSError, EOFError, pickle.UnpicklingError, ValueError, TypeError):
             # No usable cache (see the OpenCL counterpart): re-parse instead of failing.
             return False
-        for related_file in meta["related_files"]:
+        if "related_digests" not in meta and modify_time(self._file_name) > meta_mtime:
+            return False
+
+        newest_mtime:float = 0
+        program_root:str = os.path.dirname(os.path.abspath(self._file_name))
+        if not related_files_are_current(meta["related_files"], program_root,
+                                         meta.get("related_digests"), meta_mtime):
+            return False
+        # The newest stamp is still reported for the binary cache's own comparison; the
+        # *validity* decision above is content-based where a digest was recorded.
+        for related_file in resolved_related_files(meta["related_files"], self._file_name):
             if not os.path.isfile(related_file):
                 return False
-
             related_file_mtime = modify_time(related_file)
             if related_file_mtime > newest_mtime:
                 newest_mtime = related_file_mtime
 
-            if related_file_mtime > meta_mtime:
-                return False
-            
         self._clean_code = meta["clean_code"]
-        self._related_files = meta["related_files"]
+        self._related_files = resolved_related_files(meta["related_files"], self._file_name)
         self._line_map = meta["line_map"]
         self._kernel_infos = meta["kernel_infos"]
         self._struct_infos = meta["struct_infos"]
         for struct_info in self._struct_infos.values():
             self._create_struct_type(struct_info)
+        # A content-validated parse lets the binary be trusted by its name (see _load_cubin).
+        self._validated_by_content = bool(meta.get("related_digests"))
 
         return newest_mtime
 
@@ -249,6 +271,12 @@ class Kernel_{kernel_name}(Kernel):
     @property
     def newest_mtime(self)->Union[float, bool]:
         return self._newest_mtime
+
+
+    @property
+    def validated_by_content(self)->bool:
+        """Whether this parse was validated by content, not by a timestamp comparison."""
+        return self._validated_by_content
 
 
     @property
@@ -393,15 +421,25 @@ class Kernel_{kernel_name}(Kernel):
             include = os.path.normcase(os.path.abspath(include)).replace("\\", "/")
             if include not in clean_includes:
                 clean_includes.append(include)
-                
+
         content = {
-            "includes": clean_includes,
+            # `includes` decide where a `#include` resolves, so two include sets may produce
+            # different code. They are recorded as their *own* directory names rather than
+            # full paths -- the same reason `file_name` below is: an absolute path would make
+            # the key depend on where the tree happens to sit, so a cache moved to another
+            # directory (or shipped inside a packaged application) would miss it and recompile
+            # everything. See `program_key`.
+            "includes": [os.path.basename(os.path.normpath(include))
+                         for include in clean_includes],
             "defines": defines,
             "options": str(options)
         }
         if file_name:
-            content["file_name"] = (os.path.normcase(os.path.abspath(file_name))
-                                    .replace("\\", "/"))
+            # The generated source is identified by its name and its *content*, never by its
+            # absolute path: several kernels share one generated file (every kernel a module
+            # defines), and each is compiled on its own call, so the content is what tells two
+            # versions of that file apart.
+            content["file_name"] = os.path.basename(file_name)
             # The source's *content* belongs to the key: several kernels can share one
             # generated file (every kernel a python module defines), and each is compiled
             # on its own call, so a key that named only the path would let the first
