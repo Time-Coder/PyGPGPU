@@ -58,7 +58,7 @@ dependencies = [
     # at ABI 13 and shipped as cp37-abi3, the one combination that both
     # tree-sitter 0.20.x -- the last line with CPython 3.7 wheels -- and 0.21+
     # accept, so a single wheel serves every supported interpreter.
-    "tree-sitter-metal>=0.1.0",
+    "tree-sitter-metal>=0.1.1",
     # pygpgpu/__init__.py imports pygf for the numpy patches and re-exports its vector types,
     # so it is a hard requirement rather than an optional extra.
     # 0.1.5 owns the whole numpy boundary: the `VectorArray` view, the constructor patches,
