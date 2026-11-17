@@ -22,7 +22,8 @@ class Camera:
         self.aspect_ratio: float = 16/9
         self.image_width: int = 400
         self.viewport_width: float = 0.4
-        self.samples_per_pixel: int = 10
+        self.samples_per_pixel: int = 100
+        self.max_depth: int = 10
         self.update_params()
 
     def update_params(self):
@@ -73,10 +74,11 @@ class Camera:
     @kernel
     def render(self, scene: Scene)->np.ndarray:
         for i, j in np.ndindex(self.image_height, self.image_width):
+            tid: int = i*self.image_width + j
             pixel_color = color3f(0, 0, 0)
             for sample in range(0, self.samples_per_pixel):
                 ray: Ray = self.get_ray(i, j, sample)
-                pixel_color += scene.ray_color(ray)
+                pixel_color += scene.ray_color(ray, self.max_depth, tid, sample)
 
             self.write_color(i, j, pixel_color/self.samples_per_pixel)
 
