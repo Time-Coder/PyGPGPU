@@ -180,6 +180,45 @@ class _InitMixin:
                 self.tree:ast.FunctionDef = tree.body[0]
             except SyntaxError as e:
                 raise SyntaxError(f"cannot parse function source: {e}") from None
+            if not is_kernel:
+                # A self-recursive helper whose recursive calls all sit in tail position
+                # is compiled into a loop before its own translation begins: the cycle
+                # would otherwise be refused, while MSL and OpenCL C cannot recurse at
+                # all and CUDA's per-thread stack overflows silently. A body that
+                # recurses but does not convert falls through to the native-recursion
+                # unlock when that can take it (the backends that allow recursion and a
+                # signature the call site can spell -- see scalar_recursion); only a
+                # body neither pass converts keeps the refusal, positioned at the
+                # offending call. A body that does not recurse leaves the tree exactly
+                # as parsed.
+                from .tail_recursion import tail_loop_tree, TailRecursionError
+                from .errors import _syntax_error
+                from .scalar_recursion import RECURSIVE_BACKENDS  # noqa: PLC0415
+                pointer_params:Set[str] = {
+                    name for name, t in
+                    [(arg.arg, t) for arg, t in zip(self.tree.args.posonlyargs
+                                                    + self.tree.args.args,
+                                                    param_types[:len(self.tree.args.posonlyargs)
+                                                                 + len(self.tree.args.args)])]
+                    if isinstance(t, tuple)}
+                converted:Optional[ast.FunctionDef] = None
+                try:
+                    converted = tail_loop_tree(
+                        self.tree, func, getattr(func, "__globals__", None),
+                        pointer_params)
+                except TailRecursionError as caught:
+                    if self.backend in RECURSIVE_BACKENDS:
+                        # The native unlock may still take the shape the loop
+                        # conversion refused (a pointer-parameter rebinding, say);
+                        # leave the tree as parsed and let the call-site machinery
+                        # decide. The verdict is the call sites' question now.
+                        pass
+                    else:
+                        raise _syntax_error(
+                            str(caught), getattr(caught, "node", None), self.filename,
+                            self.source_text, self.first_line) from None
+                if converted is not None:
+                    self.tree = converted
 
             self.params:List[Translated] = []
             self.shapes_used:List[Tuple[str, int]] = []
@@ -335,6 +374,12 @@ class _InitMixin:
             # *data* of the failure travels instead and the host rebuilds the exception from
             # this table -- type, message and line all come back.
             self.raise_sites:List[Dict[str, object]] = []
+            # Set when a call site inside the unit was admitted to native recursion:
+            # the generated code calls itself (or a cycle partner) as a plain device
+            # function, so the launch has to provide a per-thread stack that fits the
+            # depth the caller's data implies (see _compile_kernels's stack raise and
+            # PyKernel recursion_depth_hint).
+            self.uses_native_recursion:bool = False
             # True when a raise reached the generated code, so the render adds the exception
             # slot and the host reads it after the launch.
             self.has_raises:bool = False

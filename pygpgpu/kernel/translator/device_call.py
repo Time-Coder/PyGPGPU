@@ -22,6 +22,9 @@ from .walk import (
     short_hash,
     type_sig,
 )
+from .scalar_recursion import (
+    mark_in_progress,
+)
 
 
 class _DeviceCallMixin:
@@ -101,7 +104,37 @@ class _DeviceCallMixin:
         entry:Optional[Dict[str, object]] = self.device_cache.get(sig_key)
         if entry is not None:
             if entry["status"] == "in_progress":
-                self._error(f"recursive call detected: '{name}'", node)
+                # The site calls a function that is being translated right now: a
+                # cycle. The key alone cannot say which frame -- a self-call's key
+                # carries the caller's exception base, which differs from the callee's
+                # own whenever an outer caller raises -- so the frame on the
+                # in-progress entry (see scalar_recursion) is the authority. The
+                # backends that allow recursion and the shapes whose signature the
+                # call site can spell completely get native recursion instead of the
+                # refusal: the generated C is a plain device function calling itself
+                # by name, the code a hand-written CUDA file would carry. Everything
+                # else keeps the refusal -- MSL and OpenCL C forbid recursion outright.
+                admitted, return_type = self._native_recursion_admitted(raw_func,
+                                                                        param_types)
+                if admitted:
+                    # The generated unit now recurses natively: the launch has to run
+                    # with a per-thread stack large enough for the depth the user's
+                    # data implies (see uses_native_recursion and the stack raise in
+                    # _compile_kernels).
+                    self.uses_native_recursion = True
+                    return self._emit_recursive_site(raw_func, param_types,
+                                                     call_codes, node, name,
+                                                     return_type)
+                self._error(
+                    f"recursive call detected: '{name}' -- this backend's device "
+                    f"functions cannot recurse (MSL and OpenCL C forbid it), so the "
+                    f"call needs one of: a tail-recursive spelling, which the "
+                    f"translator compiles into a loop automatically; a loop written "
+                    f"by hand, which every backend runs; or launching this kernel on "
+                    f"cuda or hip, whose device functions may recurse natively", node)
+            # A cache hit on a cycle partner's *completed* entry needs no special
+            # handling: the entry carries the final signature, and the forwarding
+            # below is the ordinary one.
             # The callee's outer-scope values must be parameters of THIS caller too, and
             # a cache hit used to skip that registration -- only the miss path required
             # them. A helper that reaches a module constant only through a cached callee
@@ -137,7 +170,7 @@ class _DeviceCallMixin:
             return (f"{entry['c_name']}({', '.join(argument_codes)})",
                     entry["return_type"])
 
-        self.device_cache[sig_key] = {"status": "in_progress"}
+        mark_in_progress(self.device_cache, sig_key, raw_func, param_types, self)
         try:
             # Through the facade, lazily: this mixin is imported by the module that
             # defines the class, and a top-level import would be a cycle.
@@ -186,6 +219,13 @@ class _DeviceCallMixin:
             for outer_name, outer in callee.outer_vars.items():
                 self._require_outer_parameter(outer_name, outer, node)
                 outer_codes.append(self._outer_argument(outer_name, outer))
+            # The cycle this entry closes: the tokens the body's walk left in *this*
+            # translator's lines are rewritten before the render -- the code string
+            # below is built from these very lines, so the tokens must be gone by
+            # then. A self-call's shapes are final here; a mutual partner's call is
+            # pure-scalar by the bar the site checked, so its call needs no shape
+            # argument (see _finish_recursive_sites).
+            callee._finish_recursive_sites()
             entry = {
                 "status": "done",
                 "c_name": c_name,
