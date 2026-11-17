@@ -215,6 +215,21 @@ def padded_member_fields(fields:Sequence[Tuple[str, type]],
     return padded
 
 
+def is_pad_member(name:str)->bool:
+    """Whether a dtype field name is one of the layout's explicit padding members.
+
+    `padded_member_fields` names them `_pgpgpu_pad_N`, and the rendered declaration
+    (see `structure_fields`) writes the same arrays. A body never reads one, but the
+    CUDA/HIP constructor literal has to walk every member in order -- and a padding
+    member is an unsigned-byte *array*, which C++ (as NVRTC compiles it) will not accept
+    a bare `0` for: the scalar binds to nothing, every later slot shifts left by one,
+    and the next vector member lands on the pad's bytes ("no suitable conversion function
+    from float3 to unsigned char"). The literal spells such a member as a braced zero
+    list instead, which both initializes the array and keeps the slot count honest.
+    """
+    return name.startswith("_pgpgpu_pad_")
+
+
 def structure_fields(dtype:np.dtype, backend:str)->List[str]:
     """One C member declaration per field, in declaration order, with the layout explicit.
 

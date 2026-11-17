@@ -57,6 +57,7 @@ from .layout import (
     dtype_of,
     field_type,
     fixed_member_class,
+    is_pad_member,
     is_record,
     member_types,
     nested_dtypes,

@@ -5,12 +5,13 @@ import numpy as np
 from .notation import (
     Translated,
 )
+from .predicates import (
+    is_image,
+    is_ptr,
+)
 from .vectors import (
     _vec_field_names,
     is_vec,
-)
-from .predicates import (
-    is_ptr,
 )
 
 
@@ -167,7 +168,22 @@ class _StructuresMixin:
         from .. import structs
 
         if is_ptr(member_type):
-            return "0"
+            # A sub-array member (the layout's explicit padding, or a declared
+            # `ctypes` array field) reads as a pointer for indexing, but an aggregate
+            # literal cannot take a bare `0` for an array member: NVRTC refuses it, and
+            # every later slot then shifts left by one, so the next vector lands on the
+            # pad's bytes ("no suitable conversion from float3 to unsigned char"). The
+            # zero is a braced list, which both fills the array and keeps the slot count.
+
+            element:object = member_type[1]
+            if not is_vec(element) and not is_image(element):
+                if isinstance(element, str) and structs.dtype_for(element) is not None:
+                    return self._zero_value(element)
+                return "{0}"
+            # A vector's array member would be spelled per element, but a vector member
+            # itself is handled above; reaching here with a vector element means a
+            # declared `float3 xs[4]` field, which the constructor refuses elsewhere.
+            return "{0}"
         if is_vec(member_type):
             return self._vec_maker(member_type,
                                    ", ".join("0" for _ in _vec_field_names(member_type)))
