@@ -96,9 +96,15 @@ class _CompileTranslateMixin:
         # whose derived signature changed kept its old name, and the generated file ended up
         # holding two declarations of it ("more than one instance of overloaded function").
         # Re-deriving the name with the rendered declaration folds that into the same hash.
+        # The helper closure's source digest folds in here too: a helper is monomorphized
+        # inside this kernel's translation unit, so an edit inside a helper has to move the
+        # name -- the generated file's bytes and the binary cache's key are both keyed on
+        # them, and a fresh process would otherwise load a binary built from the old helper
+        # (the in-process key folds the same digest; see _prepare_launch).
         plan.c_name = self._c_kernel_name(sig, backend,
                                      declaration=";".join(plan.translator.parameter_declarations()),
-                                     owner=owner)
+                                     owner=owner,
+                                     helpers=self._helper_closure_digest())
         # One kernel per magic loop: a body with several renders several, launched in order
         # so the arrays stay on the device between them.
         plan.rendered:List[Tuple[str, str]] = plan.translator.render_kernels(plan.c_name)

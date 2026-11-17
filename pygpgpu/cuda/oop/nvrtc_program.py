@@ -113,10 +113,28 @@ class NVRTCProgram(CUObject):
     def _save_ptx(self, device:Device)->None:
         save_bin(self._ptx[device], self._ptx_file_name(device))
 
+    def _binary_inputs_newest(self)->float:
+        """The newest stamp among the files this unit's binary was built from, read now.
+
+        The unit is this generated source *plus* the related files it `#include`s (a
+        helper module's generated file, expanded by the preprocessor at build time). The
+        write step may have restarted one of those after this parse -- a helper edit
+        restarts the foreign file without touching this one -- so the stamps are read from
+        disk at the load decision, not from the parse-time snapshot: a binary older than
+        any input was built from text that no longer exists, and reusing it would answer
+        the old helper's numbers (see tests/test_kernel_cache_helpers.py).
+        """
+        newest:float = self._program_parser.newest_mtime or 0.0
+        for related_file in getattr(self._program_parser, "related_files", ()) or ():
+            related_mtime:float = modify_time(related_file)
+            if related_mtime > newest:
+                newest = related_mtime
+        return newest
+
     def _load_cubin(self, device:Device)->bool:
         if not self._program_parser.newest_mtime:
             return False
-        
+
         cubin_file_name = self._cubin_file_name(device)
         # The file name already carries the generated source's md5, so an existing binary is
         # the right one. Only a parse that had to fall back to a timestamp comparison also
@@ -125,20 +143,30 @@ class NVRTCProgram(CUObject):
         if not self._program_parser.validated_by_content \
                 and self._program_parser.newest_mtime > modify_time(cubin_file_name):
             return False
-                       
+        # A content-validated parse names the binary by this file's bytes, but the unit
+        # the binary was built from also included the parse's related files. A binary
+        # older than the newest input is stale whatever its name says: rebuild.
+        inputs_newest:float = self._binary_inputs_newest()
+        if inputs_newest and modify_time(cubin_file_name) < inputs_newest:
+            return False
+
         self._cubin[device] = load_bin(cubin_file_name)
 
         return True
-    
+
     def _load_ptx(self, device:Device)->bool:
         if not self._program_parser.newest_mtime:
             return False
-        
+
         ptx_file_name = self._ptx_file_name(device)
         if not self._program_parser.validated_by_content \
                 and self._program_parser.newest_mtime > modify_time(ptx_file_name):
             return False
-        
+        # The same related-input rule the cubin check applies.
+        inputs_newest:float = self._binary_inputs_newest()
+        if inputs_newest and modify_time(ptx_file_name) < inputs_newest:
+            return False
+
         self._ptx[device] = load_bin(ptx_file_name)
 
         return True

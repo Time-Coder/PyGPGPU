@@ -7,6 +7,9 @@ from typing import (
 from ..translator import (
     short_hash,
 )
+from .helper_closure import (
+    helper_closure_digest,
+)
 
 
 class _PykernelIdentityMixin:
@@ -17,6 +20,18 @@ class _PykernelIdentityMixin:
             return ""
         return ",".join(f"{key}={self._type_map[key]}"
                         for key in sorted(self._type_map))
+
+
+    def _helper_closure_digest(self)->str:
+        """The source digest of the helper closure this kernel inlines ("" for none).
+
+        Read live on every launch rather than cached on the instance: the answer follows
+        the helper function objects the module globals hold *now*, so an edit to a helper
+        module changes it on the next call without the kernel's own source moving. The
+        walk is the same shape the launch already pays for per call
+        (`baked_shared_shapes`): a cached parse and a plain AST pass.
+        """
+        return helper_closure_digest(self.raw_func, self._resolve_global)
 
 
     def _source_signature(self)->str:
@@ -61,7 +76,7 @@ class _PykernelIdentityMixin:
 
 
     def _c_kernel_name(self, sig:str, backend:str, declaration:str="",
-                     owner:Optional[type]=None)->str:
+                     owner:Optional[type]=None, helpers:str="")->str:
         """The kernel's C name, unique per module and per what it declares.
 
         Two modules can define a kernel with the same name and the same argument types --
@@ -85,6 +100,14 @@ class _PykernelIdentityMixin:
         reuse the first one's compiled binary, and silently answer the first one's numbers
         (see tests/regressions/subclass_kernel_identity.py). The in-memory cache key
         carries the same mark, so the two halves cannot disagree.
+
+        `helpers` is the source digest of the helper closure the body inlines (see
+        `helper_closure.helper_closure_digest`). A helper is monomorphized inside this
+        kernel's own translation unit, so its text is this kernel's device code: a literal
+        edited inside a helper has to change the name, or the generated file keeps its old
+        bytes, the binary cache keeps its old key (it is keyed on those bytes), and a fresh
+        process silently loads a binary built from the old helper. The in-process cache
+        key folds the same digest (see _prepare_launch), so the two halves cannot disagree.
         """
         source_file:str = getattr(getattr(self.raw_func, "__code__", None),
                                   "co_filename", "") or ""
@@ -103,4 +126,6 @@ class _PykernelIdentityMixin:
             payload += "|owner=" + f"{owner.__module__}.{owner.__qualname__}"
         if declaration:
             payload += "|" + declaration
+        if helpers:
+            payload += "|helpers=" + helpers
         return f"{base}_{short_hash(payload)}"

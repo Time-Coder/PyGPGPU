@@ -102,6 +102,17 @@ class _DeviceCallMixin:
         if entry is not None:
             if entry["status"] == "in_progress":
                 self._error(f"recursive call detected: '{name}'", node)
+            # The callee's outer-scope values must be parameters of THIS caller too, and
+            # a cache hit used to skip that registration -- only the miss path required
+            # them. A helper that reaches a module constant only through a cached callee
+            # then forwarded an argument it never declared: the generated unit referenced
+            # `H_R` (or whatever the constant is) and the device compiler refused it with
+            # `identifier "H_R" is undefined`. Requiring here keeps every caller of a
+            # cached entry on the same footing as the first one.
+            stored_outer:object = entry.get("outer_vars") or {}
+            if isinstance(stored_outer, dict):
+                for outer_name, outer in stored_outer.items():
+                    self._require_outer_parameter(outer_name, outer, node)
             stored_params:object = entry.get("shape_params") or ()
             site_params:List[Tuple[str, int]] = (
                 [(shape[0], shape[1]) for shape in stored_params]
@@ -166,7 +177,11 @@ class _DeviceCallMixin:
             # the first site's variables.
             shape_params:List[Tuple[str, int]] = list(callee.shapes_used)
             # A helper reaches outer-scope names the same way the kernel does, so it gets
-            # the same parameters: the call site forwards its own (see below).
+            # the same parameters: the call site forwards its own (see below). The
+            # callee's own entries travel with the cache entry, so a *second* caller that
+            # hits this entry can require them on itself the way this caller did -- the
+            # forwarding codes are the callee's names, and a caller that never declared
+            # the parameters would emit a call to names it does not carry.
             outer_codes:List[str] = []
             for outer_name, outer in callee.outer_vars.items():
                 self._require_outer_parameter(outer_name, outer, node)
@@ -191,6 +206,10 @@ class _DeviceCallMixin:
                 "code": callee.render_device(c_name, shape_params),
                 "shape_params": [list(shape) for shape in shape_params],
                 "outer_codes": outer_codes,
+                # The callee's outer-scope entries, in the order `outer_codes` forwards
+                # them. A hit on this entry must require them on the *hitting* caller
+                # exactly as the miss path did (see the hit branch below).
+                "outer_vars": dict(callee.outer_vars),
                 # Structure types this helper's signature or body mentions: the caller emits
                 # their typedefs once, ahead of every device function.
                 "structs": list(callee.private_structs),

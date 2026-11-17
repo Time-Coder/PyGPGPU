@@ -140,8 +140,25 @@ class HipCompiler:
                 file.write(clean_code)
 
         newest_mtime = parser.newest_mtime
+        # The unit clang compiles is the clean source *plus* the related files it
+        # `#include`s (a helper module's generated file, read from disk at compile time).
+        # The write step may have restarted one of those after this parse -- a helper edit
+        # restarts the foreign file without touching this one -- so the stamps that decide
+        # freshness are read from disk *now*, not from the parse-time snapshot: an object
+        # older than any file it was built from answers the old helper's numbers (see
+        # tests/test_kernel_cache_helpers.py).
+        inputs_newest:float = 0.0
+        for related_file in getattr(parser, "related_files", ()) or ():
+            related_mtime:float = modify_time(related_file)
+            if related_mtime > inputs_newest:
+                inputs_newest = related_mtime
+        if inputs_newest < newest_mtime:
+            inputs_newest = newest_mtime
         if (not os.path.isfile(obj_path)
-                or (newest_mtime and modify_time(clean_path) > modify_time(obj_path))):
+                or (inputs_newest and modify_time(obj_path) < inputs_newest)):
+            # The object's freshness rule: it must be at least as new as every input it
+            # was built from -- the clean source and each related file. A missing or
+            # outgrown object is rebuilt; nothing else is.
             # Use clang when hipRTC fails on this path: the extern "C" wrapper is already in the parser-generated clean_code
             # --cuda-device-only: emits an unbundled raw AMDGCN code object,
             # which hipModuleLoadData can load directly (-x hip defaults to a host COFF with an embedded fatbin, which reports image invalid)

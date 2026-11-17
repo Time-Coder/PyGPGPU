@@ -219,6 +219,17 @@ class _PrepareLaunchMixin:
                        if plan.owner is not None else "")
         plan.cache_key:str = (f"{plan.backend}|{plan.device_key}|{plan.sig}"
                           f"|{self._type_map_key()}|{owner_mark}")
+        # The inlined helper closure is part of the identity, exactly as the baked shapes
+        # above are: a helper is monomorphized inside this kernel's own translation unit,
+        # so its text is this kernel's device code. The key has to fold the closure's
+        # source digest *here* -- before the entry is looked up -- because a helper edit
+        # does not touch any generated file on disk until a recompile happens: the
+        # per-file mtime check below only sees files the last compile wrote, so without
+        # this mark the entry survives and the launch silently answers the old helper's
+        # numbers. The kernel's C name folds the same digest (see _c_kernel_name).
+        helpers_mark:str = self._helper_closure_digest()
+        if helpers_mark:
+            plan.cache_key = f"{plan.cache_key}|helpers={helpers_mark}"
         plan.entry = self._cache.get(plan.cache_key)
         if plan.entry is not None and self._source_files_changed(plan.entry[8]):
             # A generated file this entry was built from changed on disk (damage the
