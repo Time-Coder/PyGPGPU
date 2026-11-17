@@ -394,7 +394,9 @@ def _dependency_order(device_cache:Dict[object, object])->List[Dict[str, object]
     would then reference a function C has not seen yet. Names are matched textually
     against each entry's generated code.
     """
-    entries:List[Dict[str, object]] = [e for e in device_cache.values() if e.get("status") == "done"]
+    entries:List[Dict[str, object]] = [e for e in device_cache.values()
+                                       if isinstance(e, dict)
+                                       and e.get("status") == "done"]
     if len(entries) <= 1:
         return entries
 

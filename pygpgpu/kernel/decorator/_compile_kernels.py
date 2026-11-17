@@ -60,6 +60,16 @@ class _CompileKernelsMixin:
                     plan.linked = "<<<" in plan.file.read()
             except OSError:
                 plan.linked = False
+        # Native recursion in the unit (a call site admitted to a self-call or a mutual
+        # cycle) makes the per-thread stack a correctness parameter: CUDA/HIP give each
+        # thread a small fixed stack by default, and a frame that spills past it writes
+        # through memory nobody owns -- a wrong answer rather than an error. The launch
+        # raises the stack limit before the first launch when the current one is too
+        # small (see _raise_stack_for_recursion); the flag travels in the launch meta so
+        # a cached entry keeps answering it.
+        plan.recursive:bool = bool(getattr(plan.translator, "uses_native_recursion", False)
+                             or any(getattr(phase, "uses_native_recursion", False)
+                                    for phase in plan.translator.phase_translators))
         # The write above and the compile below are one critical section. A sibling kernel
         # of this same module may be appending its definition concurrently, and the compile
         # keys its cached binary on the file's *content*: a compile that started between two
@@ -299,6 +309,9 @@ class _CompileKernelsMixin:
                  # runs them once, after the launch (see _run_host_region).
                  "body_tail": getattr(plan.translator, "body_tail", []),
                  "kernels": plan.kernels,
+                 # Whether the generated unit recurses natively: the launch raises the
+                 # per-thread stack limit before launching (see _raise_stack_for_recursion).
+                 "recursive": plan.recursive,
                  # The trailing extent arguments each phase kernel needs, by phase.
                  "kernel_shapes": plan.extra_shapes,
                  "kernel_created": plan.phase_created,

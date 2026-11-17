@@ -33,7 +33,49 @@ from ._typing import (
 )
 
 
+# The per-thread stack size a recursion-carrying kernel launches with, when the
+# context's current limit is smaller. CUDA's default is 1024 bytes per thread -- a
+# handful of frames -- and a frame that spills past the limit writes through memory
+# nobody owns, which is a wrong answer rather than an error. 64 KiB carries hundreds
+# of the small frames the translator generates (a handful of scalars per level); a
+# body that recurses deeper than that can raise the context's own `stack_size`.
+RECURSION_STACK_BYTES:int = 64 * 1024
+
+
 class _PykernelCallMixin:
+
+    @staticmethod
+    def _raise_stack_for_recursion(backend:str, device_obj:object,
+                                   launch_meta:Dict[str, object])->None:
+        """Raise the per-thread stack limit when the unit recurses natively.
+
+        Called once per launch, before the first kernel: a context whose limit is
+        already large enough (a previous recursion launch raised it, or the user set
+        it) is left exactly as it was -- the check is one query, and the raise is a
+        driver call the first recursive launch of a module pays once.
+
+        HIP is CUDA's ABI but the binding carries no hipDeviceSetLimit entry, so the
+        raise is CUDA-only today; a deep HIP recursion still needs the runtime's own
+        default until that entry lands (see the guard's message).
+        """
+        if not launch_meta.get("recursive"):
+            return
+        if backend == "cuda":
+            import ctypes  # noqa: PLC0415
+            from ...cuda.driver import CUDA, CUlimit  # noqa: PLC0415
+
+            context:object = device_obj.default_context
+            value:ctypes.c_size_t = ctypes.c_size_t()
+            context.make_current()
+            CUDA.cuCtxGetLimit(ctypes.pointer(value), CUlimit.CU_LIMIT_STACK_SIZE)
+            if value.value >= RECURSION_STACK_BYTES:
+                return
+            CUDA.cuCtxSetLimit(CUlimit.CU_LIMIT_STACK_SIZE, RECURSION_STACK_BYTES)
+            return
+        # HIP: the runtime's own hipDeviceSetLimit is not in the driver table yet
+        # (adding one is a driver-table change, see hip/driver/hipinfo.py), so the
+        # launch keeps the runtime's default; the recursion tests pin only what the
+        # backend guarantees.
 
     def _invoke(self, instance:object, args:Tuple[object, ...],
                 backend_sel:Optional[str], device_sel:Optional[str],

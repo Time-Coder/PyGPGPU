@@ -32,6 +32,11 @@ class _RunLaunchMixin:
         arrays that travel between them stay on the device instead of going back to
         the host and returning.
         """
+        # Native recursion in the unit needs a per-thread stack that fits the depth
+        # the caller's data implies (CUDA's default is a handful of frames): raise the
+        # context's limit once, before the first launch, when the current one is
+        # smaller (see _raise_stack_for_recursion and the `recursive` launch-meta flag).
+        self._raise_stack_for_recursion(plan.backend, plan.device_obj, plan.launch_meta)
         self._sync_device(plan.backend, plan.device_obj)
         # A gap statement may assign a kernel argument (`n = n + 1` between two loops).
         # A parameter is python's function-local, so a later pass must receive the updated
