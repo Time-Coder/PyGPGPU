@@ -7,7 +7,6 @@ from pygf import (
     clamp,
     normalize,
     cross,
-    dot,
 )
 import math
 import numpy as np
@@ -43,50 +42,49 @@ class Camera:
     def look_at(self, target: point3f, up: vector3f = vector3f(0, 1, 0)):
         """Aim the camera at ``target``, from its own position.
 
-        The orientation is built in two steps, each a verifiable axis-angle
-        quaternion: first the rotation that carries the camera's viewing direction
-        (0, 0, -1) onto (target - position), then a roll about that direction which
-        brings the camera's up as close to ``up`` as a rotation allows. Call it
-        before `update_params`, because the viewport's world-space step vectors are
-        derived from the orientation.
+        The basis is the standard look-at: right = cross(forward, up_world)
+        (horizontal for a vertical ``up``), true_up = cross(right, forward), and
+        the orientation is the rotation whose columns carry the camera's local x/
+        y/z onto that basis -- extracted from the orthonormal matrix with the
+        trace form. Call it before `update_params`, because the viewport's
+        world-space step vectors are derived from the orientation.
         """
         forward: vector3f = normalize(target - self.position)
-        base: vector3f = vector3f(0, 0, -1)
-        cos_turn: float = max(-1.0, min(1.0, -(forward.z)))
-        turn: float = math.acos(cos_turn)
-        if turn > 1e-9:
-            axis: vector3f = normalize(cross(base, forward))
-            half: float = turn / 2
-            self.orientation = quatf(math.cos(half),
-                                     axis.x * math.sin(half),
-                                     axis.y * math.sin(half),
-                                     axis.z * math.sin(half))
+        right: vector3f = normalize(cross(forward, up))
+        true_up: vector3f = cross(right, forward)
+        # The rotation matrix whose COLUMNS are the camera's local axes in world
+        # space (local x -> right, local y -> true_up, local z -> -forward, since
+        # the camera looks along its -z): R * v_local = v_world, which is the
+        # convention pygf's `quat * vector` applies.
+        m00, m10, m20 = right.x, right.y, right.z
+        m01, m11, m21 = true_up.x, true_up.y, true_up.z
+        m02, m12, m22 = -forward.x, -forward.y, -forward.z
+        trace: float = m00 + m11 + m22
+        if trace > 0.0:
+            s: float = math.sqrt(trace + 1.0) * 2.0
+            w: float = 0.25 * s
+            x: float = (m21 - m12) / s
+            y: float = (m02 - m20) / s
+            z: float = (m10 - m01) / s
+        elif m00 > m11 and m00 > m22:
+            s = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
+            w = (m21 - m12) / s
+            x = 0.25 * s
+            y = (m01 + m10) / s
+            z = (m02 + m20) / s
+        elif m11 > m22:
+            s = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
+            w = (m02 - m20) / s
+            x = (m01 + m10) / s
+            y = 0.25 * s
+            z = (m12 + m21) / s
         else:
-            # The forward direction is (anti-)parallel to the default: a 180-degree
-            # turn needs an axis from the roll vector instead (the cross product
-            # degenerates), and 0 degrees keeps the identity.
-            if forward.z > 0:
-                self.orientation = quatf(0, 0, 1, 0)
-            else:
-                self.orientation = quatf(1, 0, 0, 0)
-        # The roll: where did the camera's own up land? Rotate (0, 1, 0) by the
-        # orientation and measure the signed angle to the requested up, measured
-        # about the forward direction.
-        landed: vector3f = self.orientation * vector3f(0, 1, 0)
-        projected_up: vector3f = normalize(up - forward * (up * forward))
-        cos_roll: float = max(-1.0, min(1.0, dot(landed, projected_up)))
-        roll: float = math.acos(cos_roll)
-        # The sign: positive when landed sits clockwise from projected_up (as seen
-        # looking against the forward direction) -- the cross of the two, dotted
-        # with forward, says which way to roll.
-        roll_sign: float = 1.0 if dot(cross(landed, projected_up), forward) > 0 else -1.0
-        if roll > 1e-9:
-            half: float = roll_sign * roll / 2
-            self.orientation = (quatf(math.cos(half),
-                                      forward.x * math.sin(half),
-                                      forward.y * math.sin(half),
-                                      forward.z * math.sin(half))
-                                * self.orientation)
+            s = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
+            w = (m10 - m01) / s
+            x = (m02 + m20) / s
+            y = (m12 + m21) / s
+            z = 0.25 * s
+        self.orientation = quatf(w, x, y, z)
 
     def update_params(self):
         self.image_height: int = int(self.image_width / self.aspect_ratio)
