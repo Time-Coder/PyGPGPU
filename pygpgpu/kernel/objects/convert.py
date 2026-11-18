@@ -340,8 +340,12 @@ def convert_object_arguments(func:object, args:Sequence[object],
                     elif (isinstance(kind, type) and issubclass(kind, ctypes.Structure)
                             and not isinstance(value, kind)):
                         # A nested member is rebuilt in the synthesized type from the values
-                        # the caller's object carries.
-                        value = kind(**{n: getattr(value, n) for n, _ in kind._fields_})
+                        # the caller's object carries. The synthesized layout's `_fields_`
+                        # carries padding members the caller's object knows nothing about
+                        # (a vector member's alignment slot), so only the names the source
+                        # actually has are read -- a pad keeps the zero it was declared with.
+                        value = kind(**{n: getattr(value, n) for n, _ in kind._fields_
+                                        if hasattr(value, n)})
                     elif isinstance(value, list) and isinstance(kind, type) \
                             and issubclass(kind, ctypes.Array):
                         # A list member: the field is a fixed-length array of the element
@@ -353,7 +357,8 @@ def convert_object_arguments(func:object, args:Sequence[object],
                                     and issubclass(element_kind, ctypes.Structure) \
                                     and not isinstance(item, element_kind):
                                 item = element_kind(**{
-                                    n: getattr(item, n) for n, _ in element_kind._fields_})
+                                    n: getattr(item, n) for n, _ in element_kind._fields_
+                                    if hasattr(item, n)})
                             filled[position] = item
                         value = filled
                     values[member] = value

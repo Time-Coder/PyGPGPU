@@ -205,7 +205,7 @@ class _InitMixin:
                 try:
                     converted = tail_loop_tree(
                         self.tree, func, getattr(func, "__globals__", None),
-                        pointer_params)
+                        pointer_params, self_name=self_param or None)
                 except TailRecursionError as caught:
                     if self.backend in RECURSIVE_BACKENDS:
                         # The native unlock may still take the shape the loop

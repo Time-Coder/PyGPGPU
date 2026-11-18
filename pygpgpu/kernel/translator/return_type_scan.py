@@ -89,6 +89,10 @@ def _bare_calls(node:ast.AST, receiver_name:Optional[str] = None
     spelling is recognized too: the pair it names is the method's own name, which is
     what the bar and the seed need the call to say. Any other receiver (`other.obj`,
     a rebound method) stays unrecognized, exactly as the bare-name rule leaves it.
+
+    The third element says whether the call was method-spelled: a method call's
+    arguments bind the parameters *after* the receiver, so the arity a consumer
+    demands is one less than a bare call's.
     """
     found:List[tuple] = []
     for child in ast.walk(node):
@@ -97,12 +101,12 @@ def _bare_calls(node:ast.AST, receiver_name:Optional[str] = None
         func:ast.expr = child.func
         if isinstance(func, ast.Name):
             if isinstance(func.ctx, ast.Load):
-                found.append((func.id, child))
+                found.append((func.id, child, False))
         elif (isinstance(func, ast.Attribute) and receiver_name is not None
               and isinstance(func.value, ast.Name)
               and func.value.id == receiver_name
               and isinstance(func.value.ctx, ast.Load)):
-            found.append((func.attr, child))
+            found.append((func.attr, child, True))
     return found
 
 
@@ -137,14 +141,37 @@ def seed_return_type(tree:ast.FunctionDef, param_types:List[object],
     params:List[str] = _parameter_names(tree, _receiver_name_of(tree))
     declared:Dict[str, object] = dict(zip(params, param_types[:len(params)]))
     cycle:frozenset = _cycle_names(tree, globals_map)
+    # A local assigned straight from a cycle call (`bounced = self.ray_color(...)`)
+    # carries the cycle's own type: the induction works through the assignment the
+    # same way it works through the return. Without this the seed cannot type
+    # `return bounced * 0.5` -- the name is not a parameter, and answering None
+    # would refuse the method-recursion shape outright.
+    inducted:Dict[str, object] = {}
+    receiver:str = _receiver_name_of(tree)
     answer:Optional[str] = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
+                and isinstance(node.value, ast.Call):
+            func:ast.expr = node.value.func
+            target:Optional[str] = None
+            if isinstance(node, ast.Assign):
+                if isinstance(node.targets[0], ast.Name):
+                    target = node.targets[0].id
+            elif isinstance(node.target, ast.Name):
+                target = node.target.id
+            if target is not None and isinstance(func, ast.Attribute) \
+                    and isinstance(func.value, ast.Name) \
+                    and func.value.id == receiver \
+                    and func.attr == tree.name:
+                inducted[target] = SELF_TYPE
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Return) and node.value is not None):
             continue
         kind:Optional[str] = _expression_type(node.value, tree.name, declared,
                                               float_width, depth=0,
                                               cycle_names=cycle,
-                                              globals_map=globals_map)
+                                              globals_map=globals_map,
+                                              inducted=inducted)
         if kind == SELF_TYPE:
             # The induction: this return's type is the cycle's own, which the other
             # returns fix. It contributes no fact and no disagreement.
@@ -176,7 +203,7 @@ def _cycle_names(tree:ast.FunctionDef, globals_map:Optional[dict])->frozenset:
     names:set = {tree.name}
     if globals_map is not None:
         own_module:str = str(globals_map.get("__name__", "") or "")
-        for call_name, _call in _bare_calls(tree, receiver):
+        for call_name, _call, _method_spelled in _bare_calls(tree, receiver):
             if call_name == tree.name:
                 continue
             value:object = globals_map.get(call_name)
@@ -191,7 +218,8 @@ def _cycle_names(tree:ast.FunctionDef, globals_map:Optional[dict])->frozenset:
 def _expression_type(node:ast.expr, func_name:str, declared:Dict[str, object],
                      float_width:str, depth:int,
                      cycle_names:Optional[frozenset] = None,
-                     globals_map:Optional[dict] = None)->Optional[str]:
+                     globals_map:Optional[dict] = None,
+                     inducted:Optional[Dict[str, object]] = None)->Optional[str]:
     """The scalar type one returned expression denotes, by the translation's own rules.
 
     `depth` bounds the recursion: an expression tree is finite and shallow in practice,
@@ -203,9 +231,11 @@ def _expression_type(node:ast.expr, func_name:str, declared:Dict[str, object],
     if isinstance(node, ast.Constant):
         kind:Optional[str] = _constant_kind(node.value)
         return float_width if kind == "@float-width" else kind
-    if isinstance(node, ast.Name) and node.id in declared \
-            and isinstance(declared[node.id], str):
-        return declared[node.id]
+    if isinstance(node, ast.Name):
+        if inducted is not None and node.id in inducted:
+            return inducted[node.id]
+        if node.id in declared and isinstance(declared[node.id], str):
+            return declared[node.id]
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
         # `_visit_unaryop` spells `(-x)` and keeps the operand's type; `not` answers
         # a bool, `~` an int, and everything else is refused by the translation.
@@ -214,10 +244,10 @@ def _expression_type(node:ast.expr, func_name:str, declared:Dict[str, object],
         if isinstance(node.op, ast.Invert):
             operand:str = _expression_type(node.operand, func_name, declared,
                                            float_width, depth + 1, cycle_names,
-                                           globals_map)
+                                           globals_map, inducted)
             return operand if operand in INT_TYPES else None
         return _expression_type(node.operand, func_name, declared, float_width,
-                                depth + 1, cycle_names, globals_map)
+                                depth + 1, cycle_names, globals_map, inducted)
     if isinstance(node, ast.Compare):
         return "bool"
     if isinstance(node, ast.Call) and cycle_names is not None \
@@ -232,7 +262,7 @@ def _expression_type(node:ast.expr, func_name:str, declared:Dict[str, object],
         # `a and b` answers an *operand* (python's rule, spelled as a conditional
         # expression): the type is the promoted pair, and `not`-free arms only.
         kinds:List[str] = [_expression_type(value, func_name, declared, float_width,
-                                            depth + 1, cycle_names, globals_map)
+                                            depth + 1, cycle_names, globals_map, inducted)
                            for value in node.values]
         if any(kind is None for kind in kinds):
             return None
@@ -245,17 +275,17 @@ def _expression_type(node:ast.expr, func_name:str, declared:Dict[str, object],
         # The conditional answers the promoted pair, exactly as _visit_expression's
         # IfExp branch spells it.
         body:str = _expression_type(node.body, func_name, declared, float_width,
-                                    depth + 1, cycle_names, globals_map)
+                                    depth + 1, cycle_names, globals_map, inducted)
         orelse:str = _expression_type(node.orelse, func_name, declared, float_width,
-                                      depth + 1, cycle_names, globals_map)
+                                      depth + 1, cycle_names, globals_map, inducted)
         if body is None or orelse is None:
             return None
         return body if body == orelse else _promoted(body, orelse)
     if isinstance(node, ast.BinOp):
         left:str = _expression_type(node.left, func_name, declared, float_width,
-                                    depth + 1, cycle_names, globals_map)
+                                    depth + 1, cycle_names, globals_map, inducted)
         right:str = _expression_type(node.right, func_name, declared, float_width,
-                                     depth + 1, cycle_names, globals_map)
+                                     depth + 1, cycle_names, globals_map, inducted)
         if left is None or right is None:
             return None
         name:str = node.op.__class__.__name__
@@ -304,7 +334,8 @@ def _expression_type(node:ast.expr, func_name:str, declared:Dict[str, object],
 def _call_type(node:ast.Call, func_name:str, declared:Dict[str, object],
                float_width:str, depth:int,
                cycle_names:Optional[frozenset] = None,
-               globals_map:Optional[dict] = None)->Optional[str]:
+               globals_map:Optional[dict] = None,
+               inducted:Optional[Dict[str, object]] = None)->Optional[str]:
     """The static type of the builtin and math vocabulary a returned call may spell."""
     if not (isinstance(node.func, ast.Name) or (isinstance(node.func, ast.Attribute)
                                                 and isinstance(node.func.value, ast.Name))):
@@ -329,7 +360,7 @@ def _call_type(node:ast.Call, func_name:str, declared:Dict[str, object],
             return None
     # The argument types first: every rule below reads them.
     kinds:List[str] = [_expression_type(arg, func_name, declared, float_width,
-                                        depth + 1, cycle_names, globals_map)
+                                        depth + 1, cycle_names, globals_map, inducted)
                        for arg in node.args]
     # A vector-family helper (pygf's mix/normalize/... spell `-> genType`) answers its
     # first *vector* argument's own type, which is what the emission does -- and the

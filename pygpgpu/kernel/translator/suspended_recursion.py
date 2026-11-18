@@ -154,16 +154,21 @@ def convert_statements_full(body:List[ast.stmt], plan:_Plan)->List[ast.stmt]:
 
     statements:List[ast.stmt] = []
     for node in body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) \
-                and _resolve_callee(node.value, plan.name) \
-                and isinstance(node.targets[0], ast.Name) \
-                and node.targets[0].id in plan.suspended:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) \
+                and node.value is not None and isinstance(node.value, ast.Call) \
+                and _resolve_callee(node.value, plan.name, plan.self_name) \
+                and isinstance(node.targets[0] if isinstance(node, ast.Assign)
+                               else node.target, ast.Name) \
+                and (node.targets[0].id if isinstance(node, ast.Assign)
+                     else node.target.id) in plan.suspended:
             from .suspended_recursion import _rebinding_assignment_from  # noqa: PLC0415
 
-            pairs:List[Tuple[str, ast.expr]] = _site_rebinds(node.value, plan.params)
+            pairs:List[Tuple[str, ast.expr]] = _site_rebinds(node.value, plan.params, plan.self_name)
             if pairs:
                 statements.append(_rebinding_assignment_from(pairs, node))
-            counter:ast.Name = ast.Name(id=f"_pg_recursion_k_{node.targets[0].id}",
+            slot_name:str = (node.targets[0].id if isinstance(node, ast.Assign)
+                             else node.target.id)
+            counter:ast.Name = ast.Name(id=f"_pg_recursion_k_{slot_name}",
                                         ctx=ast.Store())
             increase:ast.AugAssign = ast.AugAssign(
                 target=counter, op=ast.Add(), value=ast.Constant(value=1))

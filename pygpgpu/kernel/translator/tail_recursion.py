@@ -68,19 +68,30 @@ from .suspended_recursion import (
 )
 
 
-def _resolve_callee(node:ast.Call, func_name:str)->bool:
-    """Whether `node` calls the function by its bare name (`name(...)`).
+def _resolve_callee(node:ast.Call, func_name:str,
+                    self_name:Optional[str] = None)->bool:
+    """Whether `node` calls the function by its bare name (`name(...)`), or --
+    when `self_name` is given -- by the method spelling (`self.name(...)`).
 
-    Only that spelling is recognized. A method's recursive call is spelled
-    `self.name(...)`, an attribute lookup the translator resolves to the same object --
-    leaving it unrecognized sends it to the translator's own cycle detection, which is
-    the deliberate v1 scope: the attribute path can also name a rebound method, and the
-    static check does not guess. The *identity* of the name -- whether the module has
-    rebound it to another function since the tree was parsed -- is the hook's question
-    (it holds the function object; see FunctionTranslator.__init__).
+    A method's recursive call is an attribute lookup the translator resolves to the
+    same object through the method table, so the self-spelling is recognized only
+    under two gates the static check can hold: the base is the receiver parameter
+    itself (`self`, as the hook names it), and the attribute is the function's own
+    name. A rebound instance attribute would still slip past the spelling check --
+    accepted, the same way the method table's dispatch already treats the
+    registered method as the attribute's answer; the *identity* of a bare module
+    name is the hook's question (it holds the function object).
     """
-    return (isinstance(node.func, ast.Name) and isinstance(node.func.ctx, ast.Load)
-            and node.func.id == func_name)
+    if isinstance(node.func, ast.Name) and isinstance(node.func.ctx, ast.Load) \
+            and node.func.id == func_name:
+        return True
+    if self_name is not None and isinstance(node.func, ast.Attribute) \
+            and isinstance(node.func.ctx, ast.Load) \
+            and isinstance(node.func.value, ast.Name) \
+            and node.func.value.id == self_name \
+            and node.func.attr == func_name:
+        return True
+    return False
 
 
 def _binds_own_name(tree:ast.FunctionDef)->bool:
@@ -118,13 +129,19 @@ def _tail_calls(node:ast.expr, func_name:str)->List[ast.Call]:
     return []
 
 
-def _site_rebinds(call:ast.Call, params:List[str])->List[Tuple[str, ast.expr]]:
+def _site_rebinds(call:ast.Call, params:List[str],
+                  self_name:Optional[str] = None)->List[Tuple[str, ast.expr]]:
     """The (parameter, new value) pairs one recursive call site rebinds.
 
     Positional only: a keyword or starred argument has no fixed slot, and more arguments
     than parameters is a bug the conversion would hide. A parameter the call does not
     spell keeps its current value -- tail-call semantics pass exactly that -- so it is
     simply absent from the pairs, and the loop form leaves the variable alone.
+
+    A method-spelling call (`self.name(...)`) never rebinds the receiver: the
+    receiver is what the attribute names, not an argument -- the call's arguments
+    bind the parameters *after* it, and the loop form keeps the receiver's variable
+    (the `self` pointer) exactly as it is.
     """
     if call.keywords:
         raise _fail("a recursive call with keyword arguments has no fixed parameter "
@@ -132,20 +149,26 @@ def _site_rebinds(call:ast.Call, params:List[str])->List[Tuple[str, ast.expr]]:
     for arg in call.args:
         if isinstance(arg, ast.Starred):
             raise _fail("a starred argument has no fixed parameter slot to rebind", call)
-    if len(call.args) > len(params):
+    offset:int = 1 if self_name else 0
+    bindable:List[str] = params[offset:]
+    if len(call.args) > len(bindable):
         raise _fail("the recursive call passes more arguments than the function "
                     "declares", call)
-    return [(params[position], arg) for position, arg in enumerate(call.args)]
+    return [(bindable[position], arg) for position, arg in enumerate(call.args)]
 
 
 class _Plan:
     """The static check: does this body recurse, and only into the convertible shape?"""
 
     def __init__(self, tree:ast.FunctionDef, pointer_params:Optional[Set[str]] = None,
-                 globals_map:Optional[dict] = None):
+                 globals_map:Optional[dict] = None, self_name:Optional[str] = None):
         self.tree:ast.FunctionDef = tree
         self.name:str = tree.name
         self.globals_map:Optional[dict] = globals_map
+        # The receiver parameter's name, for the method spelling (`self.name(...)`) of
+        # a recursive call: the hook supplies it when the function is a method, and a
+        # `None` keeps the bare-name-only recognition.
+        self.self_name:Optional[str] = self_name
         # The positional parameters, in declaration order (posonly first). A function
         # the translator accepts has no vararg/kwarg/kwonly -- those are refused before
         # this pass runs -- so this list is the whole parameter world.
@@ -200,7 +223,7 @@ class _Plan:
             if calls:
                 # Validate the site now, so a refusal names its reason and position
                 # even though the conversion re-plans each site while rewriting.
-                pairs:List[Tuple[str, ast.expr]] = _site_rebinds(calls[0], self.params)
+                pairs:List[Tuple[str, ast.expr]] = _site_rebinds(calls[0], self.params, self.self_name)
                 for param_name, _expr in pairs:
                     if param_name in self.pointer_params:
                         raise _fail(
@@ -216,7 +239,7 @@ class _Plan:
             # expression with the slot substituted becomes the suspended block.
             nested:List[ast.Call] = [child for child in ast.walk(node.value)
                                      if isinstance(child, ast.Call)
-                                     and _resolve_callee(child, self.name)]
+                                     and _resolve_callee(child, self.name, self.self_name)]
             if len(nested) > 1:
                 raise _fail(
                     "a return whose value wraps the recursive call in an expression "
@@ -233,7 +256,7 @@ class _Plan:
                         "statements follow a return whose value wraps the recursive "
                         "call in an expression -- the wrapped spelling carries the "
                         "suspension in the expression itself", node)
-                for param_name, expr in _site_rebinds(nested[0], self.params):
+                for param_name, expr in _site_rebinds(nested[0], self.params, self.self_name):
                     if param_name in self.pointer_params:
                         raise _fail(
                             f"the call rebinds '{param_name}', which travels as a "
@@ -277,29 +300,32 @@ class _Plan:
                     # slot name into that body.
                     node.value = saved
                     raise
-                self.nested_pairs[slot] = _site_rebinds(nested[0], self.params)
+                self.nested_pairs[slot] = _site_rebinds(nested[0], self.params, self.self_name)
                 self.suspended[slot] = [ast.Return(value=substituted)]
                 self.nested_returns[id(node)] = slot
                 self.sites += 1
             return
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) \
-                and _resolve_callee(node.value, self.name) \
-                and isinstance(node.targets[0], ast.Name):
-            # A suspended-result site: `r = f(...)` -- the recursive call's value
-            # lands in a slot, and the statements after it in this block are what
-            # runs once the callee (and every deeper level) has answered. The
-            # conversion re-runs that block once per level, so the block may read
-            # only the slot and the parameters no recursive call rebinds -- a
-            # rebound parameter's value differs per level, and the k-loop would
-            # show every level the final one's.
-            slot:str = node.targets[0].id
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) \
+                and node.value is not None and isinstance(node.value, ast.Call) \
+                and _resolve_callee(node.value, self.name, self.self_name) \
+                and isinstance(node.targets[0] if isinstance(node, ast.Assign)
+                               else node.target, ast.Name):
+            # A suspended-result site: `r = f(...)` (annotated or not) -- the
+            # recursive call's value lands in a slot, and the statements after it
+            # in this block are what runs once the callee (and every deeper level)
+            # has answered. The conversion re-runs that block once per level, so
+            # the block may read only the slot and the parameters no recursive
+            # call rebinds -- a rebound parameter's value differs per level, and
+            # the k-loop would show every level the final one's.
+            slot:str = (node.targets[0].id if isinstance(node, ast.Assign)
+                        else node.target.id)
             rest:List[ast.stmt] = self._statements_after(node)
             if not rest:
                 raise _fail(
                     f"'{slot} = {self.name}(...)' assigns the recursive result but "
                     f"nothing follows it: the call is in tail position and should be "
                     f"spelled as a plain 'return {self.name}(...)'", node)
-            for param_name, expr in _site_rebinds(node.value, self.params):
+            for param_name, expr in _site_rebinds(node.value, self.params, self.self_name):
                 if param_name in self.pointer_params:
                     raise _fail(
                         f"the call rebinds '{param_name}', which travels as a "
@@ -373,7 +399,8 @@ def _rebinding_assignment(call:ast.Call, pairs:List[Tuple[str, ast.expr]])->ast.
 
 def tail_loop_tree(tree:ast.FunctionDef, identity:Optional[object] = None,
                    globals_map:Optional[dict] = None,
-                   pointer_params:Optional[Set[str]] = None)->Optional[ast.FunctionDef]:
+                   pointer_params:Optional[Set[str]] = None,
+                   self_name:Optional[str] = None)->Optional[ast.FunctionDef]:
     """The loop form of a recursive body, or None when the body does not recurse.
 
     The input is the translator's own deep-copied tree, and the converted tree moves its
@@ -389,10 +416,15 @@ def tail_loop_tree(tree:ast.FunctionDef, identity:Optional[object] = None,
     `pointer_params` names the parameters that travel as pointers: a tail site
     rebinding one is refused, because the loop form cannot re-store a pointer.
     """
-    if identity is not None and globals_map is not None \
+    if self_name is None and identity is not None and globals_map is not None \
             and globals_map.get(tree.name) is not identity:
+        # The bare-name gate: a module function whose module name was rebound to
+        # something else is not recognized (the translator's own live resolution
+        # answers those). A METHOD skips the gate: its name lives on the class, not
+        # in the module globals, and its call sites resolve through the method
+        # table, which is the live identity there.
         return None
-    plan:_Plan = _Plan(tree, pointer_params, globals_map)
+    plan:_Plan = _Plan(tree, pointer_params, globals_map, self_name)
     plan.scan()
     if plan.sites == 0:
         return None

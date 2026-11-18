@@ -124,13 +124,14 @@ def scalar_bar_met(tree:ast.FunctionDef, name:str, param_types:List[object],
     if not calls:
         return False
     param_count:int = len(_parameter_names(tree, receiver))
-    for call_name, call in calls:
+    for call_name, call, method_spelled in calls:
         if call.keywords:
             return False
         for arg in call.args:
             if isinstance(arg, ast.Starred):
                 return False
-        if call_name == name and len(call.args) < param_count:
+        required:int = (param_count - 1 if method_spelled else param_count)
+        if call_name == name and len(call.args) < required:
             # The device call spells every parameter: the launch machinery has no
             # python-default pass-through, so an omitted trailing argument would
             # leave the call one slot short ("takes N device arguments but M types
