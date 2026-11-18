@@ -32,23 +32,22 @@ class Scene(Hittable):
         return record
 
     def ray_color(self, ray: Ray, depth: int, tid: int, seed: int)->color3f:
-        # The bounce recursion is not a tail call (the 0.5 * lands after the callee
-        # answers), so the loop is spelled by hand: one iteration is one bounce, and
-        # `current` is rebuilt as a value each round -- naming the pointer parameter
-        # directly would make the local a pointer alias, which cannot be reassigned.
-        current: Ray = Ray(ray.origin, ray.direction)
-        attenuation: float = 1.0
-        for bounce in range(depth):
-            record = self.hit(current, Interval(0, math.inf))
-            if record.is_hitted:
-                attenuation *= 0.5
-                direction: vector3f = rand_vector3f_hemisphere(record.normal, tid, seed)
-                seed += 1
-                current = Ray(record.position, direction)
-            else:
-                unit_dir = normalize(current.direction)
-                weight = 0.5 * (unit_dir.y + 1.0)
-                return attenuation * mix(color3f(1), color3f(0.5, 0.7, 1.0), weight)
+        # The textbook recursion: the multiply lands after the callee answers, so the
+        # bounce sequence is a real call stack on the backends whose device functions
+        # may recurse (cuda/hip -- the launch raises the per-thread stack for it). The
+        # scalar `0.5` multiplier is exact in binary floating point, so the recursive
+        # order and the loop order agree bit for bit here; on the backends that forbid
+        # recursion the same body keeps the refusal and the loop spelling below is the
+        # portable form.
+        record = self.hit(ray, Interval(0, math.inf))
+        if record.is_hitted:
+            if depth <= 0:
+                return color3f(0)
+            direction: vector3f = rand_vector3f_hemisphere(record.normal, tid, seed)
+            return 0.5 * self.ray_color(Ray(record.position, direction), depth-1,
+                                        tid, seed+1)
 
-        return color3f(0)
+        unit_dir = normalize(ray.direction)
+        weight = 0.5 * (unit_dir.y + 1.0)
+        return mix(color3f(1), color3f(0.5, 0.7, 1.0), weight)
     
