@@ -426,15 +426,12 @@ def _structure_for(fields:Sequence[Tuple[str, type]],
     # min_value/max_value became max-first, inverting the range on the device). The order
     # comes from the ORIGINAL class the value was built from, found through the lifted-
     # construction records the scan left beside this dtype's fields.
-    from ..structs import register_declared_class, register_constructed_parameters  # noqa: PLC0415 (import cycle)
 
-    register_declared_class(np.dtype(structure), structure)
-    from .construction import original_class_for, original_constructed_parameters  # noqa: PLC0415 (import cycle)
-
-    original:Optional[type] = original_class_for(ordered)
-    if original is not None:
-        register_constructed_parameters(structure,
-                                        original_constructed_parameters(original))
+    # The registration is deferred to the caller: the hint that names the
+    # structure after the user's class is applied between this function and
+    # the parameter naming, and registering here would pin the dtype's C name
+    # before the hint lands (`_st_<hash>` instead of `Point_<hash>`). The
+    # caller (_prefer_class_name's site) registers both.
     _STRUCT_CACHE[key] = structure
     return structure
 

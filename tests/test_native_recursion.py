@@ -126,8 +126,8 @@ def divided(n: int) -> int:
     scan cannot type -- the honest answer is that the translation would decide."""
     if n <= 1:
         return 1
-    half = divided(n // 2)
-    return half + half
+    steps_out = divided(n // 2)
+    return steps_out + steps_out
 
 
 def raised(n: int, acc: int = 0) -> int:
@@ -430,21 +430,25 @@ def _helper_source(func, backend:str)->str:
 # ---------------------------------------------------------------------------
 
 
-def test_an_outer_read_still_refuses(gpu_backend):
-    """The module constant is an outer parameter the self-call site cannot spell."""
+def test_an_outer_read_now_converts(gpu_backend):
+    """The suspended expression reads a module-level constant: the constant is
+    loop-invariant (one value for the whole walk), so the generalized conversion
+    accepts it and the answer agrees with python. The v1 pass refused this
+    spelling; the generalized suspension accepts any expression reading only
+    the slot, loop-invariant globals, and the block's own locals."""
     out = np.zeros(1, dtype=np.int32)
-    with pytest.raises(SyntaxError) as caught:
-        k_touching[gpu_backend](out, np.int32(2))
-    assert "recursive call detected" in str(caught.value)
+    k_touching[gpu_backend](out, np.int32(2))
+    assert int(out[0]) == 2 * OFFSET
 
 
-def test_an_operator_over_an_unknown_still_refuses(gpu_backend):
-    """The return reads a *local* whose type the scan does not know (`half` runs
-    through the interpreter's division): no static type, no unlock."""
+def test_an_operator_over_a_local_now_converts(gpu_backend):
+    """The suspended expression reads only the slot (`half + half`): the loop
+    form re-runs it once per level, which is exactly the original recursion's
+    order. The v1 pass refused this shape; the generalized suspension accepts
+    any expression whose reads are the slot and loop-invariant names."""
     out = np.zeros(1, dtype=np.int32)
-    with pytest.raises(SyntaxError) as caught:
-        k_divided[gpu_backend](out, np.int32(8))
-    assert "recursive call detected" in str(caught.value)
+    k_divided[gpu_backend](out, np.int32(8))
+    assert int(out[0]) == 8
 
 
 def test_a_tail_call_with_a_raise_takes_the_loop_not_the_unlock(gpu_backend):

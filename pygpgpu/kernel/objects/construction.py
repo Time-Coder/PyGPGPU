@@ -266,6 +266,13 @@ def constructed_locals(func:object, objects:Dict[str, object],
         template:object = _template_from(kinds, cls)
         if template is not None:
             found[target.id] = template
+            # The named construction's parameter order joins the records the
+            # synthesized class reads back (see kinds._structure_for): the layout
+            # sorts its fields by name, and a positional construction matches its
+            # arguments against the constructor's order -- without this record the
+            # order falls back to the field names, reversing any constructor whose
+            # parameters sort the other way.
+            _CONSTRUCTED_PARAMETERS.setdefault(cls, _init_parameters(cls))
     # A construction written straight into a call -- `self.hit(ray, Interval(0, math.inf))`
     # -- has no name for the scan to bind, so the value it builds was refused as "device
     # code has no objects". The tree is rewritten as though the body had written
@@ -312,19 +319,28 @@ def _function_key_of(func:object)->str:
 def original_class_for(fields:List[Tuple[str, type]])->Optional[type]:
     """The user's class a synthesized layout was built from, or None.
 
-    The lifted-construction records name the original class beside the members its
-    constructor supplied (`_LIFTED_MEMBERS`); the class whose supplied member names
-    match this layout's field set is the one whose `__init__` parameter order the
-    positional constructions spell. Without it the order falls back to the dtype's
-    sorted field names, which reverses any constructor whose parameters sort the
-    other way (Interval's min_value/max_value came out max-first on the device).
+    Two records name the original class: the lifted-construction members
+    (`_LIFTED_MEMBERS`) for an inline construction, and the named-construction
+    parameter order (`_CONSTRUCTED_PARAMETERS`) for `ray = Ray(...)` -- the class
+    whose recorded parameter names cover this layout's field set is the one whose
+    `__init__` order the positional constructions spell. Without it the order
+    falls back to the dtype's sorted field names, which reverses any constructor
+    whose parameters sort the other way (Interval's min_value/max_value came out
+    max-first on the device).
     """
-    from .state import _LIFTED_MEMBERS
+    from .state import _CONSTRUCTED_PARAMETERS, _LIFTED_MEMBERS
 
     field_names:set = {name for name, _ in fields}
     for cls, supplied in _LIFTED_MEMBERS.items():
         supplied_names:set = {name for name, _ in supplied}
         if supplied_names and supplied_names <= field_names:
+            return cls
+    for cls, parameters in _CONSTRUCTED_PARAMETERS.items():
+        parameter_names:set = set(parameters)
+        # The layout may carry FEWER fields than the constructor declares (a member
+        # the body never reads is dropped), so the fields are the subset: the
+        # recorded parameters must cover every field and name at least one.
+        if parameter_names and field_names and field_names <= parameter_names:
             return cls
     return None
 

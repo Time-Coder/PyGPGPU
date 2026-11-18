@@ -60,7 +60,9 @@ class _EmitMixin:
         A **record** (`c64`/`c128`, a structure) cannot be cast from an int -- C has no
         conversion to a structure type, and `(c128)0` is a compile error -- so it takes `{0}`,
         which zeroes every member and is valid for a scalar too. A scalar and a pointer keep
-        the cast. A **vector** keeps it as well: a scalar cast to a vector is OpenCL's
+        a plain `0` (a cast adds nothing for a scalar, and some OpenCL frontends reject the
+        second `int` token of `(int)0` inside a declaration whose own specifier is `int`).
+        A **vector** keeps the cast: a scalar cast to a vector is OpenCL's
         broadcast initializer, where brace-initializing one is not portable.
 
         One vector case cannot keep the cast: a **CUDA** compile. A vector there is a plain
@@ -74,9 +76,11 @@ class _EmitMixin:
         base:str = type_text.replace("const", "").strip()
         if is_aggregate(base):
             return "{0}"
-        if is_vec(base) and self.launch_backend == "cuda":
-            return "{0}"
-        return f"({base})0"
+        if is_vec(base):
+            if self.launch_backend == "cuda":
+                return "{0}"
+            return f"({base})0"
+        return "0"
 
 
     def _hoist_declaration(self, name:str, type_text:str,
