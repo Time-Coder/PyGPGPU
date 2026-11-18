@@ -315,7 +315,11 @@ def test_tree_recursion_answers_python(gpu_backend):
 
 
 def test_the_backend_boundary(gpu_backend):
-    """The same body: unlocked where recursion is legal, refused where it is not."""
+    """The same body: unlocked where recursion is legal, refused where it is not.
+
+    `fib` carries two self-calls in one expression -- the shape the generalized
+    conversion refuses by name (one counter cannot order two walks), so the
+    refusal message is the scan's own, and it still names the way out."""
     out = np.zeros(1, dtype=np.int64)
     if _codegen_backend(gpu_backend) in RECURSIVE_BACKENDS:
         k_fib[gpu_backend](out, np.int32(10))
@@ -324,12 +328,10 @@ def test_the_backend_boundary(gpu_backend):
         with pytest.raises(SyntaxError) as caught:
             k_fib[gpu_backend](out, np.int32(10))
         message:str = str(caught.value)
-        assert "recursive call detected" in message
-        # The refusal names the three ways out, so the user has a path: the tail
-        # conversion (automatic), a hand-written loop, or a recursive backend.
-        assert "tail-recursive" in message
-        assert "loop" in message
-        assert "cuda or hip" in message
+        assert "carries it 2 times" in message
+        # The refusal names the way out for this shape: name one call's result
+        # and re-run the other, or fold both into accumulator parameters.
+        assert "accumulator" in message
 
 
 def test_a_tail_call_answers_on_the_nonrecursive_backends(gpu_backend):

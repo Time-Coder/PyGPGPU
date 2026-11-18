@@ -217,6 +217,14 @@ class _Plan:
             nested:List[ast.Call] = [child for child in ast.walk(node.value)
                                      if isinstance(child, ast.Call)
                                      and _resolve_callee(child, self.name)]
+            if len(nested) > 1:
+                raise _fail(
+                    "a return whose value wraps the recursive call in an expression "
+                    f"carries it {len(nested)} times -- the counter loop unwinds one "
+                    "level per pass, and two independent walks in one expression have "
+                    "no order a single counter can reproduce. Name one call's result "
+                    "and re-run the other as a loop, or fold both into accumulators",
+                    node)
             if len(nested) == 1:
                 slot:str = f"_pg_recursion_r_{len(self.suspended)}"
                 rest:List[ast.stmt] = self._statements_after(node)
@@ -225,12 +233,19 @@ class _Plan:
                         "statements follow a return whose value wraps the recursive "
                         "call in an expression -- the wrapped spelling carries the "
                         "suspension in the expression itself", node)
-                for param_name, _expr in _site_rebinds(nested[0], self.params):
+                for param_name, expr in _site_rebinds(nested[0], self.params):
                     if param_name in self.pointer_params:
                         raise _fail(
                             f"the call rebinds '{param_name}', which travels as a "
                             f"pointer: a loop conversion cannot re-store it (the "
                             f"native unlock is the caller's next stop)", nested[0])
+                    # A parameter the call passes *as itself* (`f(n - 1, step)`) keeps
+                    # one value for the whole walk: the rebinding is an identity, and
+                    # the suspended expression may read it like any loop-invariant
+                    # name. Only a call that gives the parameter a NEW expression
+                    # makes its value differ per level.
+                    if isinstance(expr, ast.Name) and expr.id == param_name:
+                        continue
                     self.rebound_params.add(param_name)
                 # The suspended expression is the return value with the call
                 # replaced by the slot: the same per-level rule applies -- it may
@@ -284,12 +299,16 @@ class _Plan:
                     f"'{slot} = {self.name}(...)' assigns the recursive result but "
                     f"nothing follows it: the call is in tail position and should be "
                     f"spelled as a plain 'return {self.name}(...)'", node)
-            for param_name, _expr in _site_rebinds(node.value, self.params):
+            for param_name, expr in _site_rebinds(node.value, self.params):
                 if param_name in self.pointer_params:
                     raise _fail(
                         f"the call rebinds '{param_name}', which travels as a "
                         f"pointer: a loop conversion cannot re-store it (the "
                         f"native unlock is the caller's next stop)", node)
+                # A parameter the call passes *as itself* keeps one value for the
+                # whole walk -- see the nested-site branch for the full note.
+                if isinstance(expr, ast.Name) and expr.id == param_name:
+                    continue
                 self.rebound_params.add(param_name)
             reads:Set[str] = _reads_of(rest)
             # A name the block assigns before reading is the block's own local:
