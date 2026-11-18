@@ -18,10 +18,20 @@ class Camera:
     def __init__(self):
         self.position: point3f = point3f(0, 0, 0)
         self.orientation: quatf = quatf(1, 0, 0, 0)
-        self.focal_length: float = 0.1
+        # The camera's photographic parameters, in real units: the focal length and
+        # the sensor width are *millimetres* (36 mm is a full-frame sensor's long
+        # edge), and the focus distance is in *scene units* -- metres here, the same
+        # unit the scene is built in. The viewport the rays are traced through lives
+        # at the focus distance and spans sensor_width * focus_distance / focal_length
+        # in scene units, which is the pinhole model: a 50 mm lens on full frame
+        # focused at 2 m sees 1.44 m across, and the field of view it implies is a
+        # property of the *ratio*, so the scene's unit never changes the framing as
+        # long as the sensor, the lens and the scene distances are stated together.
+        self.focal_length_mm: float = 16.0
+        self.sensor_width_mm: float = 36.0
+        self.focus_distance: float = 2.0
         self.aspect_ratio: float = 16/9
         self.image_width: int = 400
-        self.viewport_width: float = 0.4
         self.samples_per_pixel: int = 100
         self.max_depth: int = 10
         self.update_params()
@@ -29,6 +39,9 @@ class Camera:
     def update_params(self):
         self.image_height: int = int(self.image_width / self.aspect_ratio)
         self.aspect_ratio: float = self.image_width / self.image_height
+        # The viewport in scene units, at the focus plane (the pinhole model above).
+        self.viewport_width: float = (self.sensor_width_mm
+                                      * self.focus_distance / self.focal_length_mm)
         self.viewport_height: float = self.viewport_width / self.aspect_ratio
         self.du_in_view: vector3f = vector3f(self.viewport_width / self.image_width, 0, 0)
         self.dv_in_view: vector3f = vector3f(0, -self.viewport_height / self.image_height, 0)
@@ -38,7 +51,7 @@ class Camera:
             self.position + vector3f(
                 -self.viewport_width/2 + 0.5*self.du_in_view.x,
                 self.viewport_height/2 - 0.5*self.dv_in_view.y,
-                -self.focal_length
+                -self.focus_distance
             )
         )
         self.left_top_pixel_pos_in_world: point3f = self.view_pos_to_world(self.left_top_pixel_pos_in_view)
