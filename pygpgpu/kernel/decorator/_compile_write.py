@@ -9,9 +9,6 @@ from typing import (
 )
 import numpy as np
 from .. import structs
-from ..translator import (
-    DeviceType,
-)
 from .. import source_paths
 from .host_regions import (
     _called_modules,
@@ -162,18 +159,20 @@ class _CompileWriteMixin:
         plan.prototype_lines:List[str] = source_paths.compilation_prototypes(
             list(plan.device_cache.values()), plan.device_prefix + plan.helper_pieces)
 
-        plan.structure_dtypes:List[DeviceType] = list(plan.translator.structure_dtypes())
+        plan.structure_entries:List[object] = list(plan.translator.structure_dtypes())
         for entry in plan.device_cache.values():
             for plan.dtype in entry.get("structs", ()):
-                if plan.dtype not in plan.structure_dtypes:
-                    plan.structure_dtypes.append(plan.dtype)
+                if (plan.dtype, None) not in plan.structure_entries:
+                    plan.structure_entries.append((plan.dtype, None))
         # Every structure this compilation reaches is declared by the kernel's own file. A
         # helper in another module names its types too, and that module's file is reached
         # from here, so the declaration has to be in scope before the include is read --
         # putting it in the helper's own file instead made a cycle of includes and, when two
-        # modules shared one structure, the same declaration twice in one file.
-        plan.typedefs:str = (structs.render_structures(plan.structure_dtypes, plan.translator.backend)
-                        if plan.structure_dtypes else "")
+        # modules shared one structure, the same declaration twice in one file. The entries
+        # are (dtype, extent) pairs (see infer_ctype's record-array branch); the renderer
+        # spells the extent-qualified name for a pair and the bare name for a dtype.
+        plan.typedefs:str = (structs.render_structures(plan.structure_entries, plan.translator.backend)
+                        if plan.structure_entries else "")
         # A structure member whose type a fixed header declares needs that header even when
         # the body never operates on the value: `struct S { c64 z; };` names `c64`, so the
         # declaration has to be in scope. Walking the member dtypes here is what covers that
@@ -183,7 +182,10 @@ class _CompileWriteMixin:
 
         plan.member_quaternion_needs:Set[str] = set()
         plan.member_complex_needs:Set[str] = set()
-        for plan.dtype in plan.structure_dtypes:
+        for plan.structure_entry in plan.structure_entries:
+            plan.dtype:object = (plan.structure_entry[0]
+                                 if isinstance(plan.structure_entry, tuple)
+                                 else plan.structure_entry)
             plan.record:np.dtype = plan.dtype if isinstance(plan.dtype, np.dtype) else np.dtype(plan.dtype)
             for plan.name in plan.record.names or ():
                 plan.field_dtype:np.dtype = np.dtype(plan.record.fields[plan.name][0])

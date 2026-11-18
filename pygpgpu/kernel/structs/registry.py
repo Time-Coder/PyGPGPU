@@ -10,6 +10,7 @@ from .state import (
     _DECLARED_FILES,
     _NAME_BASES,
     _REGISTRY,
+    _REGISTRY_EXTENTS,
 )
 from .unions import _add_subscript_access, is_union_dtype
 from types import CodeType, ModuleType
@@ -86,12 +87,30 @@ def _safe_identifier(name:str) -> str:
 
 
 
-def register(dtype:DTypeLike) -> str:
-    """Record a structure dtype and return its C type name."""
+def register(dtype:DTypeLike, extent:Optional[int] = None) -> str:
+    """Record a structure dtype and return its C type name.
+
+    ``extent`` folds an array argument's element count into the name (see
+    `struct_name`): the device side bakes the count into its loop, so two launches of
+    one kernel whose lists differ in length are two signatures.
+    """
     dtype:np.dtype = np.dtype(dtype)
-    name:str = struct_name(dtype)
+    name:str = struct_name(dtype, extent)
     _REGISTRY[name] = dtype
+    if extent is not None:
+        _REGISTRY_EXTENTS[name] = extent
     return name
+
+
+
+def registered_extent(name:str) -> Optional[int]:
+    """The element count a record-array parameter's type name carries, or None.
+
+    `infer_ctype` folds a record array's length into its type name (see
+    `register`); the typedef renderer needs the same extent back to spell the name
+    the parameter uses.
+    """
+    return _REGISTRY_EXTENTS.get(name)
 
 
 

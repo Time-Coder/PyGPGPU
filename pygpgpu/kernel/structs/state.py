@@ -22,18 +22,21 @@ _DECLARED_ALL: Dict[np.dtype, List[type]] = {}
 
 
 _REGISTRY: Dict[str, np.dtype] = {}
-
-
-_REGISTRY: Dict[str, np.dtype] = {}
+# C type name -> the element count its record-array parameter folded in (see
+# `register`'s extent and `infer_ctype`'s record-array branch). A name without an
+# extent answers None.
+_REGISTRY_EXTENTS: Dict[str, int] = {}
 # dtype -> the python class name its structure is spelled after. The C name is
 # `<base>_<hash>`: readable, and still distinct when two modules declare one class name.
 _NAME_BASES: Dict[np.dtype, str] = {}
 
 
 _NAME_BASES: Dict[np.dtype, str] = {}
-# dtype -> the C name it was first given. Pinned, because a later class registration must
-# not rename a layout an existing signature already spells.
-_SETTLED_NAMES: Dict[np.dtype, str] = {}
+# (dtype, extent) -> the C name it was first given. Pinned, because a later class
+# registration must not rename a layout an existing signature already spells. The
+# extent is None for a bare dtype and the element count for an array argument's
+# parameter name (see `struct_name`).
+_SETTLED_NAMES: Dict[object, str] = {}
 
 
 _SETTLED_NAMES: Dict[np.dtype, str] = {}

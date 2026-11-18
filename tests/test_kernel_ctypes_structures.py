@@ -64,12 +64,15 @@ def test_a_ctypes_class_argument_is_registered_by_its_class():
 
 
 def test_a_ctypes_array_is_a_structure_array():
-    assert infer_ctype(np.zeros(2, dtype=Pair)) == ("*", structs.register(Pair))
+    # An array argument's name folds the element count in (see infer_ctype's
+    # record-array branch): the kernel bakes the count into its loop, so two
+    # launches whose lists differ in length are two signatures.
+    assert infer_ctype(np.zeros(2, dtype=Pair)) == ("*", structs.register(Pair, 2))
 
 
 def test_a_structure_that_looks_like_a_vector_stays_a_structure():
     """`Vec2Like` and `float2` have byte-identical layouts; the declaration decides."""
-    assert infer_ctype(np.zeros(1, dtype=Vec2Like)) == ("*", structs.register(Vec2Like))
+    assert infer_ctype(np.zeros(1, dtype=Vec2Like)) == ("*", structs.register(Vec2Like, 1))
     assert infer_ctype(Vec2Like(1.0, 2.0)) == ("*", structs.register(Vec2Like))
 
 
@@ -209,7 +212,8 @@ def test_a_declared_class_contributes_every_member(gpu_backend):
 def test_a_plain_record_dtype_is_a_structure():
     dtype = np.dtype([("i", "<i4"), ("f", "<f4")])
     assert structs.is_record(dtype)
-    assert infer_ctype(np.zeros(2, dtype=dtype)) == ("*", structs.register(dtype))
+    # The array's name folds its element count in (see infer_ctype's record branch).
+    assert infer_ctype(np.zeros(2, dtype=dtype)) == ("*", structs.register(dtype, 2))
 
 
 # ---------------------------------------------------------------------------

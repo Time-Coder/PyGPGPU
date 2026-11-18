@@ -238,26 +238,37 @@ class _StructuresMixin:
     def structure_dtypes(self)->List[object]:
         """Every structure dtype this translation mentions, in no particular order.
 
-        The caller emits one typedef block for the whole source, so the kernel and each
-        helper contribute their own set and duplicates are dropped.
+        Each entry is a bare dtype, or a ``(dtype, extent)`` pair when the mention is
+        an array argument whose parameter name folds the element count in (see
+        `infer_ctype`'s record-array branch). The caller emits one typedef block for
+        the whole source, so the kernel and each helper contribute their own set and
+        duplicates are dropped.
         """
         from .. import structs
 
-        dtypes:List[object] = []
+        entries:List[object] = []
         for name, t in list(self.params):
             candidate:object = t[1] if is_ptr(t) else t
-            dtype:object = structs.dtype_for(candidate) if isinstance(candidate, str) else None
-            if dtype is not None and dtype not in dtypes:
-                dtypes.append(dtype)
+            if isinstance(candidate, str):
+                dtype:object = structs.dtype_for(candidate)
+                extent:Optional[int] = structs.registered_extent(candidate)
+            else:
+                dtype, extent = None, None
+            if dtype is not None and (dtype, extent) not in entries:
+                entries.append((dtype, extent))
         for dtype in self.private_structs:
-            if dtype not in dtypes:
-                dtypes.append(dtype)
+            if (dtype, None) not in entries:
+                entries.append((dtype, None))
         for entry in (self.return_layout or []):
             candidate = entry["type"]
-            dtype = structs.dtype_for(candidate) if isinstance(candidate, str) else None
-            if dtype is not None and dtype not in dtypes:
-                dtypes.append(dtype)
-        return dtypes
+            if isinstance(candidate, str):
+                dtype = structs.dtype_for(candidate)
+                extent = structs.registered_extent(candidate)
+            else:
+                dtype, extent = None, None
+            if dtype is not None and (dtype, extent) not in entries:
+                entries.append((dtype, extent))
+        return entries
 
 
     def render_structure_typedefs(self)->str:
@@ -269,18 +280,4 @@ class _StructuresMixin:
         """
         from .. import structs
 
-        dtypes:List[object] = []
-        for name, t in list(self.params):
-            for candidate in (t[1] if is_ptr(t) else t,):
-                dtype:object = structs.dtype_for(candidate) if isinstance(candidate, str) else None
-                if dtype is not None and dtype not in dtypes:
-                    dtypes.append(dtype)
-        for dtype in self.private_structs:
-            if dtype not in dtypes:
-                dtypes.append(dtype)
-        for entry in (self.return_layout or []):
-            candidate:object = entry["type"]
-            dtype = structs.dtype_for(candidate) if isinstance(candidate, str) else None
-            if dtype is not None and dtype not in dtypes:
-                dtypes.append(dtype)
-        return structs.render_structures(dtypes, self.backend)
+        return structs.render_structures(self.structure_dtypes(), self.backend)

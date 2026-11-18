@@ -42,6 +42,7 @@ from .registry import (
     declared_classes,
     declared_file,
     is_declared_structure,
+    registered_extent,
     register,
     register_class,
     register_declared_class,

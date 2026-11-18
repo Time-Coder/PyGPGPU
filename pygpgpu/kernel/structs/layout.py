@@ -31,13 +31,18 @@ def is_record(dtype:DTypeLike)->bool:
 
 
 
-def struct_name(dtype:np.dtype)->str:
+def struct_name(dtype:np.dtype, extent:Optional[int] = None)->str:
     """A stable C identifier for the structure a dtype describes.
 
-    A quaternion is the one exception, and it is a deliberate one: its declaration lives in
-    the fixed quaternion header, so the name has to be one the header can spell -- a content
-    hash cannot be written in advance. Two quaternion layouts exist, so two fixed names cover
-    every case, and `render_structures` then leaves them out of its typedef block.
+    ``extent`` folds an element count into the hash for an *array* argument: the
+    generated kernel bakes the count into its loop and (for a synthesized object list)
+    into the union's array extent, so two launches of one kernel whose lists differ in
+    length are two signatures -- sharing one would run a kernel that reads past a
+    shorter buffer. A quaternion is the other exception, and it is a deliberate one: its
+    declaration lives in the fixed quaternion header, so the name has to be one the
+    header can spell -- a content hash cannot be written in advance. Two quaternion
+    layouts exist, so two fixed names cover every case, and `render_structures` then
+    leaves them out of its typedef block.
     """
     from ..complex import record_complex_type_name  # noqa: PLC0415 (import cycle)
     from ..quaternion import quat_type_name  # noqa: PLC0415 (import cycle)
@@ -58,13 +63,13 @@ def struct_name(dtype:np.dtype)->str:
     # translated, and another module may register its own class later), and a name that
     # changes afterwards would change the type signature of every kernel already compiled
     # against the old spelling -- the same function then appears twice in one generated file.
-    settled:Optional[str] = _SETTLED_NAMES.get(dtype)
+    settled:Optional[str] = _SETTLED_NAMES.get((dtype, extent))
     if settled is not None:
         return settled
-    digest:str = hashlib.md5(repr(dtype).encode("utf-8")).hexdigest()[:10]
+    digest:str = hashlib.md5(f"{dtype!r}|{extent}".encode("utf-8")).hexdigest()[:10]
     base:Optional[str] = _NAME_BASES.get(dtype)
     name:str = f"{base}_{digest}" if base is not None else f"_st_{digest}"
-    _SETTLED_NAMES[dtype] = name
+    _SETTLED_NAMES[(dtype, extent)] = name
     return name
 
 
@@ -285,22 +290,41 @@ def nested_dtypes(dtype:np.dtype)->List[np.dtype]:
 
 
 
-def render_structures(dtypes:List[np.dtype], backend:str)->str:
-    """The typedef block for every structure the kernel uses, members before containers."""
+def render_structures(entries:List[object], backend:str)->str:
+    """The typedef block for every structure the kernel uses, members before containers.
+
+    Each entry is either a bare dtype (named without an extent) or a ``(dtype,
+    extent)`` pair -- the shape an array argument's parameter name carries (see
+    `infer_ctype`'s record-array branch). The extent is part of the *name*, so a
+    typedef emitted for a pair spells the extent-qualified name.
+    """
     from ..complex import record_complex_type_name  # noqa: PLC0415 (import cycle)
     from ..quaternion import quat_type_name  # noqa: PLC0415 (import cycle)
 
-    ordered:List[np.dtype] = []
-    for dtype in dtypes:
+    ordered:List[object] = []
+    for entry in entries:
+        dtype:np.dtype
+        extent:Optional[int]
+        if isinstance(entry, tuple):
+            dtype, extent = entry
+        else:
+            dtype, extent = entry, None
         for inner in nested_dtypes(dtype):
-            if inner not in ordered:
-                ordered.append(inner)
-        if dtype not in ordered:
-            ordered.append(dtype)
+            if (inner, None) not in ordered and inner not in [
+                    item[0] if isinstance(item, tuple) else item for item in ordered]:
+                ordered.append((inner, None))
+        if (dtype, extent) not in ordered:
+            ordered.append((dtype, extent))
 
     lines:List[str] = []
-    for dtype in ordered:
-        name:str = struct_name(dtype)
+    for item in ordered:
+        dtype:np.dtype
+        extent:Optional[int]
+        if isinstance(item, tuple):
+            dtype, extent = item
+        else:
+            dtype, extent = item, None
+        name:str = struct_name(dtype, extent)
         # A quaternion or a complex value is declared by its fixed header, which a source
         # using one always includes; emitting it here too would define the type twice, which
         # C++ rejects.

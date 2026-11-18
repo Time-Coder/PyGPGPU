@@ -159,14 +159,23 @@ def infer_ctype(value:object, type_map:Optional[Dict[str, str]]=None)->DeviceTyp
 
     if isinstance(value, np.ndarray):
         if value.dtype.fields is not None:
+            if structs.is_record(value.dtype):
+                # A record array's type name folds the element count in: the generated
+                # kernel bakes the count into its fixed-length loop and (for a
+                # synthesized object list) into the union's array extent, so two
+                # launches of one kernel whose lists differ in length are two
+                # signatures -- sharing one would run a kernel that reads past a
+                # shorter buffer (the illegal-address crash the ray-tracing probe
+                # hit: a depth=2 launch reused the depth=1 kernel's 1-element union
+                # while the loop read hittables[1]). The extent rides in the name's
+                # hash; the dtype itself stays the element's.
+                return (PTR, structs.register(value.dtype, len(value)))
             if structs.is_declared_structure(value.dtype):
                 # An array of a caller's `ctypes.Structure`: structured, whatever layout.
                 return (PTR, structs.register(value.dtype))
             vec_name = _vector_dtype_name(value.dtype)
             if vec_name is not None:
                 return (PTR, vec_name)
-            if structs.is_record(value.dtype):
-                return (PTR, structs.register(value.dtype))
             raise SyntaxError(f"unsupported numpy structured dtype: {value.dtype}") from None
         if value.dtype.name not in DTYPE_MAP:
             raise SyntaxError(f"unsupported numpy dtype: {value.dtype.name}") from None
