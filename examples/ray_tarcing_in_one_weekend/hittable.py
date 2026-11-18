@@ -16,7 +16,11 @@ class HitRecord:
         self.front_face: bool = front_face
 
     def set_face_normal(self, ray: Ray, outward_normal: vector3f)->None:
-        self.front_face: bool = dot(ray.direction, outward_normal)
+        # The book's rule: the ray came from outside when the outward normal points
+        # AGAINST the ray (a negative dot product); a raw dot product stored here
+        # made the flag always truthy, so the normal never flipped and inside hits
+        # shaded as if lit from behind.
+        self.front_face: bool = dot(ray.direction, outward_normal) < 0.0
         self.normal = (outward_normal if self.front_face else -outward_normal)
 
 

@@ -1,6 +1,11 @@
 import numpy as np
 from pygf import vector3f, length, dot
 
+# The mixer's multiplies wrap uint32, which numpy reports as an overflow warning on
+# the host while the device wraps silently -- the value is identical. The report is
+# noise for a deliberate wrap, so the scalar overflow report is quieted once here.
+np.seterr(over="ignore")
+
 
 def splitmix32(counter: int) -> np.uint32:
     """One splitmix32 output: a cheap, high-quality 32-bit scalar mixer.
@@ -10,8 +15,8 @@ def splitmix32(counter: int) -> np.uint32:
     (it copies the sign bit), while python's shift on a positive int is logical, so a
     mask over signed values made the two backends disagree the moment a draw's high
     bit was set (whole rejection loops diverged, and the two renders differed). The
-    values here are numpy uint32 end to end, whose `>>` is the logical shift both the
-    host and the generated C spell as unsigned.
+    values are numpy uint32 end to end, whose `>>` is the logical shift both the host
+    and the generated C spell as unsigned.
 
     Quality: the original single philox round's consecutive outputs were strongly
     anti-correlated (rho = -0.42 measured), and the anti-correlation survived into the
