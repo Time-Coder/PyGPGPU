@@ -44,6 +44,7 @@ from .registry import (
     is_declared_structure,
     registered_extent,
     register,
+    register_constructed_parameters,
     register_class,
     register_declared_class,
     register_name_hint,

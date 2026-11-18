@@ -417,11 +417,24 @@ def _structure_for(fields:Sequence[Tuple[str, type]],
     # The synthesized class is the dtype's declaring class, registered here: a method call
     # on a *pointer* to this structure (`hitable.hit(...)` through the list element) reads
     # the owner back off the registry, and an unregistered class would answer None -- which
-    # is what made the call refuse as "no such method" although the class carries it.
-    if methods:
-        from ..structs import register_declared_class  # noqa: PLC0415 (import cycle)
+    # is what made the call refuse as "no such method" although the class carries it. The
+    # constructor's own parameter order travels with the registration: a positional
+    # construction inside a helper body matches its arguments against that order (see
+    # `_emit_structure_constructor`'s positional branch), and the synthesized class has no
+    # `__init__` of its own to read -- an empty answer there fell back to the *field* order,
+    # which reverses any constructor whose parameters sort the other way (Interval's
+    # min_value/max_value became max-first, inverting the range on the device). The order
+    # comes from the ORIGINAL class the value was built from, found through the lifted-
+    # construction records the scan left beside this dtype's fields.
+    from ..structs import register_declared_class, register_constructed_parameters  # noqa: PLC0415 (import cycle)
 
-        register_declared_class(np.dtype(structure), structure)
+    register_declared_class(np.dtype(structure), structure)
+    from .construction import original_class_for, original_constructed_parameters  # noqa: PLC0415 (import cycle)
+
+    original:Optional[type] = original_class_for(ordered)
+    if original is not None:
+        register_constructed_parameters(structure,
+                                        original_constructed_parameters(original))
     _STRUCT_CACHE[key] = structure
     return structure
 

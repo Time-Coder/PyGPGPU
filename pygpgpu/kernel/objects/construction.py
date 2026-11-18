@@ -309,6 +309,32 @@ def _function_key_of(func:object)->str:
     return f"{digest}_{firstlineno}"
 
 
+def original_class_for(fields:List[Tuple[str, type]])->Optional[type]:
+    """The user's class a synthesized layout was built from, or None.
+
+    The lifted-construction records name the original class beside the members its
+    constructor supplied (`_LIFTED_MEMBERS`); the class whose supplied member names
+    match this layout's field set is the one whose `__init__` parameter order the
+    positional constructions spell. Without it the order falls back to the dtype's
+    sorted field names, which reverses any constructor whose parameters sort the
+    other way (Interval's min_value/max_value came out max-first on the device).
+    """
+    from .state import _LIFTED_MEMBERS
+
+    field_names:set = {name for name, _ in fields}
+    for cls, supplied in _LIFTED_MEMBERS.items():
+        supplied_names:set = {name for name, _ in supplied}
+        if supplied_names and supplied_names <= field_names:
+            return cls
+    return None
+
+
+def original_constructed_parameters(cls:type)->List[str]:
+    """The constructor parameter order of the original class, which the positional
+    constructions inside helper bodies spell."""
+    return _init_parameters(cls)
+
+
 def _init_parameters(cls:type)->List[str]:
     """The class's constructor parameter order, which is the order a construction supplies."""
     import inspect as _inspect  # noqa: PLC0415

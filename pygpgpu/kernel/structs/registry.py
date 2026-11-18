@@ -114,6 +114,23 @@ def registered_extent(name:str) -> Optional[int]:
 
 
 
+def register_constructed_parameters(cls:type, parameters:List[str]) -> None:
+    """Record the constructor parameter order a synthesized class answers for.
+
+    A synthesized class has no `__init__` of its own, but a positional construction
+    inside a helper body matches its arguments against the *constructor's* order --
+    which the original class the value was built from declares. Without this the
+    order fell back to the dtype's sorted field names, reversing any constructor
+    whose parameters sort the other way (`Interval(min_value, max_value)` came out
+    max-first, inverting the range on the device).
+    """
+    from ..objects.state import _CONSTRUCTED_PARAMETERS
+
+    if cls not in _CONSTRUCTED_PARAMETERS:
+        _CONSTRUCTED_PARAMETERS[cls] = list(parameters)
+
+
+
 def register_class(cls:type) -> Optional[np.dtype]:
     """Record the dtype a `ctypes` structure or union class declares, and return it.
 
