@@ -180,11 +180,14 @@ def convert_object_arguments(func:object, args:Sequence[object],
     # device type (CUDA accepts it, OpenCL rejects the launch), and there would be nothing to
     # pass. Say so instead of shipping an empty aggregate. A nested path is exempt, because a
     # parent that is read only for its nested object still has a structure to carry, and so is
-    # a list path, whose element reads are what carry it.
+    # a list path, whose element reads are what carry it. A path whose *methods* the body
+    # calls is exempt too: the receiver's structure carries its list of objects (a Scene's
+    # `hittables`), and the methods travel on the synthesized class, so the value is what
+    # the device needs even with no scalar member read.
     for name in named:
         if name in scan.lists:
             continue
-        if not scan.members[name]:
+        if not scan.members[name] and not scan.methods.get(name):
             raise SyntaxError(
                 f"'{name}' is a {type(named[name]).__name__}, but the kernel body reads none of "
                 f"its attributes and calls none of its methods, so there is nothing to put in a "

@@ -94,7 +94,8 @@ def _constructs_a_class(func:object, resolve:Callable[[str], object],
 def _inline_constructions(tree:ast.Module, find_class:Callable[[str], object],
                           objects:Dict[str, object],
                           resolve:Callable[[str], object],
-                          type_map:Optional[Dict[str, str]]=None)->Dict[str, object]:
+                          type_map:Optional[Dict[str, str]]=None,
+                          func:object=None)->Dict[str, object]:
     """Lift every unnamed construction into a local, and answer the templates it built.
 
     `self.hit(ray, Interval(0, math.inf))` builds a value straight into a call, so the scan
@@ -107,6 +108,15 @@ def _inline_constructions(tree:ast.Module, find_class:Callable[[str], object],
     the *body*, where the constructor call is, so only the scan's view carries the name.
     """
     lifted:Dict[str, object] = {}
+    # The counter is per-function and the names are qualified with the function's own
+    # key, because two walks lift their own inline constructions independently: a shared
+    # counter would hand different functions' values the *same* path name, and the first
+    # registration would win -- a forwarded parameter then bound to the wrong class (the
+    # trace that found this: `ray_range` bound to a path whose registered class was the
+    # *kernel body's* Ray while the value was Scene.hit's Interval). The key is the
+    # function's own code object (its file and first line), which `func` carries; a bare
+    # tree has no file, so the caller passes the function it is lifting for.
+    function_key:str = _function_key_of(func)
     counter:List[int] = [0]
 
     def lift(node:ast.AST)->ast.AST:
@@ -128,7 +138,7 @@ def _inline_constructions(tree:ast.Module, find_class:Callable[[str], object],
                     kinds.append(kind)
                 template:object = _template_from(kinds, cls)
                 if template is not None:
-                    name:str = f"{INLINE_PREFIX}{counter[0]}"
+                    name:str = f"{INLINE_PREFIX}{function_key}_{counter[0]}"
                     counter[0] += 1
                     lifted[name] = template
                     # The members this construction supplies, in the constructor's own
@@ -144,10 +154,14 @@ def _inline_constructions(tree:ast.Module, find_class:Callable[[str], object],
                             supplied.append((parameter_names[position], kind))
                     _LIFTED_MEMBERS.setdefault(cls, list(supplied))
                     return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+        if (isinstance(node, ast.Assign) or isinstance(node, ast.AnnAssign)) \
+                and isinstance(node.value, ast.Call):
             # A construction that already has a name is handled by the loop in
             # `constructed_locals`; lifting it again would give the same value a second,
             # unnamed path, which the scan then resolves against an empty template.
+            # An *annotated* assignment (`ray: Ray = Ray(...)`) is an AnnAssign, not an
+            # Assign -- leaving it out lifted the whole construction instead, and the
+            # name it was written under bound to nothing.
             lift_arguments(node.value)
             return node
         for field, value in ast.iter_fields(node):
@@ -215,11 +229,21 @@ def constructed_locals(func:object, objects:Dict[str, object],
         return resolve(name)
 
     for statement in ast.walk(tree):
-        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+        # A named construction is an `Assign` (`ray = Ray(...)`) or an *annotated* one
+        # (`ray: Ray = Ray(...)`), whose value sits in `statement.value` directly.
+        if isinstance(statement, ast.Assign):
+            if len(statement.targets) != 1 \
+                    or not isinstance(statement.targets[0], ast.Name):
+                continue
+            target:ast.expr = statement.targets[0]
+            value:ast.expr = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            target:ast.expr = statement.target
+            value:ast.expr = statement.value
+        else:
             continue
-        target:ast.expr = statement.targets[0]
-        value:ast.expr = statement.value
-        if not (isinstance(target, ast.Name) and isinstance(value, ast.Call)):
+        if value is None or not (isinstance(target, ast.Name)
+                                 and isinstance(value, ast.Call)):
             continue
         callee:ast.expr = value.func
         if not isinstance(callee, ast.Name):
@@ -248,7 +272,8 @@ def constructed_locals(func:object, objects:Dict[str, object],
     # `bounds = Interval(...)` and passed `bounds`, which is the shape every later step
     # already handles; the lifted names answer from `found` and never reach the generated
     # source, because the translator reaches the constructor in the body itself.
-    lifted:Dict[str, object] = _inline_constructions(tree, find_class, objects, resolve)
+    lifted:Dict[str, object] = _inline_constructions(tree, find_class, objects, resolve,
+                                                     type_map, func)
     if lifted:
         # Every later step reads the same tree (see _parse), or the lifted name would be
         # nowhere in the body the scan walks next. The values are cached with it: a second
@@ -259,6 +284,29 @@ def constructed_locals(func:object, objects:Dict[str, object],
     found.update(lifted)
     return found
 
+
+
+def _function_key_of(func:object)->str:
+    """A short, collision-free id for the function whose constructions are lifted.
+
+    The lifted names live in the scan's shared namespace, so two walks must not hand
+    different values the same path name. The id is the function's code object's file
+    and first line, which is stable across the re-reads of one function and distinct
+    between them -- a line number alone collides across files (Camera.render and
+    Scene.ray_color can start on the same line), and a collision bound a forwarded
+    parameter to another function's construction (the trace that found this bound
+    `ray_range` to a path whose registered class was `Ray` while the value was an
+    `Interval`).
+    """
+    code:object = getattr(func, "__code__", None)
+    if code is None:
+        return "_"
+    filename:str = getattr(code, "co_filename", "") or ""
+    firstlineno:int = getattr(code, "co_firstlineno", 0) or 0
+    digest:str = "".join(ch if (ch.isalnum() or ch in "._") else "_"
+                         for ch in filename)
+    digest:str = digest[-40:]
+    return f"{digest}_{firstlineno}"
 
 
 def _init_parameters(cls:type)->List[str]:

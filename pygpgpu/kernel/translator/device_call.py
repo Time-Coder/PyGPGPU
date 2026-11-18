@@ -313,7 +313,10 @@ class _DeviceCallMixin:
         if not entry.get("needs_exception"):
             return
         self.has_raises = True
-        for site in entry.get("raise_sites") or []:  # type: ignore[union-attr]
+        sites:object = entry.get("raise_sites") or []
+        if not isinstance(sites, list):
+            return
+        for site in sites:
             self.raise_sites.append(dict(site))  # type: ignore[arg-type]
 
 

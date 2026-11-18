@@ -414,6 +414,14 @@ def _structure_for(fields:Sequence[Tuple[str, type]],
     for method_name, function in methods:
         if method_name not in structure.__dict__:
             setattr(structure, method_name, function)
+    # The synthesized class is the dtype's declaring class, registered here: a method call
+    # on a *pointer* to this structure (`hitable.hit(...)` through the list element) reads
+    # the owner back off the registry, and an unregistered class would answer None -- which
+    # is what made the call refuse as "no such method" although the class carries it.
+    if methods:
+        from ..structs import register_declared_class  # noqa: PLC0415 (import cycle)
+
+        register_declared_class(np.dtype(structure), structure)
     _STRUCT_CACHE[key] = structure
     return structure
 

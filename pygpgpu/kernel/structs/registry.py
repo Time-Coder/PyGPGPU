@@ -182,8 +182,20 @@ def register_declared_class(dtype:np.dtype, cls:type) -> None:
     is paired with that dtype here. The pairing is what lets a member method resolve:
     `ray.at(t)` needs the class the method is defined on, and a bare record dtype cannot say
     whose methods to compile.
+
+    Both registries carry the pairing: `_DECLARED` is the single-class answer a launch's
+    own class question reads, and `_DECLARED_ALL` is the list `declared_class_carrying`
+    walks -- which is how a method call on a *pointer* to the structure resolves whose
+    class defines it (`hitable.hit(...)` through a list element, whose owner is the
+    synthesized `ObjectCenterRadius`, not the Hittable the list was declared with).
     """
-    _DECLARED.setdefault(np.dtype(dtype), cls)
+    dtype:np.dtype = np.dtype(dtype)
+    _DECLARED.setdefault(dtype, cls)
+    classes:Optional[list] = _DECLARED_ALL.get(dtype)
+    if classes is None:
+        _DECLARED_ALL[dtype] = [cls]
+    elif cls not in classes:
+        classes.append(cls)
     register(dtype)
 
 

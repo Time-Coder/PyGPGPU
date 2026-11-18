@@ -41,6 +41,16 @@ def _scan_function(func:object, tracked:Dict[str, str], scan:Scan)->None:
     tree:Optional[ast.Module] = _parse(func)
     if tree is None:
         return
+    # A value the body builds itself (`ray = Ray(...)`) is a tracked name too, bound to its
+    # own path: a call that hands it on (`scene.hit(ray, ...)`) forwards it under the callee's
+    # parameter name, and the callee's member reads (`ray.direction`) then land on the path
+    # that names the construction. Without this the forwarded parameter bound nothing -- the
+    # callee's reads discovered no members, and the argument reached the device as an empty
+    # structure. The binding is local to this walk: the *same* name in a callee's own body
+    # binds to that callee's own constructions there.
+    for local_name in scan.constructed:
+        if local_name not in tracked:
+            tracked[local_name] = local_name
     # A class this body constructs (`record = HitRecord(...)` inside Sphere.hit) is a value
     # like any other: it joins the walk under the body's own name for it, so its member reads
     # land on a path and the translator gets a structure for the constructor call. The

@@ -161,19 +161,29 @@ def _cycle_names(tree:ast.FunctionDef, globals_map:Optional[dict])->frozenset:
     """The calls this body spells as the cycle the seed may assume.
 
     The function's own name is always in the set. A call of *another* bare name is in
-    it only when the name resolves to a plain python function through `globals_map` --
-    the mutual partner the translation will follow, whose own returns must fix the
-    same type. A method's `self.<name>` spelling names the method itself when the
-    attribute is the function's own name (its receiver resolves to the same object).
+    it only when the name resolves to a plain python function through `globals_map` AND
+    the function is defined in the same module the caller reads -- the mutual partner
+    whose own translation will follow this one. A helper a body merely *uses* (pygf's
+    `mix`, `normalize`, a random sampler) is also a plain function, but its return type
+    is its own annotation's business, not the cycle's: treating every imported function
+    as a partner made `mix(color3f(...), ...)` answer "@self" (the induction) instead of
+    the vector its arguments carry. Same-module is the line: a recursive partner has to
+    live where the recursion is written, while vocabulary comes from imports. A method's
+    `self.<name>` spelling names the method itself when the attribute is the function's
+    own name (its receiver resolves to the same object).
     """
     receiver:str = _receiver_name_of(tree)
     names:set = {tree.name}
     if globals_map is not None:
+        own_module:str = str(globals_map.get("__name__", "") or "")
         for call_name, _call in _bare_calls(tree, receiver):
             if call_name == tree.name:
                 continue
             value:object = globals_map.get(call_name)
-            if isinstance(value, types.FunctionType):
+            if not isinstance(value, types.FunctionType):
+                continue
+            module:str = getattr(value, "__module__", "") or ""
+            if module == own_module or module == "__main__":
                 names.add(call_name)
     return frozenset(names)
 
@@ -249,6 +259,16 @@ def _expression_type(node:ast.expr, func_name:str, declared:Dict[str, object],
         if left is None or right is None:
             return None
         name:str = node.op.__class__.__name__
+        # A vector operand carries the operation: `0.5 * ray_color(...)` is the scalar-
+        # times-vector form the emission handles component-wise, and the answer is the
+        # vector's own type -- the same rule `_visit_binop` applies when one operand is
+        # a vector. `@self` (the induction) rides along: the cycle's own type is what
+        # the other returns fix, and the multiply keeps it.
+        for operand in (left, right):
+            if operand in _vec_registry():
+                return operand
+            if operand == SELF_TYPE:
+                return SELF_TYPE
         if name == "Div":
             # `x / y` is python's true division: an integer pair answers a real
             # (see _visit_binop's Div branch), anything else promotes.
@@ -301,6 +321,9 @@ def _call_type(node:ast.Call, func_name:str, declared:Dict[str, object],
             if target.__name__ in _vec_registry():
                 return target.__name__
             for base in target.__mro__:
+                # The alias's *registered base* is the answer, not the host name: the
+                # seed speaks device types, and `color3f` is a host alias whose device
+                # spelling is `float3` (the MRO walk is what finds it).
                 if base.__name__ in _vec_registry():
                     return base.__name__
             return None
@@ -308,8 +331,38 @@ def _call_type(node:ast.Call, func_name:str, declared:Dict[str, object],
     kinds:List[str] = [_expression_type(arg, func_name, declared, float_width,
                                         depth + 1, cycle_names, globals_map)
                        for arg in node.args]
+    # A vector-family helper (pygf's mix/normalize/... spell `-> genType`) answers its
+    # first *vector* argument's own type, which is what the emission does -- and the
+    # answer stands even when a later scalar argument's type the scan cannot see (a
+    # local weight). Try it before the any-None refusal below.
+    if globals_map is not None and isinstance(node.func, ast.Name):
+        target:object = globals_map.get(node.func.id)
+        if callable(target) and not isinstance(target, type):
+            for kind in kinds:
+                if kind in _vec_registry():
+                    return kind
     if any(kind is None for kind in kinds):
         return None
+    if globals_map is not None and isinstance(node.func, ast.Name) \
+            and callable(globals_map.get(node.func.id)) \
+            and not isinstance(globals_map.get(node.func.id), type):
+        # A helper call names the type the helper's own return annotation declares: a
+        # pygf vector function is annotated `-> genType`, the *family* the concrete type
+        # belongs to rather than a device name -- the concrete answer follows the first
+        # vector argument (mix(color3f, color3f, w) answers color3f), which is what the
+        # emission does. Only a *vector* resolution is taken here -- a scalar annotation
+        # lies about widths the mapping may have moved, and a structure return is the
+        # translation's decision, not a static fact.
+        target:object = globals_map.get(node.func.id)
+        annotation:object = getattr(target, "__annotations__", {}).get("return")
+        # The first argument's own kind, normalized to the registered device name: a
+        # constructor call of a host alias answers its base (`color3f` -> `float3`),
+        # which is what kinds carries after the MRO walk above.
+        if kinds and kinds[0] in _vec_registry():
+            return kinds[0]
+        for base in getattr(annotation, "__mro__", ()):
+            if getattr(base, "__name__", "") in _vec_registry():
+                return base.__name__
     if isinstance(node.func, ast.Attribute):
         module:str = node.func.value.id
         attr:str = node.func.attr
