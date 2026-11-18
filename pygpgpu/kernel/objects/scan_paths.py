@@ -149,7 +149,7 @@ def _tree_key(func:Callable[..., object])->str:
 
 
 
-def _follow_aliases(tree:ast.Module, tracked:Dict[str, str])->None:
+def _follow_aliases(tree:ast.Module, tracked:Dict[str, str], members:Dict[str, List[str]])->None:
     """Follow `q = p` so `q.x` counts as `p.x`. A fixed point, because aliases chain.
 
     A tracked name maps to an object *path*: the parameter it came from, plus any member
@@ -159,15 +159,42 @@ def _follow_aliases(tree:ast.Module, tracked:Dict[str, str])->None:
     while changed:
         changed = False
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
+            targets:List[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            if not targets:
                 continue
             if not (isinstance(node.value, ast.Name) and node.value.id in tracked):
                 continue
             origin:str = tracked[node.value.id]
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id not in tracked:
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if target.id not in tracked:
                     tracked[target.id] = origin
                     changed = True
+                elif tracked[target.id] != origin:
+                    print("ALIAS-UNION:", target.id, tracked[target.id], "<-", origin,
+                          flush=True)
+                    # Both names already carry paths (`bundle` was constructed, `held`
+                    # is the parameter it was initialized from): until the rebind the
+                    # two names are one object, so each path's member set is the union
+                    # -- the layout one structure serves must cover what either name
+                    # reads. The union here is the conservative direction: a member
+                    # only one side reads still lands on the shared layout.
+                    other_path:str = tracked[target.id]
+                    origin_members:List[str] = members.setdefault(origin, [])
+                    other_members:List[str] = members.setdefault(other_path, [])
+                    for attr in list(other_members):
+                        if attr not in origin_members:
+                            origin_members.append(attr)
+                            changed = True
+                    for attr in list(origin_members):
+                        if attr not in other_members:
+                            other_members.append(attr)
+                            changed = True
 
 
 

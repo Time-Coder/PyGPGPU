@@ -73,7 +73,7 @@ def _scan_function(func:object, tracked:Dict[str, str], scan:Scan)->None:
             # only evidence here.
             for attribute in vars(template):
                 scan.note(local_name, attribute)
-    _follow_aliases(tree, tracked)
+    _follow_aliases(tree, tracked, scan.members)
     called:set = _called_members(tree, tracked)
     # `for element in p.items:` over a tracked list path: the loop variable is another name
     # for one element, so its member reads belong to the element structure. (A list of
@@ -324,6 +324,12 @@ def _scan_function(func:object, tracked:Dict[str, str], scan:Scan)->None:
         if helper_constructions:
             _scan_function(target, {**forwarded, **{n: n
                                                     for n in helper_constructions}}, scan)
+    # The alias union runs again here: the read walk above noted members on
+    # both sides of an alias (undle.a on the constructed path, held.a on
+    # the parameter's), and the layouts one structure serves must cover what
+    # either name reads -- the parameter's structure is what the recursive
+    # rebind's value has to match.
+    _follow_aliases(tree, tracked, scan.members)
 
 
 
@@ -350,4 +356,4 @@ def _writes_to(tree:ast.Module, tracked:Dict[str, str])->List[str]:
                 description:str = f"{tracked[target.value.value.id]}.{target.attr}"
                 if description not in written:
                     written.append(description)
-    return written
+    return written

@@ -154,7 +154,15 @@ def _site_rebinds(call:ast.Call, params:List[str],
     if len(call.args) > len(bindable):
         raise _fail("the recursive call passes more arguments than the function "
                     "declares", call)
-    return [(bindable[position], arg) for position, arg in enumerate(call.args)]
+    pairs:List[Tuple[str, ast.expr]] = [(bindable[position], arg)
+                                        for position, arg in enumerate(call.args)]
+    # A parameter the call passes *as itself* (`f(n - 1, step)`) is an identity:
+    # the rebinding would be `step = step`, which stores nothing and -- after the
+    # pointer-param rename -- would read the hidden parameter a second time. The
+    # pair is dropped: the loop form leaves the variable alone, which is exactly
+    # the value the call passes.
+    return [(name, expr) for name, expr in pairs
+            if not (isinstance(expr, ast.Name) and expr.id == name)]
 
 
 class _Plan:
@@ -197,6 +205,13 @@ class _Plan:
         # alike): their values differ per level, so a suspended computation reading
         # one would see only the final value in the k-loop -- refused.
         self.rebound_params:Set[str] = set()
+        # The pointer parameters a recursive call rebinds (a structure argument the
+        # walk replaces per level, the bounce ray of a ray tracer): the loop form
+        # cannot re-store the parameter, so the conversion gives each one a local
+        # value under the parameter's own name -- the body's reads see the current
+        # level's value, the parameter itself is renamed and read only by the one
+        # initializer, and the rebind is an ordinary struct-value store.
+        self.rebind_pointer_params:Set[str] = set()
 
     def scan(self)->None:
         """Walk the body, refusing every shape the conversion cannot model.
@@ -226,10 +241,7 @@ class _Plan:
                 pairs:List[Tuple[str, ast.expr]] = _site_rebinds(calls[0], self.params, self.self_name)
                 for param_name, _expr in pairs:
                     if param_name in self.pointer_params:
-                        raise _fail(
-                            f"the tail call rebinds '{param_name}', which travels as a "
-                            f"pointer: a loop conversion cannot re-store it (the "
-                            f"native unlock is the caller's next stop)", calls[0])
+                        self.rebind_pointer_params.add(param_name)
                     self.rebound_params.add(param_name)
                 self.sites += 1
                 return
@@ -258,10 +270,7 @@ class _Plan:
                         "suspension in the expression itself", node)
                 for param_name, expr in _site_rebinds(nested[0], self.params, self.self_name):
                     if param_name in self.pointer_params:
-                        raise _fail(
-                            f"the call rebinds '{param_name}', which travels as a "
-                            f"pointer: a loop conversion cannot re-store it (the "
-                            f"native unlock is the caller's next stop)", nested[0])
+                        self.rebind_pointer_params.add(param_name)
                     # A parameter the call passes *as itself* (`f(n - 1, step)`) keeps
                     # one value for the whole walk: the rebinding is an identity, and
                     # the suspended expression may read it like any loop-invariant
@@ -327,10 +336,7 @@ class _Plan:
                     f"spelled as a plain 'return {self.name}(...)'", node)
             for param_name, expr in _site_rebinds(node.value, self.params, self.self_name):
                 if param_name in self.pointer_params:
-                    raise _fail(
-                        f"the call rebinds '{param_name}', which travels as a "
-                        f"pointer: a loop conversion cannot re-store it (the "
-                        f"native unlock is the caller's next stop)", node)
+                    self.rebind_pointer_params.add(param_name)
                 # A parameter the call passes *as itself* keeps one value for the
                 # whole walk -- see the nested-site branch for the full note.
                 if isinstance(expr, ast.Name) and expr.id == param_name:
@@ -413,8 +419,11 @@ def tail_loop_tree(tree:ast.FunctionDef, identity:Optional[object] = None,
     `__globals__`: when both are given, a bare-name recursive call is only recognized
     while the module-level name still binds *that* object -- a name rebound to another
     function leaves the recursion to the translator's own live resolution.
-    `pointer_params` names the parameters that travel as pointers: a tail site
-    rebinding one is refused, because the loop form cannot re-store a pointer.
+    `pointer_params` names the parameters that travel as pointers. One a
+    recursive call rebinds is supported: the conversion renames the parameter and
+    snapshots its value into a local under the original name (the copy-on-rebind
+    rule makes that first binding a value copy), so the body's reads see the
+    current level's value and the rebind is an ordinary struct-value store.
     """
     if self_name is None and identity is not None and globals_map is not None \
             and globals_map.get(tree.name) is not identity:
@@ -428,13 +437,33 @@ def tail_loop_tree(tree:ast.FunctionDef, identity:Optional[object] = None,
     plan.scan()
     if plan.sites == 0:
         return None
+    # A pointer parameter a recursive call rebinds (a structure argument the walk
+    # replaces per level) gets a local value under the parameter's own name: the
+    # parameter is renamed, and one initializer snapshots the caller's value into
+    # the local -- the body's reads and every rebind then work on the local, which
+    # is an ordinary struct value the converted loop can store. The snapshot is
+    # what the copy-on-rebind rule wants: the local's name is assigned again (the
+    # rebind), so the first binding from the pointer is a value copy, never an
+    # alias.
+    initializers:List[ast.stmt] = []
+    for param_name in sorted(plan.rebind_pointer_params):
+        hidden:str = f"_pg_param_{param_name}"
+        for index, arg in enumerate(tree.args.posonlyargs + tree.args.args):
+            if arg.arg == param_name:
+                arg.arg = hidden
+                break
+        snapshot:ast.Assign = ast.Assign(
+            targets=[ast.Name(id=param_name, ctx=ast.Store())],
+            value=ast.Name(id=hidden, ctx=ast.Load()))
+        ast.copy_location(snapshot, tree)
+        ast.fix_missing_locations(snapshot)
+        initializers.append(snapshot)
     # The level counters start at zero before the loop: an AugAssign reads the
     # name, and the translator's use-before-assignment check would fire on a
     # counter whose first assignment is the AugAssign itself. The result slots
     # need no initializer: the main loop's bottom-out always assigns the slot
     # before the k-loop reads it, and a second declaration would collide with
     # the site assignment's own hoist.
-    initializers:List[ast.stmt] = []
     for slot in sorted(plan.suspended):
         counter_init:ast.Assign = ast.Assign(
             targets=[ast.Name(id=f"_pg_recursion_k_{slot}", ctx=ast.Store())],

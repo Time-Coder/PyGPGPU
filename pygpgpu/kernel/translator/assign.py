@@ -321,16 +321,35 @@ class _AssignMixin(_PrivateArrayMixin, _WorkGroupMixin):
             stored:object = t
             if self._is_block_id_expression(node.value):
                 stored = "blockid"
+            # A structure pointer whose name the body re-assigns later is a
+            # *rebind*, not an alias: python's own rule -- the first binding
+            # snapshots the caller's object (the value the parameter carried),
+            # and every later assignment rebinds the local without touching
+            # the caller's. The C spelling is a value copy of the deref; a
+            # pointer alias here would make the later rebind a pointer store,
+            # which the converted recursion needs to be a value. Decided before
+            # `_define`, because the stored type is what the later assignment
+            # checks its target against.
+            snapshot_copy:bool = (isinstance(target, ast.Name) and is_new
+                                  and isinstance(t, tuple) and is_ptr(t)
+                                  and _structs_module.dtype_for(t[1]) is not None
+                                  and self._name_is_reassigned(target.id))
+            if snapshot_copy:
+                stored = t[1]
             self._define(target.id, stored, node)
             decl:str = ""
             if is_new:
                 if isinstance(t, tuple) and is_ptr(t):
-                    # A structure pointer alias: declared with the *same* const qualification
-                    # the source expression has, because a `const Struct*` parameter cannot
-                    # initialise a mutable `Struct*`.
-                    const:str = ("const " if isinstance(node.value, ast.Name)
-                                 and self._is_const_struct(node.value.id) else "")
-                    decl = f"{const}{self._kernel_scalar_type(t[1])}* "
+                    if snapshot_copy:
+                        decl = f"{self._kernel_scalar_type(t[1])} "
+                        code = f"(*{code})"
+                    else:
+                        # A structure pointer alias: declared with the *same* const qualification
+                        # the source expression has, because a `const Struct*` parameter cannot
+                        # initialise a mutable `Struct*`.
+                        const:str = ("const " if isinstance(node.value, ast.Name)
+                                     and self._is_const_struct(node.value.id) else "")
+                        decl = f"{const}{self._kernel_scalar_type(t[1])}* "
                 else:
                     decl = self._device_type(t) + " "
                 if len(self.scopes) > 1:
@@ -474,3 +493,40 @@ class _AssignMixin(_PrivateArrayMixin, _WorkGroupMixin):
                 f"cannot rebind the outer array '{target.id}': the array object itself is "
                 f"shared with the caller, so a device kernel can only write its elements", node)
         return outer
+
+    def _name_is_reassigned(self, name:str)->bool:
+        """Whether the body assigns `name` again after this binding.
+
+        The tree is the translator's own deep copy, walked once per query and cached on
+        the instance -- a name is asked once per binding site, and the answer decides
+        whether the first binding of a structure pointer is an alias (the caller's
+        object, read and written through) or a snapshot (python's own rebind rule: the
+        later assignment rebinds the local and never reaches the caller).
+        """
+        cached:object = getattr(self, "_reassigned_names", None)
+        if cached is None:
+            cached = {}
+            self._reassigned_names = cached
+        if name in cached:
+            return bool(cached[name])
+        count:int = 0
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    # A tuple target (`ray, depth = new_ray, depth - 1`, the
+                    # converted recursion's simultaneous rebind) counts every name
+                    # it spells: the rebinding lands on each of them.
+                    for item in ([target] if isinstance(target, ast.Name)
+                                 else ast.walk(target) if isinstance(target,
+                                                                     (ast.Tuple, ast.List))
+                                 else []):
+                        if isinstance(item, ast.Name) and item.id == name:
+                            count += 1
+            elif isinstance(node, ast.AnnAssign) and node.value is not None \
+                    and isinstance(node.target, ast.Name) and node.target.id == name:
+                count += 1
+            elif isinstance(node, ast.AugAssign) \
+                    and isinstance(node.target, ast.Name) and node.target.id == name:
+                count += 1
+        cached[name] = count > 1
+        return count > 1
