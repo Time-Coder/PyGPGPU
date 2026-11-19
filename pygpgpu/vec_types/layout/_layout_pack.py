@@ -330,16 +330,23 @@ def _pack_structure(value:object, backend:str)->Packed:
 def _copy_plain_fields(source:object, target:object)->None:
     """One device-layout structure's fields onto the host-layout twin, field by field.
 
-    Only the fields whose widths agree on both sides are copied: a vector member is
-    handled by the caller's own unpack (its components, not its padding), and this walk
-    answers scalars and plain arrays -- the two the vector-focused unpack used to skip.
+    Scalars and plain arrays are copied element by element (their widths agree on both
+    sides); a vector member goes through `_unpack_vector`, because the device layout
+    pads it -- assigning the device class straight onto the host class is the
+    "float3 instance instead of float3 instance" refusal -- and a nested structure
+    recurses.
     """
     for field, kind in type(target)._fields_:
         source_value:object = getattr(source, field)
-        if isinstance(kind, type) and issubclass(kind, ctypes.Array):
+        vector:Optional[str] = _is_vector_class(kind)
+        if vector is not None:
+            _unpack_vector(source_value, getattr(target, field))
+        elif isinstance(kind, type) and issubclass(kind, ctypes.Array):
             target_array:object = getattr(target, field)
             if isinstance(source_value, ctypes.Array):
                 for index in range(len(target_array)):
                     target_array[index] = source_value[index]
+        elif isinstance(kind, type) and issubclass(kind, ctypes.Structure):
+            _copy_plain_fields(source_value, getattr(target, field))
         else:
             setattr(target, field, source_value)
