@@ -235,6 +235,27 @@ class _NamingMixin:
         return self._tail_var(array_name, count)
 
 
+    def _object_array_parameter(self, param_name:str, member_attr:str)->Optional[str]:
+        """The parameter an object argument's ndarray member travels as, or None.
+
+        `param_name` is the argument the object arrived as (`item`) and `member_attr`
+        the attribute the body names (`item.image`): the member left the synthesized
+        structure and travels as its own parameter `_<param>_<member>` -- the same
+        shape the receiver's `_self_<attr>` spells -- so this is the one answer every
+        site that names the member shares: the read path (`item.image[i, j]`), the
+        array name a tuple store registers its extents under, and the shape holder
+        a domain is sized from. None when the argument carries no such member (an
+        ordinary object, or an attribute that is not the array).
+        """
+        members:List[Tuple[str, str]] = list(
+            self.object_array_members.get(param_name) or [])
+        for member, _device_note in members:
+            if member == member_attr:
+                pname:str = f"_{param_name}_{member}"
+                if self._lookup(pname) is not None:
+                    return pname
+        return None
+
     def _shape_holder_param(self, attr_node:ast.expr)->Optional[str]:
         """When X in `X.shape` is an array parameter, return its parameter name.
 
@@ -254,13 +275,7 @@ class _NamingMixin:
         # (`item.image[i, j]`) binds to.
         if (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
                 and self.object_array_members):
-            members:List[Tuple[str, str]] = list(
-                self.object_array_members.get(base.value.id) or [])
-            for member, _device_note in members:
-                if member == base.attr:
-                    pname:str = f"_{base.value.id}_{member}"
-                    if is_ptr(self._lookup(pname)):
-                        return pname
+            return self._object_array_parameter(base.value.id, base.attr)
         return None
 
 
@@ -367,11 +382,7 @@ class _NamingMixin:
         # same answer `_visit_attribute` gives on the read path.
         if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and self.object_array_members):
-            members:List[Tuple[str, str]] = list(
-                self.object_array_members.get(node.value.id) or [])
-            for member, _device_note in members:
-                if member == node.attr:
-                    pname:str = f"_{node.value.id}_{member}"
-                    if self._lookup(pname) is not None:
-                        return pname
+            pname:Optional[str] = self._object_array_parameter(node.value.id, node.attr)
+            if pname is not None:
+                return pname
         self._error("unsupported array expression", node)

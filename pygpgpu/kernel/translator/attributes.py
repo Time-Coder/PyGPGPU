@@ -2,7 +2,7 @@ from __future__ import annotations
 import ast
 import enum
 import math
-from typing import (Any, Dict, List, Optional, Tuple)
+from typing import (Any, Dict, Optional, Tuple)
 import numpy as np
 from ..device_builtins import (
     INDEX_VECTOR_AXES_CUDA,
@@ -137,14 +137,9 @@ class _AttributesMixin:
             # but whose array never travels, so reaching here with the map answering
             # is the whole check.
             if self.object_array_members:
-                members:List[Tuple[str, str]] = list(
-                    self.object_array_members.get(node.value.id) or [])
-                for member, _device_note in members:
-                    if member == node.attr:
-                        pname:str = f"_{node.value.id}_{member}"
-                        t:DeviceType = self._lookup(pname)
-                        if t is not None:
-                            return pname, t
+                pname:Optional[str] = self._object_array_parameter(node.value.id, node.attr)
+                if pname is not None:
+                    return pname, self._lookup(pname)
 
         base_code, base_t = self._visit_expression(node.value)
         # A complex value's members are its real and imaginary parts, which the header
