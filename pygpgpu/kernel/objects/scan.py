@@ -334,7 +334,15 @@ def _scan_function(func:object, tracked:Dict[str, str], scan:Scan)->None:
 
 
 def _writes_to(tree:ast.Module, tracked:Dict[str, str])->List[str]:
-    """Every `p.x = ...` target on a tracked object, as `path.member` strings."""
+    """Every `p.x = ...` target on a tracked object, as `path.member` strings.
+
+    The target's base may itself be a member chain (`bag.inner.x = v`): the chain is
+    walked the same way a *read* of it would be -- each hop names a member, and every
+    hop but the last lands on an object the read walk already opened as its own path.
+    The description is therefore the root's path joined with every hop, the same
+    `path.member` shape a one-hop write produces, which is what lets the write-back
+    follow the route hop by hop.
+    """
     written:List[str] = []
     for node in ast.walk(tree):
         targets:List[ast.AST] = []
@@ -348,6 +356,24 @@ def _writes_to(tree:ast.Module, tracked:Dict[str, str])->List[str]:
                 description:str = f"{tracked[target.value.id]}.{target.attr}"
                 if description not in written:
                     written.append(description)
+                continue
+            # bag.inner.x = ...: the base is itself a member chain rooted on a tracked
+            # name. The read of the same expression opened each hop's path (the walk
+            # above resolves `bag.inner.x` into the paths `bag` -> `bag.inner` and the
+            # member `x`), so the write's description is simply the hops joined onto
+            # the root's tracked path.
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Attribute):
+                hops:List[str] = []
+                cursor:ast.AST = target
+                while isinstance(cursor, ast.Attribute):
+                    hops.append(cursor.attr)
+                    cursor = cursor.value
+                if isinstance(cursor, ast.Name) and cursor.id in tracked:
+                    description:str = tracked[cursor.id]
+                    for attr in reversed(hops):
+                        description:str = f"{description}.{attr}"
+                    if description not in written:
+                        written.append(description)
                 continue
             # items[j].x = ...: a store into an element of a tracked list.
             if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Subscript)

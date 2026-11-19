@@ -83,7 +83,8 @@ class _CompileTranslateMixin:
             host_creation_values=plan.region_values,
             host_executed_lines=plan.executed_lines,
             type_map=self._type_map,
-            argument_values=list(args))
+            argument_values=list(args),
+            object_array_members=(getattr(self, "_object_array_members", None) or {}))
         # `@kernel(domain="x")` names the parameter whose shape declares the iteration
         # domain. It is applied before `translate()` so the declaration is in place while the
         # magic loop is scanned -- a body cannot carry one of its own any more.

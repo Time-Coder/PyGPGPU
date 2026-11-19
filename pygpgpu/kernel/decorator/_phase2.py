@@ -76,8 +76,17 @@ class _BuildLaunchMixin:
         plan.receiver_values:List[object] = (list(plan.self_values[:1]) if plan.self_struct_members else [])
         plan.argument_values:List[object] = (list(plan.self_values[1:]) if plan.self_struct_members
                                      else list(plan.self_values))
+        # An object ARGUMENT's ndarray members travel as their own parameters
+        # (`_<param>_<member>`), appended after the converted arguments by
+        # _prepare_launch -- the same position the translator declares them in, and
+        # the same position the aligned loop finds them at.
+        plan.object_array_names:List[str] = []
+        for param_name, members in (getattr(plan, "object_array_members", None) or {}).items():
+            for member, _array in members:
+                plan.object_array_names.append(f"_{param_name}_{member}")
         plan.prefix_names:List[str] = (plan.receiver_name
                                   + list(_positional_argument_names(self.raw_func))[:len(plan.args)]
+                                  + plan.object_array_names
                                   + plan.self_attr_names
                                   + list(plan.launch_meta.get("carried") or []))
         plan.full:List[object] = [_kernel_scalar_argument(value, t)

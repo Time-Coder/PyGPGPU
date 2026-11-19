@@ -142,6 +142,13 @@ def reads_an_array_member(w, out: np.ndarray):
 
 
 @kernel
+def writes_an_array_member_element(w, out: np.ndarray):
+    for i in range(out.shape[0]):
+        w.xs[0] = 9.0
+        out[i] = 1.0
+
+
+@kernel
 def reads_nothing(obj, out: np.ndarray):
     for i in range(out.shape[0]):
         out[i] = 1.0

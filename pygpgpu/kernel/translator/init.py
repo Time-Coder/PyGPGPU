@@ -35,7 +35,8 @@ class _InitMixin:
                      struct_arg_classes:Optional[Dict[str, type]]=None,
                      receiver_as_argument:bool=False,
                      type_map:Optional[Dict[str, str]]=None,
-                     argument_values:Optional[List[object]]=None):
+                     argument_values:Optional[List[object]]=None,
+                     object_array_members:Optional[Dict[str, List[Tuple[str, str]]]]=None):
             self.func:Callable = func
             self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
             self.backend:str = backend
@@ -128,6 +129,13 @@ class _InitMixin:
             # cannot say whose method `p.total` is. The launch knows: the caller handed over an
             # instance, and its type is recorded here under the parameter's name.
             self.struct_arg_classes:Dict[str, type] = dict(struct_arg_classes or {})
+            # An object ARGUMENT's ndarray members, keyed by the parameter the object
+            # arrived as: parameter name -> [(member, device type)] -- the member left
+            # the synthesized structure and travels as its own parameter named
+            # `_<param>_<member>`, which is what every `item.arr` read in the body
+            # binds to (see _visit_attribute's object-array branch).
+            self.object_array_members:Dict[str, List[Tuple[str, str]]] = dict(
+                object_array_members or {})
             # The receiver travels as one structure: member name -> the attribute it holds.
             # A member read of `self.<attr>` becomes a field read of the struct parameter, and
             # an ndarray attribute stays a separate `_self_<attr>` argument (the read/write
@@ -423,9 +431,13 @@ class _InitMixin:
                     param_types = list(param_types[1:])
                 args = args[1:]
             # `param_types` holds the positional arguments, then the receiver struct, then one
-            # type per ndarray attribute (see PyKernel._invoke_inner and _emit_device_call).
+            # type per ndarray attribute (see PyKernel._invoke_inner and _emit_device_call),
+            # then one type per object argument's ndarray member (see _prepare_launch,
+            # which appends the arrays after plan.args).
             expected:int = len(args) + len(self.self_attr_types) + (
                 1 if self.self_struct_members else 0)
+            for _param_name, members in self.object_array_members.items():
+                expected += len(members)
             if expected != len(param_types):
                 raise SyntaxError(f"{func.__name__}() takes {expected} device arguments but {len(param_types)} types were given") from None
 
@@ -466,4 +478,23 @@ class _InitMixin:
                 pname:str = f"_self_{attr}"
                 scope[pname] = t
                 self.params.append((pname, t))
+            # An object ARGUMENT's ndarray members: the member left the synthesized
+            # structure and travels as its own parameter named `_<param>_<member>`,
+            # appended after the positional arguments -- the same position the launch
+            # packs them at (see _prepare_launch, which appends the arrays after
+            # plan.args). `param_types` is the positional types only, so each member's
+            # own type is what `argument_values` carried into `infer_ctype` -- the
+            # launch reads it back off the same map (`object_array_members` names the
+            # arrays; the *type* is taken from the appended param_types tail).
+            if self.object_array_members:
+                tail:List[object] = param_types[len(args):]
+                position:int = 0
+                for param_name, members in self.object_array_members.items():
+                    for member, _device_note in members:
+                        pname:str = f"_{param_name}_{member}"
+                        array_t:object = (tail[position] if position < len(tail)
+                                          else ("*", "float"))
+                        position += 1
+                        scope[pname] = array_t
+                        self.params.append((pname, array_t))
             self.scopes.append(scope)

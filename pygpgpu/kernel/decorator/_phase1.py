@@ -228,6 +228,27 @@ class _PrepareLaunchMixin:
                                              type_map=self._type_map,
                                              backend=plan.backend)
         plan.arg_types:List[DeviceType] = [infer_ctype(a, self._type_map) for a in plan.args]
+        # An object ARGUMENT's ndarray members travel as their own kernel parameters,
+        # appended after the converted arguments (`_<param>_<member>`, the same shape
+        # the receiver's `_self_<attr>` spells): the launch passes the caller's array
+        # itself, so a store through it lands in the caller's buffer. The map travels
+        # to the translator, which binds `item.arr` to the parameter, and to the launch
+        # packing, which appends the names so the aligned loop finds the holder.
+        plan.object_array_members:Dict[str, List[Tuple[str, object]]] = dict(
+            plan.object_binding.array_members)
+        if plan.object_array_members:
+            for param_name, members in plan.object_array_members.items():
+                for member, array in members:
+                    plan.args = list(plan.args) + [array]
+                    plan.arg_types = list(plan.arg_types) + [
+                        infer_ctype(array, self._type_map)]
+        # The map reaches the translator through the compile plan (the members carry
+        # their device types, which `infer_ctype` answered off the caller's arrays);
+        # the translator declares each member a parameter named `_<param>_<member>`
+        # and binds every `item.arr` read in the body to it.
+        self._object_array_members = {
+            param: [(member, "ptr") for member, _array in members]
+            for param, members in plan.object_array_members.items()}
         if not plan.self_struct_members:
             plan.self_types = []
             for name, value in zip(plan.self_attrs, plan.self_values):

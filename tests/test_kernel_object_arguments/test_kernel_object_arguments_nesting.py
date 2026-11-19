@@ -13,6 +13,7 @@ from _helpers.test_kernel_object_arguments_helpers import (
     reads_a_nested_object,
     reads_an_array_member,
     reads_nothing,
+    writes_an_array_member_element,
     writes_to_the_object,
 )
 
@@ -27,19 +28,22 @@ def test_a_nested_object_becomes_a_nested_structure(runner):
     assert float(out[0]) == pytest.approx(6.0)
 
 
-def test_a_nested_read_through_a_non_object_is_refused(gpu_backend, runner):
-    """w.xs[0] reads through an array member, which is not an object."""
-    with pytest.raises(SyntaxError) as caught:
-        runner(reads_an_array_member,
-               WithArray(np.arange(4, dtype=np.float32)), np.zeros(1, np.float32))
-    assert "array" in str(caught.value)
+def test_an_array_member_travels_as_its_own_parameter(gpu_backend, runner):
+    """`w.xs` is an ndarray member: it leaves the synthesized structure and travels
+    as its own kernel parameter, so the read answers the caller's array's bytes."""
+    xs = np.arange(4, dtype=np.float32)
+    out = np.zeros(1, dtype=np.float32)
+    runner(reads_an_array_member, WithArray(xs), out)
+    assert float(out[0]) == pytest.approx(float(xs[0]))
 
 
-def test_an_array_member_is_refused(gpu_backend, runner):
-    with pytest.raises(SyntaxError) as caught:
-        runner(reads_an_array_member,
-               WithArray(np.arange(4, dtype=np.float32)), np.zeros(1, np.float32))
-    assert "array" in str(caught.value)
+def test_an_array_member_element_write_lands_in_the_callers_array(gpu_backend, runner):
+    """`item.xs[i] = v` stores through the array parameter -- the launch passed the
+    caller's array itself, so the store lands in it with no write-back step."""
+    xs = np.zeros(4, dtype=np.float32)
+    out = np.zeros(1, dtype=np.float32)
+    runner(writes_an_array_member_element, WithArray(xs), out)
+    np.testing.assert_allclose(xs, (9.0, 0.0, 0.0, 0.0))
 
 
 def test_a_write_travels_back_to_the_object(runner):

@@ -2,7 +2,7 @@ from __future__ import annotations
 import ast
 import enum
 import math
-from typing import (Any, Dict, Optional, Tuple)
+from typing import (Any, Dict, List, Optional, Tuple)
 import numpy as np
 from ..device_builtins import (
     INDEX_VECTOR_AXES_CUDA,
@@ -130,7 +130,21 @@ class _AttributesMixin:
                     self._error(
                         f"np.{node.attr} is a type: use it as a keyword (dtype=np.{node.attr}) "
                         f"or as a constructor (np.{node.attr}(value)), not as a value", node)
-                self._error(f"{node.value.id}.{node.attr} is not supported", node)
+            # An object ARGUMENT's ndarray member: the member left the synthesized
+            # structure and travels as its own parameter (`_<param>_<member>`), so
+            # `item.arr` is that parameter -- an ordinary array pointer the array
+            # paths read and write through. The scan refuses a member the body reads
+            # but whose array never travels, so reaching here with the map answering
+            # is the whole check.
+            if self.object_array_members:
+                members:List[Tuple[str, str]] = list(
+                    self.object_array_members.get(node.value.id) or [])
+                for member, _device_note in members:
+                    if member == node.attr:
+                        pname:str = f"_{node.value.id}_{member}"
+                        t:DeviceType = self._lookup(pname)
+                        if t is not None:
+                            return pname, t
 
         base_code, base_t = self._visit_expression(node.value)
         # A complex value's members are its real and imaginary parts, which the header

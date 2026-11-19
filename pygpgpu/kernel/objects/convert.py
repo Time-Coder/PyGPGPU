@@ -13,6 +13,10 @@ from .kinds import (
     merge_fields,
     numeric_list_as_array,
 )
+from .build import (
+    _build_nested,
+    _fill_record_field,
+)
 from .scan import (
     Scan,
     _list_root,
@@ -176,6 +180,24 @@ def convert_object_arguments(func:object, args:Sequence[object],
             if isinstance(attribute, np.ndarray):
                 receiver_members.remove(member)
 
+    # An object ARGUMENT's ndarray member travels the same way the receiver's does:
+    # it leaves the synthesized structure (`member_type` refuses an array member) and
+    # becomes its own kernel parameter, named `_<param>_<member>` -- the same shape
+    # the receiver's `_self_<attr>` arguments spell. The launch passes the caller's
+    # array itself, so a store through it (`item.arr[i] = v`) lands in the caller's
+    # buffer and needs no write-back.
+    for name, value in named.items():
+        if name in scan.lists:
+            continue
+        members:List[str] = scan.members.get(name, [])
+        for member in list(members):
+            attribute:object = getattr(value, member, None)
+            if isinstance(attribute, np.ndarray):
+                members.remove(member)
+                if binding is not None:
+                    binding.array_members.setdefault(name, []).append(
+                        (member, attribute))
+
     # An object nothing reads has no structure to build: an empty one is not a portable
     # device type (CUDA accepts it, OpenCL rejects the launch), and there would be nothing to
     # pass. Say so instead of shipping an empty aggregate. A nested path is exempt, because a
@@ -187,7 +209,12 @@ def convert_object_arguments(func:object, args:Sequence[object],
     for name in named:
         if name in scan.lists:
             continue
-        if not scan.members[name] and not scan.methods.get(name):
+        # A parameter whose every member moved to its own array parameter
+        # (`_<param>_<member>`) has an empty synthesized structure left -- that is
+        # the intended shape (a bag the body only fills element-wise through its
+        # array member), not an object the body ignored.
+        took_arrays:bool = bool(binding is not None and binding.array_members.get(name))
+        if not scan.members[name] and not scan.methods.get(name) and not took_arrays:
             raise SyntaxError(
                 f"'{name}' is a {type(named[name]).__name__}, but the kernel body reads none of "
                 f"its attributes and calls none of its methods, so there is nothing to put in a "
@@ -308,6 +335,13 @@ def convert_object_arguments(func:object, args:Sequence[object],
                                                    if len(specs) > 1 else specs[0])
         for name, fields in zip(names, specs):
             chosen:List[Tuple[str, type]] = merged if merged is not None else fields
+            if not chosen:
+                # Every member of this object moved to its own array parameter
+                # (`_<param>_<member>`), leaving the synthesized structure empty --
+                # a zero-byte ctypes structure, whose device buffer the launch
+                # cannot allocate (cuMemAlloc refuses a size of 0). One byte of pad
+                # keeps the parameter a real, allocatable record; nothing reads it.
+                chosen = [("__pygpgpu_pad__", ctypes.c_uint8)]
             structure:type = _structure_for(chosen, scan.methods[name], backend)
             _prefer_class_name(structure, type(holders[name]))
             if name in scan.constructed:
@@ -330,42 +364,14 @@ def convert_object_arguments(func:object, args:Sequence[object],
 
             def build(source:object)->object:
                 """An instance of ``structure`` carrying ``source``'s values, recursively."""
-                values:Dict[str, object] = {}
-                for member, kind in chosen:
-                    value:object = getattr(source, member)
-                    if _is_complex_member_class(kind) and not isinstance(value, kind):
-                        # `ctypes` has no complex field, so the value is split into the
-                        # record's two parts at the class's own width.
-                        value = _complex_member_value(value, kind)
-                    elif (isinstance(kind, type) and issubclass(kind, ctypes.Structure)
-                            and not isinstance(value, kind)):
-                        # A nested member is rebuilt in the synthesized type from the values
-                        # the caller's object carries. The synthesized layout's `_fields_`
-                        # carries padding members the caller's object knows nothing about
-                        # (a vector member's alignment slot), so only the names the source
-                        # actually has are read -- a pad keeps the zero it was declared with.
-                        value = kind(**{n: getattr(value, n) for n, _ in kind._fields_
-                                        if hasattr(value, n)})
-                    elif isinstance(value, list) and isinstance(kind, type) \
-                            and issubclass(kind, ctypes.Array):
-                        # A list member: the field is a fixed-length array of the element
-                        # structure, filled from the caller's list in order.
-                        filled:object = kind()
-                        element_kind:object = kind._type_
-                        for position, item in enumerate(value):
-                            if isinstance(element_kind, type) \
-                                    and issubclass(element_kind, ctypes.Structure) \
-                                    and not isinstance(item, element_kind):
-                                item = element_kind(**{
-                                    n: getattr(item, n) for n, _ in element_kind._fields_
-                                    if hasattr(item, n)})
-                            filled[position] = item
-                        value = filled
-                    values[member] = value
-                return structure(**values)
+                return _build_nested(source, structure)
 
             instance:object = build(named[name])
-            written_paths:set = {description.rsplit(".", 1)[0] for description in scan.written}
+            # A write to any member of the object's subtree marks the whole argument
+            # as written: `bag.inner.x = v` names the nested route, and the record the
+            # device writes through is the top-level argument's. The description's
+            # root segment is the parameter's name.
+            written_paths:set = {description.split(".", 1)[0] for description in scan.written}
             if name in written_paths:
                 # The body writes this object's members: by value the device would write to
                 # its own copy and the stores would be lost. A one-element record array
@@ -380,13 +386,36 @@ def convert_object_arguments(func:object, args:Sequence[object],
                         # split into it before numpy sees the assignment (numpy would raise
                         # "float() argument must be ... not 'complex'").
                         value = _complex_member_value(value, field_type)
+                    if isinstance(field_type, type) and issubclass(field_type, ctypes.Structure) \
+                            and not isinstance(value, field_type):
+                        # A nested member whose field is the synthesized structure while
+                        # the caller's value is a plain python object (`bag.inner` on a
+                        # Bag that holds an Inner): numpy refuses a whole-object
+                        # assignment, so the field is built the way `build` builds it --
+                        # through the same recursive walk, which is what carries a
+                        # two-level chain (`bag.mid.leaf`) without ctypes' keyword
+                        # constructor refusing a plain object for a structure field.
+                        value = _build_nested(value, field_type)
                     if isinstance(value, ctypes.Structure):
-                        value = np.array(value, dtype=np.dtype(type(value)))
+                        # A structure field lands in the record field by field: the
+                        # record's field view is a structured sub-array, and a whole-
+                        # object assignment reaches numpy's array constructor -- which
+                        # the vector registry hooks (pygf owns the np.asarray name
+                        # process-wide) and that hook answers "could not convert
+                        # string to float" for a synthesized record. A field-by-field
+                        # fill through the field view touches no hook, and a nested
+                        # structure field recurses the same way (a whole-`ObjectLeaf`
+                        # assignment onto the `mid` field's sub-field view is the same
+                        # hooked constructor again).
+                        _fill_record_field(records[0][member], value)
+                        continue
                     records[0][member] = value
                 out[all_parameters.index(name)] = records
                 if binding is not None:
                     binding.instances[name] = records
                     binding.values[name] = named[name]
+                    binding.record_nested_routes(name, named[name], records[0],
+                                                 scan.written)
             else:
                 out[all_parameters.index(name)] = instance
                 if binding is not None:
