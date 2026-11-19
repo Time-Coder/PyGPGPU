@@ -267,15 +267,20 @@ class _RunLaunchMixin:
                 plan.launch_meta.get("body_tail") or plan.launch_meta.get("phase_tail") or [])
             # A receiver whose members the body wrote comes home through the holder the
             # launch packed; the copy runs when the future settles, which is where its
-            # read-backs have landed (see _write_back_receiver). It joins the tail's
-            # trigger conditions so a body with nothing else to settle still runs it.
+            # read-backs have landed (see _write_back_receiver). An object argument's
+            # member stores settle through the same callback (see _with_tail). Both
+            # join the tail's trigger conditions so a body with nothing else to settle
+            # still runs it.
+            has_object_writes:bool = bool(plan.object_binding.written)
             if not plan.tail_statements and not plan.outer_state["writable"] \
-                    and not plan.return_state and getattr(plan, "receiver_write_back", None) is None:
+                    and not plan.return_state and not has_object_writes \
+                    and getattr(plan, "receiver_write_back", None) is None:
                 return plan.future
             return self._with_tail(
                 plan.future, plan.tail_statements, args, instance,
                 plan.carried_slots, plan.gap_slots, plan.created_objects, plan.outer_state,
-                plan.outer_writable, plan.return_state, plan.returns, plan.full, plan.created)
+                plan.outer_writable, plan.return_state, plan.returns, plan.full, plan.created,
+                object_binding=plan.object_binding)
         for plan.position, plan.phase_kernel in enumerate(plan.active_kernels):
             if plan.position:
                 # The previous pass wrote the shared slots on the device; the read-back is

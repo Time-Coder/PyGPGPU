@@ -214,7 +214,8 @@ class _PykernelReturnsMixin:
                    return_state:Dict[str, object],
                    returns:Optional[Dict[str, object]],
                    full:List[object],
-                   created:Optional[Dict[str, object]]=None)->object:
+                   created:Optional[Dict[str, object]]=None,
+                   object_binding:object=None)->object:
         """Wrap an asynchronous launch so its future resolves the way a call would.
 
         The synchronous launch runs the host tail (the statements after the last
@@ -227,6 +228,11 @@ class _PykernelReturnsMixin:
         and the tail must not race it: the value is delivered through a fresh future
         (a concurrent one, or one on the caller's loop for asyncio), settled only
         after the tail has run.
+
+        `object_binding` is the pairing that copies an object argument's member
+        stores back onto the caller's objects; the synchronous path runs it beside
+        the outer write-back, and the settle callback must run it too -- without it
+        every member store an asynchronous launch made was lost.
         """
         tail_writable:Dict[str, np.ndarray] = {
             entry["name"]: entry["buffer"] for entry in outer_writable}
@@ -267,6 +273,13 @@ class _PykernelReturnsMixin:
                         carried_slots, gap_slots, created_objects=created_objects,
                         outer_state=outer_state, writable_outer=tail_writable)
                     self._write_back_outer(outer_state)
+                    # An object argument's member stores come home through the same
+                    # binding the synchronous path runs (see ObjectBinding.write_back):
+                    # without it every member store an asynchronous launch made was
+                    # lost -- the device read its copy, and the caller's object kept
+                    # its old value.
+                    if object_binding is not None and object_binding.written:
+                        object_binding.write_back()
                     # The receiver struct's members come home through the holder the
                     # launch packed (see _write_back_receiver); the plan is gone here,
                     # so the pairing the launch left on the kernel is what this reads.

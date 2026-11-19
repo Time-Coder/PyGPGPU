@@ -181,6 +181,35 @@ def test_the_member_store_survives_an_async_launch():
     assert instance.count == 3
 
 
+def test_an_object_argument_member_store_survives_submit():
+    class _Bag:
+        def __init__(self) -> None:
+            self.base = 1.0
+
+    def _body(item, out: np.ndarray):
+        for i in range(out.shape[0]):
+            item.base = 7.0
+
+    bag = _Bag()
+    body = kernel(_body)
+    # Every backend except the interpreter: the settle callback of a submit() must
+    # run the object binding the synchronous path runs, or the member store the
+    # device made never reached the caller's object (pinned after the audit found
+    # exactly that gap on the single-pass submit path).
+    for backend in ("cuda", "opencl"):
+        if not any(str(device).startswith(backend) for device in _available()):
+            continue
+        bag.base = 1.0
+        body[backend].submit(bag, np.zeros(4, dtype=np.float32)).result()
+        assert bag.base == 7.0
+
+
+def _available():
+    from pygpgpu import list_devices
+
+    return list_devices()
+
+
 # ---------------------------------------------------------------------------
 # cls.<helper>(...) from device code
 # ---------------------------------------------------------------------------
