@@ -307,7 +307,12 @@ class _PykernelCallMixin:
                 f"the python backend has no devices, so '{self.__name__}[\"python:{device_sel}\"]' "
                 f"has no meaning; use {self.__name__}[\"python\"]")
         if self._is_method and instance is None:
-            raise TypeError(f"{self.__name__}() requires an instance")
+            # A classmethod kernel resolves its receiver the way the device path does:
+            # from the kernel's own qualified name (`K.g` names `K`).
+            if self._is_classmethod or self._self_param == "cls":
+                instance = self._owner_class_of()
+            else:
+                raise TypeError(f"{self.__name__}() requires an instance")
         runner:object = self._python_runner
         if runner is None:
             runner = PythonKernel(self.raw_func, self._is_method, self._self_param,

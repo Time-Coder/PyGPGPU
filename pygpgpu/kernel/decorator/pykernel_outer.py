@@ -103,6 +103,37 @@ class _PykernelOuterMixin:
             self._store_outer(entry["name"], entry["kind"], value)
 
 
+    def _write_back_receiver(self, plan:object)->None:
+        """Copy the receiver struct's members home, onto the caller's receiver.
+
+        A body that assigns `self.<attr> = ...` (or `cls.<attr> = ...`) stores through the
+        receiver struct's device buffer; the backend's read-back lands in the holder the
+        launch packed (`plan.holder`, a ctypes structure). Python's own semantics for the
+        same statement is an attribute write on the receiver -- the instance for an
+        instance method, the *class* for a classmethod (`cls.attr = v` rebinds the class
+        attribute). This copies each member the launch carried back onto that object,
+        which is what makes the store observable to the caller.
+
+        The launch recorded the pairing on the plan; an asynchronous launch's settle
+        callback runs after the phases have let the plan go, so it passes None and the
+        pairing the launch left on the kernel is used instead.
+        """
+        pairing:object = (getattr(plan, "receiver_write_back", None)
+                          if plan is not None else None)
+        if pairing is None:
+            pairing = getattr(self, "_receiver_write_back", None)
+        if not isinstance(pairing, tuple) or len(pairing) != 3:
+            return
+        source:object = pairing[0]
+        holder:object = pairing[1]
+        members:List[str] = pairing[2]
+        for member in members:
+            value:object = getattr(holder, member, None)
+            if value is None:
+                continue
+            setattr(source, member, value)
+
+
     def _store_outer(self, name:str, kind:str, value:object)->None:
         """Assign an outer name, through its closure cell or the module globals."""
         if kind == "closure":

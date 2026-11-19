@@ -208,7 +208,7 @@ class _CallsMixin(_NestedLaunchMixin):
                 kind:str
                 target:object
                 kind, target = _self_member_call_kind(call_owner, func.attr)
-                if kind in ("method", "staticmethod") and receiver_owner is not None \
+                if kind in ("method", "classmethod", "staticmethod") and receiver_owner is not None \
                         and call_owner is not self.self_owner:
                     # A method of the receiver's class: the receiver is this call's first
                     # argument, so it binds positionally, exactly as `ray.at(t)` does.
@@ -218,7 +218,7 @@ class _CallsMixin(_NestedLaunchMixin):
                         self_param=(target.__code__.co_varnames[0]
                                     if getattr(target, "__code__", None) else "self"),
                         receiver_as_argument=True)
-                if kind in ("method", "staticmethod"):
+                if kind in ("method", "classmethod", "staticmethod"):
                     return self._emit_self_method_call(kind, target, func.attr, args, node)
                 self._error(
                     f"calling self.{func.attr}() from device code is not supported: "

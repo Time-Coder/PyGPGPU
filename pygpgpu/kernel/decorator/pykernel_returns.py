@@ -267,6 +267,10 @@ class _PykernelReturnsMixin:
                         carried_slots, gap_slots, created_objects=created_objects,
                         outer_state=outer_state, writable_outer=tail_writable)
                     self._write_back_outer(outer_state)
+                    # The receiver struct's members come home through the holder the
+                    # launch packed (see _write_back_receiver); the plan is gone here,
+                    # so the pairing the launch left on the kernel is what this reads.
+                    self._write_back_receiver(None)
                     if return_state and int(return_state["claim"][0]):
                         # A work item reached an in-loop return first: python's
                         # "first return wins".

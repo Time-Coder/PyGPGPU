@@ -62,7 +62,10 @@ def self_attr_kind(owner:Optional[type], name:str)->Translated:
     - ``"method"``: a plain function defined on the class, i.e. a device helper that
       also receives the kernel's self attributes (as extra parameters);
     - ``"staticmethod"``: a staticmethod, i.e. a plain device function with no receiver;
-    - ``"classmethod"``: rejected, ``cls`` semantics do not exist on a device;
+    - ``"classmethod"``: a classmethod, unwrapped to ``__func__`` -- a device helper
+      whose first parameter names the class. A ``cls.<attr>`` read is the class
+      attribute's *value*, which the caller's receiver struct already carries under
+      the same name, so the call passes the receiver the way ``self.method`` does;
     - ``"kernel"``: a ``@kernel``-decorated method, rejected (kernels are launched from
       the host, never called from device code);
     - ``"data"``: an instance or class data attribute (array, scalar, property, ...).
@@ -78,7 +81,10 @@ def self_attr_kind(owner:Optional[type], name:str)->Translated:
         func:object = raw.__func__
         return ("kernel" if getattr(func, "is_pykernel", False) else "staticmethod"), func
     if isinstance(raw, classmethod):
-        return "classmethod", raw.__func__
+        func = raw.__func__
+        if getattr(func, "is_pykernel", False):
+            return "kernel", func
+        return "classmethod", func
     if getattr(raw, "is_pykernel", False):
         return "kernel", raw
     if inspect.isfunction(raw):
@@ -195,6 +201,9 @@ def _self_member_call_kind(owner:Optional[type], name:str)->Translated:
         if isinstance(attribute, staticmethod):
             func:object = attribute.__func__
             return ("kernel" if getattr(func, "is_pykernel", False) else "staticmethod"), func
+        if isinstance(attribute, classmethod):
+            func = attribute.__func__
+            return ("kernel" if getattr(func, "is_pykernel", False) else "classmethod"), func
         if inspect.isfunction(attribute):
             return "method", attribute
     return kind, target
@@ -206,9 +215,11 @@ def _super_target(owner:Optional[type], attr:str)->Optional[Callable]:
     Python's zero-argument `super()` from a method of `C` answers "the next class after
     `C` in the MRO that defines `attr`". The MRO is a fact about the python classes, all
     of them in hand at translation time, so the answer is a plain walk: every base after
-    the owner is asked in order, the first carrier decides. A @kernel method or a
-    classmethod is not a device helper, so it answers None -- the caller reports that no
-    base implementation can be called from device code.
+    the owner is asked in order, the first carrier decides. A @kernel method is not a
+    device helper, so it answers None -- the caller reports that no base implementation
+    can be called from device code. A base classmethod IS one: its `__func__` is a plain
+    function whose first parameter names the class, which is exactly the receiver the
+    caller already holds.
     """
     if owner is None:
         return None
@@ -217,8 +228,6 @@ def _super_target(owner:Optional[type], attr:str)->Optional[Callable]:
             continue
         raw:object = klass.__dict__[attr]
         function:object = getattr(raw, "__func__", raw)
-        if isinstance(raw, classmethod):
-            return None
         if getattr(function, "is_pykernel", False) or not inspect.isfunction(function):
             return None
         return function
@@ -344,17 +353,22 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
         kind, target = _self_member_call_kind(owner, node.attr)
         if node.attr in called:
             # A member that is called is not data, so it needs no kernel argument. An
-            # instance method's own self.xxx reads do, so follow it; anything else
-            # (a staticmethod, a @kernel method, a classmethod) is decided at the
-            # call site, where a clear error can name the reason.
-            if kind == "method":
+            # instance method's own self.xxx reads do, so follow it; a classmethod's
+            # own cls.xxx reads are the receiver's reads too (the device call passes
+            # this receiver as the callee's first parameter); anything else (a
+            # staticmethod, a @kernel method) is decided at the call site, where a
+            # clear error can name the reason.
+            if kind in ("method", "classmethod"):
                 # The host lines are the KERNEL's own numbering: they say which
                 # statements the interpreter already ran in *this* body. A followed
                 # method is device work by construction (the call into it was checked
                 # against those lines above), so its own body is scanned with none --
                 # reusing the kernel's numbers here would drop any read whose line
-                # happens to collide with one of them.
-                _collect_self_attrs(target, self_param, owner, attrs, visited, None)
+                # happens to collide with one of them. The scan follows the callee's
+                # own receiver name (`cls` for a classmethod), because that is the
+                # spelling its body reads its members through.
+                _collect_self_attrs(target, _receiver_param_of(target), owner,
+                                    attrs, visited, None)
             continue
         if node.attr not in attrs:
             attrs.append(node.attr)

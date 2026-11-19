@@ -184,7 +184,9 @@ class _NdIndexMixin:
                     struct_dtype, self.backend).get(member)
                 if member_type is not None and is_int(member_type):
                     self.work_size_members.append(node.attr)
-                    return f"(self)->{member}", -3
+                    # The struct parameter is named for the receiver's own spelling
+                    # (`self`/`cls`), which the launch matches through the same name.
+                    return f"({self.self_param})->{member}", -3
             return None
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             # A constant on a module the body names (`config.HEIGHT`): the same compile-time

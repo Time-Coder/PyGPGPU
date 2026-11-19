@@ -275,15 +275,24 @@ class _MagicMethodsMixin:
 
     def _emit_self_method_call(self, kind:str, target:object, attr:str,
                                args:List[Translated], node:ast.Call)->Translated:
-        """Call self.<attr>(...) where the member is a method of the kernel's own class."""
+        """Call self.<attr>(...) where the member is a method of the kernel's own class.
+
+        The receiver the callee sees is spelled by *its own* first parameter name --
+        `self` for a plain method, `cls` for a classmethod -- and the call passes this
+        kernel's own receiver struct as that parameter: python's binding for the same
+        call hands the callee the caller's receiver, and the callee's `cls.<attr>`
+        reads land on the same members. A staticmethod takes no receiver at all.
+        """
         if getattr(target, "is_pykernel", False):
             self._error(
                 f"self.{attr} is a @kernel method and cannot be called from device code; "
                 f"move the shared logic into a plain method or function", node)
+        receiver_first:bool = kind in ("method", "classmethod")
         args = self._satisfy_override_signature(attr, target, args, node,
-                                                receiver_first=(kind == "method"))
+                                                receiver_first=receiver_first)
+        callee_self_param:str = (_receiver_param_of(target) if receiver_first else "")
         return self._emit_device_call(attr, target, args, node,
-                                      self_param=self.self_param if kind == "method" else "")
+                                      self_param=callee_self_param)
 
 
     def _satisfy_override_signature(self, attr:str, target:object, args:List[Translated],
@@ -387,8 +396,6 @@ class _MagicMethodsMixin:
 
     def _why_not_callable(self, kind:str, name:str)->str:
         """Explain why a self.xxx member cannot be called, for the error message."""
-        if kind == "classmethod":
-            return "a classmethod (cls has no meaning on a device)"
         if kind == "kernel":
             return "a @kernel method (kernels are launched from the host, not called from device code)"
         return ("not a method or static method of the class; only those, and module-level "

@@ -74,6 +74,9 @@ class _PhaseAsyncMixin:
                 self._write_back_outer(plan.outer_state)
                 if plan.object_binding.written:
                     plan.object_binding.write_back()
+                # The receiver struct's members come home through the holder the launch
+                # packed; this is where they reach the caller's own receiver.
+                self._write_back_receiver(plan)
                 if plan.return_state and int(plan.return_state["claim"][0]):
                     result: object = self._finish_returns(
                         plan.return_state, plan.returns, plan.full, plan.created)

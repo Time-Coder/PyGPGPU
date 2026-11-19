@@ -171,8 +171,13 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
                  default_devices:Optional[DefaultDeviceEntries]=None,
                  domain:Optional[str]=None,
                  type_map:Optional[Dict[str, object]]=None):
+        self._is_classmethod:bool = False
         if isinstance(func, classmethod):
-            raise SyntaxError("@kernel cannot decorate classmethods (cls semantics are host-only)") from None
+            # A classmethod kernel: the receiver is the class, which travels the same
+            # structure-argument way an instance does (its class-level scalar members
+            # are the struct fields, its ndarray members stay separate arguments).
+            func = func.__func__
+            self._is_classmethod = True
         if isinstance(func, staticmethod):
             func = func.__func__
 
@@ -199,8 +204,20 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
         self.__doc__:str = func.__doc__ or ""
 
         arg_names:List[str] = list(func.__code__.co_varnames[:func.__code__.co_argcount])
-        self._is_method:bool = bool(arg_names and arg_names[0] == "self")
+        # A classmethod's receiver is spelled `cls` -- python's own convention, and the
+        # one this package's host-region scans already treat as a receiver name. The
+        # `@classmethod` wrapper proves the spelling when it is present, and a plain
+        # `def f(cls, ...)` body spells it when the wrapper is not; both mean the class
+        # is the receiver. The `_is_method` flag covers both receivers: every site that
+        # tests it asks "does the first parameter travel separately", and a class
+        # answers that the same way an instance does. `_self_param` keeps the
+        # receiver's own name so the device signature spells it (`cls` for a
+        # classmethod kernel).
+        self._is_method:bool = bool(self._is_classmethod) or bool(
+            arg_names and arg_names[0] in ("self", "cls"))
         self._self_param:str = (arg_names[0] if self._is_method else "")
+        if self._is_classmethod and self._self_param != "cls":
+            self._self_param = "cls"
         # A decorated body may read self.<attr> or call self.<helper>(...), and only the
         # latter can tell a method from a value -- which needs the instance's class, known
         # at call time rather than now. The attribute set is therefore collected in
@@ -217,7 +234,13 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
     @overload
     def __get__(self, obj:object, objtype:Optional[type]=None)->_BoundKernelMethod[_P]: ...
     def __get__(self, obj:object, objtype:Optional[type]=None)->object:
-        # descriptor protocol: instance access returns the bound form, class access/static methods return self
+        # descriptor protocol: instance access returns the bound form, class access/static methods return self.
+        # A classmethod kernel binds the *class* itself -- through instance access too,
+        # which is python's own rule (`type(obj)`), so `obj.m(...)` and `Kls.m(...)`
+        # both reach the same bound form; `cls` is never an explicit argument. The `cls`
+        # receiver *name* spells the same thing without the wrapper.
+        if self._is_classmethod or self._self_param == "cls":
+            return _BoundKernelMethod(self, objtype if objtype is not None else type(obj))
         if obj is None or not self._is_method:
             return self
         return _BoundKernelMethod(self, obj)
@@ -233,12 +256,24 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
     # honest annotation is the untyped one -- `object` would forbid unpacking a
     # tuple return at the call site.
     def __call__(self, *args:object, **kwargs:object)->Any:
+        if self._is_classmethod or (self._self_param == "cls"
+                                    and not (args and isinstance(args[0], type))):
+            # A classmethod kernel. Through the descriptor the class is already bound;
+            # through the bare PyKernel (`K.g.__func__(out)`) nothing prepends it --
+            # both leave every argument an argument, and the owner resolves from the
+            # kernel's own qualified name (see _owner_class_of). The `@classmethod`
+            # wrapper's own direct call (`K.g(out)`) is the one shape that prepends
+            # the class as args[0], and it goes through the receiver branch below.
+            call_args:Tuple[object, ...] = _bind_arguments(self.raw_func, args, kwargs, skip_first=True)
+            return self._invoke(None, call_args, None, None, None, None)
         if self._is_method:
+            # The first argument is the receiver -- the instance, or the class the
+            # `@classmethod` wrapper prepended.
             if not args:
                 raise TypeError(
                     f"{self.__name__}() is an instance method; call it on an instance "
                     f"or pass the instance as the first argument")
-            call_args:Tuple[object, ...] = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
+            call_args = _bind_arguments(self.raw_func, args[1:], kwargs, skip_first=True)
             return self._invoke(args[0], call_args, None, None, None, None)
         call_args = _bind_arguments(self.raw_func, args, kwargs)
         return self._invoke(None, call_args, None, None, None, None)
@@ -255,7 +290,20 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
         the output arrays are only safe to read from its result (or after
         ``.result()``/``.wait()``).
         """
+        if self._is_classmethod or (self._self_param == "cls"
+                                    and not (args and isinstance(args[0], type))):
+            # A classmethod kernel. Two spellings reach here with different shapes:
+            # through the descriptor (the class is bound already -- every argument is
+            # an argument), or through attribute forwarding off the `@classmethod`
+            # wrapper (a plain `K.g.submit(out)` -- nothing prepends the class). The
+            # one shape that is neither is the wrapper's own direct call
+            # (`K.g(out)`), which prepends the class as args[0]; that one goes
+            # through the receiver branch below, exactly like an instance method.
+            call_args:Tuple[object, ...] = _bind_arguments(self.raw_func, args, kwargs, skip_first=True)
+            return self._invoke(None, call_args, None, None, None, None, launch="submit")
         if self._is_method:
+            # The first argument is the receiver -- the instance, or the class the
+            # `@classmethod` wrapper prepended.
             if not args:
                 raise TypeError(
                     f"{self.__name__}() is an instance method; call it on an instance "
@@ -274,6 +322,10 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
         kernel is enqueued immediately, so awaiting only waits for completion,
         and the returned future resolves once the read-back has finished.
         """
+        if self._is_classmethod or (self._self_param == "cls"
+                                    and not (args and isinstance(args[0], type))):
+            call_args:Tuple[object, ...] = _bind_arguments(self.raw_func, args, kwargs, skip_first=True)
+            return self._invoke(None, call_args, None, None, None, None, launch="async")
         if self._is_method:
             if not args:
                 raise TypeError(

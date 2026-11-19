@@ -265,7 +265,12 @@ class _RunLaunchMixin:
             # write back settles with no extra work.
             plan.tail_statements:List[ast.stmt] = list(
                 plan.launch_meta.get("body_tail") or plan.launch_meta.get("phase_tail") or [])
-            if not plan.tail_statements and not plan.outer_state["writable"] and not plan.return_state:
+            # A receiver whose members the body wrote comes home through the holder the
+            # launch packed; the copy runs when the future settles, which is where its
+            # read-backs have landed (see _write_back_receiver). It joins the tail's
+            # trigger conditions so a body with nothing else to settle still runs it.
+            if not plan.tail_statements and not plan.outer_state["writable"] \
+                    and not plan.return_state and getattr(plan, "receiver_write_back", None) is None:
                 return plan.future
             return self._with_tail(
                 plan.future, plan.tail_statements, args, instance,
@@ -352,4 +357,7 @@ class _RunLaunchMixin:
         self._write_back_outer(plan.outer_state)
         if plan.object_binding.written:
             plan.object_binding.write_back()
+        # The receiver struct's members come home through the holder the launch packed;
+        # this is where they reach the caller's own receiver (see _write_back_receiver).
+        self._write_back_receiver(plan)
         return plan.result

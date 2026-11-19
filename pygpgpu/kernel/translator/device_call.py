@@ -198,6 +198,9 @@ class _DeviceCallMixin:
             # the cache key above.
             callee.raise_site_base = exception_base
             callee.translate()
+            # The callee's own spelling of its receiver (its first parameter's name):
+            # its member-write verdict is read under that name below.
+            callee_param_name:str = callee.self_param or self_param
             c_name:str = self._device_func_name(raw_func, param_types)
             # A helper that indexes a multi-dimensional array needs that array's extents, and
             # they are parameters, not part of the pointer. They are appended to the helper's
@@ -226,6 +229,17 @@ class _DeviceCallMixin:
             # pure-scalar by the bar the site checked, so its call needs no shape
             # argument (see _finish_recursive_sites).
             callee._finish_recursive_sites()
+            # A callee that writes its receiver's members makes THIS caller's receiver
+            # writable too: the same structure travels down, the stores land in it, and
+            # the launch has to read it back. The caller's signature must lose its
+            # `const` (the callee's own verdict is what decided the callee's), or C
+            # rejects the pointer hand-off and the device write never comes home. The
+            # same forwarding a `const_cast` at the call site states for C states here
+            # for the analysis: member writes flow out of the callee onto the caller.
+            if (self_param and not receiver_as_argument and self.self_struct_members
+                    and getattr(callee, "member_writes", None)
+                    and callee_param_name in callee.member_writes):
+                self.member_writes.add(self.self_param)
             entry = {
                 "status": "done",
                 "c_name": c_name,

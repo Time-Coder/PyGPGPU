@@ -19,6 +19,13 @@ class _TsBodyMixin:
 
 
     def _resolve_expr_root(self, node:Node, scopes:List[Dict[str, Tuple[Optional[str], bool]]])->Tuple[Optional[str], bool]:
+        # The translator spells a member access on a structure pointer as `(self)->member`,
+        # whose base is a parenthesized_expression, not the bare identifier -- so the root
+        # is found one layer down. Without the unwrap the base resolved to nothing and a
+        # member store (`(self)->count = v`) never marked the pointer written: the device
+        # buffer was never read back, and the caller's receiver kept its old value.
+        while node.type == "parenthesized_expression" and node.named_children:
+            node = node.named_children[0]
         if node.type in ("identifier", "field_identifier"):
             return self._resolve(self._node_text(node), scopes)
         return None, False

@@ -442,6 +442,12 @@ class _InitMixin:
                 if self.self_struct_type is None:
                     self.self_struct_type = struct_type
                 self.params.append((self.self_param, struct_type))
+                # The receiver name joins the scope as the struct pointer it is: a member
+                # store (`self.scale = v`) reaches the emission through an ordinary
+                # expression visit of the receiver name first, so an expression-level
+                # `_lookup(self_param)` has to answer -- without it, the store path was
+                # unreachable ("unknown name 'self'") and every member write failed.
+                scope[self.self_param] = struct_type
             if receiver_type is not None:
                 # The receiver is not a `_self_` field set: it is one structure pointer,
                 # spelled by the function's own first parameter name.

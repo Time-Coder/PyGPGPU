@@ -30,6 +30,26 @@ from .host_regions import (
 
 class _PrepareLaunchMixin:
 
+    def _owner_class_of(self)->type:
+        """The class a classmethod kernel's receiver names, resolved from its qualname.
+
+        The kernel's own qualified name is `K.g` (or `Base.g` for the class it was
+        *defined* on), and the module globals hold the class that attribute belongs to.
+        A subclass reached through the descriptor (`Sub.g`) carries the same qualname,
+        so a caller wanting subclass ownership passes the class explicitly -- which is
+        what the descriptor-bound form does (`Sub.g.__self__` never reaches here, but
+        `_invoke(Sub, ...)` through `_KernelCall`'s class form can).
+        """
+        qualname:str = getattr(self.raw_func, "__qualname__", "") or ""
+        if "." in qualname and "<" not in qualname:
+            owner_name:str = qualname.rsplit(".", 1)[0]
+            owner:object = self.raw_func.__globals__.get(owner_name)
+            if isinstance(owner, type):
+                return owner
+        raise TypeError(
+            f"{self.__name__}() is a classmethod; call it on its class, which binds "
+            f"cls automatically")
+
     def _prepare_launch(self, plan:object, instance:object, args:Tuple[object, ...],
                     backend_sel:Optional[str], device_sel:Optional[str],
                     global_size:Optional[Tuple[int, ...]],
@@ -99,13 +119,29 @@ class _PrepareLaunchMixin:
         self.host_region_snapshot = plan.host_values_now
         self.host_region_statements = plan.host_executed
         if self._is_method:
-            if instance is None:
-                raise TypeError(f"{self.__name__}() requires an instance")
+            # A classmethod kernel's receiver IS the class: the caller reached the launch
+            # through the class attribute (python's own binding rule), so the value passed
+            # as `instance` -- when one arrived -- is the class itself, not an instance of
+            # it. Without one, the owner is resolved from the kernel's own qualified name
+            # (`K.g` names the class `K` in the module it was defined in), which is what
+            # keeps a launch through the undecorated PyKernel object working too. The
+            # `cls` receiver name carries the same meaning as the `@classmethod` wrapper:
+            # either spelling is how this package spells a classmethod kernel.
+            is_cls_kernel:bool = self._is_classmethod or self._self_param == "cls"
+            if is_cls_kernel:
+                if isinstance(instance, type):
+                    plan.owner = instance
+                else:
+                    plan.owner = self._owner_class_of()
+                    instance = plan.owner
+            else:
+                if instance is None:
+                    raise TypeError(f"{self.__name__}() requires an instance")
+                plan.owner = type(instance)
             # The decorated body was scanned at decoration time, before the class
             # existed, so self.<helper> could only look like data. Scan again now
             # that the instance is here: calling a self-method makes the attributes
             # *it* reads kernel arguments too, recursively.
-            plan.owner = type(instance)
             # Which statements the host regions run is a fact about the *source*, so the lines
             # computed above are what decides which methods are host-only (see `_host_region_values`).
             plan.self_attrs = scan_self_attrs(self.raw_func, self._self_param, plan.owner,
@@ -161,6 +197,16 @@ class _PrepareLaunchMixin:
                             and not isinstance(plan.member_value, plan.field_type):
                         plan.member_value = _complex_member_value(plan.member_value, plan.field_type)
                     setattr(plan.holder, name, plan.member_value)
+                # A body that assigns `self.<attr> = ...` writes through the device buffer,
+                # whose read-back lands in this holder; the host copies the members home
+                # after the launch (see _write_back_receiver). The pairing is the record
+                # that copy reads: holder members -> the receiver they came from. It is
+                # kept on the plan (the synchronous tail reads it there) and on the kernel
+                # (the asynchronous tail runs after the launch phases have let the plan
+                # go, and `_with_tail` has no other way back to it).
+                plan.receiver_write_back:object = (instance, plan.holder,
+                                                   list(plan.struct_attrs))
+                self._receiver_write_back = plan.receiver_write_back
                 plan.self_attrs = plan.array_attrs
                 plan.self_types = [plan.self_struct_type] + [
                     infer_ctype(getattr(instance, name), self._type_map)

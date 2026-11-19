@@ -212,10 +212,14 @@ class _CompileKernelsMixin:
             # A single kernel: its own extents are the launch's.
             plan.extra_shapes = [list(plan.shape_sources)]
         # Each entry is (parameter index, dimension) for an array-sourced extent, or
-        # (None, count) for a literal one (np.ndindex(2, 3)).
+        # (None, count) for a literal one (np.ndindex(2, 3)). A receiver-struct extent
+        # is spelled `(self)->member` (or `(cls)->...` for a classmethod kernel) in the
+        # translator's own spelling of the receiver name, so the parameter index is
+        # looked up under that same name rather than a hard-coded "self".
+        plan.self_param:str = (self._self_param if self._self_param else "self")
         plan.work_size_dims:List[Tuple[Optional[int], int]] = [
-            (plan.param_index.get("self"), dim)
-            if plan.name.startswith("(self)->") else
+            (plan.param_index.get(plan.self_param), dim)
+            if plan.name.startswith(f"({plan.self_param})->") else
             (plan.shape_index[plan.name], dim) if plan.name else (None, dim)
             for plan.name, dim in plan.shapes_owner.work_size_dims]
         # An `@kernel(domain=...)` declaration: expand each named array into its own

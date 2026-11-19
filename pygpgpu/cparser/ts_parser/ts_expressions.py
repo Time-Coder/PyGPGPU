@@ -2,7 +2,7 @@
 # spells.
 from __future__ import annotations
 from typing import TYPE_CHECKING
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from tree_sitter import Node
 from ...constants import KernelFlags
 
@@ -176,6 +176,29 @@ class _TsExpressionsMixin:
 
         for i, actual in enumerate(actuals):
             root, is_mem = self._resolve_expr_root(actual, scopes)
+
+            # A receiver handed to a helper that writes it is spelled through a cast:
+            # `put(const_cast<S*>(self), v)` (or a plain `(S*)self`) -- the caller's
+            # own `const` qualification cannot initialize a mutable parameter, so the
+            # call site casts. The cast wrapper hides the root, and without unwrapping
+            # it the helper's read/write sets were never propagated onto the caller's
+            # pointer: the device wrote the members and the host never read them back.
+            if root is None:
+                cursor:Node = actual
+                while (cursor.type in ("call_expression", "cast_expression",
+                                       "parenthesized_expression") and cursor.named_children):
+                    if cursor.type == "call_expression":
+                        arg_list:Optional[Node] = next(
+                            (c for c in cursor.named_children if c.type == "argument_list"),
+                            None)
+                        if arg_list is None or not arg_list.named_children:
+                            break
+                        cursor = arg_list.named_children[0]
+                    else:
+                        cursor = cursor.named_children[-1]
+                unroot:Tuple[Optional[str], bool] = self._resolve_expr_root(cursor, scopes)
+                if unroot[0] is not None:
+                    root, is_mem = unroot
 
             if helper_flags is not None and i < len(param_names):
                 flags:KernelFlags = helper_flags[param_names[i]]

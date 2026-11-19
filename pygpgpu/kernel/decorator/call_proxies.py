@@ -58,6 +58,20 @@ class _KernelCall(_KernelBase[_P]):
     def __call__(self, *args:_P.args, **kwargs:_P.kwargs)->Any:
         instance:object = self._instance
         instance_arg:Optional[object] = None
+        if self._kernel._is_classmethod or self._kernel._self_param == "cls":
+            # A classmethod kernel. Through the descriptor the class is already bound
+            # (`instance` carries it); through the bare PyKernel nothing binds it, and
+            # the owner resolves from the kernel's own qualified name -- unless the
+            # caller passes the class explicitly as the leading argument (the one
+            # spelling that works for a class the qualname cannot resolve, a
+            # test-local class, say). Either way the rest are arguments.
+            if instance is None and args and isinstance(args[0], type):
+                instance = args[0]
+                args = args[1:]
+            call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
+                                                        skip_first=True)
+            return self._kernel._invoke(instance, call_args, self._backend, self._device,
+                                    self._global_size, self._local_size)
         if self._kernel._is_method and instance is None:
             # class form: Klass.method["cuda"](instance, args...)
             if not args:
@@ -76,13 +90,18 @@ class _KernelCall(_KernelBase[_P]):
                 kwargs:Optional[Dict[str, object]]=None)->object:
         """Shared body of the three launch styles, honouring the bracket selectors."""
         instance:object = self._instance
-        if self._kernel._is_method and instance is None:
-            if not args:
-                raise TypeError(
-                    f"{self._kernel.__name__}() is an instance method; pass the instance "
-                    f"as the first argument")
-            instance = args[0]
-            args = args[1:]
+        if self._kernel._is_classmethod or self._kernel._self_param == "cls":
+            # Same classmethod rule as __call__ above: the bound class travels when the
+            # descriptor supplied one, an explicitly passed class is peeled, and
+            # otherwise the owner resolves from the qualname.
+            if instance is None and args and isinstance(args[0], type):
+                instance = args[0]
+                args = args[1:]
+            call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args,
+                                                        kwargs or {},
+                                                        skip_first=True)
+            return self._kernel._invoke(instance, call_args, self._backend, self._device,
+                                    self._global_size, self._local_size, launch=launch)
         call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args,
                                                     kwargs or {},
                                                     skip_first=self._kernel._is_method)
