@@ -1,11 +1,11 @@
 from __future__ import annotations
-import ctypes
 from typing import (
     Dict,
     List,
     Optional,
 )
 import numpy as np
+from ..objects.binding import ObjectBinding
 from ..translator import (
     OuterObjectEntry,
     is_ptr,
@@ -107,20 +107,16 @@ class _PykernelOuterMixin:
     def _write_back_receiver(self, plan:object)->None:
         """Copy the receiver struct's members home, onto the caller's receiver.
 
-        A body that assigns `self.<attr> = ...` (or `cls.<attr> = ...`) stores through the
-        receiver struct's device buffer; the backend's read-back lands in the holder the
-        launch packed (`plan.holder`, a ctypes structure). Python's own semantics for the
-        same statement is an attribute write on the receiver -- the instance for an
-        instance method, the *class* for a classmethod (`cls.attr = v` rebinds the class
-        attribute). This copies each member the launch carried back onto that object,
-        which is what makes the store observable to the caller.
-
-        A member that is itself a `ctypes` structure (a nested python object: python
-        semantics says `self.inner.x = v` mutates the object `self.inner` already names)
-        is copied **in place**, field by field, so the caller's original object stays the
-        one on the attribute -- a second python name for it (an alias) sees the update,
-        which is exactly what `self.inner.x = v` means and what replacing the attribute
-        would silently break.
+        A body that assigns `self.<attr> = ...` (or `cls.<attr> = ...`) stores through
+        the receiver struct's device buffer; the backend's read-back lands in the
+        holder the launch packed (`plan.holder`, a ctypes structure). The pairing the
+        launch recorded -- the caller-side object (the instance, or the *class* for a
+        classmethod, since `cls.attr = v` rebinds the class attribute) and the holder
+        -- is the SAME shape the object arguments carry, so the shared
+        `ObjectBinding.write_back` answers both, and this method only translates the
+        pairing into it. The in-place structure copy and the complex unwrap are the
+        binding's, which is what keeps an alias seeing the update and python's
+        `self.inner.x = v` mutating the object `self.inner` already names.
 
         The launch recorded the pairing on the plan; an asynchronous launch's settle
         callback runs after the phases have let the plan go, so it passes None and the
@@ -135,18 +131,17 @@ class _PykernelOuterMixin:
         source:object = pairing[0]
         holder:object = pairing[1]
         members:List[str] = pairing[2]
-        for member in members:
-            value:object = getattr(holder, member, None)
-            if value is None:
-                continue
-            current:object = getattr(source, member, None)
-            if (isinstance(value, ctypes.Structure) and isinstance(current, ctypes.Structure)
-                    and type(value)._fields_ == type(current)._fields_):
-                # The same layout, and the caller's object must stay the one the
-                # attribute names: copy the fields through in place.
-                _copy_structure_fields(value, current)
-            else:
-                setattr(source, member, value)
+        # The receiver's pairing is the SAME shape the object arguments carry: the
+        # caller-side object (the instance for an instance method, the *class* for a
+        # classmethod) and the instance that travelled (the ctypes holder the launch
+        # packed). The shared ObjectBinding answers both, so one write-back owns
+        # python's semantics -- in-place structure copies, the complex unwrap -- and
+        # this method only translates the pairing the launch recorded into it.
+        binding:ObjectBinding = ObjectBinding()
+        binding.written = [f"receiver.{member}" for member in members]
+        binding.values = {"receiver": source}
+        binding.instances = {"receiver": holder}
+        binding.write_back()
 
     def _store_outer(self, name:str, kind:str, value:object)->None:
         """Assign an outer name, through its closure cell or the module globals."""
@@ -158,38 +153,6 @@ class _PykernelOuterMixin:
                     return
             raise ValueError(f"outer variable '{name}' is not in the kernel's closure")
         self.raw_func.__globals__[name] = value
-
-
-def _copy_structure_fields(source:object, target:object)->None:
-    """One ctypes structure's fields onto another of the same layout, recursively.
-
-    A nested structure field recurses the same way (in place), so a store two levels
-    deep (`self.inner.point.x = v`) still reaches the object the caller's attribute
-    already names; every other field is a plain attribute write, which for a ctypes
-    substructure field would rebind it -- a nested field is therefore reached through
-    the recursion, never through setattr.
-    """
-    for field, kind in type(target)._fields_:
-        value:object = getattr(source, field)
-        if isinstance(kind, type) and issubclass(kind, ctypes.Structure):
-            _copy_structure_fields(value, getattr(target, field))
-        elif isinstance(kind, type) and issubclass(kind, ctypes.Array):
-            _copy_array_fields(value, getattr(target, field))
-        else:
-            setattr(target, field, value)
-
-
-def _copy_array_fields(source:object, target:object)->None:
-    """A fixed-length ctypes array's elements, recursing into structure elements."""
-    for index in range(len(target)):
-        value:object = source[index]
-        element:object = target[index]
-        if isinstance(element, ctypes.Structure):
-            _copy_structure_fields(value, element)
-        elif isinstance(element, ctypes.Array):
-            _copy_array_fields(value, element)
-        else:
-            target[index] = value
 
 
 def _outer_object_instance(source:object, spec:OuterObjectEntry)->object:

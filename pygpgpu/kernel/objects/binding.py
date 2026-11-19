@@ -28,7 +28,18 @@ class ObjectBinding:
         self.array_members:Dict[str, List[Tuple[str, "np.ndarray"]]] = {}
 
     def write_back(self)->None:
-        """Copy the final member values home, for every object the body wrote to."""
+        """Copy the final member values home, for every object the body wrote to.
+
+        The one write-back for every object the package travels to the device: an
+        object ARGUMENT (whose instance is a one-element record array or, one hop
+        down, a structured scalar view) and the RECEIVER (`self`/`cls`, whose instance
+        is the ctypes holder the launch packed its members into) both land here. The
+        three shapes below are the three carriers, not three semantics -- python's
+        meaning for the statement the body spelled is the same attribute write on the
+        caller's object either way, and a member whose value is itself a structure is
+        copied in place on every path, because python says `x.inner.v = w` mutates the
+        object `x.inner` already names and replacing it would silently break an alias.
+        """
         for description in self.written:
             path, member = description.rsplit('.', 1)
             instance:object = self.instances.get(path)
@@ -42,7 +53,7 @@ class ObjectBinding:
                     value:object = instance[0][member]
                 except (IndexError, ValueError):
                     continue
-                setattr(source, member, _member_home_value(value))
+                self._land_member(source, member, value)
                 continue
             if isinstance(instance, np.void):
                 # A NESTED route (`bag.inner.x`): the write-back walks the record's own
@@ -53,13 +64,30 @@ class ObjectBinding:
                     value:object = instance[member]
                 except (IndexError, ValueError, KeyError):
                     continue
-                setattr(source, member, _member_home_value(value))
+                self._land_member(source, member, value)
                 continue
             try:
                 value:object = getattr(instance, member)
             except AttributeError:
                 continue
-            setattr(source, member, _member_home_value(value))
+            self._land_member(source, member, value)
+
+    def _land_member(self, source:object, member:str, value:object)->None:
+        """One member's read-back value onto the caller's object, python's semantics.
+
+        A structure of the same layout the caller's attribute already names is copied
+        field by field IN PLACE -- the object stays the one the attribute names, so an
+        alias sees the update (`self.inner.x = v` mutates, never replaces). Anything
+        else is an attribute write of the read-back value, in the form the caller
+        holds (a complex member arrives as the two-part record and lands as a plain
+        `complex`).
+        """
+        current:object = getattr(source, member, None)
+        if (isinstance(value, ctypes.Structure) and isinstance(current, ctypes.Structure)
+                and type(value)._fields_ == type(current)._fields_):
+            _copy_structure_fields(value, current)
+            return
+        setattr(source, member, _member_home_value(value))
 
     def record_nested_routes(self, root_name:str, root_value:object,
                              record_element:object, written:List[str])->None:
@@ -89,6 +117,38 @@ class ObjectBinding:
                 self.values.setdefault(hop_path, hop_value)
                 self.instances.setdefault(hop_path, record_field)
 
+
+
+def _copy_structure_fields(source:object, target:object)->None:
+    """One ctypes structure's fields onto another of the same layout, recursively.
+
+    A nested structure field recurses the same way (in place), so a store two levels
+    deep (`self.inner.point.x = v`) still reaches the object the caller's attribute
+    already names; every other field is a plain attribute write, which for a ctypes
+    substructure field would rebind it -- a nested field is therefore reached through
+    the recursion, never through setattr.
+    """
+    for field, kind in type(target)._fields_:
+        value:object = getattr(source, field)
+        if isinstance(kind, type) and issubclass(kind, ctypes.Structure):
+            _copy_structure_fields(value, getattr(target, field))
+        elif isinstance(kind, type) and issubclass(kind, ctypes.Array):
+            _copy_array_fields(value, getattr(target, field))
+        else:
+            setattr(target, field, value)
+
+
+def _copy_array_fields(source:object, target:object)->None:
+    """A fixed-length ctypes array's elements, recursing into structure elements."""
+    for index in range(len(target)):
+        value:object = source[index]
+        element:object = target[index]
+        if isinstance(element, ctypes.Structure):
+            _copy_structure_fields(value, element)
+        elif isinstance(element, ctypes.Array):
+            _copy_array_fields(value, element)
+        else:
+            target[index] = value
 
 
 def _complex_member_value(value:object, kind:type)->ctypes.Structure:
