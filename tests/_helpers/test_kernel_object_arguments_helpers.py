@@ -74,6 +74,13 @@ class WithArray:
         self.xs = xs
 
 
+class WithImage:
+    """An object whose ndarray member sizes the dispatch and takes tuple stores."""
+
+    def __init__(self, image):
+        self.image = image
+
+
 @kernel
 def calls_a_method(g, out: np.ndarray):
     for i in range(out.shape[0]):
@@ -146,6 +153,16 @@ def writes_an_array_member_element(w, out: np.ndarray):
     for i in range(out.shape[0]):
         w.xs[0] = 9.0
         out[i] = 1.0
+
+
+@kernel
+def paints_an_image(item, out: np.ndarray):
+    """The examples' shape: the member's own shape sizes the domain, and the store
+    names one component of a tuple index."""
+    for i, j in np.ndindex(item.image.shape[0], item.image.shape[1]):
+        item.image[i, j, 0] = 255 * (i % 2)
+        item.image[i, j, 1] = 128
+        item.image[i, j, 2] = 64
 
 
 @kernel
