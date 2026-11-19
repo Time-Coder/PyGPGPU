@@ -215,6 +215,14 @@ def _scan_function(func:object, tracked:Dict[str, str], scan:Scan)->None:
                     scan.note(current_path, attr)
                 current_path = member_path
                 continue
+            if index < len(hops) - 1 and isinstance(value, np.ndarray):
+                # An ndarray member read *through* (`item.image.shape` as a loop
+                # domain): the member travels as its own array parameter (see
+                # convert, which moves it out of the structure), so the read notes
+                # it and stops -- opening a path inside it would treat the array as
+                # a nested structure, which the array parameter replaces.
+                scan.note(current_path, attr)
+                break
             if index < len(hops) - 1:
                 raise SyntaxError(
                     f"'{ast.unparse(node)}' reads through '{attr}', which is a "

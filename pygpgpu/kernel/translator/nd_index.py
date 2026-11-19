@@ -453,23 +453,6 @@ class _NdIndexMixin:
         self._emit_blank()
 
 
-    def _shape_holder_param(self, attr_node:ast.expr)->Optional[str]:
-        """When X in `X.shape` is an array parameter, return its parameter name.
-
-        A local alias of an array (`src = a`) resolves to the array it names: the extent is
-        the same one, and the loop over `src.shape[0]` is the same dispatch.
-        """
-        if not (isinstance(attr_node, ast.Attribute) and attr_node.attr == "shape"):
-            return None
-        base:ast.expr = attr_node.value
-        if isinstance(base, ast.Name):
-            return self._array_pointer_root(base.id)
-        if (self.self_param and isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
-                and base.value.id == self.self_param):
-            return f"_self_{base.attr}"
-        return None
-
-
     def _shape0_range_param(self, iter_node:ast.expr)->Optional[str]:
         """The parameter `range(X.shape[0])` sizes the dispatch from, or None.
 

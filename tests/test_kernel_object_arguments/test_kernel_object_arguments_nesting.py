@@ -10,6 +10,8 @@ from _helpers.test_kernel_object_arguments_helpers import (
     Holder,
     Pair,
     WithArray,
+    WithImage,
+    paints_an_image,
     reads_a_nested_object,
     reads_an_array_member,
     reads_nothing,
@@ -44,6 +46,17 @@ def test_an_array_member_element_write_lands_in_the_callers_array(gpu_backend, r
     out = np.zeros(1, dtype=np.float32)
     runner(writes_an_array_member_element, WithArray(xs), out)
     np.testing.assert_allclose(xs, (9.0, 0.0, 0.0, 0.0))
+
+
+def test_an_array_member_sizes_the_dispatch_and_takes_tuple_stores(gpu_backend, runner):
+    """`item.image.shape[0]` sizes the work-item domain from the member's own array
+    parameter (the same holder the read path binds to), and the tuple store the
+    examples spell (`item.image[i, j, 0] = v`) lands per component."""
+    image = np.zeros((2, 2, 3), dtype=np.uint8)
+    out = np.zeros(1, dtype=np.float32)
+    runner(paints_an_image, WithImage(image), out)
+    np.testing.assert_array_equal(image[0], ((0, 128, 64), (0, 128, 64)))
+    np.testing.assert_array_equal(image[1], ((255, 128, 64), (255, 128, 64)))
 
 
 def test_a_write_travels_back_to_the_object(runner):

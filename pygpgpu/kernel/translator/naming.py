@@ -235,6 +235,35 @@ class _NamingMixin:
         return self._tail_var(array_name, count)
 
 
+    def _shape_holder_param(self, attr_node:ast.expr)->Optional[str]:
+        """When X in `X.shape` is an array parameter, return its parameter name.
+
+        A local alias of an array (`src = a`) resolves to the array it names: the extent is
+        the same one, and the loop over `src.shape[0]` is the same dispatch.
+        """
+        if not (isinstance(attr_node, ast.Attribute) and attr_node.attr == "shape"):
+            return None
+        base:ast.expr = attr_node.value
+        if isinstance(base, ast.Name):
+            return self._array_pointer_root(base.id)
+        if (self.self_param and isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                and base.value.id == self.self_param):
+            return f"_self_{base.attr}"
+        # An object ARGUMENT's ndarray member: `item.image.shape[0]` sizes the dispatch
+        # from the member's own array parameter -- the same holder the read path
+        # (`item.image[i, j]`) binds to.
+        if (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                and self.object_array_members):
+            members:List[Tuple[str, str]] = list(
+                self.object_array_members.get(base.value.id) or [])
+            for member, _device_note in members:
+                if member == base.attr:
+                    pname:str = f"_{base.value.id}_{member}"
+                    if is_ptr(self._lookup(pname)):
+                        return pname
+        return None
+
+
     def _array_pointer_root(self, name:str)->str:
         """The array a local pointer variable was assigned from, or the name itself.
 
@@ -332,4 +361,17 @@ class _NamingMixin:
         if (self.self_param and isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and node.value.id == self.self_param):
             return f"_self_{node.attr}"
+        # An object ARGUMENT's ndarray member: the member left the synthesized
+        # structure and travels as its own parameter (`_<param>_<member>`), so the
+        # array the body subscripts (`item.image[i, j, 0]`) is that parameter -- the
+        # same answer `_visit_attribute` gives on the read path.
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and self.object_array_members):
+            members:List[Tuple[str, str]] = list(
+                self.object_array_members.get(node.value.id) or [])
+            for member, _device_note in members:
+                if member == node.attr:
+                    pname:str = f"_{node.value.id}_{member}"
+                    if self._lookup(pname) is not None:
+                        return pname
         self._error("unsupported array expression", node)
