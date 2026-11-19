@@ -135,7 +135,13 @@ def _merge_definitions(existing: List[str], definitions: List[str]) -> Tuple[Lis
         if identity == PROTOTYPE_MARKER:
             # The forward-declaration block is *unioned*, not replaced: a later call
             # renders only its own callees, and replacing the block would drop the ones
-            # an earlier call declared -- calls the file still holds.
+            # an earlier call declared -- calls the file still holds. The union is then
+            # narrowed below, once every merged definition is known (see the tail of
+            # this function): the per-file block names only the callees its file
+            # reaches (see compilation_prototypes), so a declaration whose callee no
+            # definition in this file names anymore -- the one a package-side
+            # regeneration stopped spelling, or an earlier package version stacked into
+            # every file -- is dropped here rather than surviving the union forever.
             from .prototypes import merge_prototype_blocks  # noqa: PLC0415 (import cycle)
 
             held:str = "\n\n".join(part.strip("\n") for part in groups[index][1]).strip("\n")
@@ -152,6 +158,40 @@ def _merge_definitions(existing: List[str], definitions: List[str]) -> Tuple[Lis
         groups.extend((_definition_identity(piece), [piece]) for piece in added)
         changed = True
     merged: List[str] = [piece for _identity, pieces in groups for piece in pieces]
+    # The unioned declaration blocks are narrowed once, over the whole merged file:
+    # the per-file block names only what this file's definitions call and do not
+    # define, so a declaration the file no longer reaches -- a package-side
+    # regeneration stopped spelling the callee, or an earlier package version stacked
+    # the whole unit's calls into every file -- is dropped here rather than surviving
+    # the union forever.
+    from .prototypes import narrow_prototype_block  # noqa: PLC0415 (import cycle)
+
+    narrowed_blocks: List[Tuple[int, Optional[str]]] = []
+    # The narrowing reads only the *definitions* the merged file holds -- the block
+    # itself is excluded, because a declaration names its own callee and would
+    # otherwise always match itself.
+    narrowed_inputs: List[str] = [piece for index, (identity, pieces)
+                                  in enumerate(groups)
+                                  if identity != PROTOTYPE_MARKER
+                                  for piece in pieces]
+    for index, (identity, pieces) in enumerate(groups):
+        if identity != PROTOTYPE_MARKER:
+            continue
+        held = "\n\n".join(part.strip("\n") for part in pieces).strip("\n")
+        narrowed: Optional[str] = narrow_prototype_block(held, narrowed_inputs)
+        narrowed_blocks.append((index, narrowed))
+    for index, narrowed in narrowed_blocks:
+        held = "\n\n".join(part.strip("\n") for part in groups[index][1]).strip("\n")
+        if narrowed is None:
+            if not held:
+                continue
+            groups[index] = (PROTOTYPE_MARKER, [])
+        elif held == narrowed:
+            continue
+        else:
+            groups[index] = (PROTOTYPE_MARKER, [narrowed])
+        changed = True
+    merged = [piece for _identity, pieces in groups for piece in pieces if piece]
     return merged, changed
 
 

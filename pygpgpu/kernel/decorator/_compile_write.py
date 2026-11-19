@@ -148,16 +148,15 @@ class _CompileWriteMixin:
                                    + list(plan.translator.nested_kernels))
         plan.device_prefix.extend(entry["code"] for entry in plan.own_entries)
 
-        # One forward-declaration block for the compilation's whole callee set, carried by
-        # every file this pass writes. An included file's definitions call functions this
-        # unit defines *later* (the base-class helper an override reaches sits behind the
-        # include), and C refuses a call it has not seen declared -- which is exactly the
-        # `identifier "Base_scale_<hash>" is undefined` this block removes. The
-        # synthesized helpers are declared here too, although the shared header declares
-        # them as well: a block that names them costs nothing and keeps every file's
-        # calls covered whatever order its includes land in.
-        plan.prototype_lines:List[str] = source_paths.compilation_prototypes(
-            list(plan.device_cache.values()), plan.device_prefix + plan.helper_pieces)
+        # One forward-declaration block per file this pass writes, each naming only the
+        # callees that file's own definitions call (see compilation_prototypes). A
+        # foreign definition calls helpers the kernel's own file defines later -- the
+        # base-class helper an override reaches sits behind the include -- and C refuses
+        # a call it has not seen declared, which is exactly the
+        # `identifier "Base_scale_<hash>" is undefined` these blocks remove. The
+        # synthesized helpers are declared too, although the shared header declares them
+        # as well: a line that names one costs nothing and keeps the calls covered
+        # whatever order a file's includes land in.
 
         plan.structure_entries:List[object] = list(plan.translator.structure_dtypes())
         for entry in plan.device_cache.values():
@@ -262,6 +261,22 @@ class _CompileWriteMixin:
         plan.pieces:List[str] = [piece.rstrip("\n") for piece in plan.device_prefix]
         plan.pieces.extend(source.rstrip("\n") for _, source in plan.rendered)
 
+        # One forward-declaration block per file this pass writes, each naming only the
+        # callees that file's own definitions call (see compilation_prototypes). A
+        # foreign definition calls helpers the kernel's own file defines later -- the
+        # base-class helper an override reaches sits behind the include -- and C refuses
+        # a call it has not seen declared, which is exactly the
+        # `identifier "Base_scale_<hash>" is undefined` these blocks remove. The
+        # synthesized helpers are declared too, although the shared header declares them
+        # as well: a line that names one costs nothing and keeps the calls covered
+        # whatever order a file's includes land in. The kernel's file's block is built
+        # from its own pieces -- the nested helpers, the own entries and the rendered
+        # kernels -- so a body that calls a foreign module's device function names it
+        # here, and a body that calls nothing across the boundary names nothing.
+        plan.prototype_lines:List[str] = source_paths.compilation_prototypes(
+            list(plan.device_cache.values()), plan.device_prefix + plan.helper_pieces,
+            own_codes=[piece for piece in plan.pieces if piece])
+
         plan.own_path:str = module_of({"source_file": plan.kernel_source_file})
         # The synthesized helpers go to the shared header now, before any file below is
         # assembled: the include each file writes is spelled *relative to that file*
@@ -320,7 +335,8 @@ class _CompileWriteMixin:
         if plan.prototype_lines:
             # The declarations precede the includes: a pasted definition calls functions
             # whose definitions sit behind it (in this file's own pieces), and C requires
-            # the declaration first (see compilation_prototypes).
+            # the declaration first (see compilation_prototypes). The block names what
+            # THIS file's own pieces call -- the whole unit's callees were the old shape.
             plan.own_header.append(source_paths.prototype_block(plan.prototype_lines))
         if plan.foreign_includes:
             plan.own_header.append("\n".join(plan.foreign_includes))
@@ -334,11 +350,14 @@ class _CompileWriteMixin:
             # would put every declaration in every file, which is a cycle of includes and a
             # duplicate definition in the one file two modules share.
             plan.foreign_header:List[str] = []
-            if plan.prototype_lines:
-                # The same declarations this compilation's other files carry: a foreign
-                # definition calls helpers defined in the kernel's own file, which is
-                # included *after* this one (see compilation_prototypes).
-                plan.foreign_header.append(source_paths.prototype_block(plan.prototype_lines))
+            # This file's own declarations: what ITS entries call, spelled against the
+            # whole compilation's callee set (a helper defined in the kernel's file sits
+            # behind this file's include, and C refuses a call it has not seen declared).
+            plan.foreign_prototypes:List[str] = source_paths.compilation_prototypes(
+                list(plan.device_cache.values()), plan.device_prefix + plan.helper_pieces,
+                own_codes=[entry["code"] for entry in plan.entries if entry["code"]])
+            if plan.foreign_prototypes:
+                plan.foreign_header.append(source_paths.prototype_block(plan.foreign_prototypes))
             if plan.include_lines:
                 plan.foreign_header.append(plan.include_lines)
             if plan.helper_include:
@@ -377,7 +396,8 @@ class _CompileWriteMixin:
             # What the heal path needs for this foreign file, kept per path: the header
             # pieces and the definitions, exactly as this render built them. A build that
             # fails on the file is answered by rebuilding it from here (see
-            # _compile_kernels) -- the one shape that is always current.
+            # _compile_kernels) -- the one shape that is always current. The prototype
+            # block travels in the header piece it was built into.
             plan.rewrite_plan[plan.path] = (list(plan.foreign_header),
                                             [piece for piece in plan.foreign_pieces
                                              if piece],

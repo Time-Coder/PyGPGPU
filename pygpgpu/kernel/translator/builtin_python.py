@@ -20,8 +20,6 @@ from .receivers import (
     _receiver_param_of,
 )
 from .vectors import (
-    _vec_field_names,
-    _vec_registry,
     is_vec,
 )
 from .builtins import (
@@ -69,8 +67,9 @@ class _BuiltinPythonMixin:
             code, t = args[0]
             if is_vec(t):
                 # GLSL's spelling on a whole vector, and pygf's host answers per slot:
-                # the device expands component-wise like the +/* paths do.
-                return self._emit_vec_abs(code, t), t
+                # the device answers through the same device-function form the +/* paths
+                # take (the body spells `fabs`/`abs` per component).
+                return self._emit_vec_abs(code, t, t)
             if is_float(t):
                 return f"fabs({code})", t
             if is_int(t):
@@ -200,7 +199,8 @@ class _BuiltinPythonMixin:
         if name in MATH_BUILTINS:
             # A scalar math intrinsic. OpenCL has a native vector overload for every one of
             # them, so the call passes straight through; CUDA has only the `f`-suffixed
-            # scalar spelling, so a vector argument is expanded per component here.
+            # scalar spelling, so a vector argument answers through the device-function
+            # form (one helper per shape, the argument expression exactly once).
             if len(args) not in (1, 2):
                 self._error(f"gpu.{name}() takes 1 or 2 arguments", node)
             cuda_name:str = MATH_BUILTINS[name][1]
@@ -329,7 +329,10 @@ class _BuiltinPythonMixin:
                 self._error(f"gpu.dot() operands must have the same type, got {lt} and {rt}", node)
             if self._opencl_syntax:
                 return f"dot({lcode}, {rcode})", "float"
-            return self._emit_vec_dot(lcode, rcode, lt), "float"
+            # The answer is one sum over every component, so the device function is
+            # composed whole (see `_geometric_device_call`): the argument expression
+            # appears exactly once, the way the arithmetic family's call keeps it.
+            return self._geometric_device_call("dot", args, lt, "float")
 
         if name in ("cross", "normalize", "length", "distance"):
             return self._emit_vec_builtin(name, args, node)
@@ -349,7 +352,10 @@ class _BuiltinPythonMixin:
                 if self._opencl_syntax:
                     int_vec:str = self._get_int_vec_type(a_t)
                     return f"select({b_code}, {a_code}, ({c_code} == ({int_vec})(0)))", a_t
-                return self._emit_vec_select(a_code, b_code, c_code, a_t), a_t
+                # The value form python's spelling means, per component, through the
+                # same device-function form the arithmetic family takes (OpenCL's
+                # native select takes a mask, which is why it keeps its own emission).
+                return self._vector_device_call("select", "select", "", args, a_t, a_t)
             if self._opencl_syntax:
                 return f"select({b_code}, {a_code}, ({c_code} == 0))", a_t
             return f"(({c_code}) ? ({b_code}) : ({a_code}))", a_t
@@ -364,7 +370,18 @@ class _BuiltinPythonMixin:
                 if self._opencl_syntax:
                     # opencl vector relation functions use -1 (all-1 bits) for true; & 1 normalizes it to 1
                     return f"({name}({lcode}, {rcode}) & 1)", self._get_int_vec_type(lt)
-                return self._emit_vec_relation(name, lcode, rcode, lt), self._get_int_vec_type(lt)
+                # One device function per comparison shape, the form the arithmetic
+                # family takes: the argument expression appears exactly once.
+                op:str = {"isequal": "==", "isnotequal": "!=", "isgreater": ">",
+                          "isgreaterequal": ">=", "isless": "<",
+                          "islessequal": "<="}.get(name)
+                if op is None:
+                    # isordered/isunordered carry no operator: they are the NaN
+                    # tests, spelled per component with no device callee to name.
+                    return self._emit_vec_relation(name, lcode, rcode, lt), \
+                        self._get_int_vec_type(lt)
+                return self._vector_device_call(
+                    name, "compare", op, args, lt, self._get_int_vec_type(lt))
             if self._opencl_syntax:
                 return f"{name}({lcode}, {rcode})", "int"
             return self._emit_scalar_relation(name, lcode, rcode), "int"
@@ -375,11 +392,10 @@ class _BuiltinPythonMixin:
             code, t = args[0]
             if self._opencl_syntax:
                 return f"{name}({code})", "int"
-            cls:object = _vec_registry()[t]
-            components:List[str] = _vec_field_names(cls)
-            joiner:str = ("|" if name == "any" else "&")
-            expr:str = f"({joiner.join(f'({code}.{c})' for c in components)})"
-            return f"(({expr}) != 0)", "int"
+            # The answer folds ACROSS the components, so the device function's body
+            # joins them into one test (the reduction form, beside the per-component
+            # family): the argument expression appears exactly once.
+            return self._vector_device_call(name, name, "", args, t, "int")
 
         if name in ("abs_diff", "hadd", "rhadd", "mad24", "mul24"):
             expected:int = (3 if name == "mad24" else 2)
@@ -388,18 +404,14 @@ class _BuiltinPythonMixin:
             if any(is_vec(t) for _, t in args):
                 if not all(is_vec(t) for _, t in args) or len({t for _, t in args}) != 1:
                     self._error(f"gpu.{name}() vector operands must all be the same vector type", node)
-                # generate the integer function family uniformly per-component: NVIDIA's opencl implementation
-                # unsigned-izes the return type (abs_diff/hadd/rhadd/mul24/mad24), so calling it directly on int
-                # vectors fails to compile or drifts the result type; per-component expansion matches the cuda path and host semantics exactly
-                if name == "abs_diff":
-                    return self._emit_vec_absdiff(arg_codes[0], arg_codes[1], vec_t), vec_t
-                if name == "hadd":
-                    return self._emit_vec_hadd(arg_codes[0], arg_codes[1], vec_t), vec_t
-                if name == "rhadd":
-                    return self._emit_vec_rhadd(arg_codes[0], arg_codes[1], vec_t), vec_t
-                if name == "mul24":
-                    return self._vec_componentwise("*", arg_codes[0], vec_t, right=arg_codes[1]), vec_t
-                return self._emit_vec_mad(arg_codes, arg_types, vec_t), vec_t
+                # NVIDIA's opencl implementation unsigned-izes the return type
+                # (abs_diff/hadd/rhadd/mul24/mad24), so calling it directly on int
+                # vectors fails to compile or drifts the result type; the device
+                # function spells the per-component formula the expansion spelled --
+                # one helper per shape, the argument expression exactly once.
+                if name == "mad24":
+                    return self._vector_device_call("mad", "mad", "", args, vec_t, vec_t)
+                return self._vector_device_call(name, name, "", args, vec_t, vec_t)
             if not all(is_int(t) for _, t in args):
                 self._error(f"gpu.{name}() requires integer arguments", node)
             codes:List[str] = arg_codes

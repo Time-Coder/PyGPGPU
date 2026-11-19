@@ -1,7 +1,7 @@
 from __future__ import annotations
 import ast
 from typing import (Any, Dict, List, Optional, Tuple)
-from ..device_builtins.vector_helpers import ARITH_HELPERS, COMPARE_HELPERS
+from ..device_builtins.vector_helpers import (ARITH_HELPERS, COMPARE_HELPERS)
 from .type_map import (
     _check_integer_fits,
 )
@@ -218,9 +218,14 @@ class _OperatorsMixin:
                                 if getattr(method, "__code__", None) else "self"),
                     receiver_as_argument=True)
         if name == "USub":
-            if is_vec(t) and self.backend == "cuda":
-                # CUDA has no unary minus on a vector type: the negation is per component.
-                return self._vec_componentwise("-", code, t), t
+            if is_vec(t) and not self._opencl_syntax:
+                # CUDA has no unary minus on a vector type: the negation goes through
+                # the same device-function form the arithmetic family takes, one
+                # helper per shape, the operand expression exactly once.
+                return self._vector_device_call("neg", "neg", "", [(code, t)], t, t)
+            if is_vec(t):
+                # OpenCL and Metal negate a vector natively.
+                return f"(-{code})", t
             if self._complex_dtype_of(t) is not None:
                 # A complex value is a structure, so `-z` is the header's own negation.
                 self._require_complex(self._complex_dtype_of(t))
@@ -261,7 +266,15 @@ class _OperatorsMixin:
             if is_vec(rt):
                 if rt != lt:
                     self._error(f"vector operands must have the same type, got {lt} and {rt}", node)
-                return self._vec_componentwise_compare(symbols[name], left, lt, right), self._get_int_vec_type(lt)
+                if self._opencl_syntax:
+                    # opencl natively returns an int vector: each component is -1 for
+                    # true, so the result is normalized to 0/1.
+                    return self._vec_componentwise_compare(symbols[name], left, lt, right), self._get_int_vec_type(lt)
+                # One device function per comparison shape, the form the arithmetic
+                # family takes: the argument expression appears exactly once.
+                return self._vector_device_call(
+                    COMPARE_HELPERS[symbols[name]], "compare", symbols[name],
+                    [(left, lt), (right, rt)], lt, self._get_int_vec_type(lt))
             self._error("vector comparison requires vector operands on both sides", node)
 
         parts:List[str] = []

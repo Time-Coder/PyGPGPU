@@ -4,8 +4,8 @@ from typing import (List, Optional, Set, Tuple)
 from ..device_builtins import (
     GENERIC_BUILTINS,
 )
-from ..device_builtins.vector_helpers import (ARITH_HELPERS, helper_call, helper_name,
-                                              helper_source)
+from ..device_builtins.vector_helpers import (ARITH_HELPERS, geometric_source, helper_call,
+                                              helper_name, helper_source)
 from .notation import (
     Translated,
 )
@@ -35,15 +35,21 @@ class _VectorOpsMixin:
         return _C_FIELD_TYPES[(vec, _vec_components(vec)[0][0])]
 
 
-    def _emit_vec_abs(self, code:str, vec:str)->str:
+    def _emit_vec_abs(self, code:str, t:object, vec:str)->Translated:
         """`abs(v)` over a whole vector, per component.
 
         GLSL spells it on the vector and pygf's host answers per slot, so the device
-        expands into the per-component form the +/* paths generate: the floating widths
-        take `fabs`, the integer widths `abs`.
+        answers the same way: OpenCL and Metal negate through their native overloads
+        (the component spelling there, as the +/* paths keep), while CUDA/HIP have no
+        vector `abs` and take the same device-function form the arithmetic family
+        does -- the body spells `fabs`/`abs` per component, the floating widths
+        `fabs`, the integer widths `abs`.
         """
         device:str = "abs" if is_int(self._vec_element_type(vec)) else "fabs"
-        return self._vec_componentwise(device, code, vec)
+        if self._opencl_syntax:
+            return self._vec_componentwise(device, code, vec), vec
+        return self._vector_device_call(device, "call", device,
+                                        [(code, t)], vec, vec)
 
 
     def _emit_vec_minmax(self, name:str, args:List[Translated], vec:str,
@@ -53,7 +59,10 @@ class _VectorOpsMixin:
         The scalar spelling's own rule decides the callee: the floating widths take the
         `fmin`/`fmax` pair, the integer widths `min`/`max` -- the same pick the scalar
         chain makes, so one name means one thing on both paths. python's builtin takes
-        any arity and folds left to right, which this chain keeps.
+        any arity and folds left to right, which this chain keeps: on CUDA/HIP every
+        pair folds through the same device-function form the arithmetic family takes
+        (the pair helper is emitted once and reused), and OpenCL/Metal keep their
+        native per-component expansion.
         """
         for _, t in args:
             if is_vec(t) and t != vec:
@@ -70,24 +79,67 @@ class _VectorOpsMixin:
             if is_vec(rt):
                 # The mismatch check above already proved every vector arg is `vec`.
                 if is_vec(left_t):
-                    left = self._vec_componentwise(pick, left, vec, right=rcode)
+                    left = self._fold_minmax_pair(name, pick, left, vec, rcode, rt)
                 elif left:
-                    left = self._vec_componentwise(pick, rcode, vec, scalar=left)
+                    # `left` is a leading scalar: the vector decides the shape, and
+                    # the fold keeps the scalar on the right -- the operand order the
+                    # expansion spelled (`min(2.0, v)` is `min(v, 2.0)`).
+                    left = self._fold_minmax_pair(name, pick, rcode, vec, left, left_t)
                 else:
                     left = rcode
+                    left_t = rt
+                    continue
             elif is_vec(left_t):
-                left = self._vec_componentwise(pick, left, vec, scalar=rcode)
+                left = self._fold_minmax_pair(name, pick, left, vec, rcode, rt)
             else:
                 # A leading scalar pair waits for the vector that decides the shape
                 # (`min(2.0, v, w)` starts folding on the vector's terms).
                 left = rcode
+                left_t = rt
                 continue
             left_t = vec
         return left, vec
 
 
+    def _fold_minmax_pair(self, name:str, pick:str, left:str, lt:object,
+                          right:str, rt:object)->str:
+        """One left-to-right folding step of a vector min/max.
+
+        CUDA/HIP spell the pair through the same device-function form the arithmetic
+        family takes (one helper per operand shape, emitted once and reused);
+        OpenCL/Metal keep their native per-component expansion -- reached only by an
+        arity above the native overloads' own (two- and three-argument calls never
+        land here).
+        """
+        if self._opencl_syntax:
+            if is_vec(rt):
+                return self._vec_componentwise(pick, left, lt, right=right)
+            return self._vec_componentwise(pick, left, lt, scalar=right)
+        return self._vector_device_call(name, "call", pick,
+                                        [(left, lt), (right, rt)], lt, lt)[0]
+
+
     def _component(self, code:str, t:object, c:str)->str:
         return f"{code}.{c}" if is_vec(t) else code
+
+
+    def _geometric_device_call(self, name:str, args:List[Translated],
+                               vec:str, result_t:object)->Translated:
+        """Call one geometric helper (`dot`, `length`, ...), emitting its definition.
+
+        The geometric family's answer is a scalar summed over every component, or a
+        formula that mixes them (cross's `a.y * b.z - a.z * b.y`), so its body is
+        composed whole (see `device_builtins.vector_helpers.geometric_source`) --
+        the one shape the per-component term form cannot spell. The definition is
+        built from the same formulas the inline expansion spelled and travels in
+        the `device_helpers` channel beside the per-component family's.
+        """
+        param_types:Tuple[str, ...] = tuple(t for _, t in args)
+        source:str = geometric_source(name, vec, str(result_t), param_types)
+        if source not in self.device_helpers:
+            self.device_helpers.append(source)
+        return helper_call(helper_name(name, param_types),
+                           [code for code, _ in args]), result_t
 
 
     def _vector_device_call(self, name:str, kind:str, spell:str,
@@ -146,9 +198,9 @@ class _VectorOpsMixin:
     def _vec_componentwise(self, op:str, left:str, vec:str, right:str="", scalar:str="")->str:
         """CUDA has no vector arithmetic/math overloads; expand into per-component form.
 
-        Kept for the OpenCL/Metal spellings and for callers outside the helper
-        path; the CUDA/HIP call sites go through `_vector_device_call` instead, so
-        an argument expression is not duplicated once per component.
+        Kept for the OpenCL/Metal spellings; the CUDA/HIP call sites go through
+        `_vector_device_call` instead, so an argument expression is not duplicated
+        once per component.
         right is a vector operand, scalar is a broadcast scalar operand.
         """
         cls:object = _vec_registry()[vec]
@@ -170,26 +222,6 @@ class _VectorOpsMixin:
         if self._opencl_syntax:
             return f"({vec})({inner})"
         return f"make_{vec}({inner})"
-
-
-    def _emit_vec_clamp(self, codes:List[str], types:List[object], vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        maker:str = f"make_{vec}"
-        inner:str = ", ".join(
-            f"fminf(fmaxf({self._component(codes[0], types[0], c)}, {self._component(codes[1], types[1], c)}), {self._component(codes[2], types[2], c)})"
-            for c in components)
-        return f"{maker}({inner})"
-
-
-    def _emit_vec_mix(self, codes:List[str], types:List[object], vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        maker:str = f"make_{vec}"
-        inner:str = ", ".join(
-            f"(({self._component(codes[0], types[0], c)}) * (1.0f - ({self._component(codes[2], types[2], c)})) + ({self._component(codes[1], types[1], c)}) * ({self._component(codes[2], types[2], c)}))"
-            for c in components)
-        return f"{maker}({inner})"
 
 
     def _emit_vec_member_store(self, target:ast.Attribute, value_code:str,
@@ -295,25 +327,6 @@ class _VectorOpsMixin:
         return f"make_{int_vec}({inner})"
 
 
-    def _emit_vec_mad(self, codes:List[str], types:List[object], vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        maker:str = f"make_{vec}"
-        inner:str = ", ".join(
-            f"(({self._component(codes[0], types[0], c)}) * ({self._component(codes[1], types[1], c)})) + ({self._component(codes[2], types[2], c)})"
-            for c in components)
-        return f"{maker}({inner})"
-
-
-    def _emit_vec_select(self, a_code:str, b_code:str, c_code:str, vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        maker:str = f"make_{vec}"
-        inner:str = ", ".join(
-            f"(({c_code}.{c}) ? ({b_code}.{c}) : ({a_code}.{c}))" for c in components)
-        return f"{maker}({inner})"
-
-
     def _emit_vec_relation(self, name:str, lcode:str, rcode:str, vec:str)->str:
         op:str = {"isequal": "==", "isnotequal": "!=", "isgreater": ">",
                   "isgreaterequal": ">=", "isless": "<", "islessequal": "<="}[name]
@@ -340,36 +353,6 @@ class _VectorOpsMixin:
         return f"((int)(({lcode}) {op} ({rcode})))"
 
 
-    def _emit_vec_absdiff(self, lcode:str, rcode:str, vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        inner:str = ", ".join(f"abs(({lcode}.{c}) - ({rcode}.{c}))" for c in components)
-        return self._vec_maker(vec, inner)
-
-
-    def _emit_vec_hadd(self, lcode:str, rcode:str, vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        inner:str = ", ".join(
-            f"((({lcode}.{c}) & ({rcode}.{c})) + ((({lcode}.{c}) ^ ({rcode}.{c})) >> 1))" for c in components)
-        return self._vec_maker(vec, inner)
-
-
-    def _emit_vec_rhadd(self, lcode:str, rcode:str, vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        inner:str = ", ".join(
-            f"((({lcode}.{c}) | ({rcode}.{c})) - ((({lcode}.{c}) ^ ({rcode}.{c})) >> 1))" for c in components)
-        return self._vec_maker(vec, inner)
-
-
-    def _emit_vec_dot(self, lcode:str, rcode:str, vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        terms:str = " + ".join(f"(({lcode}.{c}) * ({rcode}.{c}))" for c in components)
-        return f"({terms})"
-
-
     def _emit_vec_builtin(self, name:str, args:List[Translated], node:ast.Call)->Translated:
         opencl_name, _ = GENERIC_BUILTINS[name]
         expected_args:int = (1 if name in ("normalize", "length") else 2)
@@ -386,42 +369,12 @@ class _VectorOpsMixin:
 
         if self._opencl_syntax:
             return f"{opencl_name}({', '.join(c for c, _ in args)})", vec
-
-        codes:List[str] = [c for c, _ in args]
-        if name == "normalize":
-            return self._emit_vec_normalize(codes[0], vec), vec
-        if name == "length":
-            return f"sqrtf({self._emit_vec_dot(codes[0], codes[0], vec)})", "float"
-        if name == "distance":
-            diff:str = self._vec_componentwise("-", codes[0], vec, right=codes[1])
-            return f"sqrtf({self._emit_vec_dot(diff, diff, vec)})", "float"
-        if name == "cross":
-            return self._emit_vec_cross(codes[0], codes[1], vec), vec
-        self._error(f"gpu.{name} is not supported", node)
-
-
-    def _emit_vec_normalize(self, code:str, vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        maker:str = f"make_{vec}"
-        dot_expr:str = self._emit_vec_dot(code, code, vec)
-        inner:str = ", ".join(f"(({code}.{c}) * rsqrtf({dot_expr}))" for c in components)
-        return f"{maker}({inner})"
-
-
-    def _emit_vec_cross(self, lcode:str, rcode:str, vec:str)->str:
-        cls:object = _vec_registry()[vec]
-        components:List[str] = _vec_field_names(cls)
-        maker:str = f"make_{vec}"
-        x, y, z = components[0], components[1], components[2]
-        inner:str = (f"(({lcode}.{y}) * ({rcode}.{z}) - ({lcode}.{z}) * ({rcode}.{y})), "
-                     f"(({lcode}.{z}) * ({rcode}.{x}) - ({lcode}.{x}) * ({rcode}.{z})), "
-                     f"(({lcode}.{x}) * ({rcode}.{y}) - ({lcode}.{y}) * ({rcode}.{x}))")
-        if len(components) == 4:
-            inner += ", 0.0f"
-        elif len(components) != 3:
-            self._error(f"gpu.cross() requires a 3 or 4 component vector, got {vec}")
-        return f"{maker}({inner})"
+        # The geometric family's answer is a scalar summed over every component, or
+        # a formula that mixes them, so its device function is composed whole (see
+        # `_geometric_device_call`); the argument expression appears exactly once,
+        # the way the arithmetic family's call keeps it.
+        result:object = ("float" if name in ("length", "distance") else vec)
+        return self._geometric_device_call(name, args, vec, result)
 
 
     def _emit_vec_constructor(self, name:str, args:List[Translated], node:ast.Call)->Translated:
