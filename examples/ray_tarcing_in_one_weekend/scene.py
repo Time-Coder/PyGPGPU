@@ -50,9 +50,8 @@ class Scene(Hittable):
             if depth <= 0:
                 return color3f(0)
             direction: vector3f = rand_vector3f_hemisphere(record.normal, tid, seed)
-            bounced: color3f = self.ray_color(
+            return 0.5 * self.ray_color(
                 Ray(record.position, direction), depth - 1, tid, seed + 1)
-            return bounced * 0.5
         unit_dir = normalize(ray.direction)
         weight = 0.5 * (unit_dir.y + 1.0)
         return mix(color3f(1), color3f(0.5, 0.7, 1.0), weight)

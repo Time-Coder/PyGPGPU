@@ -250,6 +250,7 @@ vecadd.vecadd["opencl"][(3907, 256)](a, a, out, np.int32(len(a)))   # 后端 + w
 - **内核内部访问 Python 对象** —— 嵌套成员照常读, 参数对象的方法照常调(`scene.hit(x)`); 加上 `self.method(...)`、任意类的静态方法、模块级函数, 调用写法与普通 Python 完全一致。([03](examples/03_nd_loop_and_class_method.py)、[14](examples/14_heterogeneous_data.py))
 - **内核内部创建对象** —— `np.zeros`/`np.zeros_like` 等写在魔法循环之外, 宿主上创建一次、由所有工作项共享; 写在循环之内, 则是每个工作项私有的设备端对象; 两者都可以 `return`。([14](examples/14_heterogeneous_data.py))
 - **子函数** —— kernel 里调用的子函数不需要装饰器、不需要注解, 在调用点按实参类型单态化, 子函数再调子函数递归支持。([03](examples/03_nd_loop_and_class_method.py))
+- **设备函数的递归** —— 一个子函数或方法自调用本身, 在每个后端都被自动编译成循环: 尾调用、调用者消费的结果(`r = f(...)` 之后接语句, 或 `return g(f(...))` 且递归调用位于任意参数位置), 以及每层被替换的结构体参数(光线追踪的弹射光线)。循环无法排序的形状——包裹表达式读取逐层不同的值、或一个表达式里两次自调用——会被拒绝并给出原因; CUDA 与 HIP 通过原生递归承接这些形状。([光线追踪](examples/ray_tarcing_in_one_weekend/render.py))
 - **访问外层作用域变量** —— 函数体读取的外层变量成为 kernel 参数, 改变后下一次调用立即生效; 用 `nonlocal`/`global` 声明的标量在调用后写回原作用域。([11_returns_and_scope.py](examples/11_returns_and_scope.py))
 - **异步启动** —— 同一个装饰函数上有 `submit()`(`concurrent.futures.Future`)与 `await k.async_call(...)`(`asyncio.Future`), 中括号同样适用。([10](examples/10_async_launch.py))
 
