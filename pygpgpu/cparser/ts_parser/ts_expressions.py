@@ -130,6 +130,15 @@ class _TsExpressionsMixin:
             self._visit_call(node, scopes, ctx)
             return
 
+        if node_type == "parenthesized_expression" and node.named_children:
+            # A transparent wrapper: the assignment walk reaches it as the base of a
+            # member store (`((self)->inner).x = v`), where the inner field expression
+            # must keep the write verdict -- the generic fallback below visits children
+            # as reads, and dropping the flag here left every store through a
+            # parenthesized base unrecorded (the receiver buffer was never read back).
+            self._visit_expression(node.named_children[0], scopes, ctx, is_write)
+            return
+
         for child in node.named_children:
             self._visit_expression(child, scopes, ctx, False)
 

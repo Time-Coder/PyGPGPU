@@ -302,5 +302,44 @@ def _pack_structure(value:object, backend:str)->Packed:
                         host_array[index], backend)
                     if element_unpack is not None:
                         element_unpack(source_array[index])
+            elif issubclass(host_field_type, ctypes.Array):
+                # A plain array member (no vectors inside): its elements are the same
+                # widths on both sides, and a kernel that writes them (`self.row.values[0]
+                # = v`) stores through this field. Skipping it dropped every such store
+                # on opencl -- the layout there differs (an array member sits where
+                # opencl C places it, which the packed class reproduces), so the device
+                # bytes came home into `packed` and the caller's field never saw them.
+                host_array:object = getattr(value, field_name)
+                source_array:object = getattr(source, field_name)
+                for index in range(host_field_type._length_):
+                    host_array[index] = source_array[index]
+            elif issubclass(host_field_type, ctypes.Structure):
+                # A nested structure with no vector members: its layout may still differ
+                # (an array member inside it is placed where opencl C places it), so the
+                # field copy is the same by-fields walk this unpack already runs.
+                _pack_structure(getattr(value, field_name), backend)
+                _copy_plain_fields(getattr(source, field_name), getattr(value, field_name))
+            else:
+                # A scalar member: the same store argument as the plain array above --
+                # `self.n = 5` on opencl reached the packed copy and stopped there.
+                setattr(value, field_name, getattr(source, field_name))
 
     return packed, unpack
+
+
+def _copy_plain_fields(source:object, target:object)->None:
+    """One device-layout structure's fields onto the host-layout twin, field by field.
+
+    Only the fields whose widths agree on both sides are copied: a vector member is
+    handled by the caller's own unpack (its components, not its padding), and this walk
+    answers scalars and plain arrays -- the two the vector-focused unpack used to skip.
+    """
+    for field, kind in type(target)._fields_:
+        source_value:object = getattr(source, field)
+        if isinstance(kind, type) and issubclass(kind, ctypes.Array):
+            target_array:object = getattr(target, field)
+            if isinstance(source_value, ctypes.Array):
+                for index in range(len(target_array)):
+                    target_array[index] = source_value[index]
+        else:
+            setattr(target, field, source_value)

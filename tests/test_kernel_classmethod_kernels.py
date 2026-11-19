@@ -301,6 +301,105 @@ def test_a_device_helper_writing_cls_members_comes_home(runner):
 
 
 # ---------------------------------------------------------------------------
+# A receiver member that is itself a python object: nested stores come home in place
+# ---------------------------------------------------------------------------
+
+
+def test_a_nested_ctypes_member_store_reaches_the_object(runner):
+    import ctypes
+
+    class _Inner(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_float)]
+
+    class _Outer:
+        def __init__(self) -> None:
+            self.inner = _Inner(1.0)
+
+        @kernel
+        def run(self, out: np.ndarray):
+            for i in range(out.shape[0]):
+                out[i] = self.inner.x
+                self.inner.x = 5.0
+
+    instance = _Outer()
+    alias = instance.inner            # python's own aliasing: one object, two names
+    out = np.zeros(4, dtype=np.float32)
+    runner(instance.run, out)
+    # Every work item reads the member's *launch-time* value on a device (each work
+    # item sees its own copy of the receiver struct), while the python backend runs
+    # the body once as written -- so the out sequence differs by backend and is not
+    # what this pins. The store itself is.
+    np.testing.assert_allclose(out[0], 1.0)
+    # python semantics for `self.inner.x = v`: the object the attribute *already
+    # names* is mutated -- the attribute is not rebound -- so the alias sees the
+    # update and `instance.inner` is still that same object.
+    assert instance.inner is alias
+    assert instance.inner.x == 5.0
+    assert alias.x == 5.0
+
+
+def test_a_two_level_nested_store_reaches_the_object(runner):
+    import ctypes
+    from pygf import float2
+
+    class _Point(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_float), ("y", ctypes.c_float)]
+
+    class _Inner(ctypes.Structure):
+        _fields_ = [("point", _Point), ("v", float2)]
+
+    class _Outer:
+        def __init__(self) -> None:
+            self.inner = _Inner(_Point(1.0, 2.0), float2(3.0, 4.0))
+            self.tag = 7
+
+        @kernel
+        def run(self, out: np.ndarray):
+            for i in range(out.shape[0]):
+                out[i] = self.inner.point.x + self.inner.point.y
+                self.inner.point.x = 10.0
+                self.inner.v.x = 20.0
+                self.tag = 3
+
+    instance = _Outer()
+    out = np.zeros(4, dtype=np.float32)
+    runner(instance.run, out)
+    # The out sequence differs by backend for the same reason the single-level test
+    # states; the members are what this pins.
+    assert instance.inner.point.x == 10.0
+    assert instance.inner.v.x == 20.0
+    assert instance.tag == 3
+
+
+def test_an_array_field_of_a_nested_member_store_comes_home(runner):
+    import ctypes
+
+    class _Row(ctypes.Structure):
+        _fields_ = [("values", ctypes.c_float * 3), ("n", ctypes.c_int)]
+
+    class _Holder:
+        def __init__(self) -> None:
+            self.row = _Row()
+            for i, value in enumerate((1.0, 2.0, 3.0)):
+                self.row.values[i] = value
+            self.row.n = 3
+
+        @kernel
+        def run(self, out: np.ndarray):
+            for i in range(out.shape[0]):
+                out[i] = self.row.values[i]
+                self.row.values[0] = 9.0
+                self.row.n = 5
+
+    holder = _Holder()
+    out = np.zeros(3, dtype=np.float32)
+    runner(holder.run, out)
+    assert out[0] == 1.0
+    assert list(holder.row.values) == [9.0, 2.0, 3.0]
+    assert holder.row.n == 5
+
+
+# ---------------------------------------------------------------------------
 # A plain `def f(cls, ...)` body spells a classmethod kernel without the wrapper
 # ---------------------------------------------------------------------------
 
