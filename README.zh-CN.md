@@ -139,15 +139,27 @@ class Layer:
             out[i] = x[i] * 2.0
         return out
 
+    @classmethod
+    @kernel
+    def scaled(cls, x: np.ndarray) -> np.ndarray:
+        out = np.zeros_like(x)
+        for i in range(out.shape[0]):   # cls 成员可以直接做循环上界
+            out[i] = x[i] * cls.factor
+        return out
+
 x = np.ones(4, dtype=np.float32)
 layer = Layer(np.arange(4, dtype=np.float32), 0.5)
 
 layer.apply(x)           # -> array([0.5, 1.5, 2.5, 3.5])
 layer.apply["cuda"](x)   # 方法上同样可以用中括号
 Layer.double(x)          # -> array([2., 2., 2., 2.])
+Layer.factor = 3.0
+Layer.scaled(x)          # cls 就是接收者: 类成员就是 kernel 参数
 ```
 
 类型注解是可选的(它们服务于编辑器与类型检查器, 不参与翻译): 设备类型来自调用时的实参, kernel 按类型签名分别特化。
+
+**classmethod kernel 以类为接收者。** `@kernel` 也可以装饰 `@classmethod`, 两种顺序都行——`cls` 就是接收者, `cls.<attr>` 读取(标量、数组, 甚至循环上界)与 `cls.<helper>(...)` 的设备调用, 和实例方法上的 `self.<attr>` 完全一致。`@kernel @classmethod` 与 `@classmethod @kernel` 绑定方式相同: 调用写 `Layer.scaled(x)`, `cls.version = 9` 重绑类属性并在启动后回到调用方(持有该类的别名能看到), `submit()`/`async_call()` 也以同样方式落地。
 
 **输出数组用返回值表示。** kernel 用 numpy 创建结果并 `return` 它——形状与 dtype 由 numpy 自己决定, 调用方拿到的是普通 ndarray; 不需要预先分配 `out` 参数。魔法循环之外创建的对象在宿主上创建一次、由所有工作项共享; 循环之内创建的是每个工作项私有的设备端对象。两者都可以返回, 每条 `return` 语句可以有各自的形状, 第一个 return 的工作项获胜。
 
@@ -244,7 +256,7 @@ vecadd.vecadd["opencl"][(3907, 256)](a, a, out, np.int32(len(a)))   # 后端 + w
 
 ## 特性
 
-- **`@kernel` 装饰一切** —— 普通函数、实例方法、静态方法都能直接装饰; 函数体读取的 `self.xxx` 属性自动成为 kernel 参数。([01](examples/01_basic_kernel.py)、[03](examples/03_nd_loop_and_class_method.py))
+- **`@kernel` 装饰一切** —— 普通函数、实例方法、静态方法、类方法都能直接装饰; 函数体读取的 `self.xxx`/`cls.xxx` 属性自动成为 kernel 参数, classmethod 以类为接收者。([01](examples/01_basic_kernel.py)、[03](examples/03_nd_loop_and_class_method.py))
 - **返回值** —— 结果数组在函数体内用 numpy 创建并 `return`, 调用方直接拿到 ndarray; 标量、向量、结构体、数组都可返回, 每条 `return` 可以有不同形状, 第一个 return 的工作项获胜。([11_returns_and_scope.py](examples/11_returns_and_scope.py))
 - **Python 对象作为参数** —— 普通对象直接传入, 其成员(标量、数组、嵌套对象)自动成为 kernel 参数, 全部在调用时读取。([14](examples/14_heterogeneous_data.py))
 - **内核内部访问 Python 对象** —— 嵌套成员照常读, 参数对象的方法照常调(`scene.hit(x)`); 加上 `self.method(...)`、任意类的静态方法、模块级函数, 调用写法与普通 Python 完全一致。([03](examples/03_nd_loop_and_class_method.py)、[14](examples/14_heterogeneous_data.py))

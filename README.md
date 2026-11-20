@@ -139,15 +139,27 @@ class Layer:
             out[i] = x[i] * 2.0
         return out
 
+    @classmethod
+    @kernel
+    def scaled(cls, x: np.ndarray) -> np.ndarray:
+        out = np.zeros_like(x)
+        for i in range(out.shape[0]):   # a cls member can be the loop extent
+            out[i] = x[i] * cls.factor
+        return out
+
 x = np.ones(4, dtype=np.float32)
 layer = Layer(np.arange(4, dtype=np.float32), 0.5)
 
 layer.apply(x)           # -> array([0.5, 1.5, 2.5, 3.5])
 layer.apply["cuda"](x)   # brackets work on methods too
 Layer.double(x)          # -> array([2., 2., 2., 2.])
+Layer.factor = 3.0
+Layer.scaled(x)          # cls IS the receiver: class members are the arguments
 ```
 
 Type annotations are optional (they serve editors and type checkers, not translation): the device types come from the actual arguments at call time, and the kernel is specialized per type signature.
+
+**A classmethod kernel takes the class as the receiver.** `@kernel` decorates `@classmethod` too, in either order — `cls` is the receiver, so `cls.<attr>` reads (scalars, arrays, even a loop extent) and `cls.<helper>(...)` device calls work exactly as `self.<attr>` does on an instance method. Both `@kernel @classmethod` and `@classmethod @kernel` bind the same way: the call is `Layer.scaled(x)`, `cls.version = 9` rebinds the class attribute and reaches the caller after the launch (an alias holding the class sees it), and `submit()`/`async_call()` settle it the same way.
 
 **Output arrays are return values.** A kernel creates its result with numpy and `return`s it — the shape and dtype come from numpy itself, and the caller receives an ordinary ndarray; there is no `out` parameter to pre-allocate. An object created above the magic loop is built once on the host and shared by every work item; one created inside the loop is device-private per work item. Either can be returned, every `return` statement may have its own shape, and the first work item to return wins.
 
@@ -244,7 +256,7 @@ A struct `typedef` in the source becomes a ctypes type (a `Pt` above would pass 
 
 ## Features
 
-- **One decorator for every function** — plain functions, instance methods and static methods all take `@kernel`; the `self.xxx` attributes the body reads become kernel arguments automatically. ([01](examples/01_basic_kernel.py), [03](examples/03_nd_loop_and_class_method.py))
+- **One decorator for every function** — plain functions, instance methods, static methods and classmethods all take `@kernel`; the `self.xxx`/`cls.xxx` attributes the body reads become kernel arguments automatically, with the class as the receiver for a classmethod. ([01](examples/01_basic_kernel.py), [03](examples/03_nd_loop_and_class_method.py))
 - **Return values** — the result array is created in the body with numpy and `return`ed; the caller receives an ordinary ndarray. Scalars, vectors, structures and arrays all return, every `return` may have its own shape, and the first work item to return wins. ([11_returns_and_scope.py](examples/11_returns_and_scope.py))
 - **Python objects as arguments** — pass a plain object and its members (scalars, arrays, nested objects) become kernel arguments, read at call time. ([14](examples/14_heterogeneous_data.py))
 - **Python objects inside the kernel** — read nested members and call methods of an argument object (`scene.hit(x)`); together with `self.method(...)`, static methods of any class and module-level functions, the call spellings are exactly ordinary Python's. ([03](examples/03_nd_loop_and_class_method.py), [14](examples/14_heterogeneous_data.py))
