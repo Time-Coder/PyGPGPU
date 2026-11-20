@@ -7,8 +7,9 @@ from typing import Dict
 import numpy as np
 from .... import numpy as gnp
 from ...driver import (
-    HIPInfo
+    HIPInfo,
 )
+from ...driver.hip import HIP
 from ..program_info import ArgInfo
 from ..stream import Stream
 from ..program_parser import ProgramParser
@@ -49,6 +50,8 @@ class _KernelArgsMixin:
                 buffer = stream.context.get_buffer(data.nbytes)
                 buffer.kernel_flags = arg_info.kernel_flags
                 event = buffer.set_data(stream, data)
+                if event is not None and HIP.print_info:
+                    print(f"copy data to device for argument '{arg_info.name}'")
                 bound[arg_info.name] = (buffer, value, packed)
                 return pointer(c_void_p(buffer.id.value))
 
