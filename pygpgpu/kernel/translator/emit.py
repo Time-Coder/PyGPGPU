@@ -48,6 +48,28 @@ class _EmitMixin:
         self.lines.append("    " * self._indent + line)
 
 
+    def _aggregate_carries_vector(self, type_text:str)->bool:
+        """Whether the structure `type_text` names has a vector-typed member.
+
+        The members come from the struct registry (`structs.dtype_for`); numpy packs a
+        `float3` member as a *nested record* of its components (the field's dtype
+        carries `x/y/z` names), and HIP's `HIP_vector_type` refuses to
+        brace-initialize that member from the int `0`. A subarray-shaped field (a
+        fixed-length array member) also reads through this check.
+        """
+        from .. import structs as _structs_module  # noqa: PLC0415 (import cycle)
+
+        dtype:object = _structs_module.dtype_for(type_text)
+        if dtype is None or not getattr(dtype, "fields", None):
+            return False
+        for _member_name, (member_dtype, _offset) in dtype.fields.items():
+            if getattr(member_dtype, "shape", None):
+                return True
+            if member_dtype.names:
+                return True
+        return False
+
+
     def _emit_blank(self)->None:
         """A separator line, recorded so the renderer can collapse or trim it."""
         if self.lines and self.lines[-1] != "":
@@ -72,9 +94,19 @@ class _EmitMixin:
         `{0}`. HIP's `float3` is a `HIP_vector_type`, which carries exactly that converting
         constructor, and OpenCL reads the cast as the broadcast: both keep the cast, which
         is what their kernels compile today.
+
+        The same three-way split has a **HIP record** exception: a structure whose members
+        include a HIP vector cannot take the record's `{0}` either -- brace-initializing a
+        `HIP_vector_type` member from the int `0` hits its *explicit* single-value
+        constructor ("no viable conversion from 'int' to 'float3'", the failing declaration
+        the ray tracer's hoisted `Ray ray = {0};` showed). Value-initialization (`{}`) is
+        the form HIP accepts there: it zero-fills every member, vectors included.
         """
         base:str = type_text.replace("const", "").strip()
         if is_aggregate(base):
+            if (self.launch_backend == "hip"
+                    and self._aggregate_carries_vector(base)):
+                return "{}"
             return "{0}"
         if is_vec(base):
             if self.launch_backend == "cuda":

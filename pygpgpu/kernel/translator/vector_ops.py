@@ -368,6 +368,15 @@ class _VectorOpsMixin:
             self._error(f"gpu.{name}() operands must have the same vector type", node)
 
         if self._opencl_syntax:
+            if name in ("length", "distance"):
+                # OpenCL C's `length`/`distance` answer a *scalar* (the vector's own
+                # element type), not the vector: typing the call as the vector made
+                # `float3 len_result = length(result)` legal-looking C that the
+                # compiler then refuses (`if` demands a scalar), and every comparison
+                # against the result with it. The element type is what the geometric
+                # device helpers on the CUDA path declare for the same calls.
+                return (f"{opencl_name}({', '.join(c for c, _ in args)})",
+                        self._vec_element_type(vec))
             return f"{opencl_name}({', '.join(c for c, _ in args)})", vec
         # The geometric family's answer is a scalar summed over every component, or
         # a formula that mixes them, so its device function is composed whole (see
