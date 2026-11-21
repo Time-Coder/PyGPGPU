@@ -27,7 +27,14 @@ if TYPE_CHECKING:
 
 
 class CommandQueue(MTLObject):
-    """One `MTLCommandQueue`: a serial stream of command buffers."""
+    """One `MTLCommandQueue`: a serial stream of command buffers.
+
+    `context` is a self-reference, matching the shared launch surface: every
+    other backend's queue carries a back-pointer to the context that owns it,
+    and `ArgInfo.use_buffer` reaches the buffer pool through
+    `cmd_queue.context.get_buffer`. A Metal queue has no separate context object,
+    so the device-holding Context hands the queue itself over.
+    """
 
     def __init__(self, device:"Device")->None:
         _wait_ready()
@@ -36,6 +43,15 @@ class CommandQueue(MTLObject):
             raise RuntimeError("Metal could not create a command queue")
         MTLObject.__init__(self, queue_id)
         self._device:"Device" = device
+        self._context:"Context" = None  # set by Context.__init__
+
+    @property
+    def context(self)->"Context":
+        return self._context
+
+    @context.setter
+    def context(self, context:"Context")->None:
+        self._context = context
 
     @property
     def device(self)->"Device":
@@ -65,6 +81,7 @@ class Context(MTLObject):
         _wait_ready()
         self._device:"Device" = device
         self._queue:CommandQueue = CommandQueue(device)
+        self._queue.context = self
         MTLObject.__init__(self, device.id)
         self._buffers:Dict[int, List["Buffer"]] = {}
 

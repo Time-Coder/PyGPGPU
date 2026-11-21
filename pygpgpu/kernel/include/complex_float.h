@@ -133,7 +133,7 @@ COMPLEX_QUAL static COMPLEX_UNUSED int c64_equal(c64 a, c64 b)
 /* The magnitude: numpy's `abs(complex)` is a real, not a complex. */
 COMPLEX_QUAL static COMPLEX_UNUSED float c64_abs(c64 a)
 {
-    return hypot(a.re, a.im);
+    return COMPLEX_HYPOT(a.re, a.im);
 }
 
 /* The phase, in [-pi, pi]: numpy's `np.angle` for a complex scalar. */
@@ -260,7 +260,7 @@ COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_reciprocal(c64 a)
 /* The principal square root.
  *
  * The closed form from |z| and the sign of the real part: for a positive real part the
- * root's real part is sqrt((|z| + re) / 2) and its imaginary part follows from the product,
+ * root's real part is COMPLEX_SQRT((|z| + re) / 2) and its imaginary part follows from the product,
  * and for a negative one the two swap roles with the sign of im carried through. The zero
  * case is answered directly, because both formulas divide by a zero there. */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sqrt(c64 a)
@@ -272,51 +272,51 @@ COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sqrt(c64 a)
         r.im = 0.0f;
         return r;
     }
-    float magnitude = hypot(a.re, a.im);
+    float magnitude = COMPLEX_HYPOT(a.re, a.im);
     if (a.re >= 0.0f)
     {
-        float t = sqrt((magnitude + a.re) * 0.5f);
+        float t = COMPLEX_SQRT((magnitude + a.re) * 0.5f);
         r.re = t;
         r.im = a.im / (2.0f * t);
         return r;
     }
-    float t = sqrt((magnitude - a.re) * 0.5f);
+    float t = COMPLEX_SQRT((magnitude - a.re) * 0.5f);
     r.re = (a.im < 0.0f ? -1.0f : 1.0f) * fabs(a.im) / (2.0f * t);
     r.im = t;
     return r;
 }
 
-/* exp(z) = exp(re) * (cos(im) + i sin(im)) */
+/* COMPLEX_EXP(z) = COMPLEX_EXP(re) * (COMPLEX_COS(im) + i COMPLEX_SIN(im)) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_exp(c64 a)
 {
-    float magnitude = exp(a.re);
+    float magnitude = COMPLEX_EXP(a.re);
     c64 r;
-    r.re = magnitude * cos(a.im);
-    r.im = magnitude * sin(a.im);
+    r.re = magnitude * COMPLEX_COS(a.im);
+    r.im = magnitude * COMPLEX_SIN(a.im);
     return r;
 }
 
-/* log(z) = log|z| + i arg(z) */
+/* COMPLEX_LOG(z) = log|z| + i arg(z) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_log(c64 a)
 {
     c64 r;
-    r.re = log(hypot(a.re, a.im));
+    r.re = COMPLEX_LOG(COMPLEX_HYPOT(a.re, a.im));
     r.im = atan2(a.im, a.re);
     return r;
 }
 
-/* 2^z = exp2(re) * (cos(im ln 2) + i sin(im ln 2)) */
+/* 2^z = COMPLEX_EXP2(re) * (COMPLEX_COS(im ln 2) + i COMPLEX_SIN(im ln 2)) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_exp2(c64 a)
 {
-    float magnitude = exp2(a.re);
+    float magnitude = COMPLEX_EXP2(a.re);
     float angle = a.im * 0.6931471805599453f;
     c64 r;
-    r.re = magnitude * cos(angle);
-    r.im = magnitude * sin(angle);
+    r.re = magnitude * COMPLEX_COS(angle);
+    r.im = magnitude * COMPLEX_SIN(angle);
     return r;
 }
 
-/* log2(z) and log10(z): the natural logarithm rescaled, which is what numpy computes. */
+/* COMPLEX_LOG2(z) and COMPLEX_LOG10(z): the natural logarithm rescaled, which is what numpy computes. */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_log2(c64 a)
 {
     c64 natural = c64_log(a);
@@ -335,55 +335,55 @@ COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_log10(c64 a)
     return r;
 }
 
-/* sin(z) = sin(re)cosh(im) + i cos(re)sinh(im) */
+/* COMPLEX_SIN(z) = COMPLEX_SIN(re)COMPLEX_COSH(im) + i COMPLEX_COS(re)COMPLEX_SINH(im) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sin(c64 a)
 {
     c64 r;
-    r.re = sin(a.re) * cosh(a.im);
-    r.im = cos(a.re) * sinh(a.im);
+    r.re = COMPLEX_SIN(a.re) * COMPLEX_COSH(a.im);
+    r.im = COMPLEX_COS(a.re) * COMPLEX_SINH(a.im);
     return r;
 }
 
-/* cos(z) = cos(re)cosh(im) - i sin(re)sinh(im) */
+/* COMPLEX_COS(z) = COMPLEX_COS(re)COMPLEX_COSH(im) - i COMPLEX_SIN(re)COMPLEX_SINH(im) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_cos(c64 a)
 {
     c64 r;
-    r.re = cos(a.re) * cosh(a.im);
-    r.im = -sin(a.re) * sinh(a.im);
+    r.re = COMPLEX_COS(a.re) * COMPLEX_COSH(a.im);
+    r.im = -COMPLEX_SIN(a.re) * COMPLEX_SINH(a.im);
     return r;
 }
 
-/* tan(z) = sin(z) / cos(z) */
+/* COMPLEX_TAN(z) = COMPLEX_SIN(z) / COMPLEX_COS(z) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_tan(c64 a)
 {
     return c64_div(c64_sin(a), c64_cos(a));
 }
 
-/* sinh(z) = sinh(re)cos(im) + i cosh(re)sin(im) */
+/* COMPLEX_SINH(z) = COMPLEX_SINH(re)COMPLEX_COS(im) + i COMPLEX_COSH(re)COMPLEX_SIN(im) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_sinh(c64 a)
 {
     c64 r;
-    r.re = sinh(a.re) * cos(a.im);
-    r.im = cosh(a.re) * sin(a.im);
+    r.re = COMPLEX_SINH(a.re) * COMPLEX_COS(a.im);
+    r.im = COMPLEX_COSH(a.re) * COMPLEX_SIN(a.im);
     return r;
 }
 
-/* cosh(z) = cosh(re)cos(im) + i sinh(re)sin(im) */
+/* COMPLEX_COSH(z) = COMPLEX_COSH(re)COMPLEX_COS(im) + i COMPLEX_SINH(re)COMPLEX_SIN(im) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_cosh(c64 a)
 {
     c64 r;
-    r.re = cosh(a.re) * cos(a.im);
-    r.im = sinh(a.re) * sin(a.im);
+    r.re = COMPLEX_COSH(a.re) * COMPLEX_COS(a.im);
+    r.im = COMPLEX_SINH(a.re) * COMPLEX_SIN(a.im);
     return r;
 }
 
-/* tanh(z) = sinh(z) / cosh(z) */
+/* COMPLEX_TANH(z) = COMPLEX_SINH(z) / COMPLEX_COSH(z) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_tanh(c64 a)
 {
     return c64_div(c64_sinh(a), c64_cosh(a));
 }
 
-/* asin(z) = -i log(iz + sqrt(1 - z^2)) */
+/* COMPLEX_ASIN(z) = -i COMPLEX_LOG(iz + COMPLEX_SQRT(1 - z^2)) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_asin(c64 a)
 {
     c64 one;
@@ -401,7 +401,7 @@ COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_asin(c64 a)
     return r;
 }
 
-/* acos(z) = pi/2 - asin(z) */
+/* COMPLEX_ACOS(z) = pi/2 - COMPLEX_ASIN(z) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_acos(c64 a)
 {
     c64 arc = c64_asin(a);
@@ -411,7 +411,7 @@ COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_acos(c64 a)
     return r;
 }
 
-/* atan(z) = (i/2) log((i + z) / (i - z)) */
+/* COMPLEX_ATAN(z) = (i/2) COMPLEX_LOG((i + z) / (i - z)) */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_atan(c64 a)
 {
     c64 i_value;
@@ -426,7 +426,7 @@ COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_atan(c64 a)
     return r;
 }
 
-/* z^w = exp(w log z). A zero base answers 1 for a zero exponent and 0 otherwise, which is
+/* z^w = COMPLEX_EXP(w log z). A zero base answers 1 for a zero exponent and 0 otherwise, which is
  * what numpy's `0 ** w` answers for a complex w of positive real part. */
 COMPLEX_QUAL static COMPLEX_UNUSED c64 c64_pow(c64 a, c64 b)
 {

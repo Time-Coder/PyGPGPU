@@ -80,7 +80,13 @@ def test_the_async_forms_reach_the_bound_launch() -> None:
     with pytest.raises(BaseException) as submit_error:
         submit_future.result(timeout=10)
     assert not isinstance(submit_error.value, NotImplementedError)
+    # The failure surfaces through the future; retrieve it so the interpreter does
+    # not log "Future exception was never retrieved" after the test returns.
+    _ = submit_future.exception()
 
     async_future = kernel.async_call()
     # `async_call` answers an asyncio future, whose `exception()` never raises.
     assert hasattr(async_future, "exception")
+    # The launch failure travels on it the same way; retrieving the exception is
+    # what stops the loop from logging "exception was never retrieved" later.
+    assert async_future.exception() is not None

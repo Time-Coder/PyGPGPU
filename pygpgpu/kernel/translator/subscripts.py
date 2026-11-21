@@ -2,6 +2,7 @@ from __future__ import annotations
 import ast
 from typing import (Any, Dict, List, Optional, Tuple, cast)
 from ..structs import dtype_for as structs_dtype_for
+from ..device_builtins import emit_index
 from .notation import (
     BLOCK_ARRAY,
     BLOCK_LOCAL_BUILTINS,
@@ -185,6 +186,11 @@ class _SubscriptsMixin:
         name directly (`bins[i] = v`), and as its slice once the group subscript has folded;
         both are normalized to the slice form here, which is the one shape the flattening
         below reads.
+
+        On Metal the base `code` is an offset expression rather than a plain pointer
+        (`_local0[(gid) * 8]`, see `_visit_shared_slice`), so it carries its own
+        subscript: the flattening adds to the running offset instead of subscripting
+        the base again.
         """
         if isinstance(t, tuple) and t and t[0] == BLOCK_ARRAY:
             t = (BLOCK_SLICE, t[1], tuple(t[4]))
@@ -277,10 +283,17 @@ class _SubscriptsMixin:
         """`buf[blockIdx]` on a per-group buffer: **this** group's storage, and nothing more.
 
         The subscript picks *which* group's slice is meant, which is a real choice on the
-        host (where the value is a mapping) but not on a device: the hardware already
+        host (where the value is a mapping) but not on OpenCL/CUDA/HIP: the hardware already
         gives every group its own `__shared__`/`__local` storage, so the answer is always
         the caller's own slice and **no index arithmetic is emitted at all**. `buf[blockIdx]`
         folds to the buffer itself.
+
+        Metal is the exception, and it folds to an **offset** instead: a shared buffer
+        travels as one `device` allocation covering every group (`groups * total` elements,
+        see `render.parameter_declarations`), because the affected macOS driver loses
+        threadgroup memory across a barrier (see `metal_codegen.barrier`). The slice is
+        the caller's group number times the group's element count, so the arithmetic is
+        the honest translation of `buf[blockIdx]` there.
 
         The subscript is therefore validated rather than computed: it must be a block id
         (`blockIdx`, or `get_group_id(d)`), because any other expression would name a group
@@ -304,11 +317,28 @@ class _SubscriptsMixin:
                 "item can only reach its own: index it with the group first, as "
                 "`buf[blockIdx][j]` (or `buf[get_group_id(0)][j]`). A buffer this block "
                 "indexes directly is `local_array(...)`", index)
-        # Both backends give each work group its own copy of the buffer -- OpenCL allocates
-        # one `__local` parameter per group, CUDA/HIP a `__shared__` array per block -- so
-        # the slice a work item reaches is the whole buffer, and the block id only names
-        # which group is asking. No offset is added: doing so would read into the next
-        # group's copy, which is exactly the memory a work item must not touch.
+        # OpenCL allocates one `__local` parameter per group and CUDA/HIP a
+        # `__shared__` array per block, so the slice a work item reaches is the whole
+        # buffer and the block id only names which group is asking. Metal's shared
+        # buffers live in one device allocation covering every group, so the slice
+        # starts at `group * total` elements (see `metal_codegen.barrier`). The group
+        # number is the block id along the buffer's first axis -- the same number a
+        # `get_group_id(0)` call names -- taken directly rather than through the int3
+        # vector a bare `blockIdx` read builds, so the offset is a scalar multiply.
+        # The offset travels in the marker's `offset_base` slot (the same slot a
+        # partly-indexed slice uses), so the ONE flattening below emits the single
+        # subscript of the per-group allocation.
+        if self._metal_syntax:
+            # `t` is the closed 5-tuple the `shared` marker carries, so the shape
+            # slot is a tuple of ints; the narrow `tuple` annotation the lookup
+            # answers leaves it `object` to the checker, hence the cast.
+            extents:tuple = cast(Tuple[int, ...], shape)
+            total:int = 1
+            for extent in extents:
+                total *= extent
+            group_code:str = emit_index("get_group_id", 0, self.backend)
+            return f"{c_name}", (SHARED_SLICE, ctype, shape,
+                                 f"({group_code}) * {total}")
         return c_name, (SHARED_SLICE, ctype, shape)
 
 

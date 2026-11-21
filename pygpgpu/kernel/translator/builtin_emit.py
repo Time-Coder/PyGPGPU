@@ -2,7 +2,7 @@ from __future__ import annotations
 import ast
 from typing import (Dict, List, Optional, cast)
 import numpy as np
-from .builtin_python import _BuiltinPythonMixin
+from .metal_atomics import _MetalAtomicBlockMixin
 from ..builtin_registry import builtin_name_of
 from ..device_library import library_function_name, library_functions
 from ..device_builtins import (
@@ -42,7 +42,7 @@ from .predicates import (
 )
 
 
-class _BuiltinEmitMixin(_BuiltinPythonMixin):
+class _BuiltinEmitMixin(_MetalAtomicBlockMixin):
 
     def _builtin_call_name(self, node:ast.expr)->Optional[str]:
         """The builtin this call invokes, or None when it invokes something else.
@@ -144,7 +144,12 @@ class _BuiltinEmitMixin(_BuiltinPythonMixin):
             if args:
                 self._error("gpu.barrier() takes no arguments", node)
             if self._metal_syntax:
+                # The Metal barrier spins on a device counter (see
+                # `metal_codegen.barrier` for why the plain fence is not emitted);
+                # `render.parameter_declarations` appends the parameter it names
+                # from the flag.
                 from ..metal_codegen import barrier
+                self.has_barrier = True
                 return barrier(), "void"
             return emit_barrier(self.backend), "void"
 
@@ -198,6 +203,10 @@ class _BuiltinEmitMixin(_BuiltinPythonMixin):
                 self._error(f"gpu.{name}() index and value must be integers", node)
             if name == "atomic_cas" and not is_int(args[2][1]):
                 self._error("gpu.atomic_cas() compare value must be an integer", node)
+            if self._metal_syntax and (name == "atomic_cas"
+                                       or arr_t[1] in ("long", "ulong")):
+                return self._emit_metal_atomic_block(
+                    name, node, arr_code, arr_t[1], idx_code, val_code, compare_code)
             return emit_atomic(name, arr_code, idx_code, val_code, arr_t[1], self.backend,
                                compare_code,
                                is_local=self._is_local_buffer(node.args[0])), arr_t[1]

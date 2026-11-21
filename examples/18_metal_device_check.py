@@ -132,7 +132,7 @@ def check_shared_memory(device: str) -> None:
 
     text = np.arange(8, dtype=np.float32)
     out = np.zeros_like(text)
-    reverse[device](text, out)
+    reverse[device][(1, 8)](text, out)
     assert np.allclose(out, text[::-1]), out
     print("  (2) threadgroup memory and the barrier work: OK")
 

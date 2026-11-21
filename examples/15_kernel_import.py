@@ -90,10 +90,16 @@ def main():
             print(f"negate on {selector} raised KeyError as expected: {error}")
 
     # 4) Device and work size, in either order, exactly the decorator's bracket language.
+    #    A device whose backend has no implementation of this kernel (`metal` here: the
+    #    vecops module ships .cl/.cu/.hip sources only) is skipped, the way `run_on`
+    #    skips a backend the machine lacks.
     out.fill(0.0)
     vecops.add_offset[(3907, 256)](a, b, out, np.float32(1.0), np.int32(n))
     assert np.allclose(out, a + b + 1.0)
     for selector in list_devices():
+        if selector.split(":", 1)[0] not in vecops.add_offset.backends:
+            print(f"add_offset on {selector}: no implementation, skipped")
+            continue
         out.fill(0.0)
         vecops.add_offset[selector][(3907, 256)](a, b, out, np.float32(1.0), np.int32(n))
         assert np.allclose(out, a + b + 1.0)

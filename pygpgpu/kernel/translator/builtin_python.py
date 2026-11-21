@@ -200,7 +200,10 @@ class _BuiltinPythonMixin:
             # A scalar math intrinsic. OpenCL has a native vector overload for every one of
             # them, so the call passes straight through; CUDA has only the `f`-suffixed
             # scalar spelling, so a vector argument answers through the device-function
-            # form (one helper per shape, the argument expression exactly once).
+            # form (one helper per shape, the argument expression exactly once). MSL spells
+            # the whole family in the `metal::precise` namespace only -- no global-namespace
+            # overload exists -- so the call is prefixed there (see the COMPLEX_NS macros
+            # in include/complex.h, which follow the same rule for the complex header).
             if len(args) not in (1, 2):
                 self._error(f"gpu.{name}() takes 1 or 2 arguments", node)
             cuda_name:str = MATH_BUILTINS[name][1]

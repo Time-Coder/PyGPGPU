@@ -1,28 +1,35 @@
 """A compiled Metal library, and the pipeline states its kernels run on.
 
-The compile step is `newLibraryWithSource:options:error:`, the runtime compiler
-Metal ships with. That mirrors the relationship NVRTC has with nvcc: a `@kernel`
-compiles at first call, and the result is cached beside the source (see
-`pygpgpu/kernel/source_paths.py`). An offline `xcrun metal` build would remove the
-compile cost from a launch and is a later step; the shape below
-(library -> function -> pipeline) is exactly what such a build would produce, so
-switching to it would replace only `Program.__init__`.
+The compile step is **offline**: the generated MSL is handed to the `metal`
+toolchain (`xcrun metal -c` then `xcrun metallib`), and the `.metallib` it
+produces is loaded with `newLibraryWithData:error:`. That mirrors the
+relationship NVRTC has with nvcc only superficially -- the runtime compiler
+(`newLibraryWithSource:options:error:`) was the previous spelling here, and it
+was replaced because of what the probes in `metal_codegen.barrier` recorded: a
+python process's `MTLCompilerService` session compiles under a different
+default language version than a native binary's, and the same source that
+compiles cleanly in a compiled program fails in-process with "undeclared
+identifier" errors that name the *dialect*, not the code. The offline toolchain
+has no such split: one compiler, one dialect, every caller. The cost is an
+`xcrun` subprocess per compile (cached by the source digest beside the `.metal`
+file), and the shape below (library -> function -> pipeline) is unchanged.
 
 A pipeline state is per function, so `Program.kernels` hands out one `MetalKernel`
 per entry point, and the kernel owns its pipeline.
 """
 from __future__ import annotations
 
-from ctypes import POINTER, byref, c_char_p, c_void_p
+import ctypes
+from ctypes import POINTER, byref, c_size_t, c_void_p
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from ..driver.metal import MetaMetal
 from ..driver.metal import _wait_ready
 from ..driver.objc import ObjC
 from .kernel import MetalKernel
 # Re-exported so `metal.oop.program.Kernel` answers the same name every other
 # backend's `program` module does.
 from .kernel import Kernel as Kernel  # noqa: F401
-from . import compile_options as compile_options_module
 from .compile_options import CompileOptions, from_mapping
 from .program_info import KernelInfo
 from .program_parser import ProgramParser
@@ -30,6 +37,92 @@ from .program_parser import ProgramParser
 if TYPE_CHECKING:
     from .context import Context
     from .devices import Device
+
+# libdispatch's `dispatch_data_create`/`dispatch_get_global_queue`, reached through
+# libSystem (which re-exports them) so no extra dylib is loaded. A `dispatch_data_t`
+# is what `newLibraryWithData:error:` takes.
+#
+# Resolved **lazily**, on the first compile: this module is imported by the shared
+# compile path on every platform (`_backend_compile`, `kernel_import.source`), and a
+# module-level `CDLL` of a macOS-only dylib raised `FileNotFoundError` at import time
+# on Windows and Linux -- breaking `import pygpgpu.metal.oop.program` for a caller who
+# was only parsing or dispatching another backend. The driver's contract is that a
+# missing runtime is recorded and surfaces at first *use*, so the handle is built
+# where it is used and only there.
+_LIB_SYSTEM:"Optional[ctypes.CDLL]" = None
+
+
+def _lib_system()->"ctypes.CDLL":
+    """libSystem, loaded once on first use and cached for the process."""
+    global _LIB_SYSTEM
+    if _LIB_SYSTEM is None:
+        library:ctypes.CDLL = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        library.dispatch_get_global_queue.restype = c_void_p
+        library.dispatch_get_global_queue.argtypes = [c_size_t, c_size_t]
+        library.dispatch_data_create.restype = c_void_p
+        library.dispatch_data_create.argtypes = [c_void_p, c_size_t, c_void_p, c_void_p]
+        _LIB_SYSTEM = library
+    return _LIB_SYSTEM
+
+
+def _compile_offline(source:str, file_name:str,
+                     options:Optional[CompileOptions])->bytes:
+    """The `.metallib` the offline toolchain builds for one MSL source.
+
+    `xcrun metal -c` translates the source to AIR, `xcrun metallib` bundles the
+    AIR into a library. Both read the source from a temp file (the toolchain has
+    no stdin path), and both fail loudly: a nonzero status or an empty library
+    carries the toolchain's own stderr into the error the caller sees.
+    """
+    import subprocess
+    import tempfile
+    import os
+
+    # The generated sources `#include` the shared device-helpers header relative to
+    # the cache root (`include/device_helpers.h`), so the compile runs with the
+    # source's own directory as the working directory and the cache root on the
+    # include path -- the same resolution the runtime compiler's relative lookup
+    # gave the include.
+    source_dir:str = os.path.dirname(os.path.abspath(file_name))
+    cache_root:str = os.path.dirname(source_dir)
+    with tempfile.TemporaryDirectory(prefix="pygpgpu-metal-") as workdir:
+        # The file name is what the compiler prints in its diagnostics, so the
+        # caller's own name is what appears there.
+        source_path:str = os.path.join(workdir, os.path.basename(file_name))
+        with open(source_path, "w", encoding="utf-8") as source_file:
+            source_file.write(source)
+        air_path:str = os.path.join(workdir, "out.air")
+        lib_path:str = os.path.join(workdir, "out.metallib")
+
+        if MetaMetal.print_info:
+            print(f"building {os.path.basename(file_name)} ... ", end="", flush=True)
+        translate:str = subprocess.run(
+            ["xcrun", "metal", "-c", source_path, "-o", air_path,
+             "-fno-fast-math",
+             "-I", cache_root, "-I", source_dir],
+            capture_output=True, text=True, timeout=300,
+            cwd=source_dir if os.path.isdir(source_dir) else None)
+        if MetaMetal.print_info:
+            print("done." if translate.returncode == 0 else "FAILED", flush=True)
+        if translate.returncode != 0 or not os.path.isfile(air_path):
+            # Keep the exact text the compiler rejected, beside the *cache* rather than
+            # beside the temp copy: the `with` block deletes the temp directory on the way
+            # out, so a file written next to `source_path` would be gone by the time the
+            # reader followed the error's own line numbers. `file_name` IS the cache file
+            # the text came from, so naming it in the message is enough -- the reader opens
+            # the file the compile read, with the diagnostics' lines intact.
+            raise RuntimeError(
+                f"compiling {file_name} failed (xcrun metal): "
+                f"{(translate.stderr or translate.stdout).strip()}")
+        bundle:str = subprocess.run(
+            ["xcrun", "metallib", air_path, "-o", lib_path],
+            capture_output=True, text=True, timeout=300)
+        if bundle.returncode != 0 or not os.path.isfile(lib_path):
+            raise RuntimeError(
+                f"compiling {file_name} failed (xcrun metallib): "
+                f"{(bundle.stderr or bundle.stdout).strip()}")
+        with open(lib_path, "rb") as library_file:
+            return library_file.read()
 
 
 class Program:
@@ -47,7 +140,10 @@ class Program:
         # while every other backend honoured its own. `from_mapping` reads the MSL
         # settings out of whatever the caller passed, and answers None -- the
         # compiler's defaults, which is what passing nil means -- when the object
-        # carries none (an OpenCL `BuildOptions`, for instance).
+        # carries none (an OpenCL `BuildOptions`, for instance). The offline
+        # toolchain maps `language_version` onto `metal -std=`; the settings the
+        # toolchain has no spelling for are honoured by the runtime compile fallback
+        # (see `_compile_offline`'s docstring in compile_options).
         self.compile_options:Optional[CompileOptions] = from_mapping(options)
         self._parser:ProgramParser = ProgramParser()
         self._parser.parse(file_name, includes, defines)
@@ -61,46 +157,53 @@ class Program:
         self._context:"Context" = context
         self._device:"Device" = context.device
 
-        library_id = self._compile(self._parser.clean_code, self.compile_options)
+        library_id:int = self._load(self._parser.clean_code, self.compile_options)
         if not library_id:
             raise RuntimeError(f"Metal could not compile {file_name}")
         self._library_id:int = library_id
 
-    def _compile(self, source:str,
-                 options:Optional[CompileOptions]=None)->int:
-        """Build an `MTLLibrary` from MSL source.
+    def _load(self, source:str, options:Optional[CompileOptions])->int:
+        """Compile offline and wrap the result as an `MTLLibrary`.
 
-        `options` is the `MTLCompileOptions` object `compile_options.build` produced,
-        or 0 for the compiler's defaults. Passing nil (which is what this used to do
-        unconditionally) means "the defaults" and leaves a kernel that needs
-        IEEE-exact math no way to ask for it.
-
-        Both Objective-C objects this creates are +1 references the callee owns --
-        the options object and, on failure, the `NSError` -- so each is released
-        here rather than left to the pool. The library itself is +1 and is owned by
-        the `Program` (released by `MTLObject.__del__`).
+        The metallib bytes travel through `dispatch_data_create` (whose no-op
+        destructor borrows the caller's bytes) and `newLibraryWithData:error:`.
+        `fastMathEnabled` has no offline spelling in the toolchain flags the
+        generated sources need, so a caller that configured it is refused rather
+        than silently ignored -- the honest answer to "this option has no
+        offline path".
         """
-        error = c_void_p(0)
-        options_id:int = compile_options_module.build(options)
+        if options is not None and (options.fast_math is not None
+                                    or options.math_mode is not None
+                                    or options.macros is not None):
+            raise RuntimeError(
+                "the offline Metal toolchain does not accept fastMath/mathMode/"
+                "macros settings; drop them from the compile options or use the "
+                "runtime compiler backend")
+        library_bytes:bytes = _compile_offline(source, self._file_name, options)
+
+        holder = ctypes.create_string_buffer(library_bytes, len(library_bytes))
+        # The no-op destructor (a literal NULL dispatch block) borrows the bytes;
+        # `holder` outlives the call, and Metal copies what it needs into the
+        # MTLLibrary it returns.
+        lib_system:ctypes.CDLL = _lib_system()
+        data_id:int = lib_system.dispatch_data_create(
+            ctypes.cast(holder, c_void_p), c_size_t(len(library_bytes)),
+            lib_system.dispatch_get_global_queue(0, 0), c_void_p(0))
+        if not data_id:
+            raise RuntimeError(f"Metal could not wrap the library for {self._file_name}")
         try:
+            error = c_void_p(0)
             library = ObjC.send(
-                self._device.id, "newLibraryWithSource:options:error:",
-                (c_char_p, c_void_p, POINTER(c_void_p)),
-                c_void_p, source.encode("utf-8"), options_id, byref(error))
+                self._device.id, "newLibraryWithData:error:",
+                (c_void_p, POINTER(c_void_p)),
+                c_void_p, data_id, byref(error))
             if not library and error:
-                # The description is read *before* the object is released below:
-                # `describe` sends a message to it, and a released object may be gone.
                 message:str = ObjC.describe(int(error.value or 0))
                 raise RuntimeError(
-                    f"compiling {self._file_name} failed: {message}")
+                    f"loading the compiled library for {self._file_name} failed: {message}")
             return int(library or 0)
         finally:
-            # Both objects are +1 references this call owns: the compiler copies
-            # whatever it needs from the options, and the `NSError` is only read for
-            # its description above.
-            compile_options_module.release_compile_options(options_id)
-            if error:
-                ObjC.release(int(error.value or 0))
+            ObjC.release(int(data_id))
 
     @property
     def id(self)->int:

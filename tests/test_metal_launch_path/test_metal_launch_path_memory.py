@@ -25,9 +25,14 @@ def test_every_owned_object_is_released() -> None:
     pinned by reading the code rather than by a device run.
     """
     import pygpgpu.metal.oop.kernel as metal_kernel
+    import pygpgpu.metal.oop.kernel.launch as metal_launch
     import pygpgpu.metal.oop.program as metal_program
 
-    launch_source = open(metal_kernel.__file__, encoding="utf-8").read()
+    # The launch lives in its own module (`kernel/launch.py`) and the pipeline in
+    # `kernel/__init__.py`; the two are read together because this test is about the
+    # ownership contract, which spans both.
+    launch_source = open(metal_launch.__file__, encoding="utf-8").read()
+    kernel_source = open(metal_kernel.__file__, encoding="utf-8").read()
     # The command buffer is released, and through a `finally` so a failing read-back
     # cannot skip it.
     assert "new_command_buffer()" in launch_source
@@ -47,11 +52,13 @@ def test_every_owned_object_is_released() -> None:
     assert guarded < encoder < dispatch, "the try must precede the encoder work"
 
     # The function handle and its NSError are released too.
-    assert "ObjC.release(function_id)" in launch_source
+    assert "ObjC.release(function_id)" in kernel_source
 
     compile_source = open(metal_program.__file__, encoding="utf-8").read()
-    assert "release_compile_options(options_id)" in compile_source
-    assert "ObjC.release(int(error.value or 0))" in compile_source
+    # The compile is offline now (see `metal_codegen.barrier` for the driver defect
+    # that moved it), so there is no runtime `MTLCompileOptions` object to release;
+    # the dispatch_data wrapping the metallib bytes IS released.
+    assert "ObjC.release(int(data_id))" in compile_source
 
 
 def test_the_preprocessor_dictionary_is_not_retained() -> None:

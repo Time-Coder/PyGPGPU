@@ -194,10 +194,9 @@ def _dictionary(macros: Dict[str, str])->int:
 
 
 def _string(text: str)->int:
-    """An `NSString` for `text`."""
+    """An `NSString` object for `text` (the macro dictionary's keys and values)."""
     objc: type[ObjC] = ObjC
-    return objc.send_ptr(objc.class_("NSString"), "stringWithUTF8String:",
-                         (ctypes.c_char_p,), ctypes.c_char_p(text.encode("utf-8")))
+    return objc.string(text)
 
 
 def release_compile_options(options_id: int)->None:

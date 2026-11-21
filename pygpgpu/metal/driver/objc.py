@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 from threading import Lock
-from ctypes import CDLL, Structure, c_char_p, c_double, c_size_t, c_void_p
+from ctypes import CDLL, Structure, c_bool, c_char_p, c_double, c_size_t, c_void_p
 
 # The path is the macOS default; a nonstandard install is reached through
 # ctypes.util.find_library, tried once when the default does not exist.
@@ -70,6 +70,8 @@ class ObjC:
         lib.objc_release.restype = None
         lib.object_getClassName.argtypes = [c_void_p]
         lib.object_getClassName.restype = c_char_p
+        lib.object_isClass.argtypes = [c_void_p]
+        lib.object_isClass.restype = c_bool
 
         ObjC.lib = lib
         return lib
@@ -139,16 +141,53 @@ class ObjC:
         return ObjC.send(obj, sel_name, argtypes, c_void_p, *args)
 
     @staticmethod
+    def string(text:str)->int:
+        """An `NSString` object for `text`.
+
+        Every Objective-C method whose parameter list names an object takes an
+        object, and the bridge must build one rather than pass a bare C string:
+        `objc_msgSend` does not convert, so a `c_char_p` where the callee reads
+        `NSString *` hands it a garbage "object" pointer. What the callee then
+        does is undefined behaviour -- observed here as `newLibraryWithSource:`
+        never answering (a wedged compile request), which is why this helper
+        exists beside `describe`.
+        """
+        return ObjC.send_ptr(
+            ObjC.class_("NSString"), "stringWithUTF8String:",
+            (c_char_p,), c_char_p(text.encode("utf-8")))
+
+    @staticmethod
     def describe(obj:int)->str:
-        """The UTF-8 text of an NSString, or "" when the object is null.
+        """The UTF-8 text of an NSString's description, or "" when the object is null.
 
         `-UTF8String` returns a `const char*` owned by the string; the bytes are
-        decoded immediately, so the reference never outlives the message.
+        decoded immediately, so the reference never outlives the message. An
+        `NSError` does not answer `UTF8String` (sending it there is an
+        `NSInvalidArgumentException` that terminates the process), so the
+        description is taken through `localizedDescription` -- which every
+        `NSObject` answers and which, for an `NSError`, is the human-readable
+        reason the error was raised for.
         """
         if not obj:
             return ""
-        utf8 = ObjC.send(obj, "UTF8String", (), c_char_p)
-        return utf8.decode("utf-8") if utf8 else ""
+        lib = ObjC.load()
+        # `object_isClass` (a C function, not a message) and a direct probe of the
+        # documented `NSString` conformance keep this off the message path entirely:
+        # an `NSError` is not an `NSString`, so its text travels through
+        # `localizedDescription`; anything else is read through `UTF8String`. A
+        # `respondsToSelector:` probe here would be a class-method send whose BOOL
+        # return the variadic bridge misdeclares, and a wrong declaration segfaults
+        # rather than raising -- the plain check avoids the whole question.
+        if lib.object_isClass is not None and lib.object_isClass(obj):
+            # A class object (rare here): its `description` is the readable text.
+            text:int = ObjC.send_ptr(obj, "description")
+            return ObjC.describe(text) if text else ""
+        is_error:bool = ObjC.class_name(obj) == "NSError"
+        if not is_error:
+            utf8 = ObjC.send(obj, "UTF8String", (), c_char_p)
+            return utf8.decode("utf-8") if utf8 else ""
+        text = ObjC.send_ptr(obj, "localizedDescription")
+        return ObjC.describe(text) if text else ""
 
     @staticmethod
     def struct_result(obj:int, sel_name:str, fields:int)->tuple:

@@ -160,6 +160,20 @@ class _StructuresMixin:
             return f"(({name}){{{', '.join(parts)}}})", name
         # CUDA and HIP compile as C++, where designated initialisers arrived only in C++20
         # (NVRTC is older); a braced aggregate takes its members in declaration order.
+        # Metal compiles as C++ too, but Apple's clang miscalculates a constructor whose
+        # arguments are long comma/paren expressions (observed on MSL 3.2: a
+        # `float3(exp(...), exp(...), exp(...))` with heavily parenthesised arguments
+        # answered one argument's value in every component). A local per component keeps
+        # each argument in its own initialiser, which every C++ compiler evaluates
+        # correctly. The temps hoist to the function's top (see _hoist_declaration).
+        if self._metal_syntax:
+            temps:List[str] = []
+            for index, expr in enumerate(positional_parts):
+                temp:str = f"_{name}_{index}_ctor"
+                self._hoist_declaration(temp, name, zero=None)
+                self._emit(f"{temp} = {expr};")
+                temps.append(temp)
+            return f"{name}({', '.join(temps)})", name
         return f"({name}{{{', '.join(positional_parts)}}})", name
 
 

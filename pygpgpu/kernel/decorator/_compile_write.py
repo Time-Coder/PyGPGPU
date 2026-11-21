@@ -127,6 +127,15 @@ class _CompileWriteMixin:
         for helper_source in plan.translator.device_helpers:
             if helper_source not in plan.helper_pieces:
                 plan.helper_pieces.append(helper_source)
+        # A Metal body that called `barrier()` spins through the device counter the
+        # generated signature declares (`_barrier_counter`); the helper that reads it
+        # is injected here, once per source, beside the other synthesized helpers
+        # (see `metal_codegen.barrier` for why the plain fence is not emitted).
+        if getattr(plan.translator, "has_barrier", False):
+            from ..metal_codegen import barrier_helpers
+            for helper_source in barrier_helpers():
+                if helper_source not in plan.helper_pieces:
+                    plan.helper_pieces.append(helper_source)
         # A multi-phase body translates its work-item code on the phase translators, whose
         # own device functions (a floored `%`, a HIP round-toward-zero helper) live on the
         # phase's list -- the main one never visits a loop, so its own list is empty for

@@ -441,5 +441,34 @@ class _VectorOpsMixin:
                 codes.append(code if source_type == slot_type
                              else f"(({self._device_type(slot_type)})({code}))")
         if self._opencl_syntax:
+            # Metal compiles this C++-style constructor call, but Apple's clang
+            # miscalculates a constructor whose arguments are long parenthesised
+            # expressions (a `float3(exp(...), exp(...), exp(...))` palette answered
+            # one argument's value in every component on MSL 3.2). Hoisting each
+            # argument into a local first keeps every initialiser trivial -- the
+            # same workaround the structure constructor applies on Metal (see
+            # structures.py's _metal_syntax branch).
+            if self._metal_syntax:
+                # Apple's clang (MSL 3.2, -fno-fast-math) miscalculates a
+                # `(floatN)(expr, expr, expr)` constructor whose arguments are long
+                # parenthesised expressions: every component answered the same value
+                # (observed with a `float3(exp(...), exp(...), exp(...))` palette that
+                # returned one channel's value in all three slots; verified natively
+                # against the host). Component-wise assignment compiles correctly, so
+                # each argument goes into its own hoisted float local first, and the
+                # vector is built by component assignment from those locals.
+                field_names:List[str] = _vec_field_names(_vec_registry()[name])
+                locals_:List[str] = []
+                for index, code in enumerate(codes):
+                    temp:str = f"_{name}_c{index}"
+                    slot_type:str = _C_FIELD_TYPES[(name, components[index][0])]
+                    self._hoist_declaration(temp, slot_type, zero="0")
+                    self._emit(f"{temp} = {code};")
+                    locals_.append(temp)
+                temp_vec:str = f"_{name}_vec"
+                self._hoist_declaration(temp_vec, name)
+                for index, local in enumerate(locals_):
+                    self._emit(f"{temp_vec}.{field_names[index]} = {local};")
+                return f"({temp_vec})", name
             return f"({name})({', '.join(codes)})", name
         return f"make_{name}({', '.join(codes)})", name

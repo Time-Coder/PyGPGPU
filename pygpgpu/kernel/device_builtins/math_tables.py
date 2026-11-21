@@ -96,10 +96,15 @@ GENERIC_BUILTINS.update(MATH_BUILTINS)
 # a code template instead of a name; and HIP has the `f`-suffixed forms of the same set,
 # with the `native_*` family under CUDA's double-underscore spellings.
 SHARED_MATH_BUILTINS:Dict[str, Dict[str, str]] = {
-    "erf": {"opencl": "erf", "cuda": "erff", "hip": "erff", "metal": "erf"},
-    "erfc": {"opencl": "erfc", "cuda": "erfcf", "hip": "erfcf", "metal": "erfc"},
-    "tgamma": {"opencl": "tgamma", "cuda": "tgammaf", "hip": "tgammaf", "metal": "tgamma"},
-    "lgamma": {"opencl": "lgamma", "cuda": "lgammaf", "hip": "lgammaf", "metal": "lgamma"},
+    # erf/erfc/tgamma/lgamma have NO Metal spelling: MSL declares none of them
+    # (metal_stdlib carries no error-function or gamma family at all), so these
+    # four stay OpenCL/CUDA/HIP-only and a Metal launch refuses them by name
+    # (`_shared_math_call`'s missing-spelling error) instead of emitting a call
+    # the offline toolchain would reject with "undeclared identifier".
+    "erf": {"opencl": "erf", "cuda": "erff", "hip": "erff"},
+    "erfc": {"opencl": "erfc", "cuda": "erfcf", "hip": "erfcf"},
+    "tgamma": {"opencl": "tgamma", "cuda": "tgammaf", "hip": "tgammaf"},
+    "lgamma": {"opencl": "lgamma", "cuda": "lgammaf", "hip": "lgammaf"},
     "rint": {"opencl": "rint", "cuda": "rintf", "hip": "rintf", "metal": "rint"},
     "remainder": {"opencl": "remainder", "cuda": "remainderf", "hip": "remainderf", "metal": "remainder"},
     "fmin": {"opencl": "fmin", "cuda": "fminf", "hip": "fminf", "metal": "fmin"},

@@ -38,7 +38,10 @@ def test_probing_metal_answers_unavailable_instead_of_raising() -> None:
     answers None. The readable error above is for a *selection*, not a probe.
     """
     from pygpgpu.kernel.decorator import _probe_backend
+    from pygpgpu.metal.driver.objc import ObjC
 
+    if ObjC.lib is not None:
+        pytest.skip("this machine has the Metal framework, so the probe answers metal")
     assert _probe_backend("metal") is None
 
 
@@ -61,6 +64,12 @@ def test_nsinteger_arguments_are_pointer_sized() -> None:
     assert (size.width, size.height, size.depth) == (8, 4, 1)
 
     source = open(metal_kernel.__file__, encoding="utf-8").read()
+    # The encoder's own selector calls live in the launch module now (see
+    # `kernel/launch.py`), and the selectors are what this test is about, so both
+    # files are searched -- a `c_ulong` reintroduced in either one is the bug.
+    import pygpgpu.metal.oop.kernel.launch as metal_launch
+
+    source += open(metal_launch.__file__, encoding="utf-8").read()
     # The selectors must not name `c_ulong`: it is the wrong width off macOS.
     assert "(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong)" not in source
     assert "(ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t)" in source

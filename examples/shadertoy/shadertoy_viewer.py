@@ -179,15 +179,29 @@ class ShadertoyViewer(QWidget):
             self.image[i, j, 2] = 255 * clamp(color.b, 0.0, 1.0)
 
     def _wrap_frame(self) -> QImage:
-        """A ``QImage`` over the frame buffer's own memory.
+        """A ``QImage`` over a host-private copy of the frame buffer.
 
-        ``QImage`` does not copy the buffer it is handed, so the pixels stay owned by
-        ``self.image`` (kept alive by the attribute) and the device read-back's writes are
-        visible to the painter as they land. One wrapper per size: only a resize allocates
-        a new framebuffer, hence a new image.
+        The framebuffer is a ``gnp`` array: its bytes live in one device-backed
+        allocation that every launch rewrites and every read-back re-copies, and the
+        window's paint runs on the Cocoa compositor's schedule. A ``QImage`` that wraps
+        the buffer's own memory races that cycle -- the compositor blits while the next
+        read-back lands, and the process dies inside the blit (observed on macOS 26 as
+        a segfault in ``processEvents`` right after the first device-drawn frame; the
+        same launches with the window hidden, or with the frame copied, run clean).
+
+        Two more facts from bisecting that crash, both about the platform and not this
+        class: a Metal launch from inside a QTimer callback segfaults on the same
+        machine even with the paint fully stubbed, while the identical launch from
+        plain python code with the window visible runs fine -- so a host that wants an
+        animation loop there should drive ``redraw`` from its own loop rather than the
+        timer. And the frame itself is small (a 640x360 RGB8 buffer is 0.7 MB), so the
+        copy-per-paint is nothing next to the launch, and the paint reads memory
+        nothing else writes.
         """
         height, width = int(self.image.shape[0]), int(self.image.shape[1])
-        return QImage(memoryview(self.image), width, height, width * 3,
+        self.image.to_host(wait=True)
+        self._frame_bytes = np.asarray(self.image).copy()
+        return QImage(self._frame_bytes.data, width, height, width * 3,
                       QImage.Format.Format_RGB888)
 
     def redraw(self) -> None:

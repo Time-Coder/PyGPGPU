@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import ast
 import os
 import types
@@ -72,7 +73,14 @@ class _DeviceCallMixin:
                 # value built straight into the call (`self.hit(ray, Interval(0, inf))`)
                 # is stored in a local first. The temporary is emitted before this
                 # statement, which is the same shape a named construction already takes.
-                if code.startswith(f"({value_t}{{"):
+                # OpenCL C spells the literal with designated initialisers --
+                # `((T){...})`, one more wrapping pair than CUDA's `(T{...})` --
+                # so one regex accepts both shapes; without it an OpenCL call
+                # reaches `&((T){...})` and the compiler refuses it ("taking the
+                # address of a temporary").
+                literal_head:re.Pattern[str] = re.compile(
+                    rf"^\(\(?{re.escape(value_t)}\)?{{")
+                if literal_head.match(code):
                     temporary:str = f"_arg{self._next_temp()}"
                     self._emit(f"{value_t} {temporary} = {code};")
                     code = temporary

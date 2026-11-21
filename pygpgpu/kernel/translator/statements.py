@@ -149,6 +149,14 @@ class _StatementsMixin(_RaiseMixin):
                 self._emit_print(node.value)
             else:
                 # Other expression statements (e.g. gpu.atomic_add(...)/gpu.barrier()) must be emitted, otherwise side effects are lost
+                # Mark the call as a bare statement: a Metal atomic_cas / 64-bit
+                # atomic emits a brace block plus a hoisted result local, and the
+                # bare form needs neither the local read nor a trailing `;` (see
+                # `_emit_gpu_builtin`'s atomic branch). The TOP-LEVEL call only --
+                # a nested call's value is consumed by its parent and must keep
+                # answering its local's name.
+                if isinstance(node.value, ast.Call):
+                    node.value._pygpgpu_bare_statement = True
                 code, _ = self._visit_expression(node.value)
                 if code:
                     self._emit(f"{code};")

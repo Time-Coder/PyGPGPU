@@ -57,11 +57,18 @@ DECLARATOR_KINDS:Tuple[str, ...] = (
     "identifier", "field_identifier", "pointer_declarator", "array_declarator",
     "function_declarator", "parenthesized_declarator", "init_declarator",
     "attributed_declarator",
+    # A reference parameter (`constant float& alpha`, what the generated kernels
+    # declare for every scalar) is a declarator too: without it here, the whole
+    # parameter is skipped and the launch reads a shorter signature than the
+    # device one -- a scalar bound to the wrong slot, or "takes 3 arguments but 5
+    # were given".
+    "reference_declarator",
 )
 
 # The type kinds the walk reads as the head of a declaration.
 TYPE_KINDS:Tuple[str, ...] = (
     "primitive_type", "type_identifier", "sized_type_specifier", "struct_specifier",
+    "union_specifier",
     "enum_specifier", "template_type", "dependent_type", "decltype",
 )
 

@@ -43,15 +43,21 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import numpy as np
+from ...driver.metal import MetaMetal
 from ...driver.metal import _wait_ready
+from .copyback import (_MTCOMMAND_BUFFER_STATUS_COMPLETED, _POLL_INTERVAL,
+                      _finish_buffer)
 from ...driver.objc import ObjC
 from ....utils import settle_future
 
 if TYPE_CHECKING:
+    import asyncio
+
     from ..buffer import Buffer
     from ..program import Program
     from ..program_info import ArgInfo
 
+from .launch import BoundKernel as BoundKernel
 from .scalars import (
     BoundEntry,
     Extents,
@@ -75,7 +81,13 @@ class MetalKernel:
     def __init__(self, program:"Program", name:str)->None:
         self._program:"Program" = program
         self._name:str = name
-        self.args:Dict[str, "ArgInfo"] = {}
+        # The launch path reads `kernel._args` on every backend the decorator drives
+        # (the OpenCL kernel publishes the same attribute through its `args` property
+        # pair below), so Metal carries the private spelling and keeps the public one
+        # an alias of it.
+        self._args:Dict[str, "ArgInfo"] = {}
+        self._arg_list:List["ArgInfo"] = []
+        self._arg_names:List[str] = []
         # The device signature's trailing attribute parameters, which the threadgroup
         # dispatch fills in. They are not bindable, and `args` therefore stops before
         # them -- which is what makes a host-bound parameter's position in `args` equal
@@ -83,6 +95,7 @@ class MetalKernel:
         self.dispatch_parameters:List[str] = []
         self.type_checked:bool = False
         self._pipeline:Optional[int] = None
+        self._bound_entries:List[Tuple["Buffer", object, object]] = []
 
     def take_bound_entries(self)->List[Tuple["Buffer", object, object]]:
         """The argument buffers the last `_bind_args` claimed, and consume the list.
@@ -96,6 +109,33 @@ class MetalKernel:
         entries = self._bound_entries
         self._bound_entries = []
         return entries
+
+    @property
+    def args(self)->Dict[str, "ArgInfo"]:
+        """The bindable parameters, keyed by name (the shared launch surface)."""
+        return self._args
+
+    @args.setter
+    def args(self, args:Dict[str, "ArgInfo"])->None:
+        self._args = args
+        self._arg_list = list(args.values())
+        self._arg_names = list(args.keys())
+
+    def set_threadgroup_allocations(self, byte_sizes:List[int])->None:
+        """Record the byte size of every `threadgroup`-space parameter, in order.
+
+        The launch metadata carries one entry per `local_buffers` record (element
+        width times count), and the parser read the parameters in the same
+        declaration order -- so the two lists zip positionally.
+        """
+        self._threadgroup_allocations:List[Tuple[str, int]] = list(zip(
+            (name for name, info in self._args.items()
+             if getattr(info, "address", None) == "local"),
+            byte_sizes))
+
+    def threadgroup_allocations(self)->List[Tuple[str, int]]:
+        """The `(parameter name, byte length)` pairs `_encode` announces."""
+        return getattr(self, "_threadgroup_allocations", [])
 
     def __repr__(self)->str:
         return f"MetalKernel({self._name})"
@@ -116,8 +156,10 @@ class MetalKernel:
         return self._pipeline
 
     def _build_pipeline(self)->int:
+        # `newFunctionWithName:` takes an `NSString *`, so the bridge passes a real
+        # string object -- a bare `c_char_p` is a garbage object pointer there.
         function_id = ObjC.send_ptr(self._program.id, "newFunctionWithName:",
-                                    (ctypes.c_char_p,), self._name.encode("utf-8"))
+                                    (ctypes.c_void_p,), ObjC.string(self._name))
         if not function_id:
             raise RuntimeError(
                 f"{self._program.file_name} declares no function {self._name!r}")
@@ -149,9 +191,15 @@ class MetalKernel:
         dispatch-supplied tail is all an ordinary generated kernel needs. A
         handwritten source may order them differently, which is why the test is per
         parameter rather than positional.
+
+        A `threadgroup`-space pointer (`_local0`, what a `local_array_per_group`
+        buffer declares) is excluded as well: the dispatch allocates that memory per
+        threadgroup and no host buffer exists to bind -- the same slot the OpenCL
+        launch skips when it walks its argument list.
         """
         return [name for name in self.args
-                if not getattr(self.args[name], "dispatch_supplied", False)]
+                if not getattr(self.args[name], "dispatch_supplied", False)
+                and getattr(self.args[name], "address", None) != "local"]
 
     def _bind_args(self, args:Tuple[object, ...],
                    kwargs:Dict[str, object])->List[BoundEntry]:
@@ -196,7 +244,9 @@ class MetalKernel:
             argument:object = args[position]
             arg_info:"ArgInfo" = self.args[name]
             if arg_info.is_ptr:
-                if not isinstance(argument, np.ndarray):
+                is_struct_param:bool = (self._program.structs.get(arg_info.base_type_str)
+                                        is not None)
+                if not is_struct_param and not isinstance(argument, np.ndarray):
                     raise TypeError(
                         f"argument '{name}' must be np.ndarray, got "
                         f"{type(argument).__name__}")
@@ -229,7 +279,7 @@ class MetalKernel:
         return self.__getitem__(None)._launch_async(
             args, kwargs, concurrent.futures.Future)
 
-    def async_call(self, *args:object, **kwargs:object)->Any:
+    def async_call(self, *args:object, **kwargs:object)->"asyncio.Future":
         """Launch without waiting, returning an ``asyncio.Future`` to ``await``."""
         import asyncio
 
@@ -238,206 +288,6 @@ class MetalKernel:
             args, kwargs, lambda: _asyncio_future_of(asyncio))
 
 
-class BoundKernel:
-    """A kernel with its work size fixed: the object a launch is made on."""
-
-    def __init__(self, kernel:MetalKernel,
-                 work_sizes:Optional[Extents])->None:
-        self._kernel = kernel
-        self._work_sizes = work_sizes
-
-    def __call__(self, *args:object, **kwargs:object)->None:
-        """The synchronous launch: encode, commit, wait, copy back, release."""
-        _wait_ready()
-        kernel = self._kernel
-        bound = kernel._bind_args(args, kwargs)
-
-        command_buffer:int = kernel.program.context.command_queue.new_command_buffer()
-        try:
-            self._encode(command_buffer, bound)
-            ObjC.send(command_buffer, "commit", (), ctypes.c_void_p)
-            ObjC.send(command_buffer, "waitUntilCompleted", (), ctypes.c_void_p)
-            # The launch has waited, so the copies back can happen inline.
-            error_obj:int = ObjC.send_ptr(command_buffer, "error")
-            encode_error:Optional[BaseException] = None
-            if error_obj:
-                encode_error = RuntimeError(
-                    f"the metal launch failed: {ObjC.describe(error_obj)}")
-            for buffer, host_value, claim in self._claim_entries():
-                _finish_buffer(buffer, host_value, claim, encode_error)
-        finally:
-            ObjC.release(int(command_buffer))
-
-    def _launch_async(self, args:Tuple[object, ...],
-                      kwargs:Dict[str, object], future_type:type)->Any:
-        """Launch without waiting; the future settles when the work has finished.
-
-        Metal reports completion through the command buffer's `status`, so a poller
-        thread watches it and settles the future when the buffer completes -- the
-        shape the other backends' stream callbacks give them, reached through the
-        one completion mechanism this driver surface exposes without blocks. An
-        encode-time failure never starts a poller: it settles the future directly.
-        """
-        future:Any = future_type()
-        try:
-            command_buffer, entries = self._enqueue(args, kwargs)
-        except BaseException as encode_error:
-            settle_future(future, encode_error)
-            return future
-
-        def watch() -> None:
-            while ObjC.send_int(command_buffer, "status") \
-                    < _MTCOMMAND_BUFFER_STATUS_COMPLETED:
-                time.sleep(_POLL_INTERVAL)
-            error_obj:int = ObjC.send_ptr(command_buffer, "error")
-            if error_obj:
-                message:str = ObjC.describe(error_obj)
-                settle_future(future, RuntimeError(
-                    f"the metal launch failed: {message}"))
-                return
-            for buffer, host_value, claim in entries:
-                _finish_buffer(buffer, host_value, claim)
-            settle_future(future)
-            # The buffer's work is done and the launch holds nothing else against it.
-            ObjC.release(int(command_buffer))
-
-        threading.Thread(target=watch, name="pygpgpu-metal", daemon=True).start()
-        return future
-
-    def _enqueue(self, args:Tuple[object, ...],
-                 kwargs:Dict[str, object])->Tuple[int, List[Tuple["Buffer", object, int]]]:
-        """Bind, encode and commit without waiting; answer what completion needs.
-
-        `(command_buffer, entries)`: the buffer a completion waits on or polls, and
-        one `(buffer, host_value, claim_serial)` per pointer argument -- the serial
-        the release must carry so it cannot free a claim the buffer no longer holds
-        (see `Buffer.unuse`). An encode-time failure releases the buffer here and
-        re-raises, so a caller's `finally` never sees a half-encoded buffer.
-        """
-        _wait_ready()
-        kernel = self._kernel
-        bound = kernel._bind_args(args, kwargs)
-        command_buffer:int = kernel.program.context.command_queue.new_command_buffer()
-        try:
-            self._encode(command_buffer, bound)
-            ObjC.send(command_buffer, "commit", (), ctypes.c_void_p)
-        except BaseException:
-            ObjC.release(int(command_buffer))
-            raise
-        return command_buffer, self._claim_entries()
-
-    def _encode(self, command_buffer:int, bound:List[BoundEntry])->None:
-        """The encode half of a launch, shared by the synchronous and async paths."""
-        kernel = self._kernel
-        encoder:int = ObjC.send_ptr(command_buffer, "computeCommandEncoder")
-        if not encoder:
-            raise RuntimeError("Metal could not create a compute command encoder")
-        ObjC.send(encoder, "setComputePipelineState:", (ctypes.c_void_p,),
-                  ctypes.c_void_p, kernel.pipeline)
-        # Only the host-bound indices are set: a dispatch-supplied parameter has
-        # nothing for the host to write (see the module docstring). A buffer takes
-        # `setBuffer:offset:atIndex:` and a scalar takes `setBytes:length:atIndex:`;
-        # binding a scalar as a buffer would present a pointer where MSL declared a
-        # value, and the pipeline rejects that launch.
-        for index, value, is_buffer in bound:
-            if is_buffer:
-                ObjC.send(encoder, "setBuffer:offset:atIndex:",
-                          (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t),
-                          ctypes.c_void_p, value.id, 0, index)
-            else:
-                payload:bytes = value
-                # `setBytes:` reads from the pointer for the duration of the call
-                # only, which is what the encoder copies from -- so a temporary
-                # ctypes array is the right holder, not a buffer the launch must
-                # keep alive.
-                data = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
-                ObjC.send(encoder, "setBytes:length:atIndex:",
-                          (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t),
-                          ctypes.c_void_p,
-                          ctypes.cast(data, ctypes.c_void_p), len(payload), index)
-        threadgroups, threads = self._dispatch_shape()
-        ObjC.send(encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
-                  (MTLSize, MTLSize), ctypes.c_void_p,
-                  _mtl_size(threadgroups), _mtl_size(threads))
-        ObjC.send(encoder, "endEncoding", (), ctypes.c_void_p)
-
-    def _claim_entries(self)->List[Tuple["Buffer", object, int]]:
-        """One `(buffer, host_value, claim_serial)` per pointer argument.
-
-        The serial is captured now, at claim time: a release that fires after the
-        buffer was handed out again carries a stale serial and must not free the new
-        holder's claim.
-        """
-        return [(buffer, host_value, buffer.claim_serial)
-                for buffer, host_value, _need in self._kernel.take_bound_entries()]
-
-    def _dispatch_shape(self)->Tuple[Tuple[int, ...], Tuple[int, ...]]:
-        """The `(threadgroups, threads_per_threadgroup)` pair for this launch."""
-        work_sizes:Optional[Extents] = self._work_sizes
-        if work_sizes is None:
-            # Automatic: the caller did not bracket, so one threadgroup of one
-            # thread is the safe launch -- work items that ask for an id get 0.
-            return (1, 1, 1), (1, 1, 1)
-        if isinstance(work_sizes, int):
-            work_sizes = (work_sizes,)
-        extents:List[Extents] = list(work_sizes)
-        if len(extents) == 1:
-            # A bare item count: that many one-thread groups, so every item is one
-            # thread. The shared work-size code derived the same total on the other
-            # backends; Metal expresses it as a one-axis grid.
-            return (int(extents[0]), 1, 1), (1, 1, 1)
-        if len(extents) != 2:
-            raise ValueError(
-                "the work size bracket must be n, (blocks,), or "
-                "(blocks_per_grid, threads_per_block)")
-        # The pair is CUDA's `(blocks_per_grid, threads_per_block)`, and either side
-        # may be written as a scalar (`(4, 256)`) or as a per-axis tuple
-        # (`((4, 1, 1), (256, 1, 1))`). Both spellings are accepted here, because the
-        # bracket is shared with the other backends and `k[(4, 256)]` is the common
-        # form -- the scalar spelling used to raise `TypeError: 'int' object is not
-        # iterable`, which made the ordinary case fail.
-        threadgroups = _axis_extents(extents[0], "blocks_per_grid")
-        threads = _axis_extents(extents[1], "threads_per_block")
-        return threadgroups, threads
-
-
-def _finish_buffer(buffer:"Buffer", host_value:object,
-                   need_read_back:object, error:Optional[BaseException]=None)->None:
-    """Copy a written buffer back into the caller's array and release its claim.
-
-    `need_read_back` comes from the argument's `ArgInfo` -- the shared read/write
-    analysis every backend consults -- rather than from a mask tested here, so a
-    buffer the body never writes is not copied back and a written one always is.
-    The synchronous launch passes the read-back flag and no error; the asynchronous
-    poller passes the claim's serial instead, so the release cannot free a claim the
-    buffer no longer carries.
-
-    StorageModeShared makes the device's bytes the host's bytes, so the read-back is
-    a copy from the buffer's own contents.
-    """
-    try:
-        if need_read_back is True and error is None and host_value is not None and \
-                isinstance(host_value, np.ndarray):
-            source = ctypes.string_at(buffer._contents(), buffer.size)
-            host_value.reshape(-1).view(np.uint8)[:buffer.size] = np.frombuffer(
-                source, dtype=np.uint8)[:host_value.nbytes]
-    finally:
-        # The claim is released on every path; a release carrying a serial the buffer
-        # no longer holds is a no-op (see MemObject.unuse), so it never shadows the
-        # read-back's own error. A raise from the release itself (a buffer that never
-        # had a claim) is absorbed: the read-back's failure is the one worth seeing.
-        try:
-            buffer.unuse(need_read_back if isinstance(need_read_back, int) else None)
-        except RuntimeError:
-            pass
-
-# `MTLCommandBufferStatus`: the value `status` answers once every command in the
-# buffer has finished. The poller waits for the buffer to reach it.
-_MTCOMMAND_BUFFER_STATUS_COMPLETED:int = 3
-# How long the completion poller sleeps between status reads. A launch takes
-# microseconds to tens of milliseconds; this is short enough to feel immediate and
-# long enough that a sleeping poller costs nothing.
-_POLL_INTERVAL:float = 0.0002
 
 # The shared `oop` spelling for a launchable entry point. Every other backend's
 # `program`/`kernel` module publishes `Kernel`, and a caller that walks a backend's

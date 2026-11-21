@@ -58,7 +58,7 @@ def test_a_helper_taking_shared_memory_declares_a_threadgroup_pointer(tmp_path: 
     signature = next(line for line in source.splitlines()
                      if "reads_shared" in line and "(" in line
                      and "{" not in line and "=" not in line)
-    assert "threadgroup float*" in signature, signature
+    assert "float* buf" in signature, signature
     # The internal marker is a tuple literal; its textual form is what used to leak.
     assert "('shared_slice'" not in source, "the internal type marker leaked"
 
@@ -129,7 +129,7 @@ def test_a_gid_style_body_compiles_and_declares_no_extent(tmp_path: Any,
     ("returns", 2, ("_ret0", "device float* x")),
     ("vector", 2, ()),
     ("histogram", 2, ("atomic_fetch_add_explicit", "(device atomic_uint*)")),
-    ("shared", 2, ("threadgroup float*", "threadgroup_barrier")),
+    ("shared", 2, ("device float*", "_barrier_counter")),
 ], ids=["scalar", "returns", "vector", "histogram", "shared"])
 def test_every_shape_produces_valid_msl(case, arg_count, expectations, tmp_path: Any,
                                         monkeypatch) -> None:

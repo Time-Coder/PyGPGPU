@@ -106,6 +106,20 @@ class _BuildLaunchMixin:
                 self.raw_func, [name], tuple(plan.args), instance).get(name, 0))
             plan.full.append(plan.slot)
             plan.carried_slots[name] = plan.slot
+        # Metal's spin barrier arrives through a device counter appended after every
+        # parameter the launch derives from (see `metal_codegen.barrier` for why the
+        # plain fence is not emitted there). One uint32 slot per threadgroup; the
+        # launch zeroes it, so every call starts from a counter at 0. The buffer is
+        # appended in `_build_phase_args`, where the launch's group count is known.
+        #
+        # These are *per kernel* facts. A body split into passes gives each pass its own
+        # signature, and the metadata records one entry per pass; the single-phase fast
+        # path records a plain flag. `None` here means "ask the phase list", which the
+        # launch resolves per position (see `_phase_metal_flags`).
+        plan.has_barrier:object = plan.launch_meta.get("has_barrier")
+        plan.has_atomic64:object = plan.launch_meta.get("has_atomic64")
+        plan.local_element_counts:object = plan.launch_meta.get("local_element_counts") or []
+        plan.local_dtypes:object = plan.launch_meta.get("local_dtypes") or []
         plan.own_count:int = len(plan.full)
 
         # Outer-scope values are read before the launch arguments are built: a shape

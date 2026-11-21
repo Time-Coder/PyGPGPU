@@ -53,16 +53,16 @@ def test_a_complex_parameter_is_declared_by_value(tmp_path: Any) -> None:
 
     MSL has no complex type, so `kernel/complex.py` declares the two fixed records (`c64`
     is a `float` pair, `c128` a `double` pair) and the translator emits one as a parameter
-    the way it emits a scalar: by value, in the thread address space. The parser is what a
-    launch binds against, so a `device c64*` here would be bound as a buffer -- the wrong
-    path entirely.
+    the way it emits a scalar: a `constant` reference (the MSL spelling a scalar kernel
+    parameter carries, see `render._scalar_param`). The parser is what a launch binds
+    against, so a `device c64*` here would be bound as a buffer -- the wrong path entirely.
     """
     types = [infer_ctype(1 + 2j), infer_ctype(np.zeros(8, np.complex64))]
     translator = FunctionTranslator(complex_scalar, types, "metal", lambda name: None, {},
                                     is_kernel=True)
     translator.translate()
     body = "\n\n".join(source for _, source in translator.render_kernels("k_complex"))
-    assert "c64 value" in body, body
+    assert "constant c64& value" in body, body
     assert "device c64* value" not in body, body
 
     source_file = tmp_path / "generated.metal"

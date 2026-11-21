@@ -64,15 +64,18 @@ def test_shared_memory_is_a_threadgroup_parameter(tmp_path: Any, monkeypatch) ->
         program_module.Program = original
 
     source: str = captured["source"]
-    assert "threadgroup uint*" in source
+    assert "device uint*" in source
     assert "__local" not in source
-    # The barrier and the atomics are Metal's own spellings too.
-    assert "threadgroup_barrier" in source
+    # The barrier and the atomics are Metal's own spellings too. The barrier is
+    # the device-counter spin (see `metal_codegen.barrier` for why the plain
+    # `threadgroup_barrier` is not emitted on the affected driver), so the source
+    # names the counter parameter and the C++11 atomic family.
+    assert "_barrier_counter" in source
     assert "atomic_fetch_add_explicit" in source
     assert "atomicAdd" not in source
-    # Both address spaces appear: the threadgroup scratch buffer and the device
-    # histogram are different atomics.
-    assert "threadgroup atomic_uint" in source
+    # The histogram itself is a device buffer: `atomic_add` casts its pointer to
+    # `device atomic_uint*` (the shared buffer travels in device memory, and the
+    # histogram is a plain device argument).
     assert "device atomic_uint" in source
 
 
@@ -131,10 +134,13 @@ def test_a_block_local_array_is_a_threadgroup_parameter_too(tmp_path: Any,
         program_module.Program = original
 
     source: str = captured["source"]
-    assert "threadgroup int*" in source
+    assert "device int*" in source
     assert "__local" not in source
-    assert "threadgroup_barrier" in source
-    # The element access names the declared array directly, with no group subscript left
-    # to fold: `_local0[lane]`, never `_local0[blockIdx][lane]` or an offset from one.
+    # The spin barrier carries the counter parameter; the plain fence is not emitted
+    # (see `metal_codegen.barrier`).
+    assert "_barrier_counter" in source
+    # The element access names the declared array directly. A block-local buffer
+    # (`shared_array`, the gid style) is ONE work item's own storage -- no group
+    # subscript, no offset: `_local0[lane]`, never `_local0[blockIdx][lane]`.
     assert "_local0[lane]" in source
     assert "blockIdx" not in source

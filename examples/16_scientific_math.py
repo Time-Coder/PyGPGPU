@@ -42,14 +42,18 @@ def main() -> None:
 
     print("== the functions both backends have ==")
     out = np.zeros(len(values), dtype=np.float32)
-    evaluate(values, out)
+    # erf/tgamma have no MSL spelling (MSL declares neither family), so the
+    # default-probe launch would refuse on this Mac; OpenCL carries both.
+    evaluate["opencl"](values, out)
     for value, result in zip(values, out):
         print(f"  erf({value}) + tgamma({value} + 1) = {result:.6f}")
     print(f"  (the host says {erf(values[1]) + tgamma(values[1] + 1.0):.6f} for the second)")
 
     print("== a device function registered by name ==")
     out = np.zeros(len(values), dtype=np.float32)
-    evaluate_with_the_registered_function(values, out)
+    # `device_function` registers an OpenCL and a CUDA implementation; on a Mac
+    # the default probe lands on Metal, which has none, so name the backend.
+    evaluate_with_the_registered_function["opencl"](values, out)
     print(f"  my_fast_rcp -> {np.round(out, 6).tolist()}")
 
     print("== the CUDA-only ones ==")

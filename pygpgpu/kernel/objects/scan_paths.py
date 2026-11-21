@@ -12,11 +12,19 @@ def looks_like_object(value:object)->bool:
     """Whether an argument is an arbitrary python object rather than a value we already know.
 
     Everything the translator already handles is excluded: arrays, numpy scalars, plain
-    numbers, strings, device handles, and anything that is a `ctypes` structure *or union* --
-    a caller's declared layout and a vector type included, all of which already have a device
-    type. A union is not a `ctypes.Structure` subclass, so testing for that alone sent every
-    union down this path, where the members are guessed from what the body reads and a
-    `p["i"]` spelling has no layout behind it to answer it.
+    numbers, strings, device handles, image arguments, and anything that is a `ctypes`
+    structure *or union* -- a caller's declared layout and a vector type included, all of
+    which already have a device type. A union is not a `ctypes.Structure` subclass, so
+    testing for that alone sent every union down this path, where the members are guessed
+    from what the body reads and a `p["i"]` spelling has no layout behind it to answer it.
+
+    An `Image` is excluded for a different reason: it is not an object to flatten into a
+    structure at all, it is a texture/surface handle. `_bind_images` turns it into the
+    backend's own texture object (a `cudaTextureObject_t`, an OpenCL `image2d_t` plus a
+    sampler) before compilation, and the subscript becomes that backend's sampling call.
+    Without the exclusion it was claimed here, refused for reading no attributes -- `src[y,
+    x]` is a subscript, not a member access -- and every GPU backend failed to compile a
+    kernel that takes a texture while the interpreter ran it correctly.
     """
     from ..structs import is_ctypes_record  # noqa: PLC0415 (import cycle)
 
@@ -25,6 +33,12 @@ def looks_like_object(value:object)->bool:
     if isinstance(value, (np.ndarray, np.generic)) or is_ctypes_record(value):
         return False
     if isinstance(value, (bool, int, float, complex, str, bytes)):
+        return False
+    # Lazy, like the `_is_device_handle` import below: `pygpgpu.image` reaches modules that
+    # import this one during package initialization.
+    from ...image import Image  # noqa: PLC0415 (import cycle)
+
+    if isinstance(value, Image):
         return False
     if not isinstance(value, (type, Callable)):
         from ..translator import _is_device_handle  # noqa: PLC0415 (import cycle)

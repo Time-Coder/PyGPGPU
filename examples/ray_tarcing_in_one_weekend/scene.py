@@ -3,7 +3,10 @@ from ray import Ray
 from pygf import color3f, normalize, mix, vector3f
 from utils import rand_vector3f_hemisphere
 import math
-from typing import override
+try:
+    from typing import override
+except ImportError:  # python < 3.12
+    from typing_extensions import override
 from interval import Interval
 
 

@@ -82,10 +82,15 @@ class ProgramParser(_MetalStructBuilderMixin, _MetalDeclarationsMixin,
         self._base_name = os.path.basename(file_name)
         self._includes = list(includes or ())
         self._defines = dict(defines or {})
+        from ...driver.metal import MetaMetal
+        if MetaMetal.print_info:
+            print(f"parsing {self._base_name} ... ", end="", flush=True)
         with open(file_name, "r", encoding="utf-8") as source:
             self._clean_code = source.read()
         self._parse()
         self._newest_mtime = os.path.getmtime(file_name)
+        if MetaMetal.print_info:
+            print("done. ", flush=True)
         return self._newest_mtime
 
     # ---- the walk ----
@@ -106,7 +111,7 @@ class ProgramParser(_MetalStructBuilderMixin, _MetalDeclarationsMixin,
         # guessing"), kept now that the tree says exactly which text defeated it.
         self._refuse_unreadable(tree.root_node)
         for child in self._top_level_nodes(tree.root_node):
-            if child.type == "struct_specifier":
+            if child.type in ("struct_specifier", "union_specifier"):
                 self._parse_struct(child)
             elif child.type == "function_definition":
                 self._parse_function(child)
@@ -201,6 +206,7 @@ class ProgramParser(_MetalStructBuilderMixin, _MetalDeclarationsMixin,
             array_shape=desc["array_shape"],
             type_qualifiers=desc["type_qualifiers"],
             kernel_flags=desc["kernel_flags"],
+            address=desc.get("address"),
         )
 
     @property

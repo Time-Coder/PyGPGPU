@@ -7,13 +7,15 @@ from typing import (
 )
 
 from .compile_plan import CompilePlan
+from ._build_phase_args import _BuildPhaseArgsMixin
 from ._compile_translate import _CompileTranslateMixin
 from ._compile_write import _CompileWriteMixin
 from ._compile_kernels import _CompileKernelsMixin
 
 
 class _PykernelCompileMixin(
-        _CompileTranslateMixin, _CompileWriteMixin, _CompileKernelsMixin):
+        _CompileTranslateMixin, _CompileWriteMixin, _CompileKernelsMixin,
+        _BuildPhaseArgsMixin):
 
 
     def _compile(self, args:List[object], arg_types:List[object], self_types:List[object],

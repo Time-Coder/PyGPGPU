@@ -19,74 +19,16 @@ from .predicates import (
     is_ptr,
 )
 from .outer_store import _OuterStoreMixin
+from .store_wrap import _StoreWrapMixin
 from .work_group import _WorkGroupMixin
 
 
-# The unsigned integer element types a store must wrap, and the signed type wide enough to
-# hold the same bit pattern. Converting through the signed type is what makes a *negative
-# float* store defined: C's float-to-unsigned conversion is undefined for a negative value
-# (the compiler answered 0 where numpy stores the modulo), while float-to-signed-integer and
-# signed-to-unsigned are both defined.
-_UNSIGNED_STORE_TYPES:frozenset = frozenset({"uchar", "ushort", "uint", "ulong"})
-_SIGNED_FOR_UNSIGNED:Dict[str, str] = {
-    "uchar": "signed char", "ushort": "short", "uint": "long long", "ulong": "long long",
-}
-_STORE_BIT_WIDTH:Dict[str, int] = {"uchar": 8, "ushort": 16, "uint": 32, "ulong": 64}
+class _AssignMixin(_StoreWrapMixin, _PrivateArrayMixin, _OuterStoreMixin, _WorkGroupMixin):
+    """Assignment, and the stores whose spelling differs per backend.
 
-
-class _AssignMixin(_PrivateArrayMixin, _OuterStoreMixin, _WorkGroupMixin):
-
-    # An integer element type whose *stored* value wraps, with the C cast that performs the
-    # wrap. The destination's own type does the modular reduction, which is exactly numpy's
-    # rule for the same assignment -- and it is a cast the compiler lowers for free, so no
-    # extra arithmetic is generated.
-    _WRAPPING_STORE_TYPES:Dict[str, str] = {
-        "char": "char", "short": "short", "int": "int", "long": "long",
-        "uchar": "uchar", "ushort": "ushort", "uint": "uint", "ulong": "ulong",
-        "bool": "bool",
-    }
-    def _wrap_for_store(self, element_type:object, code:str)->str:
-        """`code` cast so a store into an element of `element_type` wraps like numpy.
-
-        The value a kernel assigns into an array element is reduced modulo the element's
-        width, because that is what numpy does for the same assignment in the interpreter:
-
-            out = np.zeros(1, np.uint8)
-            out[0] = 255 + 1          # -> 0
-            np.uint8(255) + 1         # -> 0 (numpy wraps)
-
-        The device read the element as a 32-bit ``int`` (the documented `infer_ctype`
-        contract), so the sum was 256 and C's own conversion of 256 into an ``unsigned
-        char`` is *just* the wrap -- except for the negative-float case, where C's
-        float-to-unsigned conversion is undefined and the compiler answers 0 instead of
-        numpy's modulo (``uint8(-1.0) == 255``).
-
-        The cast is therefore always emitted for an integer destination: it is idempotent
-        when the value already fits, and it is the only thing that makes the two backends
-        agree on the cases that do not. A float destination is untouched -- casting a
-        `double` into a `float` element is ordinary narrowing and both sides agree.
-        """
-        if not isinstance(element_type, str) or element_type not in self._WRAPPING_STORE_TYPES:
-            return code
-        if element_type == "bool":
-            return f"(({code}) != 0)"
-        device_type:str = self._device_type(element_type)
-        wrapped:str = f"(({device_type})({code}))"
-        if element_type in _UNSIGNED_STORE_TYPES:
-            # A **negative float** into an unsigned element is the one case the cast alone
-            # cannot answer: C's float-to-unsigned conversion is undefined behaviour there
-            # and the compiler answers 0, while numpy stores the modulo (`uint8(-1.0)` is
-            # 255). Converting to the matching *signed* integer first makes the value an
-            # integer, and the integer-to-unsigned conversion is defined (it is the modulo
-            # the interpreter gives). A value already integral is unaffected, and a value
-            # too large for the signed type saturates -- the case numpy refuses at the call,
-            # which a kernel body cannot report.
-            signed:str = _SIGNED_FOR_UNSIGNED.get(element_type, "long long")
-            unsigned_bits:int = _STORE_BIT_WIDTH[element_type]
-            wrapped = (f"(({device_type})((long long)({code})))"
-                       if unsigned_bits >= 32 else
-                       f"(({device_type})(({signed})({code})))")
-        return f"({wrapped})"
+    The wrap an integer store performs lives in `store_wrap.py`: it is where the Apple
+    backends need a spelling of their own, and it is large enough to be its own subject.
+    """
 
     def _visit_assign(self, node:ast.Assign)->None:
         if len(node.targets) != 1:

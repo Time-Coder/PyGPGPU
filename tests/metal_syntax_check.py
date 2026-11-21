@@ -82,15 +82,7 @@ namespace metal {
     struct atomic_uint { unsigned value; };
     struct atomic_int { int value; };
     enum memory_order { memory_order_relaxed, memory_order_acquire,
-                        memory_order_release };
-    template<typename T> T atomic_fetch_add_explicit(T *p, unsigned v,
-                                                     memory_order o) {
-        T old = *p; p->value += v; return old;
-    }
-    template<typename T> bool atomic_compare_exchange_weak_explicit(
-        T *p, int *expected, int desired, memory_order a, memory_order b) {
-        (void)p; (void)expected; (void)desired; (void)a; (void)b; return false;
-    }
+                        memory_order_release, memory_order_acq_rel };
 
     inline float fast_exp(float v) { return v; }
     inline float fast_sin(float v) { return v; }
@@ -119,6 +111,90 @@ namespace metal {
         return mem_flags(a.bits | b.bits);
     }
     inline void threadgroup_barrier(mem_flags f) { (void)f; }
+    // The MSL atomics deduce the atomic type from the pointer (the generated
+    // sources cast it to `(device atomic_uint*)` / `(threadgroup atomic_uint*)`
+    // explicitly), and the value answers the wrapper's `value` member. The
+    // three-argument spelling is what `emit_atomic` emits; the spin barrier's
+    // four-argument calls (with `mem_flags`, see metal_codegen.barrier) are
+    // covered by the overloads after them.
+    template<typename T> auto atomic_fetch_add_explicit(T *p, unsigned v,
+                                                     memory_order o) -> decltype(p->value) {
+        (void)o;
+        decltype(p->value) old = p->value; p->value += v; return old;
+    }
+    template<typename T> auto atomic_fetch_add_explicit(T *p, unsigned v,
+                                                     memory_order o, mem_flags f) -> decltype(p->value) {
+        (void)f;
+        decltype(p->value) old = p->value; p->value += v; return old;
+    }
+    // `atomic_load_explicit` answers the VALUE (an `unsigned`, not the atomic
+    // wrapper), so the spin comparison against a plain uint compiles.
+    template<typename T> auto atomic_load_explicit(T *p, memory_order o)
+            -> decltype(p->value) {
+        (void)o;
+        return p->value;
+    }
+    template<typename T> auto atomic_load_explicit(T *p, memory_order o, mem_flags f)
+            -> decltype(p->value) {
+        (void)o; (void)f;
+        return p->value;
+    }
+    template<typename T> void atomic_store_explicit(T *p, unsigned v,
+                                                    memory_order o) {
+        (void)p; (void)v; (void)o;
+    }
+    template<typename T> bool atomic_compare_exchange_weak_explicit(
+        T *p, int *expected, int desired, memory_order a, memory_order b) {
+        (void)p; (void)expected; (void)desired; (void)a; (void)b; return false;
+    }
+    template<typename T> bool atomic_compare_exchange_weak_explicit(
+        T *p, int *expected, int desired, memory_order a, memory_order b, mem_flags f) {
+        (void)p; (void)expected; (void)desired; (void)a; (void)b; (void)f; return false;
+    }
+    template<typename T> auto atomic_fetch_sub_explicit(T *p, unsigned v,
+                                                     memory_order o) -> decltype(p->value) {
+        (void)o;
+        decltype(p->value) old = p->value; p->value -= v; return old;
+    }
+    template<typename T> auto atomic_fetch_min_explicit(T *p, unsigned v,
+                                                     memory_order o) -> decltype(p->value) {
+        (void)o;
+        decltype(p->value) old = p->value; p->value = p->value < v ? p->value : v; return old;
+    }
+    template<typename T> auto atomic_fetch_max_explicit(T *p, unsigned v,
+                                                     memory_order o) -> decltype(p->value) {
+        (void)o;
+        decltype(p->value) old = p->value; p->value = p->value > v ? p->value : v; return old;
+    }
+    template<typename T> auto atomic_fetch_and_explicit(T *p, unsigned v,
+                                                     memory_order o) -> decltype(p->value) {
+        (void)o;
+        decltype(p->value) old = p->value; p->value &= v; return old;
+    }
+    template<typename T> auto atomic_fetch_or_explicit(T *p, unsigned v,
+                                                     memory_order o) -> decltype(p->value) {
+        (void)o;
+        decltype(p->value) old = p->value; p->value |= v; return old;
+    }
+    template<typename T> auto atomic_fetch_xor_explicit(T *p, unsigned v,
+                                                     memory_order o) -> decltype(p->value) {
+        (void)o;
+        decltype(p->value) old = p->value; p->value ^= v; return old;
+    }
+    template<typename T> auto atomic_exchange_explicit(T *p, unsigned v,
+                                                    memory_order o) -> decltype(p->value) {
+        (void)o;
+        decltype(p->value) old = p->value; p->value = v; return old;
+    }
+    template<typename T> auto atomic_exchange_explicit(T *p, unsigned v,
+                                                    memory_order o, mem_flags f) -> decltype(p->value) {
+        (void)f;
+        decltype(p->value) old = p->value; p->value = v; return old;
+    }
+    template<typename T> void atomic_store_explicit(T *p, unsigned v,
+                                                    memory_order o, mem_flags f) {
+        (void)p; (void)v; (void)o; (void)f;
+    }
 }
 """
 
@@ -149,6 +225,30 @@ using namespace metal;
 #define access
 #define sample
 #define write
+
+// The work-item numbers are kernel parameters on Metal (see
+// `kernel/metal_codegen.py`), and a device helper that reads one receives it as a
+// parameter of its own -- but a helper's caller passes the launch terms positionally
+// and the stub has no parameter list to name. The prelude's macros expand onto those
+// parameters, so the stub defines the six underlying names as plain globals: the
+// address-space and attribute checks are the semantic ones, and this stub only
+// proves the text compiles as C++.
+inline int _mtl_thread_position_x = 0, _mtl_thread_position_y = 0, _mtl_thread_position_z = 0;
+inline int _mtl_thread_index_x = 0, _mtl_thread_index_y = 0, _mtl_thread_index_z = 0;
+inline int _mtl_threadgroup_position_x = 0, _mtl_threadgroup_position_y = 0, _mtl_threadgroup_position_z = 0;
+inline int _mtl_threads_per_threadgroup_x = 1, _mtl_threads_per_threadgroup_y = 1, _mtl_threads_per_threadgroup_z = 1;
+inline int _mtl_threads_per_grid_x = 1, _mtl_threads_per_grid_y = 1, _mtl_threads_per_grid_z = 1;
+inline int _mtl_threadgroups_per_grid_x = 1, _mtl_threadgroups_per_grid_y = 1, _mtl_threadgroups_per_grid_z = 1;
+
+struct _mtl_vec3 {
+    int x, y, z;
+};
+inline _mtl_vec3 _mtl_thread_position{};
+inline _mtl_vec3 _mtl_thread_index{};
+inline _mtl_vec3 _mtl_threadgroup_position{};
+inline _mtl_vec3 _mtl_threads_per_threadgroup{1, 1, 1};
+inline _mtl_vec3 _mtl_threads_per_grid{1, 1, 1};
+inline _mtl_vec3 _mtl_threadgroups_per_grid{1, 1, 1};
 """
 
 

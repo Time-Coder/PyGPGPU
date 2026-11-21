@@ -71,6 +71,18 @@ _SCALAR_SIZES:Dict[str, int] = {
 # memory shape.
 _COMPLEX_FORMATS:Dict[str, str] = {"c64": "<f", "c128": "<d"}
 
+# The component type each ctypes scalar class packs as. A vector record's fields
+# name ctypes classes (`c_float`), and the device spelling decides both the width
+# and the range check each component goes through.
+_COMPONENT_TYPE_NAMES:Dict[type, str] = {
+    ctypes.c_bool: "bool",
+    ctypes.c_int8: "char", ctypes.c_uint8: "uchar",
+    ctypes.c_int16: "short", ctypes.c_uint16: "ushort",
+    ctypes.c_int32: "int", ctypes.c_uint32: "uint",
+    ctypes.c_int64: "long", ctypes.c_uint64: "ulong",
+    ctypes.c_float: "float", ctypes.c_double: "double",
+}
+
 
 def _scalar_bytes(device_type:str, value:object)->bytes:
     """One scalar argument as the bytes the device's own type would hold.
@@ -82,6 +94,16 @@ def _scalar_bytes(device_type:str, value:object)->bytes:
     """
     if device_type in _COMPLEX_FORMATS:
         return _complex_bytes(device_type, value)
+    # A vector BY VALUE (`float3 offset`): the record's own fields, in declaration
+    # order, each packed as its component scalar. The parameter sits in MSL's
+    # thread address space like any value parameter, so `setBytes:` copies the
+    # whole struct's width -- 12 bytes for a float3 (compact, no fourth lane).
+    fields = getattr(type(value), "_fields_", None)
+    if fields:
+        return b"".join(
+            _scalar_bytes(_COMPONENT_TYPE_NAMES.get(field_type, "float"),
+                          getattr(value, name))
+            for name, field_type in fields)
     size:int = _SCALAR_SIZES.get(device_type, 4)
     if device_type in ("float",):
         return _pack_real(device_type, "<f", float(value), 3.4028235e38)

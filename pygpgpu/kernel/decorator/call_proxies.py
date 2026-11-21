@@ -136,6 +136,42 @@ class _BoundKernelMethod(_KernelBase[_P]):
         self._kernel:"PyKernel[_P]" = kernel
         self._instance:object = instance
 
+    @property
+    def __self__(self)->object:
+        """The receiver this bound form carries.
+
+        A python `MethodType` answers `__self__`, and the classmethod spellings in
+        the tests (and any caller mirroring the protocol) read it back to get the
+        receiver -- the class for a classmethod kernel, the instance for an
+        instance method. Without it, `bound.__self__` raises AttributeError where
+        the same access on a real bound method would have worked.
+        """
+        return self._instance
+
+    @property
+    def __func__(self)->"PyKernel[_P]":
+        """The kernel the bound form wraps (a `MethodType` answers the same way).
+
+        The classmethod-outermost spelling reaches the kernel's own surface through
+        it: `bound.__func__._cache_dir(...)`, `bound.__func__.raw_func`, and the
+        rest of the introspection a caller who holds only the bound form can ask
+        for.
+        """
+        return self._kernel
+
+    def __getattr__(self, name:str)->object:
+        """Forward kernel-owning attributes (`_cache_dir`, `raw_func`, ...).
+
+        The bound form is what callers hold, and the kernel's introspection
+        surface (`_cache_dir` for the generated sources, `raw_func` for the
+        decorated function, `_signature_stub` for the signature) lives on the
+        kernel itself. `__getattr__` runs only when normal lookup fails, so the
+        bound form's own attributes still win.
+        """
+        if name.startswith("__") or name in ("_kernel", "_instance"):
+            raise AttributeError(name)
+        return getattr(self._kernel, name)
+
     def __getitem__(self, item:object)->object:
         return _KernelCall(self._kernel, self._instance)[item]
 
@@ -147,6 +183,13 @@ class _BoundKernelMethod(_KernelBase[_P]):
     def __call__(self, *args:object, **kwargs:object)->Any:
         call_args:Tuple[object, ...] = _bind_arguments(self._kernel.raw_func, args, kwargs,
                                                     skip_first=True)
+        if self._kernel._is_classmethod or self._kernel._self_param == "cls":
+            # The receiver the descriptor bound is the class; passing it as the
+            # leading argument is the supported spelling for a class the kernel's
+            # qualname cannot resolve (a test-local class, say) -- the same shape
+            # `_KernelCall`'s class form accepts.
+            return self._kernel._invoke(self._instance, call_args, None, None,
+                                        None, None)
         return self._kernel._invoke(self._instance, call_args, None, None, None, None)
 
     @_native_argument_errors

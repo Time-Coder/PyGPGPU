@@ -86,14 +86,24 @@ def test_prologue_parameters_are_in_the_signature() -> None:
 
 
 def test_barrier_is_metal_spelling() -> None:
-    """The Metal barrier is `threadgroup_barrier`, never CUDA's `__syncthreads()`."""
-    assert "threadgroup_barrier" in msl_barrier()
-    assert "sync" not in msl_barrier().lower().replace("threadgroup_barrier", "")
+    """The Metal barrier orders the group, never CUDA's `__syncthreads()`.
+
+    The emitted spelling is the device-counter spin (see `metal_codegen.barrier`
+    for the driver defect the plain `threadgroup_barrier` fences around): the
+    arrival is an `atomic_fetch_add` on a `device atomic_uint*`, and no CUDA
+    spelling leaks in.
+    """
+    barrier:str = msl_barrier()
+    assert "atomic_fetch_add_explicit" in barrier
+    assert "atomic_load_explicit" in barrier
+    assert "__syncthreads" not in barrier
+    assert "threadgroup_barrier" not in barrier
     # And the emitted call is reached through the builtin, through the shared emitter.
     from pygpgpu.kernel.device_builtins import emit_barrier
 
-    assert "threadgroup_barrier" in emit_barrier("metal")
-    assert "__syncthreads" not in emit_barrier("metal")
+    emitted:str = emit_barrier("metal")
+    assert "atomic_fetch_add_explicit" in emitted
+    assert "__syncthreads" not in emitted
 
 
 @pytest.mark.parametrize("backend", ["opencl", "cuda"])

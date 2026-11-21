@@ -384,9 +384,8 @@ class _InitMixin:
             self.raise_sites:List[Dict[str, object]] = []
             # Set when a call site inside the unit was admitted to native recursion:
             # the generated code calls itself (or a cycle partner) as a plain device
-            # function, so the launch has to provide a per-thread stack that fits the
-            # depth the caller's data implies (see _compile_kernels's stack raise and
-            # PyKernel recursion_depth_hint).
+            # function, so the launch provides a per-thread stack (see
+            # _compile_kernels's stack raise and PyKernel recursion_depth_hint).
             self.uses_native_recursion:bool = False
             # True when a raise reached the generated code, so the render adds the exception
             # slot and the host reads it after the launch.

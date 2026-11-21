@@ -237,6 +237,12 @@ class _RunLaunchMixin:
             # `(global_work_size, local_work_size)` its API wants (see utils.blocks_to_global).
             plan.blocks = tuple(g // l for g, l in zip(global_size, local_size))
             plan.phase_geometry = (plan.blocks, local_size)
+            # The Metal shared buffers and barrier counters were sized with the
+            # one-group default (the group count is known only here); re-size them
+            # in place, so a 391-group launch allocates 391 slots (see
+            # `metal_codegen.barrier` for what the buffers carry).
+            if plan.backend == "metal":
+                self._resize_metal_shared(plan, plan.launch_args)
         else:
             plan.phase_geometry = None
         # Every phase of the body gets the same geometry: they are passes over one domain.

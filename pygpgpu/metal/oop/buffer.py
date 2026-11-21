@@ -20,12 +20,12 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import numpy as np
 
+from ...constants import KernelFlags
 from ..driver.objc import ObjC
 from .event import Event
 from .metalobject import MTLObject
 
 if TYPE_CHECKING:
-    from ...constants import KernelFlags
     from .context import CommandQueue, Context
 
 # MTLResourceOptions: StorageModeShared is (0 << 4); on macOS the CPU can map it.
@@ -176,6 +176,11 @@ class Buffer(MTLObject):
             return np.frombuffer(data, dtype=np.uint8), len(data)
         if isinstance(data, bytearray):
             return np.frombuffer(data, dtype=np.uint8), len(data)
+        if isinstance(data, (ctypes.Structure, ctypes.Union)):
+            # A ctypes record (a `self` receiver the launch travels as a structure):
+            # its bytes ARE the device layout, so the upload reads them directly.
+            size:int = ctypes.sizeof(data)
+            return np.frombuffer(memoryview(data).cast("B"), dtype=np.uint8), size
         array = np.asarray(data)
         if not array.flags["C_CONTIGUOUS"]:
             array = np.ascontiguousarray(array)

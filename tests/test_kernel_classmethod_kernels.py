@@ -99,7 +99,7 @@ def _source_of(bound, *args, backend:str):
     import shutil
     shutil.rmtree(cache_dir, ignore_errors=True)
     bound[backend](*args)
-    extension = {"cuda": "cu", "opencl": "cl", "hip": "hip"}[backend]
+    extension = {"cuda": "cu", "opencl": "cl", "hip": "hip", "metal": "metal"}[backend]
     files = sorted(glob.glob(f"{cache_dir}/*.{extension}"))
     assert files, f"no generated source under {cache_dir}"
     newest = max(files, key=lambda path: pathlib.Path(path).stat().st_mtime_ns)

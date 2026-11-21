@@ -15,6 +15,14 @@ from .predicates import (
 
 
 class _RenderMixin:
+    # The Metal render flags, class-level defaults so a translator that never
+    # touched a barrier or a 64-bit atomic answers False without init work (see
+    # `metal_codegen.barrier` and `atomics._emit_metal_cas_loop` for what each
+    # one adds to the generated signature).
+    has_barrier:bool = False
+    has_atomic64:bool = False
+
+
 
     def _needs_prologue_parameters(self)->bool:
         """Whether this device function must receive Metal's work-item parameters.
@@ -164,7 +172,7 @@ class _RenderMixin:
                 qualifier = "" if device else self._buffer_qualifier()
                 declarations.append(f"{qualifier}{element}* {name}")
             else:
-                declarations.append(f"{self._kernel_scalar_type(outer['type'])} {name}")
+                declarations.append(self._scalar_param(outer["type"], name))
         for name, entry in self.host_values.items():
             declarations.append(f"{self._host_value_declaration(name, entry, device)}")
         # The plain values a host-region statement bound: they are filled in at launch
@@ -180,7 +188,7 @@ class _RenderMixin:
                 qualifier = "" if device else self._buffer_qualifier()
                 declarations.append(f"{qualifier}{self._device_type(t[1])}* {device_name(name)}")
             else:
-                declarations.append(f"{self._kernel_scalar_type(t)} {device_name(name)}")
+                declarations.append(self._scalar_param(t, device_name(name)))
         return declarations
 
 
@@ -190,7 +198,7 @@ class _RenderMixin:
         if is_ptr(t):
             qualifier:str = "" if device else self._buffer_qualifier()
             return f"{qualifier}{self._device_type(t[1])}* {device_name(name)}"
-        return f"{self._kernel_scalar_type(t)} {device_name(name)}"
+        return self._scalar_param(t, device_name(name))
 
 
     def _device_type(self, t:str)->str:
@@ -199,7 +207,14 @@ class _RenderMixin:
         The translator's internal names follow OpenCL (uchar, ushort, uint, ulong). CUDA
         C does not define those four, so the CUDA path -- which HIP shares -- writes the
         full C form instead.
+
+        `"blockid"` is the *marker* a local holding a group id carries (see
+        `assign`), not a C type: the value is one component of a `blockIdx` read,
+        whose type is `int`. Leaving the marker through to the generated text
+        produced `blockid g = get_group_id(0);` -- an undeclared identifier.
         """
+        if t == "blockid":
+            return "int"
         if self._opencl_syntax:
             return t
         return _CUDA_TYPE_NAMES.get(t, t)
@@ -215,6 +230,21 @@ class _RenderMixin:
         if t == "bool":
             return self._device_type("uchar")
         return self._device_type(t)
+
+
+    def _scalar_param(self, t:object, name:str)->str:
+        """One scalar kernel parameter, as its backend spells it.
+
+        Metal is the odd one: an MSL kernel's plain by-value scalar is refused
+        ("invalid type 'thread float' for input declaration"), because a scalar
+        parameter without an address space lives in the `thread` space and kernel
+        arguments must come from the device side. The MSL spelling is a
+        `constant` reference -- the same parameter the scalar-in-`setBytes:`
+        binding feeds, read-only to every work item.
+        """
+        if self._metal_syntax:
+            return f"constant {self._kernel_scalar_type(t)}& {name}"
+        return f"{self._kernel_scalar_type(t)} {name}"
 
 
     def parameter_declarations(self)->List[str]:
@@ -251,14 +281,14 @@ class _RenderMixin:
             elif is_image(t):
                 params.append(f"{self._image_param_type(name, t)} {device_name(name)}")
             else:
-                params.append(f"{self._kernel_scalar_type(t)} {device_name(name)}")
+                params.append(self._scalar_param(t, device_name(name)))
         for array_name, dim in self.shapes_used:
             if dim >= 0:
-                params.append(f"const int {self._shape_var(array_name, dim)}")
+                params.append(self._scalar_param("int", self._shape_var(array_name, dim)))
             else:
                 # A negative dim is a sub-array extent (see _tail_var): the product of
                 # the axes a partial store's index leaves, bound per launch.
-                params.append(f"const int {self._tail_var(array_name, -dim - 2)}")
+                params.append(self._scalar_param("int", self._tail_var(array_name, -dim - 2)))
         # OpenCL sampling takes the sampler as a kernel argument; one per sampled
         # image, right after that image. The host binds a matching sampler per image,
         # so the Python-visible signature stays (image) only. Metal has no sampler
@@ -270,14 +300,31 @@ class _RenderMixin:
         for lc_name, lc_type, _ in self.local_buffers:
             if self._metal_syntax:
                 # MSL spells the work-group address space `threadgroup`, and a
-                # `threadgroup` buffer is a kernel parameter there too.
-                params.append(f"threadgroup {self._device_type(lc_type)}* {lc_name}")
+                # `threadgroup` buffer is a kernel parameter there too -- except
+                # on the macOS 27.2 driver, where every threadgroup-memory read
+                # that sits after a barrier answers 0 (see `metal_codegen.barrier`).
+                # A shared buffer therefore travels as a **device** slice per
+                # group: the launch allocates `groups * total` elements and the
+                # body indexes its own group's slice, which is exactly what the
+                # `buf[blockIdx][j]` spelling already means. The extra parameters
+                # the barrier's spin needs ride along at the end.
+                params.append(f"device {self._device_type(lc_type)}* {lc_name}")
             elif self._opencl_syntax:
                 params.append(f"__local {self._device_type(lc_type)}* {lc_name}")
 
         # Outer-scope parameters after everything the launch derives the work size from,
         # matching the order the host appends them in (see PyKernel._invoke_inner).
         params.extend(self._outer_param_declarations(device=False))
+
+        # Metal's spin barrier (see `metal_codegen.barrier` for why the plain fence is
+        # not emitted there) arrives through a device counter the launch allocates per
+        # group. One `atomic_uint` slot per threadgroup: the launch binds a buffer of
+        # `threadgroup_count * 4` bytes and the device resets nothing -- the counter is
+        # zero-initialized and every launch claim gets a fresh zeroed buffer. Declared
+        # after the outer parameters, so the host appends the counter LAST (see
+        # `_build_phase_args`'s metal branch, which appends it in the same position).
+        if self._metal_syntax and getattr(self, "has_barrier", False):
+            params.append("device atomic_uint* _barrier_counter")
 
         # Return slots come last, after every parameter the work size and samplers derive
         # from, so appending them at launch time cannot disturb those positions.
@@ -287,6 +334,15 @@ class _RenderMixin:
         # after everything the work size derives from" contract the return slots follow, so
         # the host appends these two buffers in the same order (see render_exception_params).
         params.extend(self.render_exception_params())
+
+        # A Metal kernel whose atomics ride a 64-bit element (see
+        # `atomics._emit_metal_cas_loop`) reads and writes that slot under a spin
+        # lock, and the lock word is a kernel parameter like the slot itself: one
+        # `atomic_uint` per slot element, zeroed by the launch, appended after
+        # every parameter the host binds (the same trailing contract the counter
+        # above follows).
+        if self._metal_syntax and getattr(self, "has_atomic64", False):
+            params.append("device atomic_uint* _atomic_lock")
 
         # Metal's work-item numbers arrive as attribute-decorated parameters, not as
         # `get_global_id()` calls (see kernel/metal_codegen.py). They are declared after

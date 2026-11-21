@@ -240,7 +240,21 @@ class PyKernel(_KernelBase[_P], _PykernelCallMixin, _PykernelInvokeMixin,
         # both reach the same bound form; `cls` is never an explicit argument. The `cls`
         # receiver *name* spells the same thing without the wrapper.
         if self._is_classmethod or self._self_param == "cls":
-            return _BoundKernelMethod(self, objtype if objtype is not None else type(obj))
+            # The receiver is the class. Class access gives it directly as `objtype`;
+            # the classmethod-outermost spelling wraps this descriptor in a
+            # `classmethod`, whose `__get__(None, Kls)` reaches here with obj=Kls
+            # and objtype=None -- and `type(obj)` would then answer `type`, the
+            # builtin, which is not the receiver. A class object it is either way:
+            # an actual class when obj/objtype is one, and `obj` itself when obj is
+            # already a type. The binding is remembered per kernel: a function-local
+            # class lives in no module globals, so the qualname fallback in
+            # `_owner_class_of` cannot find it -- the descriptor's last binding is
+            # the only record of what `cls` named.
+            receiver:object = (objtype if objtype is not None
+                               else (obj if isinstance(obj, type) else type(obj)))
+            if isinstance(receiver, type):
+                self._last_cls_receiver:object = receiver
+            return _BoundKernelMethod(self, receiver)
         if obj is None or not self._is_method:
             return self
         return _BoundKernelMethod(self, obj)

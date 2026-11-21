@@ -375,7 +375,12 @@ class _NumpyEmitMixin:
             # device has to as well. Spelling `sqrtf((float)2)` answered 1.41421354 where
             # numpy answers 1.4142135623730951. `math.*` keeps its own rule (python's
             # math.sqrt(2) is exact at the call, and the answer rounds like a float).
-            ret = "double"
+            # MSL has no `double` at all -- Metal's answer is the float32 form, the
+            # same narrowing a float32 kernel argument already accepts.
+            if self._metal_syntax:
+                ret = "float"
+            else:
+                ret = "double"
 
         if vec_arg is not None:
             # python semantics: math/np functions do not accept vector structs (np.sqrt(float4_value) raises TypeError).

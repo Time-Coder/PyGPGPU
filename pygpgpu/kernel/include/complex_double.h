@@ -121,7 +121,7 @@ COMPLEX_QUAL static COMPLEX_UNUSED int c128_equal(c128 a, c128 b)
 
 COMPLEX_QUAL static COMPLEX_UNUSED double c128_abs(c128 a)
 {
-    return hypot(a.re, a.im);
+    return COMPLEX_HYPOT(a.re, a.im);
 }
 
 COMPLEX_QUAL static COMPLEX_UNUSED double c128_angle(c128 a)
@@ -241,15 +241,15 @@ COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sqrt(c128 a)
         r.im = 0.0;
         return r;
     }
-    double magnitude = hypot(a.re, a.im);
+    double magnitude = COMPLEX_HYPOT(a.re, a.im);
     if (a.re >= 0.0)
     {
-        double t = sqrt((magnitude + a.re) * 0.5);
+        double t = COMPLEX_SQRT((magnitude + a.re) * 0.5);
         r.re = t;
         r.im = a.im / (2.0 * t);
         return r;
     }
-    double t = sqrt((magnitude - a.re) * 0.5);
+    double t = COMPLEX_SQRT((magnitude - a.re) * 0.5);
     r.re = (a.im < 0.0 ? -1.0 : 1.0) * fabs(a.im) / (2.0 * t);
     r.im = t;
     return r;
@@ -257,28 +257,28 @@ COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sqrt(c128 a)
 
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_exp(c128 a)
 {
-    double magnitude = exp(a.re);
+    double magnitude = COMPLEX_EXP(a.re);
     c128 r;
-    r.re = magnitude * cos(a.im);
-    r.im = magnitude * sin(a.im);
+    r.re = magnitude * COMPLEX_COS(a.im);
+    r.im = magnitude * COMPLEX_SIN(a.im);
     return r;
 }
 
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_log(c128 a)
 {
     c128 r;
-    r.re = log(hypot(a.re, a.im));
+    r.re = COMPLEX_LOG(COMPLEX_HYPOT(a.re, a.im));
     r.im = atan2(a.im, a.re);
     return r;
 }
 
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_exp2(c128 a)
 {
-    double magnitude = exp2(a.re);
+    double magnitude = COMPLEX_EXP2(a.re);
     double angle = a.im * 0.69314718055994530942;
     c128 r;
-    r.re = magnitude * cos(angle);
-    r.im = magnitude * sin(angle);
+    r.re = magnitude * COMPLEX_COS(angle);
+    r.im = magnitude * COMPLEX_SIN(angle);
     return r;
 }
 
@@ -303,16 +303,16 @@ COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_log10(c128 a)
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sin(c128 a)
 {
     c128 r;
-    r.re = sin(a.re) * cosh(a.im);
-    r.im = cos(a.re) * sinh(a.im);
+    r.re = COMPLEX_SIN(a.re) * COMPLEX_COSH(a.im);
+    r.im = COMPLEX_COS(a.re) * COMPLEX_SINH(a.im);
     return r;
 }
 
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_cos(c128 a)
 {
     c128 r;
-    r.re = cos(a.re) * cosh(a.im);
-    r.im = -sin(a.re) * sinh(a.im);
+    r.re = COMPLEX_COS(a.re) * COMPLEX_COSH(a.im);
+    r.im = -COMPLEX_SIN(a.re) * COMPLEX_SINH(a.im);
     return r;
 }
 
@@ -324,16 +324,16 @@ COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_tan(c128 a)
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_sinh(c128 a)
 {
     c128 r;
-    r.re = sinh(a.re) * cos(a.im);
-    r.im = cosh(a.re) * sin(a.im);
+    r.re = COMPLEX_SINH(a.re) * COMPLEX_COS(a.im);
+    r.im = COMPLEX_COSH(a.re) * COMPLEX_SIN(a.im);
     return r;
 }
 
 COMPLEX_QUAL static COMPLEX_UNUSED c128 c128_cosh(c128 a)
 {
     c128 r;
-    r.re = cosh(a.re) * cos(a.im);
-    r.im = sinh(a.re) * sin(a.im);
+    r.re = COMPLEX_COSH(a.re) * COMPLEX_COS(a.im);
+    r.im = COMPLEX_SINH(a.re) * COMPLEX_SIN(a.im);
     return r;
 }
 

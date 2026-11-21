@@ -57,7 +57,7 @@ class _MetalDeclarationsMixin:
             # A forward declaration or an anonymous struct: there is no layout to build.
             return
 
-        struct_info:"StructInfo" = self._new_struct_info(name, False)
+        struct_info:"StructInfo" = self._new_struct_info(name, node.type == "union_specifier")
         self._struct_infos[name] = struct_info
         for field in body.named_children:
             if field.type != "field_declaration":

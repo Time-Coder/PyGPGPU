@@ -168,6 +168,19 @@ class Kernel(_KernelArgsMixin, _KernelLaunchMixin, _KernelAsyncMixin, CLObject):
             # what CUDA's `stream.sync()` gives the other backends.
             queue.wait()
             Event.wait(all_events)
+            # The read-back copies run as driver-thread callbacks, and OpenCL's
+            # completion callbacks are NOT ordered against clFinish or
+            # clWaitForEvents: both return when the COMMANDS complete, while the
+            # python callbacks can still be queued on the driver's thread. A copy
+            # that lands after the wait hands the caller a buffer whose kernel
+            # writes have not been moved home yet (a stale member on a struct the
+            # body wrote). Running every pending copy on THIS thread after the
+            # waits makes the synchronous contract real: by the time `__call__`
+            # answers, the bytes are in the caller's objects.
+            for event in all_events:
+                for callback in list(event.on_completed_callbacks):
+                    callback(event, event.status)
+                event.on_completed_callbacks.clear()
         finally:
             # Every read-back event has completed, so the queue is idle.
             self._release_queue(queue, async_launch=False)

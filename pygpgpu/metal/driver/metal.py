@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import threading
 from typing import Callable, Dict, Optional
-from ctypes import CDLL, c_ulonglong, c_void_p
+from ctypes import CDLL, c_size_t, c_void_p
 
 from .objc import ObjC
+from ...utils.print_info import initial_print_info
 
 # The same background-initialization contract as every other driver (see the
 # module docstring): one event, one thread, one lock.
@@ -41,6 +42,13 @@ METAL_FRAMEWORK:str = "/System/Library/Frameworks/Metal.framework/Metal"
 
 class MetaMetal(type):
     """The driver entry points and the recorded init error, per the driver contract."""
+
+    # The verbose switch every other backend's driver carries (CL.print_info,
+    # NVRTC.print_info, MetaHIP.print_info): compile/load/copy/launch messages
+    # print only when it is set. It starts from the process-wide default in
+    # utils/print_info.py, so `config.print_info = False` silences Metal the
+    # same way it silences the other backends.
+    print_info:bool = initial_print_info()
 
     __dll = None
     # The exception init() hit when the machine has no runtime (the CDLL OSError
@@ -77,8 +85,8 @@ class MTL(metaclass=MetaMetal):
     func_signatures:Dict[str, Dict[str, object]] = {
         # id<MTLDevice> MTLCreateSystemDefaultDevice(void)
         "MTLCreateSystemDefaultDevice": {"args": {}, "restype": c_void_p},
-        # id<MTLDevice>* MTLCopyAllDevices(size_t* count)  (macOS only)
-        "MTLCopyAllDevices": {"args": {"count": c_void_p}, "restype": c_void_p},
+        # NSArray<id<MTLDevice>> *MTLCopyAllDevices(void)  (macOS only)
+        "MTLCopyAllDevices": {"args": {}, "restype": c_void_p},
     }
 
     class Func:
@@ -116,18 +124,23 @@ class MTL(metaclass=MetaMetal):
     def device_ids()->list:
         """Every Metal device, by handle, in the order MTLCopyAllDevices reports them.
 
-        `MTLCopyAllDevices` lists every GPU; when that entry point is absent (an
-        older runtime) the system-default device is the only one.
+        `MTLCopyAllDevices` is the macOS-only factory that lists every GPU, and it
+        is an Objective-C factory returning an `NSArray`: the array's contents are
+        reached with the two messages every NSArray answers (`count`,
+        `objectAtIndex:`) through the `objc` bridge, not by walking a raw pointer
+        (the array is an object, not a C array). When the entry point is absent
+        (an older runtime) the system-default device is the only one.
         """
-        from ctypes import POINTER, byref, c_void_p
-        count = c_ulonglong(0)
         try:
-            array = MTL.MTLCopyAllDevices(byref(count))
+            array = MTL.MTLCopyAllDevices()
         except AttributeError:
             array = 0
         if array:
-            handles = POINTER(c_void_p)(array)
-            return [int(handles[index]) for index in range(int(count.value))]
+            count = ObjC.send_int(array, "count")
+            return [
+                ObjC.send_ptr(array, "objectAtIndex:", (c_size_t,), index)
+                for index in range(count)
+            ]
         default = MTL.MTLCreateSystemDefaultDevice()
         return [default] if default else []
 

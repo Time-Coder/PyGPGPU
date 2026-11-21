@@ -46,6 +46,13 @@ class _PrepareLaunchMixin:
             owner:object = self.raw_func.__globals__.get(owner_name)
             if isinstance(owner, type):
                 return owner
+        # A function-local class (`<locals>` in the qualname) lives in no module
+        # globals, so the qualname cannot name it. The descriptor recorded what
+        # its last attribute access bound -- for a classmethod kernel the receiver
+        # IS the class -- and that record is the only thing that can answer here.
+        last:object = getattr(self, "_last_cls_receiver", None)
+        if isinstance(last, type):
+            return last
         raise TypeError(
             f"{self.__name__}() is a classmethod; call it on its class, which binds "
             f"cls automatically")
@@ -322,6 +329,18 @@ class _PrepareLaunchMixin:
         plan.shape_sources = _shape_sources
         plan.work_size_dims = _work_size_dims
         plan.local_sizes = _local_sizes
+        if plan.backend == "metal" and _local_sizes:
+            # Metal allocates a `threadgroup`-space parameter per threadgroup, and the
+            # encoder learns its byte size only through `setThreadgroupMemoryLength:`
+            # (see BoundKernel._encode). The sizes follow the translator's
+            # `local_buffers` order, which is the order the signature declares them in;
+            # the kernel object is the one place both the encode half and any later
+            # launch of the same kernel can read them from. `_kernel_obj` IS the
+            # MetalKernel (`_backend_compile` answered it); the duck-typed probe keeps
+            # a foreign object from breaking the launch.
+            set_allocations = getattr(_kernel_obj, "set_threadgroup_allocations", None)
+            if callable(set_allocations):
+                set_allocations(_local_sizes)
         plan.uses_global_id = _uses_global_id
         plan.image_samplers = _image_samplers
         plan.returns = _returns

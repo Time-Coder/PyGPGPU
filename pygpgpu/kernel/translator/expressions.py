@@ -144,6 +144,16 @@ class _ExpressionsMixin:
             # rule a python float follows -- which is why `1 + 2j` meets a complex64 operand
             # as a complex64 while `@kernel(float=np.float64)` makes it a complex128.
             kind:str = self._python_complex_kind()
+            if kind == "c128" and self._metal_syntax:
+                # MSL has no `double`, so a c128 (whose members are doubles) cannot
+                # exist in a Metal kernel, and a python complex literal defaults to
+                # that width. Refused here by name, with the two ways out -- the
+                # same shape the CUDA-only builtins use.
+                self._error(
+                    "a complex literal travels as c128 (double-precision members), and "
+                    "MSL has no `double`: Metal cannot compile this kernel. Map float to "
+                    "float32 (`@kernel(float=np.float32)`, the default) so the literal is "
+                    "a c64, or give the value an explicit c64 operand", node)
             return self._emit_complex_literal(value.imag, value.real, kind), kind
         self._error(f"unsupported constant: {value!r}", node)
 

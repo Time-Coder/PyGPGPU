@@ -3,7 +3,10 @@ from pygf import point3f, vector3f, dot
 from ray import Ray
 import math
 from interval import Interval
-from typing import override
+try:
+    from typing import override
+except ImportError:  # python < 3.12
+    from typing_extensions import override
 
 
 class Sphere(Hittable):

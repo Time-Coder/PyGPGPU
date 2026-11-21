@@ -34,9 +34,17 @@ from typing import List, Tuple
 # a kernel whose signature spelled these differently would compile to a body
 # referring to undeclared identifiers. The declaration order is (type, name,
 # attribute) as MSL spells it: the type first, the attribute after the name.
+#
+# The local-id slot is the vec3 attribute. MSL gives the same number two
+# spellings with different types: `thread_index_in_threadgroup` is the scalar
+# `uint` and `thread_position_in_threadgroup` is the `uint3` -- and the prologue
+# needs the vec3 one, because the `get_local_id(dim)` macro below projects
+# `.x`/`.y`/`.z` off the parameter. Declaring `uint3` with the scalar spelling is
+# a compile error ("type 'uint3' ... is not valid for attribute
+# 'thread_index_in_threadgroup'"), not a warning.
 PROLOGUE_PARAMETERS:Tuple[Tuple[str, str, str], ...] = (
     ("uint3", "_mtl_thread_position", "thread_position_in_grid"),
-    ("uint3", "_mtl_thread_index", "thread_index_in_threadgroup"),
+    ("uint3", "_mtl_thread_index", "thread_position_in_threadgroup"),
     ("uint3", "_mtl_threadgroup_position", "threadgroup_position_in_grid"),
     ("uint3", "_mtl_threads_per_threadgroup", "threads_per_threadgroup"),
     ("uint3", "_mtl_threads_per_grid", "threads_per_grid"),
@@ -111,11 +119,44 @@ def address_space_qualifier(opencl_word:str)->str:
 
 
 def barrier()->str:
-    """A work-group barrier.
+    """A work-group barrier, spelled for the driver this runs on.
 
     The threadgroup space is what a `local_array_per_group` buffer lives in, so its
     writes have to become visible across the group -- the same reason the OpenCL
     spelling names the local fence. The device fence is added because the array
     arguments are written through the same barrier.
+
+    **The plain spelling is not emitted, and that is a workaround, not a choice.**
+    On the macOS 27.2 driver this was brought up on (Apple M2, Metal 4), every
+    read of threadgroup memory that sits after a `threadgroup_barrier` answers 0 --
+    the contents vanish across the fence, an `atomic_*` on the same memory
+    included, while the barrier itself answers Completed and no error is raised.
+    That was verified against a native probe series (the same source compiles and
+    runs correctly on the documented spelling elsewhere), and it silently
+    corrupts every reduction and every histogram the translator generates.
+
+    The emitted call therefore orders the group through **device memory**, which
+    the probes show is unaffected: every thread adds 1 to the group's own counter
+    slot, and then spins until the slot reaches the next multiple of the
+    threadgroup width above the value it read on arrival. The "next multiple"
+    form is what makes the slot monotone across a body's many barriers (a
+    reduction tree barriers once per step) without a reset -- and without the
+    reset, no thread can race ahead into the next barrier and release the group
+    prematurely.
     """
-    return "threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)"
+    return ("{ uint _bc = atomic_fetch_add_explicit(&_barrier_counter[get_group_id(0)], "
+            "1u, memory_order_acq_rel, mem_flags::mem_device);"
+            "uint _width = (uint)get_local_size(0);"
+            "uint _target = ((_bc / _width) + 1u) * _width;"
+            "while (atomic_load_explicit(&_barrier_counter[get_group_id(0)], "
+            "memory_order_acquire, mem_flags::mem_device) < _target) {} }")
+
+
+def barrier_helpers()->List[str]:
+    """The device functions a generated kernel's barrier block needs.
+
+    The barrier is a statement block, not a callee (see `barrier`), so this stays
+    empty today; kept as the injection point so a helper-based spelling has a
+    home beside the other synthesized helpers.
+    """
+    return []

@@ -6,17 +6,25 @@ from __future__ import annotations
 
 
 
-def test_every_science_vocabulary_entry_has_a_metal_spelling() -> None:
+def test_every_science_vocabulary_entry_has_a_metal_spelling_or_refuses() -> None:
     """Metal must carry a spelling for every entry, or refuse by name -- never KeyError.
 
     The tables are keyed by backend, so a missing entry is a `KeyError` raised from
     inside the translation. Either a backend carries a spelling or the translator
     refuses the call with a message naming the backends that do: those are the only
     two acceptable outcomes.
+
+    erf/erfc/tgamma/lgamma are the deliberate gap: MSL declares neither the error
+    function nor the gamma family (metal_stdlib carries no such function), so the
+    four entries have no `metal` key and a Metal launch refuses them by name.
     """
     from pygpgpu.kernel.device_builtins import SHARED_MATH_BUILTINS, SHARED_MATH_TEMPLATES
 
+    NO_METAL: frozenset = frozenset(("erf", "erfc", "tgamma", "lgamma"))
     for name, table in list(SHARED_MATH_BUILTINS.items()) + list(SHARED_MATH_TEMPLATES.items()):
+        if name in NO_METAL:
+            assert "metal" not in table
+            continue
         assert "metal" in table, f"{name} has no metal spelling and would KeyError"
         assert table["metal"], f"{name}'s metal spelling is empty"
     # The two tables are disjoint: a name lives in exactly one, so the lookup order
@@ -46,7 +54,16 @@ def test_a_shared_math_name_emits_its_metal_spelling() -> None:
     """
     from pygpgpu.kernel.device_builtins import SHARED_MATH_BUILTINS, SHARED_MATH_TEMPLATES
 
+    # erf/erfc/tgamma/lgamma have no Metal spelling at all (MSL declares neither
+    # the error function nor the gamma family), so they are absent from the metal
+    # column by design and a Metal launch refuses them by name.
+    NO_METAL: frozenset = frozenset(("erf", "erfc", "tgamma", "lgamma"))
+
     for name, table in SHARED_MATH_BUILTINS.items():
+        if name in NO_METAL:
+            assert "metal" not in table, (
+                f"{name} has no MSL spelling, so its table must not claim one")
+            continue
         spelling = table["metal"]
         # A callee spelling is a bare identifier path, never an expression.
         assert "(" not in spelling and " " not in spelling, (

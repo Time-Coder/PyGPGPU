@@ -14,6 +14,7 @@ _PRINT_INFO_MODULES:Tuple[str, ...] = (
     "pygpgpu.cuda.driver.nvrtc",
     "pygpgpu.hip.driver.hip",
     "pygpgpu.hip.oop.hip_compiler",
+    "pygpgpu.metal.driver.metal",
 )
 
 # The process-wide default every backend's own flag starts from. A backend module is imported

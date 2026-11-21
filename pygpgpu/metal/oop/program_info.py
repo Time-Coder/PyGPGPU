@@ -19,9 +19,12 @@ Two things differ from CUDA and are load-bearing:
 """
 from __future__ import annotations
 
+import ctypes
+
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
+from ..driver.metal import MetaMetal
 
 from ... import numpy as gnp
 from ...constants import KernelFlags
@@ -112,12 +115,16 @@ class VarInfo:
             used_buffer, event = data._to_device(cmd_queue, self.name,
                                                  kernel_flags=self.kernel_flags)
         else:
-            used_buffer:Buffer = cmd_queue.context.get_buffer(data.nbytes)
+            size:int = (ctypes.sizeof(data) if isinstance(data, (ctypes.Structure,
+                        ctypes.Union)) else int(data.nbytes))
+            used_buffer:Buffer = cmd_queue.context.get_buffer(size)
             used_buffer.kernel_flags = self.kernel_flags
             # An argument the kernel never touches skips the copy entirely (see
             # need_upload); bind_data still records the read-back destination.
             if self.need_upload:
                 event = used_buffer.set_data(cmd_queue, data)
+                if MetaMetal.print_info:
+                    print(f"copy data to device for argument '{self.name}'", flush=True)
             else:
                 used_buffer.bind_data(data)
                 event = None
@@ -128,23 +135,35 @@ class ArgInfo(VarInfo):
 
     def __init__(self, name:str, type_str:str, array_shape:Tuple[int, ...],
                  type_qualifiers:Optional[list]=None,
-                 kernel_flags:Optional[KernelFlags]=None)->None:
+                 kernel_flags:Optional[KernelFlags]=None,
+                 address:Optional[str]=None)->None:
         VarInfo.__init__(self, name, type_str, array_shape, type_qualifiers, kernel_flags)
         # True for a parameter carrying a dispatch attribute (thread_position_in_grid
         # and friends): the threadgroup dispatch fills that slot in, so the launch
         # must not bind a buffer there. The parser sets it; it stays False for every
         # parameter a handler .metal file declares without an attribute.
         self.dispatch_supplied:bool = False
+        # The address space the declaration names ("global"/"constant"/"local"/"private"
+        # -- the parser's normalized words). `None` is the C default (private). A `local`
+        # pointer is a threadgroup allocation the dispatch hands out, not a buffer the
+        # host binds, so the launch skips it by this field.
+        self.address:Optional[str] = address
         self.member_infos:Dict[str, "VarInfo"] = {}
 
     def check_type(self, value:object)->None:
         """Validate one launch argument against its declared device type."""
         base = self.base_type_str
         if self.is_ptr:
-            if not isinstance(value, np.ndarray):
-                raise TypeError(
-                    f"argument '{self.name}' must be np.ndarray, got {type(value).__name__}")
-            return
+            # A structure pointer accepts the ctypes record the stub published for
+            # it (`Model_4ed5977ab6`, what a `self` receiver travels as) as well as
+            # a plain ndarray of the structure's dtype.
+            if isinstance(value, np.ndarray):
+                return
+            import ctypes as _ctypes
+            if isinstance(value, (_ctypes.Structure, _ctypes.Union)):
+                return
+            raise TypeError(
+                f"argument '{self.name}' must be np.ndarray, got {type(value).__name__}")
         if base in ("float", "double", "half"):
             if not isinstance(value, (int, float, np.floating)):
                 raise TypeError(

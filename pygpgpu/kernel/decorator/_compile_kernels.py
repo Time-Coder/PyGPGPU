@@ -1,6 +1,9 @@
 from __future__ import annotations
 import ast
 import os
+
+import numpy as np
+
 from typing import (
     Dict,
     List,
@@ -9,6 +12,24 @@ from typing import (
     Tuple,
 )
 from .. import source_paths
+
+
+# The numpy dtype a shared-buffer element travels as on Metal. It maps from the same
+# translator spellings the byte-size table reads, so one `local_buffers` record serves
+# both the launch (an element count and a dtype) and the byte size.
+_LOCAL_DTYPES:Dict[str, np.dtype] = {
+    "bool": np.dtype(np.bool_), "char": np.dtype(np.int8),
+    "uchar": np.dtype(np.uint8), "short": np.dtype(np.int16),
+    "ushort": np.dtype(np.uint16), "int": np.dtype(np.int32),
+    "uint": np.dtype(np.uint32), "long": np.dtype(np.int64),
+    "ulong": np.dtype(np.uint64), "float": np.dtype(np.float32),
+    "double": np.dtype(np.float64),
+}
+
+
+def _local_dtype_for(ctype:str)->np.dtype:
+    """The numpy dtype one shared-buffer element of `ctype` travels as on Metal."""
+    return _LOCAL_DTYPES.get(ctype, np.dtype(np.float32))
 
 
 def _merged_raise_sites(translator:object)->list:
@@ -132,6 +153,17 @@ class _CompileKernelsMixin:
         # Per phase, whether its kernel declares the return claim/site words (see
         # render_return_params): a pass whose only return runs in its host tail does not.
         plan.phase_claims:List[bool] = []
+        # Metal's per-phase launch metadata. A body split into passes gives each pass its
+        # own kernel, and the shared buffers / barrier counter / atomic lock a signature
+        # declares are facts about *that* signature -- `render.parameter_declarations`
+        # reads them off the phase's own translator. Reading them off the main translator
+        # instead left every such argument out of the launch for a multi-pass body (the
+        # main translator visits no loop, so its flags are all False), which bound the
+        # wrong values in every later slot.
+        plan.phase_has_barrier:List[bool] = []
+        plan.phase_has_atomic64:List[bool] = []
+        plan.phase_local_counts:List[List[int]] = []
+        plan.phase_local_dtypes:List[List[np.dtype]] = []
         if plan.translator.phase_translators:
             for plan.phase in plan.translator.phase_translators:
                 plan.phase_index:Dict[str, int] = {
@@ -140,6 +172,13 @@ class _CompileKernelsMixin:
                                      for array_name, dim in plan.phase.shapes_used])
                 plan.phase_created.append(list(plan.phase.host_values))
                 plan.phase_claims.append(bool(plan.phase._claims_on_device))
+                plan.phase_has_barrier.append(bool(getattr(plan.phase, "has_barrier", False)))
+                plan.phase_has_atomic64.append(bool(getattr(plan.phase, "has_atomic64", False)))
+                plan.phase_local_counts.append([count for plan._, plan._t, count
+                                                in plan.phase.local_buffers])
+                plan.phase_local_dtypes.append([
+                    plan.local_dtype_for(plan._t) for plan._, plan._t, plan._c
+                    in plan.phase.local_buffers])
         else:
             # One magic loop: the main translator *is* the only phase, and it binds the
             # created objects on itself.
@@ -233,6 +272,15 @@ class _CompileKernelsMixin:
                                       "int": 4, "uint": 4, "long": 8, "ulong": 8,
                                       "float": 4, "double": 8}
         plan.local_sizes:List[int] = [plan.ctype_sizes.get(ctype, 4) * count for plan._, ctype, count in plan.translator.local_buffers]
+        # Metal's shared buffers travel as device allocations (see `metal_codegen.barrier`
+        # for why threadgroup memory is not used there): the launch needs the element
+        # count per group and the element dtype, not a byte count. The numpy dtype maps
+        # from the same table the byte sizes read, so one `local_buffers` record serves
+        # both spellings.
+        plan.local_dtype_for = _local_dtype_for
+        plan.local_element_counts:List[int] = [count for plan._, ctype, count in plan.translator.local_buffers]
+        plan.local_dtypes:List[np.dtype] = [
+            _local_dtype_for(ctype) for plan._, ctype, count in plan.translator.local_buffers]
         # Images an OpenCL kernel samples need a sampler argument each; record which
         # parameter supplies the sampler so the launch can append it.
         plan.image_samplers:List[int] = [plan.param_index[plan.name]
@@ -251,7 +299,7 @@ class _CompileKernelsMixin:
                 plan.shapes_owner.uses_global_id, plan.image_samplers,
                 plan.returns if plan.translator.has_returns else None,
                 plan.translator.outer_vars,
-                {"param_names": {position: plan.name for plan.name, position in plan.param_index.items()},
+                {"param_names": {position: plan.name for position, (plan.name, plan._) in enumerate(plan.translator.params)},
                  # Every kernel this body produced, in launch order: one per magic loop.
                  "carried": list(plan.translator.carried_scalars),
                  # Each carried slot's element type: the host allocates and reads the
@@ -291,6 +339,26 @@ class _CompileKernelsMixin:
                  "main_claims": (bool(plan.translator.phase_translators[0]._claims_on_device)
                                  if plan.translator.phase_translators
                                  else bool(plan.translator._claims_on_device)),
+                 # Whether each kernel declares Metal's spin-barrier counter, and the
+                 # 64-bit atomic lock, and which shared buffers it expects. These are
+                 # per-kernel facts: `parameter_declarations` reads them off the
+                 # translator that renders *that* signature, so a multi-pass body's
+                 # second pass may declare none while the first declares both. The
+                 # single-phase fast path reads element 0 of each list.
+                 "has_barrier": ([bool(getattr(stage, "has_barrier", False))
+                                  for stage in plan.translator.phase_translators]
+                                 if plan.translator.phase_translators
+                                 else bool(getattr(plan.translator, "has_barrier", False))),
+                 "has_atomic64": ([bool(getattr(stage, "has_atomic64", False))
+                                   for stage in plan.translator.phase_translators]
+                                  if plan.translator.phase_translators
+                                  else bool(getattr(plan.translator, "has_atomic64", False))),
+                 "local_element_counts": (plan.phase_local_counts
+                                          if plan.translator.phase_translators
+                                          else list(plan.local_element_counts)),
+                 "local_dtypes": (plan.phase_local_dtypes
+                                  if plan.translator.phase_translators
+                                  else list(plan.local_dtypes)),
                  # Every raise the generated code contains, in source order. Its index (plus
                  # one) is the id the device writes into the exception slot, and the host
                  # rebuilds the class, message and line from this table after the launch

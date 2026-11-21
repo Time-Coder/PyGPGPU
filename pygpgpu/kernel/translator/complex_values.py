@@ -63,6 +63,13 @@ class _ComplexValuesMixin:
         """
         if from_kind == to_kind:
             return code
+        if self._metal_syntax and "c128" in (from_kind, to_kind):
+            # The conversion between the widths goes through the header's widen /
+            # narrow helpers, and the widening half (and its c128 argument types)
+            # cannot exist in a Metal kernel -- MSL has no `double`. A c64 kernel
+            # whose STORE maps to the c128 width still widens first on the other
+            # backends, so the shape is refused by name with the fix spelled out.
+            self._refuse_metal_mixed()
         self.complex_needs.update(complex_support.mixed_needs())
         converter:str = (f"{from_kind}_widen_{to_kind}" if to_kind == "c128"
                          else f"{from_kind}_narrow_{to_kind}")
@@ -75,8 +82,14 @@ class _ComplexValuesMixin:
         The one decision point on this side of the translation: the mapping's `float` entry
         chooses it through `python_complex_type`, so a body literal and `complex(re, im)`
         cannot disagree with the `c64`/`c128` a python complex *argument* is declared as.
+
+        Metal is refused here by name: MSL has no `double` at all, so a `c128` -- whose
+        members are doubles -- cannot exist in a Metal kernel, and a python complex
+        literal defaults to that width. The refusal names the two ways out (the `float`
+        mapping, or an explicit `c64`), the same shape `_emit_cuda_only_builtin` uses.
         """
-        return python_complex_type(self.type_map.get("float", "float"))
+        kind:str = python_complex_type(self.type_map.get("float", "float"))
+        return kind
 
 
     def _emit_complex_literal(self, imaginary:float, real:float, kind:str)->str:
@@ -92,6 +105,15 @@ class _ComplexValuesMixin:
         need:Optional[str] = complex_support.needs(dtype)
         self.uses_complex = True
         if need is not None:
+            if self._metal_syntax and need == "complex128":
+                # MSL has no `double`, so the c128 block -- whose members and whose
+                # arithmetic are doubles -- cannot exist in a Metal kernel. The
+                # refusal names the two ways out, the same shape the CUDA-only
+                # builtins use.
+                self._error(
+                    "this kernel uses complex128 (c128, whose members are doubles), "
+                    "and MSL has no `double`: Metal cannot compile it. Bind complex64 "
+                    "arrays and keep the operands complex64 on Metal")
             self.complex_needs.add(need)
 
 
@@ -110,6 +132,28 @@ class _ComplexValuesMixin:
             return f"(*{code})", dtype
         return code, dtype
 
+
+    def _refuse_metal_mixed(self)->None:
+        """Refuse a mixed complex width on Metal, and do nothing on the other backends.
+
+        The mixed float/double blocks widen to c128, whose members are doubles --
+        and MSL has no `double` at all, so the header's double/mixed blocks cannot
+        compile there and the mixed_needs macros must not reach a Metal source.
+        The message names the fix: keep both operands complex64.
+
+        The backend test lives **here** rather than at each call site because every
+        caller reaches this from a code path the other three backends share and
+        support: OpenCL, CUDA and HIP compile the mixed blocks happily, so a
+        call-site guard that was forgotten once refused a perfectly valid OpenCL
+        kernel with a message about Metal. Keeping the question in one place makes
+        that class of mistake impossible.
+        """
+        if not self._metal_syntax:
+            return
+        self._error(
+            "a complex operation mixes complex64 and complex128, which widens to "
+            "c128 (double-precision members), and MSL has no `double`: Metal cannot "
+            "compile this kernel. Keep both operands complex64 on Metal")
 
     def _complex_side(self, t:object, dtype:Optional[np.dtype])->str:
         """One operand's width, in the header's spelling: ``c64``/``c128``/``float``/``double``."""
@@ -150,6 +194,7 @@ class _ComplexValuesMixin:
         # blocks; a same-width one needs only its own.
         if left_dtype is not None and right_dtype is not None \
                 and left_side != right_side:
+            self._refuse_metal_mixed()
             self.complex_needs.update(complex_support.mixed_needs())
         elif (left_dtype is not None and right_dtype is not None) and widened:
             self._require_complex(np.dtype(np.complex128))
@@ -159,6 +204,7 @@ class _ComplexValuesMixin:
             self._require_complex(np.dtype(np.complex128))
             if (left_side == "double" or right_side == "double") \
                     and (left_side == "c64" or right_side == "c64"):
+                self._refuse_metal_mixed()
                 self.complex_needs.update(complex_support.mixed_needs())
 
         if left_dtype is not None and right_dtype is not None:
@@ -184,6 +230,7 @@ class _ComplexValuesMixin:
         typed_complex:str = complex_code
         if mixed_scalar and complex_side == "c64":
             typed_complex = f"c64_widen_c128({complex_code})"
+            self._refuse_metal_mixed()
             self.complex_needs.update(complex_support.mixed_needs())
 
         def scalar_call(operation:str)->Translated:
@@ -283,6 +330,17 @@ class _ComplexValuesMixin:
                 # under the 32-bit default is narrowed -- exactly as a python float argument is.
                 self._require_complex(dtype)
                 value_kind:str = self._complex_side(t, complex_dtype)
+                if self._metal_syntax and value_kind != kind:
+                    # MSL has no `double`, so the widening half of this conversion
+                    # (which needs the c128 block) cannot exist in a Metal kernel.
+                    # A copy at the SAME width is still exact, and that is the only
+                    # shape the default mapping produces here: the operand is c64
+                    # and the mapping answers c64.
+                    self._error(
+                        f"complex(z) of a {value_kind} answers {kind}, and the "
+                        f"conversion needs the c128 block (double-precision members) "
+                        f"-- MSL has no `double`: Metal cannot compile this kernel",
+                        node)
                 return self._convert_complex(code, value_kind, kind), kind
             if not is_float(t) and not is_int(t):
                 self._error(
@@ -305,6 +363,12 @@ class _ComplexValuesMixin:
         # `1 + 2j` already uses -- the mapping is what chose `kind` above.
         parts_are_double:bool = real_t == "double" or imag_t == "double"
         if parts_are_double:
+            if self._metal_syntax:
+                self._error(
+                    "complex(re, im) with a double part travels as c128 "
+                    "(double-precision members), and MSL has no `double`: Metal cannot "
+                    "compile this kernel. Pass the parts as np.float32 so the value is "
+                    "a c64", node)
             kind = "c128"
         element = "double" if kind == "c128" else "float"
         dtype = np.dtype(np.complex128 if kind == "c128" else np.complex64)
@@ -333,6 +397,7 @@ class _ComplexValuesMixin:
                 self._require_complex(left_dtype)
                 comparison:str = f"{kind}_equal({left_code}, {right_code})"
             else:
+                self._refuse_metal_mixed()
                 self.complex_needs.update(complex_support.mixed_needs())
                 comparison = (f"{left_side}_equal_{right_side}"
                               f"({left_code}, {right_code})")
@@ -342,6 +407,7 @@ class _ComplexValuesMixin:
             complex_code:str = left_code if complex_is_left else right_code
             scalar_code:str = right_code if complex_is_left else left_code
             if scalar_side == "double" and not widened:
+                self._refuse_metal_mixed()
                 self.complex_needs.update(complex_support.mixed_needs())
                 comparison:str = f"{kind}_equal_c128({complex_code}, {scalar_code})"
             else:
