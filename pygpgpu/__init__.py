@@ -17,6 +17,17 @@ so to use things from the submodules write `from pygpgpu.kernel import ...`.
 """
 from typing import List
 
+# `__version__` is the one place the release number is written. pyproject.toml
+# reads it from here with `attr`, so the published metadata and this attribute
+# cannot disagree -- setuptools parses the literal with an AST reader rather than
+# importing the package, which matters because importing `pygpgpu` pulls in pygf
+# (and its numpy patches) plus the whole public API surface.
+#
+# It is a literal rather than an `importlib.metadata` lookup because PyGPGPU still
+# supports Python 3.7, where `importlib.metadata` does not exist, and because a
+# source tree that was never installed would otherwise have no version at all.
+__version__ = "0.2.5"
+
 # pygf owns the whole numpy surface for its types: importing it patches numpy.array
 # (patch_nparray), the array constructors, and installs the VectorArray view whose
 # elements are vectors rather than records. PyGPGPU takes no part in that -- it only

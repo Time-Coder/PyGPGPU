@@ -4,7 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pygpgpu"
-version = "0.2.4"
+# The version lives in pygpgpu/__init__.py as a literal, so a caller, a checkout
+# that is not installed, and the built metadata all read one value. `attr` is
+# parsed out of the source by setuptools' AST reader, never by importing the
+# package -- which matters here because importing pygpgpu pulls in pygf and the
+# whole public API, far more than a build needs to do.
+dynamic = ["version"]
 description = "Run Python functions as GPU kernels with the @kernel decorator (OpenCL / CUDA / HIP / Metal)"
 readme = "README.md"
 requires-python = ">=3.7"
@@ -37,7 +42,7 @@ dependencies = [
     "numpy>=1.21",
     "imageio>=2.30",
     "tree-sitter>=0.20.0",
-    "tree-sitter-opencl>=0.0.4",
+    "tree-sitter-opencl>=0.0.5",
     # The CUDA/HIP backends parse through a tree-sitter CUDA grammar. The upstream
     # tree-sitter-cuda requires Python >=3.10, which would make this package
     # uninstallable on 3.7, so the dependency is the tree-sitter-cuda37
@@ -46,7 +51,7 @@ dependencies = [
     # 0.20.x and 0.21+. The parser modules still fall back to tree-sitter-cuda
     # when it happens to be installed, and codegen coerces a PyCapsule to a
     # Language, so either grammar distribution works.
-    "tree-sitter-cuda37>=0.21.4",
+    "tree-sitter-cuda37>=0.21.5",
     # The Metal backend parses MSL through a tree-sitter grammar, exactly as the
     # other three backends parse theirs. No MSL grammar was installable from PyPI
     # (the tree-sitter-metal names on GitHub are Neovim highlighting plugins with
@@ -58,7 +63,7 @@ dependencies = [
     # at ABI 13 and shipped as cp37-abi3, the one combination that both
     # tree-sitter 0.20.x -- the last line with CPython 3.7 wheels -- and 0.21+
     # accept, so a single wheel serves every supported interpreter.
-    "tree-sitter-metal>=0.1.1",
+    "tree-sitter-metal>=0.1.2",
     # pygpgpu/__init__.py imports pygf for the numpy patches and re-exports its vector types,
     # so it is a hard requirement rather than an optional extra.
     # 0.1.5 owns the whole numpy boundary: the `VectorArray` view, the constructor patches,
@@ -125,6 +130,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["pygpgpu*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "pygpgpu.__version__"}
 
 # The feature tests import their shared support modules (`tests/_helpers/...`) by bare name, the
 # same way they already import `metal_syntax_check` and `known_failures`. Making that path
