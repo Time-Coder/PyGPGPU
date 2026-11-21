@@ -27,7 +27,7 @@ image_width, image_height = 600, 400
 default_pixels_per_value = 150
 max_iter = 890
 
-@kernel(float=np.float32)
+@kernel
 def draw_MandelbrotSet(view_center: complex, scale: float) -> NDArray[np.uint8]:
     image = np.zeros((image_height, image_width, 3), dtype=np.uint8)
     value_per_pixel = 1 / (scale * default_pixels_per_value)
