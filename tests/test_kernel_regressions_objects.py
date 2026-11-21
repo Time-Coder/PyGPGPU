@@ -218,6 +218,82 @@ def test_a_vector_component_may_be_stored(gpu_backend):
 
 
 # ---------------------------------------------------------------------------
+# Group 7b -- the shadertoy viewer showed a black window
+#
+# Found by running `examples/shadertoy/color_wheel.py` after the private-copy change: the
+# window stayed black while the device rendered every frame correctly. The QImage was built
+# once, in `__init__` (from a buffer nothing had drawn into yet) and never refreshed, so the
+# painter blitted that all-zero snapshot forever. A QImage does not copy the buffer it is
+# handed, which is exactly why the pixels have to be copied *into* that buffer per frame.
+# ---------------------------------------------------------------------------
+
+
+def test_a_rendered_frame_reaches_the_image_the_painter_blits():
+    """The QImage the window paints must show the frame just rendered.
+
+    Uses the real viewer with the offscreen Qt platform, so the assertion is about the
+    object `paintEvent` actually keeps -- not a re-implementation of its rule. The first
+    `redraw` builds the wrapper (there is nothing to wrap before that), and every later one
+    must overwrite that same wrapper's bytes; a wrapper built once and never refreshed is a
+    black window, which is what this pins.
+    """
+    import importlib
+    import os
+    import sys
+
+    import pytest
+
+    pytest.importorskip("PySide6.QtWidgets")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    # `examples/` is not on the import path, and the example modules import each other by
+    # bare name (`from shadertoy_viewer import ShadertoyViewer`), so the directory has to be
+    # added and the module loaded through `importlib` -- a static analyser has no way to
+    # resolve a module that only exists after that insert.
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples", "shadertoy"))
+    try:
+        color_wheel = importlib.import_module("color_wheel")
+    finally:
+        sys.path.pop(0)
+
+    from PySide6.QtWidgets import QApplication
+
+    application = QApplication.instance() or QApplication([])
+
+    from pygpgpu import config
+
+    previous_map, previous_info = config.type_map, config.print_info
+    config.type_map = {float: np.float32}
+    config.print_info = False
+    try:
+        viewer = color_wheel.ColorWheel(width=16, height=9)
+        # Nothing is drawn yet, so there is no frame to show.
+        assert viewer._frame is None
+
+        viewer.redraw()
+        first = viewer._frame
+        assert first is not None, "the first redraw must build the wrapper"
+        first_pixel = first.pixelColor(0, 0).getRgb()[:3]
+
+        # A second frame at a different time must reach the SAME QImage object, because
+        # that is the one the painter holds; a newly built image would leave the painter's
+        # copy stale, and never rebuilding one leaves it black.
+        viewer.i_time = 5.0
+        viewer.redraw()
+        assert viewer._frame is first, "the painter's QImage must be reused, not replaced"
+        second_pixel = viewer._frame.pixelColor(0, 0).getRgb()[:3]
+        assert second_pixel != first_pixel, (
+            "the wrapper still shows the first frame: it was never refreshed")
+        # And it agrees with what the device actually wrote.
+        written = np.asarray(viewer.image)[0, 0].tolist()
+        assert second_pixel == tuple(int(channel) for channel in written)
+    finally:
+        config.type_map, config.print_info = previous_map, previous_info
+        application.processEvents()
+
+
+
+
+# ---------------------------------------------------------------------------
 # Group 8 -- a damaged generated file is never repaired
 #
 # Found live, twice in one day: a launch failed with `Unresolved extern function` /

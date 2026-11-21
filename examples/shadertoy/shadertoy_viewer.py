@@ -115,10 +115,12 @@ class ShadertoyViewer(QWidget):
         # again on every launch (the launch path always uploads a written argument, because
         # its read-back is whole-buffer). Only the read-back the window needs stays.
         self.image = gnp.zeros((height, width, 3), dtype=np.uint8)
-        # The QImage wraps the array's own memory -- one wrapper per size, no per-frame
-        # image construction and no pixel copy at display time; the read-back writes
-        # into the bytes the painter reads. See `_wrap_frame`.
-        self._frame = self._wrap_frame()
+        # The QImage the painter blits. It is built lazily by `_refresh_frame` on the first
+        # `redraw`, not here: at construction nothing has been drawn, so a snapshot taken
+        # now is a black frame -- and one taken once and never refreshed stays black
+        # forever, however many frames the device renders into `image` behind it.
+        self._frame: QImage | None = None
+        self._frame_bytes: np.ndarray | None = None
         # The uniforms, in Shadertoy's names and packings: i_mouse is the float4 Shadertoy
         # passes (xy the pointer, z the click position, w the button state), the rest are
         # scalars. They are plain attributes: a body reads them, the host rebinds them before
@@ -129,7 +131,6 @@ class ShadertoyViewer(QWidget):
         self.i_frame = 0
         self.i_mouse = float4(0.0, 0.0, 0.0, 0.0)
         self._started = time.perf_counter()
-        self._frame: QImage | None = None
         # The seconds the last few redraws cost, oldest first; the readout takes the median.
         self._frame_times: list[float] = []
         # The animation: while the window is shown, a tick renders the next frame, which is
@@ -197,12 +198,32 @@ class ShadertoyViewer(QWidget):
         timer. And the frame itself is small (a 640x360 RGB8 buffer is 0.7 MB), so the
         copy-per-paint is nothing next to the launch, and the paint reads memory
         nothing else writes.
+
+        **The copy is refreshed on every frame** (`_refresh_frame`), not made once here:
+        this wrapper is created per size, but its bytes are last frame's until the new
+        pixels are copied in, and a QImage whose buffer never changes shows the frame it
+        was built from forever -- which is a black window, because the first one is built
+        before anything has been drawn.
         """
         height, width = int(self.image.shape[0]), int(self.image.shape[1])
         self.image.to_host(wait=True)
-        self._frame_bytes = np.asarray(self.image).copy()
+        self._frame_bytes = np.array(self.image, dtype=np.uint8, copy=True)
         return QImage(self._frame_bytes.data, width, height, width * 3,
                       QImage.Format.Format_RGB888)
+
+    def _refresh_frame(self) -> None:
+        """Copy the freshly read-back pixels into the QImage's own buffer.
+
+        The wrapper owns `_frame_bytes` (QImage does not copy the buffer it is handed), so
+        the new frame is written *into* that buffer rather than a new QImage built: the
+        painter always holds one object per size, and the bytes under it are this frame's.
+        """
+        if self._frame is None or self._frame_bytes.size != self.image.size:
+            self._frame = self._wrap_frame()
+            return
+        self.image.to_host(wait=True)
+        pixels = np.asarray(self.image, dtype=np.uint8).reshape(-1)
+        self._frame_bytes.reshape(-1)[:pixels.size] = pixels
 
     def redraw(self) -> None:
         """Advance the clock, launch one frame, and show it."""
@@ -214,7 +235,7 @@ class ShadertoyViewer(QWidget):
         # has to happen -- the pixels the window shows. It must land BEFORE the paint below:
         # nothing reads the array through numpy any more, so nothing waits implicitly, and
         # the painter would otherwise show the previous frame's bytes.
-        self.image.to_host(wait=True)
+        self._refresh_frame()
         # The readout is the render cost, not the event rate: redraws fire on show, resize
         # and pointer events, so an idle window renders nothing and an interval would read
         # as zero. What the number answers is how many frames a second this shader costs at
@@ -245,7 +266,10 @@ class ShadertoyViewer(QWidget):
         if size.width() < 1 or size.height() < 1:
             return
         self.image = gnp.zeros((size.height(), size.width(), 3), dtype=np.uint8)
-        self._frame = self._wrap_frame()
+        # A new size is a new buffer, so the wrapper built for the old one is stale: drop
+        # it and let `_refresh_frame` (inside `redraw` below) build one for this size.
+        self._frame = None
+        self._frame_bytes = None
         self.i_resolution = float2(float(size.width()), float(size.height()))
         self.redraw()
 
