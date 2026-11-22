@@ -26,6 +26,10 @@ class Platform(CLObject):
     def __init__(self, id:cl_platform_id):
         CLObject.__init__(self, id)
         self.__n_devices:int = 0
+        # Whether the device count was asked for. A count of 0 is a real answer -- an
+        # ICD whose only backend is unusable -- so the count alone cannot double as the
+        # "not asked yet" marker (see n_devices).
+        self.__queried:bool = False
         self.__devices:Tuple[Device, ...] = ()
         self.__default_context:Optional[Context] = None
         # The device list is fetched lazily, and two threads reaching it at once both ran
@@ -44,10 +48,23 @@ class Platform(CLObject):
     @property
     def n_devices(self)->int:
         with self.__device_lock:
-            if self.__n_devices == 0:
+            # A platform that enumerates no device is a normal state, not a failure: an
+            # ICD can be installed with its only backend unusable (Mesa's rusticl without
+            # a render node, an NVIDIA ICD under WSL whose libnvidia-opencl stub exports
+            # no entry points). `clGetDeviceIDs` answers such a platform with
+            # `CL_DEVICE_NOT_FOUND`, and letting that raise marked the whole OpenCL
+            # backend unavailable -- the probe walks every platform and one empty one
+            # was enough to hide a working device on the next. An empty answer is 0, and
+            # it is cached as an answer: a count of 0 is a fact, so asking again on every
+            # read would put a driver call under each device walk.
+            if not self.__queried:
                 n_devices = cl_uint()
-                CL.clGetDeviceIDs(self._id, cl_device_type.CL_DEVICE_TYPE_ALL, 0, None, pointer(n_devices))
-                self.__n_devices = n_devices.value
+                try:
+                    CL.clGetDeviceIDs(self._id, cl_device_type.CL_DEVICE_TYPE_ALL, 0, None, pointer(n_devices))
+                    self.__n_devices = n_devices.value
+                except RuntimeError:
+                    self.__n_devices = 0
+                self.__queried = True
 
         return self.__n_devices
 
@@ -56,12 +73,14 @@ class Platform(CLObject):
             if self.__devices:
                 return
 
+            n_devices = self.n_devices
             devices = []
-            device_ids = (cl_device_id * self.n_devices)()
-            CL.clGetDeviceIDs(self.id, cl_device_type.CL_DEVICE_TYPE_ALL, self.n_devices, device_ids, None)
-            for device_id in device_ids:
-                device = Device(cl_device_id(device_id), self)
-                devices.append(device)
+            if n_devices:
+                device_ids = (cl_device_id * n_devices)()
+                CL.clGetDeviceIDs(self.id, cl_device_type.CL_DEVICE_TYPE_ALL, n_devices, device_ids, None)
+                for device_id in device_ids:
+                    device = Device(cl_device_id(device_id), self)
+                    devices.append(device)
 
             self.__devices = tuple(devices)
 
