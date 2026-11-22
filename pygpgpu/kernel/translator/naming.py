@@ -211,11 +211,53 @@ class _NamingMixin:
         travels as one parameter named after the array and the index count -- ``1`` when
         the index is full-rank. The registration rides in `shapes_used` with a negative
         dim marker, so the parameter is declared and bound exactly where the extents are.
+
+        A **full-rank** index answers the literal ``"1"`` and registers nothing. The
+        docstring above always said so, but the code registered the parameter anyway, and
+        the binding then had to invent a value for it: it read ``shape[-count - 2:]``, which
+        for a full-rank index is an empty slice only when the rank happens to match the
+        count. A five-axis store through all five indices got the *last* extent (3) as its
+        tail, so the store walked three contiguous words per element instead of one --
+        writing twice past the end of `out` and corrupting the heap. An index that names
+        every axis multiplies by nothing, so no extent is needed.
         """
         key = (array_name, -count - 2)
-        if key not in self.shapes_used:
-            self.shapes_used.append(key)
+        if key in self.shapes_used:
+            return f"_{device_name(array_name)}_tail{count}"
+        rank:int = self._parameter_rank_of(array_name)
+        if rank and count >= rank:
+            return "1"
+        self.shapes_used.append(key)
         return f"_{device_name(array_name)}_tail{count}"
+
+    def _parameter_rank_of(self, array_name:str)->int:
+        """The rank of an array parameter's value this launch, or 0 when unknown.
+
+        The generated source carries only a pointer, so the rank has to come from the object
+        the caller passed. Its position among the caller's *arguments* is what indexes
+        `argument_values`, and `params` also lists what the caller does not pass positionally
+        -- the receiver first, `_self_*` carriers and object-array members last -- so those
+        are skipped while counting.
+        """
+        receiver:str = getattr(self, "self_param", "") or ""
+        positional:List[str] = [name for name, _ in self.params
+                                if name != receiver
+                                and not name.startswith("_self_")
+                                and not name.startswith("_")]
+        if array_name not in positional:
+            return 0
+        position:int = positional.index(array_name)
+        if position >= len(self.argument_values):
+            return 0
+        value:object = self.argument_values[position]
+        shape:object = getattr(value, "shape", None)
+        if shape is None:
+            return 0
+        try:
+            return len(tuple(shape))  # type: ignore[arg-type]
+        except TypeError:
+            return 0
+
 
     def _tail_expression(self, array_name:str, count:int)->str:
         """The C that counts a sub-array's elements after a partial index.
