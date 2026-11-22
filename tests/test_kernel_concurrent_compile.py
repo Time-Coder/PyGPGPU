@@ -25,6 +25,7 @@ import multiprocessing as mp
 import os
 import shutil
 import threading
+import time
 import traceback
 
 import numpy as np
@@ -100,6 +101,19 @@ def _call_first(_ignored: object) -> str | None:
     return _call(0)
 
 
+def _hold_the_lock(source: str, ready: object) -> None:
+    """Take the source's write lock, announce it, then wait to be killed.
+
+    Exiting this function normally would release the lock, so it spins instead and leaves
+    the release to the process being killed -- which is the case the test is about.
+    """
+    with source_paths.write_lock(source):
+        ready.set()  # type: ignore[attr-defined]
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+
+
 @pytest.fixture
 def cold_cache() -> None:
     _clear_cache()
@@ -134,12 +148,59 @@ def test_concurrent_processes_compile_the_same_kernel(cold_cache, gpu_backend):
     assert not errors, errors[:3]
 
 
-def test_a_lock_file_is_not_left_behind(cold_cache):
-    """Every write releases its lock file, so a later process cannot wait on a dead one."""
+def test_releasing_the_lock_leaves_no_ownership_behind(cold_cache):
+    """The lock file stays; the *lock* does not.
+
+    Ownership is an OS advisory lock on an open handle, so the file itself is created once
+    and kept -- an empty `.lock` beside the source is a normal, unheld file, not a stale
+    lock. What has to be gone is the exclusion, which is what this checks: after the block
+    exits, another acquire takes it at once rather than waiting out the timeout.
+    """
     source = source_paths.source_path(__file__, __file__, BACKEND)
     with source_paths.write_lock(source):
         assert os.path.isfile(source + ".lock")
-    assert not os.path.isfile(source + ".lock")
+
+    started = time.monotonic()
+    with source_paths.write_lock(source):
+        pass
+    assert time.monotonic() - started < 5.0, "a released lock must be takeable at once"
+
+
+def test_a_killed_holders_lock_is_released(cold_cache):
+    """A process killed while holding the lock does not block the next one.
+
+    Ownership is an OS advisory lock, so the kernel drops it when the holder dies: the cache
+    write that follows a cancelled test, a debugger stop or a `kill -9` proceeds at once.
+
+    The alternative design -- an exclusively *created* lock file, deleted on release -- fails
+    this: the killed holder leaves the file behind, nobody owns it, and every later writer
+    polls until `_FILE_LOCK_TIMEOUT`, ten minutes of waiting on a lock whose owner is a
+    corpse. That is exactly what happened before this test existed, so the timeout here is
+    shortened and the elapsed time is what is asserted.
+    """
+    source = source_paths.source_path(__file__, __file__, BACKEND)
+    os.makedirs(os.path.dirname(source + ".lock"), exist_ok=True)
+
+    ready = mp.get_context("spawn").Event()
+    child = mp.get_context("spawn").Process(target=_hold_the_lock, args=(source, ready))
+    child.start()
+    try:
+        assert ready.wait(60), "the child never took the lock"
+        child.kill()
+    finally:
+        child.join()
+
+    from pygpgpu.kernel.source_paths import locks
+
+    original = locks._FILE_LOCK_TIMEOUT
+    locks._FILE_LOCK_TIMEOUT = 5.0
+    started = time.monotonic()
+    try:
+        with source_paths.write_lock(source):
+            elapsed = time.monotonic() - started
+    finally:
+        locks._FILE_LOCK_TIMEOUT = original
+    assert elapsed < 5.0, f"waited {elapsed:.1f}s on a killed holder's lock"
 
 
 def test_the_source_lock_is_reentrant(cold_cache):
