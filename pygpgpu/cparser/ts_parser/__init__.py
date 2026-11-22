@@ -196,6 +196,7 @@ __all__ = [
     "_call_flags",
     "_collect_addr_taken_roots",
     "_collect_root_refs",
+    "_conservative_flags",
     "_flags_from_desc",
     "_function_body",
     "_handle_declaration",

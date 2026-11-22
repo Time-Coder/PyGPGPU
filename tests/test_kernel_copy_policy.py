@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from pygpgpu import get_global_id, kernel
+from pygpgpu import atomic_cas, get_global_id, kernel
 from pygpgpu.constants import KernelFlags
 
 
@@ -108,3 +108,46 @@ def test_a_written_argument_is_still_uploaded(gpu_backend):
     assert info.kernel_flags & KernelFlags.Writed
     assert info.need_upload is True, "a written buffer has to be uploaded"
     assert info.need_read_back is True
+
+
+# ---------------------------------------------------------------------------
+# A body the grammar cannot fully read
+# ---------------------------------------------------------------------------
+
+
+@kernel
+def cas_reports_the_previous_value(x: np.ndarray, out: np.ndarray):
+    """The device reads `x` inside an atomic call and writes `out`'s slot through it."""
+    for i in range(x.shape[0]):
+        out[1] = atomic_cas(out, 0, x[i], x[i] + 100)
+
+
+def test_an_atomic_call_still_uploads_its_arguments(gpu_backend):
+    """`atomic_cas`'s generated call is a cast carrying an address space.
+
+    OpenCL C spells the atomic `(volatile __global int *)(&out[0])`, and
+    `tree-sitter-opencl` 0.0.4 has no rule for an address space inside a cast's type: the
+    whole call parses as an ERROR node, so the walk never visits the arguments inside it.
+
+    What that used to cost is exactly what a missing read flag costs -- `x` came out with
+    neither direction set, so it was never uploaded and the device compared the atomic
+    against whatever a fresh buffer held. The CAS then never matched and `out[0]` kept its
+    old value, while `out[1]` reported a "previous value" nobody had stored.
+
+    The pins are the copy policy, because that is where the loss showed: an argument whose
+    uses the grammar could not read keeps both directions.
+    """
+    x = np.array([0], dtype=np.int32)
+    out = np.array([0, -1], dtype=np.int32)
+    cas_reports_the_previous_value[gpu_backend](x, out)
+
+    np.testing.assert_array_equal(out, np.array([100, 0], dtype=np.int32))
+    compiled = _compiled(cas_reports_the_previous_value, gpu_backend)
+    # Both arguments have to travel to the device: `x` is what the compare reads and `out`
+    # is the slot the exchange writes. `out` also has to come back, because the caller's
+    # array is where the result is observed; `x` is an input and needs no read-back.
+    for name in ("x", "out"):
+        info = compiled._args[name]
+        assert info.kernel_flags & KernelFlags.Readed, name
+        assert info.need_upload is True, name
+    assert compiled._args["out"].need_read_back is True

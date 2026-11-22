@@ -28,7 +28,9 @@ class _TsAnalysisMixin:
 
     def _analyze_kernel(self, kernel_info:KernelInfoLike, body:Node)->None:
         reads, writes, escapes, member_reads, member_writes = self._analyze_body(kernel_info, body)
-        for name, flags in self._param_flags(kernel_info, reads, writes, escapes).items():
+        flags_by_name:Dict[str, KernelFlags] = self._conservative_flags(
+            self._param_flags(kernel_info, reads, writes, escapes), body)
+        for name, flags in flags_by_name.items():
             kernel_info.args[name].kernel_flags = flags
         self._apply_member_flags(kernel_info, escapes, member_reads, member_writes)
 
@@ -36,8 +38,6 @@ class _TsAnalysisMixin:
     def _pointer_members(self, arg:VarInfoLike)->Dict[str, VarInfoLike]:
         """Pointer members of a struct-typed argument (empty for non-struct args)."""
         return {}
-
-
     def _apply_member_flags(self, kernel_info:KernelInfoLike, escapes:Set[str], member_reads:Dict[str, Set[str]], member_writes:Dict[str, Set[str]])->None:
         """Derives per-member KernelFlags for pointer members of by-value struct args.
 
@@ -73,6 +73,30 @@ class _TsAnalysisMixin:
             arg.member_infos = member_infos
 
 
+    def _conservative_flags(self, flags_by_name:Dict[str, KernelFlags], body:Node)->Dict[str, KernelFlags]:
+        """The copy policy when the grammar could not read the whole body.
+
+        ``body.has_error`` says a part of the text parsed as an ERROR node, so the walk that
+        produced ``flags_by_name`` saw only the statements around it: its read/write sets are
+        incomplete by construction, not merely conservative. The construct that reliably
+        produces this is a cast whose type carries an address space --
+        ``(volatile __global int *)(&out[0])``, which every generated atomic call spells --
+        because ``tree-sitter-opencl`` 0.0.4 has no rule for an address space inside a
+        cast's type. The whole call becomes that ERROR node, so the arguments inside it are
+        never visited at all: an argument the kernel reads there used to come out with
+        neither direction set, was never uploaded, and the device read whatever a fresh
+        buffer held.
+
+        A body the grammar could not read is a body whose uses are UNKNOWN, and the rule this
+        package already applies to an unknown use is the one it applies to an escaped
+        pointer: keep both directions. Guessing read-only drops a write and guessing
+        write-only drops an input, both silently; the cost of not guessing is a copy.
+        """
+        if not body.has_error:
+            return flags_by_name
+        return {name: (KernelFlags.Readed | KernelFlags.Writed) for name in flags_by_name}
+
+
     def _call_flags(self, func_name:str)->Optional[Dict[str, KernelFlags]]:
         """Per-parameter KernelFlags of a helper function, analyzed on demand."""
         if func_name in self._helper_flags:
@@ -92,7 +116,8 @@ class _TsAnalysisMixin:
         finally:
             self._analyzing_funcs.discard(func_name)
 
-        flags:Dict[str, KernelFlags] = self._param_flags(func_info, reads, writes, escapes)
+        flags:Dict[str, KernelFlags] = self._conservative_flags(
+            self._param_flags(func_info, reads, writes, escapes), body)
         self._helper_flags[func_name] = flags
         return flags
 
