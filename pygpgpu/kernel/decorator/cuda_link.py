@@ -93,7 +93,13 @@ def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->object
 
     arch:str = (f"sm_{device_obj.compute_capability_major}"
                 f"{device_obj.compute_capability_minor}")
-    image_path:pathlib.Path = pathlib.Path(source_path).with_suffix(".cubin")
+    # One generated source holds one *module*, and a module holds several kernels. The image
+    # therefore has to be named after the kernel, not after the source: a second kernel of
+    # the same module overwrote the first one's `.cubin` while the first module was still
+    # loaded, and the launch afterwards failed with `CUDA_ERROR_NOT_FOUND` because the
+    # function it asked for had been replaced by another build's contents.
+    stem:str = f"{pathlib.Path(source_path).stem}_{c_name}"
+    image_path:pathlib.Path = pathlib.Path(source_path).with_name(stem + ".cubin")
     # nvcc compiles `.cu` as C++, where `__global__ void f(...)` gets a mangled symbol, and
     # the host looks the kernel up by the plain name it generated. NVRTC exposes the plain
     # one; nvcc does not, so the entry points are given C linkage here -- only for this
@@ -129,8 +135,13 @@ def _compile_linked_cuda(source_path:str, c_name:str, device_obj:object)->object
         raise CompileError(
             "cuobjdump was not found beside nvcc; it is needed to take the linked device "
             "image out of an nvcc build")
-    extract_dir:pathlib.Path = image_path.with_suffix(".linked")
-    extract_dir.mkdir(exist_ok=True)
+    # The extracted images land in a directory, and it must NOT be spelled
+    # `with_suffix(".linked")`: that is the same name as the `with_suffix(".linked.cu")`
+    # source written just above (the suffix is replaced, so `k.cubin` gives `k.linked` for
+    # both), and the second compile of one module then finds a directory where it wants a
+    # file -- `FileExistsError: ... .linked`. Two different extensions keep them apart.
+    extract_dir:pathlib.Path = image_path.with_suffix(".linked-images")
+    extract_dir.mkdir(parents=True, exist_ok=True)
     extracted = subprocess.run(
         [str(extractor), "-xelf", "all", str(executable)],
         capture_output=True, text=True, cwd=str(extract_dir))
