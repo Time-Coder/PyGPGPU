@@ -340,6 +340,27 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
                 function:object = getattr(raw, "__func__", raw)
                 if inspect.isfunction(function):
                     follows.append(function)
+    # `helper(self, ...)`: the receiver itself is a VALUE the body hands on. The
+    # helper's own attribute reads -- and the method calls it makes on the receiver
+    # (`r.other(v)`), whose callees read members too -- are this receiver's reads,
+    # so each such helper is followed under the name its parameter binds the
+    # receiver to. `visited` guards the recursion.
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if host_lines and int(getattr(node, "lineno", 0) or 0) in host_lines:
+            continue
+        if not any(isinstance(argument, ast.Name) and argument.id == self_param
+                   for argument in node.args):
+            continue
+        target:object = func.__globals__.get(node.func.id)
+        if inspect.isfunction(target) and not getattr(target, "is_pykernel", False):
+            parameter:str = (target.__code__.co_varnames[0]
+                             if getattr(target, "__code__", None) else "r")
+            # The owner rides along: a method the helper calls on the received
+            # receiver (`r.other(v)`) resolves against the class that owns THIS
+            # receiver -- the same class the device call will bind it from.
+            _collect_self_attrs(target, parameter, owner, attrs, visited, None)
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and node.value.id == self_param):

@@ -40,6 +40,21 @@ class _AttributesMixin:
         # self.xxx -> the receiver struct's member, or an extra parameter _self_xxx for an
         # ndarray attribute (the read/write analysis and the shape plumbing need it apart).
         if (self.self_param and isinstance(node.value, ast.Name) and node.value.id == self.self_param):
+            if self.class_constants and node.value.id == getattr(
+                    self, "_class_constant_receiver", self.self_param):
+                # A cross-class classmethod's cls: the attribute reads are the class
+                # attributes' own values, carried as compile-time constants (see
+                # class_constant_values). A WRITE has no caller to land on -- the
+                # class is not a device value here -- so it is refused with its reason.
+                if node.attr in self.class_constants:
+                    if not isinstance(node.ctx, ast.Load):
+                        self._error(
+                            f"cannot assign to {self.self_param}.{node.attr} here: this "
+                            f"function was reached through a cross-class classmethod call, "
+                            f"whose cls binds to the class itself -- a class attribute is a "
+                            f"compile-time constant on the device, and there is no caller "
+                            f"object a store could reach", node)
+                    return self._visit_constant(ast.Constant(value=self.class_constants[node.attr]))
             if node.attr not in self.self_struct_members and node.attr not in \
                     self.self_attr_types:
                 # The receiver may be a structure pointer instead of a field set

@@ -12,9 +12,9 @@ from .notation import (
     BLOCK_LOCAL_BUILTINS,
     DeviceType,
     PER_GROUP_BUILTINS,
-    PTR,
     Translated,
 )
+from .foreign_cls import class_constant_values as _class_constant_values
 from .receivers import (
     BUILTIN_METHODS,
     CALL_METHOD,
@@ -25,7 +25,6 @@ from .receivers import (
     self_attr_kind,
 )
 from .vectors import (
-    _vec_registry,
     kernel_vector_refusal,
 )
 from .predicates import (
@@ -195,15 +194,23 @@ class _CallsMixin(_NestedLaunchMixin):
                 # The method belongs to the class the *receiver* is, not necessarily to the
                 # kernel's own class: inside `Camera.render`, `scene.ray_color(...)` reaches
                 # a Scene method, and a helper bound to a Scene receiver calls Scene's own
-                # methods through `self.`. The receiver's dtype names that class.
+                # methods through `self.`. A receiver that is THIS kernel's own -- the
+                # class the launch resolved the instance from -- answers from self_owner
+                # directly: two classes with one layout share a dtype, and the dtype's
+                # registered class is whoever registered it first, which is not a fact
+                # about this receiver. A receiver a HELPER received travels as a
+                # structure pointer, and the dtype is then the only answer there is.
                 from .. import structs as _structs_module  # noqa: PLC0415
 
-                receiver_t:DeviceType = self._lookup(self.self_param)
                 receiver_owner:Optional[type] = None
-                if isinstance(receiver_t, tuple) and is_ptr(receiver_t):
-                    dtype:Optional[np.dtype] = _structs_module.dtype_for(receiver_t[1])
-                    if dtype is not None:
-                        receiver_owner = _structs_module.declared_class(dtype)
+                if self.receiver_as_argument:
+                    receiver_t:DeviceType = self._lookup(self.self_param)
+                    if isinstance(receiver_t, tuple) and is_ptr(receiver_t):
+                        dtype:Optional[np.dtype] = _structs_module.dtype_for(receiver_t[1])
+                        if dtype is not None:
+                            receiver_owner = (_structs_module.declared_class_carrying(
+                                dtype, func.attr)
+                                or _structs_module.declared_class(dtype))
                 call_owner:Optional[type] = receiver_owner or self.self_owner
                 kind:str
                 target:object
@@ -275,6 +282,20 @@ class _CallsMixin(_NestedLaunchMixin):
                 if kind == "staticmethod":
                     args = [self._visit_expression(a) for a in node.args]
                     return self._emit_device_call(func.attr, target, args, node)
+                if kind == "classmethod":
+                    # `BUtils.cm(x)`: the callee's `cls` is THIS class, and its
+                    # `cls.<attr>` reads are the class attributes' values -- facts
+                    # the device can carry as compile-time constants (the class is
+                    # a python object the translation reads directly), so no
+                    # receiver struct has to travel. A `cls.<attr>` WRITE inside
+                    # the callee has no caller to land on and is refused there
+                    # with its reason.
+                    args = [self._visit_expression(a) for a in node.args]
+                    return self._emit_device_call(
+                        func.attr, target, args, node,
+                        self_param=_receiver_param_of(target),
+                        class_constants=_class_constant_values(module),
+                        class_owner=module)
                 if kind == "method":
                     if not node.args:
                         self._error(
@@ -339,90 +360,6 @@ class _CallsMixin(_NestedLaunchMixin):
             return "", "void"
 
         self._error("unsupported call expression", node)
-
-
-    def _emit_method_on_value(self, func:ast.Attribute, node:ast.Call)->Translated:
-        """`value.method(args)` as a device call whose first argument is the value.
-
-        A structure's methods are ordinary python functions defined in the class the caller
-        declared, and their first parameter is the receiver -- which is exactly what `self`
-        already is in a device helper. So there is nothing new to translate: the call becomes
-        a device function whose first argument is the receiver expression, and the body then
-        reads `self.origin` the way any structure-typed parameter would.
-
-        The class has to be reachable, which is why only a `ctypes.Structure` subclass
-        qualifies: a bare record dtype has no methods, and two classes with one layout share
-        a dtype, so the dtype alone cannot say whose methods to compile.
-        """
-        from .. import structs
-
-        base_code, base_t = self._visit_expression(func.value)
-        # A complex value's methods are numpy's, and the device header spells the same
-        # operations: `.conjugate()` flips the imaginary part, and the rest are the free
-        # functions a reader may reach for through the value itself.
-        complex_dtype:Optional[np.dtype] = self._complex_dtype_of(base_t)
-        if complex_dtype is not None:
-            translated:Optional[Translated] = self._emit_complex_method(
-                func.attr, base_code, base_t, complex_dtype, node)
-            if translated is not None:
-                return translated
-            self._error(
-                f"a complex value has no method '.{func.attr}()': numpy's complex scalars"
-                f" define 'conjugate()' and 'conj()', and the rest are the module functions"
-                f" (np.sqrt, np.abs, np.angle, ...)", node)
-        receiver_is_pointer:bool = (isinstance(base_t, tuple) and is_ptr(base_t))
-        base_struct:str = base_t[1] if receiver_is_pointer else base_t
-        owner:Optional[type] = None
-        if isinstance(base_struct, str):
-            dtype:Optional[np.dtype] = structs.dtype_for(base_struct)
-            if dtype is not None:
-                # The class that actually defines the method: two callers can declare
-                # classes with one layout, and only one of them carries this attribute.
-                owner = (structs.declared_class_carrying(dtype, func.attr)
-                         or structs.declared_class(dtype))
-            elif base_struct in _vec_registry():
-                owner = _vec_registry()[base_struct]
-        if owner is None:
-            self._error(
-                f"cannot call '.{func.attr}()' on a value of type {base_t}: methods are "
-                f"translated from the class they are defined on, and only a "
-                f"ctypes.Structure subclass or a vector type carries one", node)
-
-        kind:str
-        target:object
-        kind, target = self_attr_kind(owner, func.attr)
-        if kind == "method":
-            args = [self._visit_expression(a) for a in node.args]
-            # A method that assigns to its receiver's members needs the receiver *by
-            # address*: a by-value structure is a copy, so `self.normal = ...` inside the
-            # method would be lost. `HitRecord.set_face_normal` is exactly that shape, and
-            # with a by-value receiver every normal stayed zero -- the GPU drew a uniform
-            # grey ball while the interpreter, which runs the method unchanged, was right.
-            receiver_param:str = (target.__code__.co_varnames[0]
-                                  if getattr(target, "__code__", None) else "self")
-            if receiver_is_pointer:
-                # A structure argument already travels as a pointer: hand it over as it is,
-                # whether the callee writes its members or only reads them. The receiver's
-                # parameter name is named so the callee binds it as the structure it is --
-                # without it, `self.origin` inside the method would read the value form.
-                return self._emit_device_call(
-                    func.attr, target, [(base_code, base_t)] + args, node,
-                    self_param=receiver_param, receiver_as_argument=True)
-            # A value receiver is handed over by address: every structure parameter is a
-            # pointer (so `self.<member>` reads the one form), and a local value's address
-            # is available at the call site. The copy python makes for a by-value call is
-            # the one thing that cannot be kept, and a method that assigns to its receiver
-            # needs the address for the write to reach the caller.
-            return self._emit_device_call(
-                func.attr, target,
-                [(f"&({base_code})", (PTR, base_struct))] + args, node,
-                self_param=receiver_param, receiver_as_argument=True)
-        if kind == "staticmethod":
-            args = [self._visit_expression(a) for a in node.args]
-            return self._emit_device_call(func.attr, target, args, node)
-        self._error(
-            f"cannot call '.{func.attr}()' on {owner.__name__}: it is "
-            f"{self._why_not_callable(kind, func.attr)}", node)
 
 
     def _reorder_keywords(self, node:ast.Call)->ast.Call:

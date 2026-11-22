@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tupl
 
 import numpy as np
 
+from .init_receiver import bind_receiver_parameters
 from .notation import (
     DeviceType,
     HostValueEntry,
@@ -36,7 +37,8 @@ class _InitMixin:
                      receiver_as_argument:bool=False,
                      type_map:Optional[Dict[str, str]]=None,
                      argument_values:Optional[List[object]]=None,
-                     object_array_members:Optional[Dict[str, List[Tuple[str, str]]]]=None):
+                     object_array_members:Optional[Dict[str, List[Tuple[str, str]]]]=None,
+                     class_constants:Optional[Dict[str, object]]=None):
             self.func:Callable = func
             self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
             self.backend:str = backend
@@ -136,6 +138,12 @@ class _InitMixin:
             # binds to (see _visit_attribute's object-array branch).
             self.object_array_members:Dict[str, List[Tuple[str, str]]] = dict(
                 object_array_members or {})
+            # A cross-class classmethod call's `cls.<attr>` reads: the callee's cls is
+            # a class no caller value represents, so its scalar attributes travel as
+            # compile-time constants keyed by the attribute name (see
+            # class_constant_values). Empty for every other shape -- a same-class
+            # classmethod's cls is the caller's own receiver, which travels as one.
+            self.class_constants:Dict[str, object] = dict(class_constants or {})
             # The receiver travels as one structure: member name -> the attribute it holds.
             # A member read of `self.<attr>` becomes a field read of the struct parameter, and
             # an ndarray attribute stays a separate `_self_<attr>` argument (the read/write
@@ -421,33 +429,18 @@ class _InitMixin:
             # Default values are accepted: a kernel argument is always supplied by the
             # caller, so a default is a convenience for reading the signature rather than
             # something the device code has to represent.
-            receiver_type:object = None
-            if self_param and args and args[0].arg == self_param:
-                if self.receiver_as_argument:
-                    # The receiver travels as this function's own first argument: take its
-                    # type off the front and name it before the remaining parameters.
-                    receiver_type = param_types[0] if param_types else None
-                    param_types = list(param_types[1:])
-                args = args[1:]
-            # `param_types` holds the positional arguments, then the receiver struct, then one
-            # type per ndarray attribute (see PyKernel._invoke_inner and _emit_device_call),
-            # then one type per object argument's ndarray member (see _prepare_launch,
-            # which appends the arrays after plan.args).
-            expected:int = len(args) + len(self.self_attr_types) + (
-                1 if self.self_struct_members else 0)
-            for _param_name, members in self.object_array_members.items():
-                expected += len(members)
-            if expected != len(param_types):
-                raise SyntaxError(f"{func.__name__}() takes {expected} device arguments but {len(param_types)} types were given") from None
-
-            # The receiver is a method's first parameter, the way python spells one: `self` is
-            # the receiver, so the device signature reads `Class* self,` before the caller's
-            # own arguments. `self.params` *is* the signature order, so the receiver is
-            # appended before the arguments rather than after them. The slot it occupies in
-            # `param_types` stays where the host packs it (after the positional arguments), so
-            # the type is taken from there and the two lists keep their own orders.
+            # The receiver's own binding (a `_self_` field set, a structure pointer, a
+            # value handed on through a helper, or a cross-class classmethod's
+            # constant-bound cls) lives in bind_receiver_parameters -- the four shapes
+            # were the longest stretch of this constructor (see init_receiver.py).
             scope:Dict[str, DeviceType] = {}
+            args, param_types, receiver_type, self_param = \
+                bind_receiver_parameters(self, args, param_types)
+            self.self_param = self_param
             if self.self_struct_members:
+                # The receiver struct is the type the caller's own list carries after
+                # the positional arguments (see PyKernel._invoke_inner); a body that
+                # never assigns a member leaves the pointer read-only.
                 struct_type:object = (param_types[len(args)] if len(param_types) > len(args)
                                    else self.self_struct_type)
                 if self.self_struct_type is None:

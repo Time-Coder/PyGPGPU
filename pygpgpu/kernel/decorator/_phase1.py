@@ -1,4 +1,5 @@
 from __future__ import annotations
+import ctypes
 from typing import (
     Dict,
     List,
@@ -14,6 +15,7 @@ from ..translator import (
     baked_shared_shapes,
     infer_ctype,
     scan_self_attrs,
+    receiver_passed_as_value,
     type_sig,
 )
 from ..objects import (ObjectBinding, _complex_member_value,  # noqa: PLC2701 (shared
@@ -174,15 +176,41 @@ class _PrepareLaunchMixin:
                                       if not isinstance(getattr(instance, name), np.ndarray)]
             plan.array_attrs:List[str] = [name for name in plan.self_attrs
                                      if isinstance(getattr(instance, name), np.ndarray)]
+            # The receiver itself can be a VALUE the body passes on: `helper(self, ...)`
+            # hands the callee the whole receiver, and the callee's own method calls
+            # (`r.other(v)`) resolve the members they read from the same structure. No
+            # `self.<attr>` read in THIS body is required for that -- without the
+            # receiver struct the name `self` would not even resolve, which is the
+            # refusal a body that only passes it on used to hit.
+            if not plan.struct_attrs and self._self_param \
+                    and receiver_passed_as_value(self.raw_func, self._self_param,
+                                                 set(plan.host_executed)):
+                plan.struct_attrs:List[str] = ["__pygpgpu_pad__"]
+            plan.receiver_as_value:bool = bool(self._self_param) and \
+                receiver_passed_as_value(self.raw_func, self._self_param,
+                                         set(plan.host_executed))
             if plan.struct_attrs:
                 from ..objects import _structure_for, member_type  # noqa: PLC0415 (import cycle)
 
                 plan.self_struct:type = _structure_for(
-                    [(name, member_type(getattr(instance, name), name, self._type_map))
+                    [(name,
+                      ctypes.c_uint8 if name == "__pygpgpu_pad__"
+                      else member_type(getattr(instance, name), name, self._type_map))
                      for name in plan.struct_attrs], [], plan.backend)
                 from ..structs import register_name_hint  # noqa: PLC0415 (import cycle)
 
                 register_name_hint(np.dtype(plan.self_struct), plan.owner)
+                # A receiver the body PASSES ON (`helper(self, ...)`) resolves the
+                # methods the callee calls on it from this class: the helper's
+                # `r.other(v)` looks the owner up through the dtype, so the class
+                # has to be registered as the dtype's declaring one. A receiver
+                # only read member-wise needs no registration -- the attribute
+                # paths above answer those reads -- and registering it there
+                # changed call paths that never asked for it.
+                if plan.receiver_as_value:
+                    from ..structs import register_declared_class  # noqa: PLC0415 (import cycle)
+
+                    register_declared_class(np.dtype(plan.self_struct), plan.owner)
                 # Each attribute is a member of the same name: the mapping is the identity,
                 # never a zip against the dtype's names. numpy sorts a record's field names
                 # alphabetically, so zipping them against the attribute order paired
@@ -198,6 +226,11 @@ class _PrepareLaunchMixin:
                 # and the host copies the members home afterwards.
                 plan.holder:object = plan.self_struct()
                 for name in plan.struct_attrs:
+                    if name == "__pygpgpu_pad__":
+                        # A value-only receiver: the pad keeps the zero it was
+                        # declared with -- nothing reads it, and the instance has
+                        # no attribute of that name to copy.
+                        continue
                     plan.member_value:object = getattr(instance, name)
                     plan.field_type:object = dict(plan.self_struct._fields_).get(name)
                     if _is_complex_member_class(plan.field_type) \

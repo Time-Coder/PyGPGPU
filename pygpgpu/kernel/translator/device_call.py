@@ -33,7 +33,9 @@ class _DeviceCallMixin:
     def _emit_device_call(self, name:str, target:object, args:List[Translated], node:ast.Call,
                           self_param:str="",
                           receiver_as_argument:bool=False,
-                          tuple_targets:Optional[List[str]]=None)->Translated:
+                          tuple_targets:Optional[List[str]]=None,
+                          class_constants:Optional[Dict[str, object]]=None,
+                          class_owner:Optional[type]=None)->Translated:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
         if is_kernel_ref:
@@ -86,10 +88,13 @@ class _DeviceCallMixin:
                     code = temporary
                 args[index] = (f"&({code})", (PTR, value_t))
         call_codes:List[str] = [c for c, _ in args]
-        if self_param:
+        if self_param and not class_constants:
             # The receiver is a method's first parameter, exactly as in the signature the
             # callee builds (see FunctionTranslator.__init__), so it is passed first. The
             # array attributes come after the caller's arguments, as their own parameters.
+            # A cross-class classmethod call carries no receiver at all: the callee's
+            # `cls.<attr>` reads are compile-time constants (see class_constants), so the
+            # callee's signature has no cls parameter to fill.
             if self.self_struct_members and not receiver_as_argument:
                 call_codes.insert(0, self.self_param)
             call_codes.extend(f"_self_{attr}" for attr in self_types)
@@ -99,7 +104,8 @@ class _DeviceCallMixin:
         param_types:List[object] = ([t for _, t in args]
                                  + ([self.self_struct_type]
                                     if self_param and self.self_struct_members
-                                    and not receiver_as_argument else [])
+                                    and not receiver_as_argument and not class_constants
+                                    else [])
                                  + list(self_types.values()))
 
         # The helper's generated code embeds where its raise sites land in the *caller's*
@@ -187,13 +193,20 @@ class _DeviceCallMixin:
                 raw_func, param_types, self.backend, _helper_globals(raw_func, self.resolve_global),
                 self.device_cache,
                 is_kernel=False, self_param=self_param, self_attr_types=self_types,
-                self_owner=self.self_owner, launch_backend=self.launch_backend,
+                self_owner=(class_owner if class_owner is not None else self.self_owner),
+                launch_backend=self.launch_backend,
                 self_struct_members=(self.self_struct_members
                                      if self_param and not receiver_as_argument
                                      else None),
                 self_struct_type=(self.self_struct_type
                                   if self_param and not receiver_as_argument else None),
                 receiver_as_argument=receiver_as_argument,
+                # A cross-class classmethod call binds the callee's `cls` to a class
+                # no caller value represents: its `cls.<attr>` reads are the class
+                # attributes' own values, which travel as compile-time constants
+                # (see class_constant_values). A same-class call passes the caller's
+                # receiver instead, and the constants stay empty.
+                class_constants=class_constants or {},
                 # A device helper is translated *inside* the kernel's own translation unit, so
                 # it has to make the same width choices the kernel does: a python complex
                 # literal in a helper body follows the same `float=` mapping (see

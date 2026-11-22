@@ -282,11 +282,28 @@ class _MagicMethodsMixin:
         kernel's own receiver struct as that parameter: python's binding for the same
         call hands the callee the caller's receiver, and the callee's `cls.<attr>`
         reads land on the same members. A staticmethod takes no receiver at all.
+
+        A classmethod reached through a CROSS-CLASS call has no receiver to pass: the
+        caller's cls is that class itself, whose scalar attributes travel as
+        compile-time constants (see class_constants), so the nested call forwards
+        them and passes no receiver -- the constants answer the nested callee's
+        `cls.<attr>` reads the same way.
         """
         if getattr(target, "is_pykernel", False):
             self._error(
                 f"self.{attr} is a @kernel method and cannot be called from device code; "
                 f"move the shared logic into a plain method or function", node)
+        if self.class_constants and kind == "classmethod":
+            # The receiver count still skips cls (the signature declares it), but the
+            # call passes no cls code -- the constants answer the reads, and the
+            # callee's own signature carries no cls parameter to fill.
+            args = self._satisfy_override_signature(attr, target, args, node,
+                                                    receiver_first=True)
+            return self._emit_device_call(
+                attr, target, args, node,
+                self_param=_receiver_param_of(target),
+                class_constants=self.class_constants,
+                class_owner=self.self_owner)
         receiver_first:bool = kind in ("method", "classmethod")
         args = self._satisfy_override_signature(attr, target, args, node,
                                                 receiver_first=receiver_first)
