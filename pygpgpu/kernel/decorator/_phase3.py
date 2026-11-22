@@ -164,9 +164,16 @@ class _RunLaunchMixin:
                     f"{plan.source}. Give one name per dimension, or iterate an explicit subset, "
                     f"e.g. np.ndindex(image.shape[0], image.shape[1])")
             if local_size is None:
+                # No padding: `allow_padding=True` rounds the global size up, and its
+                # contract is that the caller guarantees a bounds guard. A magic loop has
+                # one (`if (i >= n) return;`), a gid-style body does not -- it reads the
+                # work item itself and indexes with it. Padding such a launch made the
+                # surplus items index past the end of the caller's array, which corrupted
+                # the heap instead of merely wasting work items. With divisors the global
+                # size equals the extents exactly, so every work item is a real element.
                 global_size, local_size = detect_work_size(
                     256, extents, max_work_group_size=plan.device_max_group,
-                    max_work_item_sizes=plan.device_max_items, allow_padding=True)
+                    max_work_item_sizes=plan.device_max_items, allow_padding=False)
             elif len(local_size) == len(extents):
                 # A user-supplied local size wins; round each extent up to a multiple of it.
                 global_size = tuple(-(-plan.extent // l) * l for plan.extent, l in zip(extents, local_size))

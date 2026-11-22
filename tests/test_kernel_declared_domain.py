@@ -144,3 +144,53 @@ def test_two_domains_over_one_body_stay_independent(gpu_backend):
             out = np.zeros(size, dtype=np.float32)
             decorated[gpu_backend](x, out)
             np.testing.assert_array_equal(out, x)
+
+
+# ---------------------------------------------------------------------------
+# The work-size round-up
+# ---------------------------------------------------------------------------
+
+
+@kernel(domain="out")
+def fills_every_element(out: np.ndarray):
+    """One store per work item, so an unguarded surplus item writes past the array."""
+    gid = get_global_id(0)
+    out[gid] = 1.0
+
+
+def test_a_size_that_does_not_divide_the_group_is_still_safe(gpu_backend):
+    """The launch must not round a gid-style domain up, because nothing guards its index.
+
+    A global work size has to divide by the local one, and there are two ways to get there:
+    round the global size up to a multiple of the group, or pick a group size that divides
+    the domain. The first needs a bounds guard in the body -- a magic loop has one, because
+    its head is where the extent is written -- and a gid-style body has none: it indexes
+    with the work item itself, so a surplus item stores past the end of the caller's array.
+
+    That is what this pins. The visible symptom was a process-killing heap corruption at
+    exit (the store lands in memory the allocator owns, not in the array), so a
+    wrong-answer-only check would have passed for the elements that fit while the
+    corruption happened anyway.
+    """
+    for size in (200, 100, 193, 65, 33):
+        out = np.zeros(size, dtype=np.float32)
+        fills_every_element[gpu_backend](out)
+        np.testing.assert_array_equal(
+            out, np.ones(size, dtype=np.float32),
+            err_msg=f"size {size} did not fill exactly its own elements")
+
+
+def test_the_gid_style_signature_carries_no_extent(gpu_backend):
+    """The domain is the launch's, not the body's: no extent parameter is sent.
+
+    This is the property the launch-side fix preserves and a body-side guard would have
+    broken. A magic loop knows its array's extent and passes it as a `const int`; a
+    gid-style body reads the work item directly, so its signature is just the buffers. The
+    launch therefore has to derive a geometry that needs no extent -- which is exactly what
+    picking a divisor for the local size does.
+    """
+    out = np.zeros(200, dtype=np.float32)
+    fills_every_element[gpu_backend](out)
+
+    compiled = next(iter(fills_every_element._cache.values()))[0]
+    assert "shape" not in " ".join(compiled._args), sorted(compiled._args)
