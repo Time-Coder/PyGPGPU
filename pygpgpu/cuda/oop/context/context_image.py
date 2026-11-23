@@ -12,18 +12,6 @@ if TYPE_CHECKING:
     from ..texture import TextureObject
 
 
-# Upper bound on the streams a Context keeps alive. Synchronous calls share one
-# cached stream per thread and asynchronous calls draw from a separate pool of
-# non-blocking streams; capping both keeps a process that creates and drops
-# threads (or keeps launching asynchronously) from growing streams forever.
-STREAM_POOL_SIZE:int = 16
-
-# How many times create_texture rebuilds an image before giving up. The driver
-# rejects texture creation intermittently, and a refused array stays refused, so
-# each attempt allocates a replacement rather than retrying the same handle.
-TEXTURE_RETRY_ATTEMPTS:int = 40
-
-
 # How many times create_texture rebuilds an image before giving up. The driver
 # rejects texture creation intermittently, and a refused array stays refused, so
 # each attempt allocates a replacement rather than retrying the same handle.

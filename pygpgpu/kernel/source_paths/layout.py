@@ -9,20 +9,13 @@ from typing import Dict, List, Optional, Tuple
 
 # The extension a generated source needs, per backend.
 EXTENSIONS: Dict[str, str] = {"opencl": "cl", "cuda": "cu", "hip": "hip", "metal": "metal"}
-
-
-EXTENSIONS: Dict[str, str] = {"opencl": "cl", "cuda": "cu", "hip": "hip", "metal": "metal"}
 # The cache folder a backend writes into.
 CACHE_FOLDERS: Dict[str, str] = {"opencl": "__clcache__", "cuda": "__cucache__",
                                  "hip": "__hipcache__", "metal": "__metalcache__"}
 
 
-
 # The directory name for a python file from the standard library, and for one from an
 # installed package: both mirror their own path below these roots.
-LIB_FOLDER: str = "Lib"
-
-
 LIB_FOLDER: str = "Lib"
 SITE_PACKAGES_FOLDER: str = os.path.join("Lib", "site-packages")
 

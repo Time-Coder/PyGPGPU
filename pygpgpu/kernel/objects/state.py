@@ -7,14 +7,9 @@ import ctypes
 from typing import Dict, List, Tuple
 
 
-
+# tree key -> the source tree every later step reads for that body (see scan_paths._parse).
 _LIFTED_TREES:Dict[str, ast.Module] = {}
-
-
-_LIFTED_TREES:Dict[str, ast.Module] = {}
-_LIFTED_VALUES:Dict[str, Dict[str, object]] = {}
-
-
+# tree key -> the values a lifted construction produced, so a second read answers them.
 _LIFTED_VALUES:Dict[str, Dict[str, object]] = {}
 # class -> the members a lifted construction supplied, in the constructor order.
 _LIFTED_MEMBERS:Dict[type, List[Tuple[str, type]]] = {}
@@ -63,9 +58,6 @@ _DEVICE_SCALAR_CLASSES:Dict[str, type] = {
 
 # The member a python `int`/`float` becomes when the kernel declares no mapping. These are
 # the widths every existing kernel already has, so the default is unchanged.
-_DEFAULT_INT_MEMBER:type = ctypes.c_int32
-
-
 _DEFAULT_INT_MEMBER:type = ctypes.c_int32
 _DEFAULT_FLOAT_MEMBER:type = ctypes.c_float
 

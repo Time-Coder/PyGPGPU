@@ -36,14 +36,11 @@ import ast
 import types
 from typing import Dict, List, Optional
 
+# The type worlds the scan reads the translation's rules from -- the integer set and the real
+# pair. `type_map` owns both, so the scan cannot drift from the translator's own spelling.
+from .type_map import FLOAT_TYPES as REAL_TYPES, INT_TYPES
 from .vectors import _vec_registry
 
-
-# The type worlds the scan reads the translation's rules from: INT_TYPES and
-# FLOAT_TYPES (see type_map), and the real pair beside them.
-INT_TYPES:frozenset = frozenset({"bool", "char", "uchar", "short", "ushort", "int",
-                                 "uint", "long", "ulong"})
-REAL_TYPES:frozenset = frozenset({"float", "double"})
 
 # math/np functions whose return type the emission table overrides (see _MATH_FUNCS
 # in builtins.py and _emit_math_call): python's own return type is the rule.

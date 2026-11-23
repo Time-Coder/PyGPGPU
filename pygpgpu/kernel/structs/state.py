@@ -11,12 +11,9 @@ import numpy as np
 # vector or a structure -- `{float x; float y;}` and `float2` compare and hash equal -- so the
 # only usable evidence is the dtype *object*: numpy marks a record built from a ctypes class
 # as aligned (`isalignedstruct`), which the vector dtypes this package ships are not.
+_DECLARED: Dict[np.dtype, type] = {}
 # Every class that declared this layout, in registration order. Two classes can share one
 # dtype, and a member call has to find the one that actually carries the method.
-_DECLARED: Dict[np.dtype, type] = {}
-
-
-_DECLARED: Dict[np.dtype, type] = {}
 _DECLARED_ALL: Dict[np.dtype, List[type]] = {}
 
 
@@ -29,16 +26,10 @@ _REGISTRY_EXTENTS: Dict[str, int] = {}
 # dtype -> the python class name its structure is spelled after. The C name is
 # `<base>_<hash>`: readable, and still distinct when two modules declare one class name.
 _NAME_BASES: Dict[np.dtype, str] = {}
-
-
-_NAME_BASES: Dict[np.dtype, str] = {}
 # (dtype, extent) -> the C name it was first given. Pinned, because a later class
 # registration must not rename a layout an existing signature already spells. The
 # extent is None for a bare dtype and the element count for an array argument's
 # parameter name (see `struct_name`).
-_SETTLED_NAMES: Dict[object, str] = {}
-
-
 _SETTLED_NAMES: Dict[np.dtype, str] = {}
 # dtype -> the python file the class behind it was written in. Kept separately from
 # `_DECLARED`, because a structure synthesized from a plain object has a *generated* class

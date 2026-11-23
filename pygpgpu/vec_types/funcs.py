@@ -147,6 +147,12 @@ def _components(v:object)->Optional[List[Component]]:
     return list(v) if _is_vec(v) else None
 
 
+def _value_at(values:Component, components:Optional[List[Component]],
+              i:int)->Component:
+    """Component `i` of a vector, or the scalar itself -- it broadcasts across the vector."""
+    return values[i] if components is not None else values
+
+
 def _check_same_shape(a:object, b:object)->None:
     a_components, b_components = _components(a), _components(b)
     if (a_components is not None and b_components is not None
@@ -173,17 +179,13 @@ def select(a:Component, b:Component, cond:Component)->Component:
     """Component-wise selection: pick b where the cond component is nonzero, otherwise a."""
     a_components, b_components, cond_components = _components(a), _components(b), _components(cond)
 
-    def value_at(values:Component, components:Optional[List[Component]],
-                 i:int)->Component:
-        return values[i] if components is not None else values
-
     result_type:type = (type(a) if _is_vec(a) else type(b) if _is_vec(b) else float)
     if a_components is None:
         return b if cond else a
 
     result:List[Component] = []
     for i in range(len(a_components)):
-        result.append(value_at(b, b_components, i) if value_at(cond, cond_components, i) else value_at(a, a_components, i))
+        result.append(_value_at(b, b_components, i) if _value_at(cond, cond_components, i) else _value_at(a, a_components, i))
     return result_type(*result)
 
 
@@ -195,13 +197,9 @@ def _relation(op:Callable[[float, float], bool], a:Component,
     if a_components is None:
         return int(op(a, b))
 
-    def value_at(values:Component, components:Optional[List[Component]],
-                 i:int)->Component:
-        return values[i] if components is not None else values
-
     # `a` is a vector; `b` may be a scalar, in which case it broadcasts across components.
     int_vec:type = _int_vector_type(len(a_components))
-    return int_vec(*[int(op(x, value_at(b, b_components, i)))
+    return int_vec(*[int(op(x, _value_at(b, b_components, i)))
                      for i, x in enumerate(a_components)])
 
 
@@ -249,15 +247,11 @@ def mad24(a:Component, b:Component, c:Component)->Component:
     _check_same_shape(a, b)
     a_components, b_components, c_components = _components(a), _components(b), _components(c)
 
-    def value_at(values:Component, components:Optional[List[Component]],
-                 i:int)->Component:
-        return values[i] if components is not None else values
-
     if a_components is None:
         return a * b + c
 
     result:List[Component] = []
     for i in range(len(a_components)):
-        result.append(value_at(a, a_components, i) * value_at(b, b_components, i)
-                      + value_at(c, c_components, i))
+        result.append(_value_at(a, a_components, i) * _value_at(b, b_components, i)
+                      + _value_at(c, c_components, i))
     return type(a)(*result)

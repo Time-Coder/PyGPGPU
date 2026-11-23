@@ -7,8 +7,8 @@ from typing_extensions import override
 from ..cuobject import CUObject
 from ..event import Event
 from ...driver import CUDA, CUctx_flags, CUcontext, CUfunc_cache, CUlimit, CUstream_flags
-from .context_stream import _ContextStreamMixin
-from .context_image import _ContextImageMixin
+from .context_stream import STREAM_POOL_SIZE as STREAM_POOL_SIZE, _ContextStreamMixin
+from .context_image import TEXTURE_RETRY_ATTEMPTS as TEXTURE_RETRY_ATTEMPTS, _ContextImageMixin
 
 
 if TYPE_CHECKING:
@@ -22,12 +22,6 @@ if TYPE_CHECKING:
     from ..stream import Stream
     from ..array import Array
     from ..texture import TextureObject
-
-
-STREAM_POOL_SIZE:int = 16
-
-
-TEXTURE_RETRY_ATTEMPTS:int = 40
 
 
 class Context(_ContextStreamMixin, _ContextImageMixin, CUObject):

@@ -22,17 +22,13 @@ from ...driver.metal import MetaMetal, _wait_ready
 from ...driver.objc import ObjC
 from .copyback import (_MTCOMMAND_BUFFER_STATUS_COMPLETED, _POLL_INTERVAL,
                        _finish_buffer)
-from .scalars import Extents, MTLSize, _axis_extents, _mtl_size
+from .scalars import BoundEntry, Extents, MTLSize, _axis_extents, _mtl_size
 
 if TYPE_CHECKING:
     import asyncio
 
     from ..buffer import Buffer
     from . import MetalKernel
-
-# The `(index, value, is_buffer)` triple `_bind_args` answers per host-bound argument. A
-# pointer travels as a `Buffer`, a scalar as its bytes.
-BoundEntry = Tuple[int, object, bool]
 
 
 class BoundKernel:

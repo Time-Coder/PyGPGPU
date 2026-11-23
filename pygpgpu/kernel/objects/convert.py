@@ -465,10 +465,6 @@ def convert_object_arguments(func:object, args:Sequence[object],
     # A construction lifted inside a *helper* was scanned by the helper's own walk, so its
     # name never reached this scan's `constructed` map -- and the translator still meets the
     # constructor call when it translates that helper. The lift recorded the class with the
-    # tree, so the structure it needs can be built here from the same members.
-    # A construction lifted inside a *helper* was scanned by the helper's own walk, so its
-    # name never reached this scan's `constructed` map -- and the translator still meets the
-    # constructor call when it translates that helper. The lift recorded the class with the
     # tree, and the members it may carry are the ones the body fills: only an argument the
     # construction actually supplied is a candidate, because `__init__`'s own defaults can
     # be types a device has no room for (a string that nothing ever reads).
