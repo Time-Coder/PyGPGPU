@@ -25,7 +25,8 @@ PyGPGPU runs Python functions as GPU kernels on OpenCL (default), CUDA, and HIP,
 
 ## Setup and verification
 
-- `pip install -e ".[dev]"` (dev dependencies: pytest, ruff, ty). No CI and no pre-commit hook; the feature tests live in `tests/` and run with `python -m pytest tests/ -q`. The whole-repo check is `python check.py` (runs `ruff check --fix` then `ty check` against the config in `pyproject.toml`).
+- `pip install -e ".[dev]"` (dev dependencies: pytest, ruff, ty). No CI and no pre-commit hook; the feature tests live in `tests/` and run with `python -m pytest tests/ -q`. The whole-repo check is `python check.py`: `ruff check --fix`, then `ty check` against the config in `pyproject.toml`, then `line_budget.py`, `any_budget.py` and `dup_defs.py`.
+- **A module-level name is bound once per module, and `dup_defs.py` is what enforces it.** The failure it catches is a split artifact: a block left behind when a module became a package, which nothing objects to at runtime (the last assignment wins) and no linter sees (ruff's F811 covers a redefined import or `def`, never an assignment). The check is narrow on purpose -- only the same name bound twice, unconditionally, to the same value -- so a legitimate rebinding and the `TYPE_CHECKING`/`else` pair are left alone. The fix is to delete the dead copy **and** move its comment onto the live one: the pasted block usually carries the comment that belongs to the definition below it.
 - Fast checks without a GPU: `python -m compileall -q pygpgpu` and `python -c "from pygpgpu.kernel import kernel"`.
 - **The backend probe order is platform-dependent: Metal leads on macOS.**
   `DEFAULT_BACKEND_ORDER` in `kernel/decorator/devices.py` is
