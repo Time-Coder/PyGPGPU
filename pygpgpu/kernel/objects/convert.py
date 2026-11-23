@@ -21,7 +21,7 @@ from .scan import (
     Scan,
     _list_root,
     _member_path,
-    _parse,
+    _readonly_parse,
     _scan_function,
     _writes_to,
     looks_like_object,
@@ -62,9 +62,15 @@ def scan_object(func:object, objects:Dict[str, object],
         transitive[name] = name
     _scan_function(func, transitive, scan)
 
-    tree:Optional[ast.Module] = _parse(func)
+    tree:Optional[ast.Module] = _readonly_parse(func)
+    # One walk answers both questions: `scan.written` is the same list the validation below
+    # reads, so re-parsing (a deepcopy of the tree) to recompute it was a cost paid on every
+    # launch of a kernel that takes an object argument. `_writes_to` only reads the tree, so
+    # the shared one answers it -- and it is the *lifted* tree, exactly as `_parse` gave,
+    # because `constructed_locals` above already recorded it.
+    written:List[str] = _writes_to(tree, transitive) if tree is not None else []
     if tree is not None:
-        for description in _writes_to(tree, transitive):
+        for description in written:
             path, member = description.rsplit(".", 1)
             if path in scan.lists:
                 raise SyntaxError(
@@ -89,8 +95,7 @@ def scan_object(func:object, objects:Dict[str, object],
                         f"the kernel body assigns to '{description}', but {cls.__name__} "
                         f"declares __slots__ without '{member}', so the write has nowhere "
                         f"to land")
-    scan.written = _writes_to(_parse(func) or ast.Module(body=[], type_ignores=[]), transitive) \
-        if tree is not None else []
+    scan.written = written
     return scan
 
 

@@ -289,6 +289,15 @@ def constructed_locals(func:object, objects:Dict[str, object],
         _LIFTED_TREES[_tree_key(func)] = tree
         _LIFTED_VALUES[_tree_key(func)] = dict(lifted)
     found.update(lifted)
+    if not found:
+        # A body with nothing to lift is the common case, and its answer is the same on
+        # every launch -- there is no template here whose types could come from this
+        # call's values. Recording it is what the "already read once" path above reads, so
+        # a kernel body (and every method and helper the walk reaches) stops paying for a
+        # `deepcopy` of its tree per launch. A *found* value is deliberately not cached
+        # here: its template is typed from the caller's arguments, which this function
+        # does not know are unchanged.
+        _LIFTED_VALUES[_tree_key(func)] = {}
     return found
 
 

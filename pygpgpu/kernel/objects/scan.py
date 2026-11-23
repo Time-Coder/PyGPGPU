@@ -38,9 +38,14 @@ def _scan_function(func:object, tracked:Dict[str, str], scan:Scan)->None:
     if visit_key in scan.visited:
         return
     scan.visited.add(visit_key)
-    tree:Optional[ast.Module] = _parse(func)
+    tree:Optional[ast.Module] = _readonly_parse(func)
     if tree is None:
         return
+    # The walk below only reads the tree (it collects members, methods and lists onto
+    # `scan`), so it takes the shared one rather than paying a `deepcopy` per launch -- the
+    # same reason `_constructs_a_class` reads it that way. The one caller that *rewrites* a
+    # body (`constructed_locals`, which lifts an inline construction into a local) takes its
+    # own copy through `_parse`, and that copy is what lands in `_LIFTED_TREES`.
     # A value the body builds itself (`ray = Ray(...)`) is a tracked name too, bound to its
     # own path: a call that hands it on (`scene.hit(ray, ...)`) forwards it under the callee's
     # parameter name, and the callee's member reads (`ray.direction`) then land on the path
