@@ -14,6 +14,11 @@ from .cltypes import (
     ErrorCode,
     cl_event
 )
+from .clinfo_errors import (
+    INVALID_CONTEXT,
+    OUT_OF_HOST_MEMORY,
+    OUT_OF_RESOURCES,
+)
 
 SIGNATURES:Dict[str, Any] = {
         "clGetEventInfo": {
@@ -26,11 +31,12 @@ SIGNATURES:Dict[str, Any] = {
             },
             "restype": cl_int,
             "errors": {
-                ErrorCode.CL_INVALID_EVENT: "event is a not a valid event object.",
-                ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Event Object Queries table and param_value is not NULL.",
-                ErrorCode.CL_INVALID_VALUE: "the information to query given in param_name cannot be queried for event.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_EVENT: "event is not a valid event object.",
+                ErrorCode.CL_INVALID_VALUE: """one of following case happend:
+    * param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Event Object Queries table and param_value is not NULL.
+    * the information to query given in param_name cannot be queried for event.""",
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -41,9 +47,9 @@ SIGNATURES:Dict[str, Any] = {
             },
             "restype": cl_event,
             "errors": {
-                ErrorCode.CL_INVALID_CONTEXT: "if context is not a valid context.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "if there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "if there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_INVALID_CONTEXT: INVALID_CONTEXT,
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -57,8 +63,8 @@ SIGNATURES:Dict[str, Any] = {
                 ErrorCode.CL_INVALID_EVENT: "event is not a valid user event object.",
                 ErrorCode.CL_INVALID_VALUE: "the execution_status is not CL_COMPLETE or a negative integer value.",
                 ErrorCode.CL_INVALID_OPERATION: "the execution_status for event has already been changed by a previous call to clSetUserEventStatus.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -73,8 +79,8 @@ SIGNATURES:Dict[str, Any] = {
             "errors": {
                 ErrorCode.CL_INVALID_EVENT: "event is not a valid event object.",
                 ErrorCode.CL_INVALID_VALUE: "pfn_event_notify is NULL or command_exec_callback_type is not CL_SUBMITTED, CL_RUNNING, or CL_COMPLETE.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -85,8 +91,8 @@ SIGNATURES:Dict[str, Any] = {
             "restype": cl_int,
             "errors": {
                 ErrorCode.CL_INVALID_EVENT: "if event is not a valid event object.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "if there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "if there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
 }

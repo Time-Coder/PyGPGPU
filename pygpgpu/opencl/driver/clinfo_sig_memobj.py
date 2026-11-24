@@ -19,6 +19,12 @@ from .cltypes import (
     ptr_cl_event,
     cl_sampler
 )
+from .clinfo_errors import (
+    INVALID_COMMAND_QUEUE,
+    INVALID_CONTEXT,
+    OUT_OF_HOST_MEMORY,
+    OUT_OF_RESOURCES,
+)
 
 SIGNATURES:Dict[str, Any] = {
         "clGetMemObjectInfo": {
@@ -31,11 +37,11 @@ SIGNATURES:Dict[str, Any] = {
             },
             "restype": cl_int,
             "errors": {
-                ErrorCode.CL_INVALID_MEM_OBJECT: "memobj is a not a valid memory object.",
+                ErrorCode.CL_INVALID_MEM_OBJECT: "memobj is not a valid memory object.",
                 ErrorCode.CL_INVALID_OPERATION: "the cl_ext_buffer_device_address is not supported or the buffer was not allocated with CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT.",
                 ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Memory Object Queries table and param_value is not NULL.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY,
                 ErrorCode.CL_INVALID_DX9_MEDIA_SURFACE_KHR: "param_name is CL_MEM_DX9_MEDIA_SURFACE_INFO_KHR and memobj was not created by calling clCreateFromDX9MediaSurfaceKHR from a Direct3D9 surface.",
                 ErrorCode.CL_INVALID_D3D10_RESOURCE_KHR: "param_name is CL_MEM_D3D10_RESOURCE_KHR and memobj was not created by calling clCreateFromD3D10BufferKHR, clCreateFromD3D10Texture2DKHR, or clCreateFromD3D10Texture3DKHR.",
                 ErrorCode.CL_INVALID_D3D11_RESOURCE_KHR: "param_name is CL_MEM_D3D11_RESOURCE_KHR and memobj was not created by calling clCreateFromD3D11BufferKHR, clCreateFromD3D11Texture2DKHR, or clCreateFromD3D11Texture3DKHR."
@@ -49,8 +55,8 @@ SIGNATURES:Dict[str, Any] = {
             "restype": cl_int,
             "errors": {
                 ErrorCode.CL_INVALID_MEM_OBJECT: "memobj is not a valid memory object.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -87,13 +93,13 @@ SIGNATURES:Dict[str, Any] = {
             },
             "restype": cl_int,
             "errors": {
-                ErrorCode.CL_INVALID_COMMAND_QUEUE: "command_queue is not a valid host command-queue.",
+                ErrorCode.CL_INVALID_COMMAND_QUEUE: INVALID_COMMAND_QUEUE,
                 ErrorCode.CL_INVALID_CONTEXT: "the context associated with command_queue is not the same as the context associated with events in event_wait_list.",
                 ErrorCode.CL_INVALID_VALUE: "dst_ptr or src_ptr is NULL, or size is 0.",
                 ErrorCode.CL_INVALID_EVENT_WAIT_LIST: "event_wait_list is NULL and num_events_in_wait_list > 0, or event_wait_list is not NULL and num_events_in_wait_list is 0.",
                 ErrorCode.CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST: "the copy is blocking and the execution status of any of the events in event_wait_list is a negative integer value.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host.",
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY,
             }
         },
     
@@ -107,11 +113,11 @@ SIGNATURES:Dict[str, Any] = {
             },
             "restype": cl_sampler,
             "errors": {
-                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_CONTEXT: INVALID_CONTEXT,
                 ErrorCode.CL_INVALID_VALUE: "addressing_mode, filter_mode, normalized_coords or a combination of these arguements are not valid.",
                 ErrorCode.CL_INVALID_OPERATION: "images are not supported by any device associated with context (i.e. CL_DEVICE_IMAGE_SUPPORT specified in the Device Queries table is CL_FALSE).",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -123,11 +129,11 @@ SIGNATURES:Dict[str, Any] = {
             },
             "restype": cl_sampler,
             "errors": {
-                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_CONTEXT: INVALID_CONTEXT,
                 ErrorCode.CL_INVALID_VALUE: "the property name in sampler_properties is not a supported property name, if the value specified for a supported property name is not valid, or the same property name is specified more than once.",
                 ErrorCode.CL_INVALID_OPERATION: "images are not supported by any device associated with context (i.e. CL_DEVICE_IMAGE_SUPPORT specified in the Device Queries table is CL_FALSE).",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -141,10 +147,10 @@ SIGNATURES:Dict[str, Any] = {
             },
             "restype": cl_int,
             "errors": {
-                ErrorCode.CL_INVALID_SAMPLER: "sampler is a not a valid sampler object.",
+                ErrorCode.CL_INVALID_SAMPLER: "sampler is not a valid sampler object.",
                 ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Sampler Object Queries table and param_value is not NULL.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -155,8 +161,8 @@ SIGNATURES:Dict[str, Any] = {
             "restype": cl_int,
             "errors": {
                 ErrorCode.CL_INVALID_SAMPLER: "sampler is not a valid sampler object.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -171,7 +177,7 @@ SIGNATURES:Dict[str, Any] = {
             },
             "restype": cl_mem,
             "errors": {
-                ErrorCode.CL_INVALID_CONTEXT: "context is not a valid context.",
+                ErrorCode.CL_INVALID_CONTEXT: INVALID_CONTEXT,
                 ErrorCode.CL_INVALID_OPERATION: "no devices in context support pipes.",
                 ErrorCode.CL_INVALID_VALUE: """one of following case happend:
     * values specified in flags are not as defined above.,
@@ -179,8 +185,8 @@ SIGNATURES:Dict[str, Any] = {
     * CL_MEM_IMMUTABLE_EXT is set in flags.""",
                 ErrorCode.CL_INVALID_PIPE_SIZE: "pipe_packet_size is 0 or the pipe_packet_size exceeds CL_DEVICE_PIPE_MAX_PACKET_SIZE value specified in the Device Queries table for all devices in context or pipe_max_packets is 0.",
                 ErrorCode.CL_MEM_OBJECT_ALLOCATION_FAILURE: "there is a failure to allocate memory for the pipe object.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         }
 }

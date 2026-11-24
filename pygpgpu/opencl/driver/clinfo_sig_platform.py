@@ -14,6 +14,10 @@ from .cltypes import (
     ptr_cl_uint,
     ErrorCode
 )
+from .clinfo_errors import (
+    OUT_OF_HOST_MEMORY,
+    OUT_OF_RESOURCES,
+)
 
 SIGNATURES:Dict[str, Any] = {
         "clGetPlatformInfo": {
@@ -28,7 +32,7 @@ SIGNATURES:Dict[str, Any] = {
             "errors": {
                 ErrorCode.CL_INVALID_PLATFORM: "platform is not a valid platform.",
                 ErrorCode.CL_INVALID_VALUE: "param_name is not one of the supported values, or the size in bytes specified by param_value_size is less than size of the return type specified in the Platform Queries table and param_value is not NULL.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -42,7 +46,7 @@ SIGNATURES:Dict[str, Any] = {
             "errors": {
                 ErrorCode.CL_PLATFORM_NOT_FOUND_KHR: "cl_khr_icd extension is supported and zero platforms are available.",
                 ErrorCode.CL_INVALID_VALUE: "num_entries is equal to zero and platforms is not NULL or both num_platforms and platforms are NULL.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
     
@@ -60,8 +64,8 @@ SIGNATURES:Dict[str, Any] = {
                 ErrorCode.CL_INVALID_DEVICE_TYPE: "device_type is not a valid value.",
                 ErrorCode.CL_INVALID_VALUE: "num_entries is equal to zero and devices is not NULL or both num_devices and devices are NULL.",
                 ErrorCode.CL_DEVICE_NOT_FOUND: "no OpenCL devices that matched device_type were found.",
-                ErrorCode.CL_OUT_OF_RESOURCES: "there is a failure to allocate resources required by the OpenCL implementation on the device.",
-                ErrorCode.CL_OUT_OF_HOST_MEMORY: "there is a failure to allocate resources required by the OpenCL implementation on the host."
+                ErrorCode.CL_OUT_OF_RESOURCES: OUT_OF_RESOURCES,
+                ErrorCode.CL_OUT_OF_HOST_MEMORY: OUT_OF_HOST_MEMORY
             }
         },
 }

@@ -98,7 +98,6 @@ device_info_types = {
     cl_device_info.CL_DEVICE_PREFERRED_VECTOR_WIDTH_FLOAT: cl_uint,
     cl_device_info.CL_DEVICE_PREFERRED_VECTOR_WIDTH_DOUBLE: cl_uint,
     cl_device_info.CL_DEVICE_PREFERRED_VECTOR_WIDTH_HALF: cl_uint,
-    cl_device_info.CL_DEVICE_PREFERRED_VECTOR_WIDTH_HALF: cl_uint,
     cl_device_info.CL_DEVICE_NATIVE_VECTOR_WIDTH_CHAR: cl_uint,
     cl_device_info.CL_DEVICE_NATIVE_VECTOR_WIDTH_SHORT: cl_uint,
     cl_device_info.CL_DEVICE_NATIVE_VECTOR_WIDTH_INT: cl_uint,
