@@ -15,10 +15,12 @@ from .notation import (
     Translated,
 )
 from .foreign_cls import class_constant_values as _class_constant_values
-from .receivers import (
+from .magic_tables import (
     BUILTIN_METHODS,
     CALL_METHOD,
     CONVERSION_METHODS,
+)
+from .receivers import (
     _receiver_param_of,
     _self_member_call_kind,
     _super_target,

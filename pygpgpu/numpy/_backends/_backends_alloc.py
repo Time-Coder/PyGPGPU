@@ -2,11 +2,12 @@
 from __future__ import annotations
 from ._backends_pinning import (
     _aligned_range,
+    _attach_holder,
+    _device_pointer,
     _register_range,
     _unregister_range,
 )
 from ._backends_zerocopy import zero_copy_supported
-import ctypes
 from typing import Callable, Optional
 from .._devices import Target, context_for
 
@@ -105,26 +106,30 @@ def _allocate_zero_copy_cuda(context: object, size: int, host_ptr: int) -> objec
             f"directly; zero-copy is unavailable on it")
 
     start, registered, offset = _aligned_range(host_ptr, size)
-    _register_range("cuda", start, registered)
-    device_base = CUdeviceptr(0)
+    # The registration may be shared with an array already pinned (or have been merged into
+    # a larger one), so the base is its own answer and the address is that base's device
+    # pointer plus the host offset from it.
+    base: int = _register_range("cuda", start, registered)
     try:
-        CUDA.cuMemHostGetDevicePointer_v2(device_base, ctypes.c_void_p(start), 0)
+        device_address = _device_pointer("cuda", base) + (host_ptr - base)
     except BaseException:
-        _unregister_range("cuda", start)
+        _unregister_range("cuda", start, registered)
         raise
-    device_address = int(device_base.value) + offset
 
     from ...cuda.oop.buffer import Buffer
     from ...cuda.oop.mem_object import MemObject
 
     buffer = Buffer.__new__(Buffer)
     MemObject.__init__(buffer, CUdeviceptr(device_address), None, None, size)
-    _replace_free_with_unregister(buffer, "cuda", start, _unregister_range)
+    # A later merge re-registers the union, which can move the device address this buffer
+    # holds: the table keeps a weak reference to it so the merge can re-point it.
+    _attach_holder("cuda", start, registered, host_ptr, buffer)
+    _replace_free_with_unregister(buffer, "cuda", start, registered, _unregister_range)
     return buffer
 
 
-def _replace_free_with_unregister(buffer: object, backend: str, start: int,
-                                  unregister_range: Callable[[str, int], None]) -> None:
+def _replace_free_with_unregister(buffer: object, backend: str, start: int, size: int,
+                                  unregister_range: Callable[..., None]) -> None:
     """Make a registered buffer's release unregister its page range, not free its pointer.
 
     A zero-copy binding's handle is a *device address of host memory*: it was never
@@ -133,7 +138,7 @@ def _replace_free_with_unregister(buffer: object, backend: str, start: int,
     registration instead, which is the resource the binding actually holds -- and the
     buffer keeps its class, so a launch treats it exactly like any other buffer.
     """
-    buffer._gnp_unregister = lambda: unregister_range(backend, start)
+    buffer._gnp_unregister = lambda: unregister_range(backend, start, size)
     buffer._gnp_host_mapped = True
     # `weakref.finalize` holds the release callable it was given at construction, so the
     # one that was installed has to be replaced rather than shadowed.
@@ -154,24 +159,23 @@ def _safe_release(action: Callable[[], None]) -> None:
 
 
 def _allocate_zero_copy_hip(context: object, size: int, host_ptr: int) -> object:
-    from ...hip.driver import HIP, CUdeviceptr
+    from ...hip.driver import CUdeviceptr
 
     start, registered, offset = _aligned_range(host_ptr, size)
-    _register_range("hip", start, registered)
-    device_base = CUdeviceptr(0)
+    base: int = _register_range("hip", start, registered)
     try:
-        HIP.hipHostGetDevicePointer(device_base, ctypes.c_void_p(start), 0)
+        device_address = _device_pointer("hip", base) + (host_ptr - base)
     except BaseException:
-        _unregister_range("hip", start)
+        _unregister_range("hip", start, registered)
         raise
-    device_address = int(device_base.value) + offset
 
     from ...hip.oop.buffer import Buffer
     from ...hip.oop.mem_object import MemObject
 
     buffer = Buffer.__new__(Buffer)
     MemObject.__init__(buffer, CUdeviceptr(device_address), None, None, size)
-    _replace_free_with_unregister(buffer, "hip", start, _unregister_range)
+    _attach_holder("hip", start, registered, host_ptr, buffer)
+    _replace_free_with_unregister(buffer, "hip", start, registered, _unregister_range)
     return buffer
 
 

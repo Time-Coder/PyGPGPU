@@ -52,6 +52,10 @@ class _PhasesMixin:
                     "races: whichever work item finishes last decides the value. Use `+=` "
                     "(which becomes a device atomic), or keep the per-work-item value in a "
                     "different variable and reduce it afterwards", offender)
+            # A class instance has no device iteration (`__iter__`), so a loop over one is
+            # refused wherever it sits -- including above the dispatch loop, which is not
+            # translated as work-item code and would otherwise vanish (see the scan).
+            self._refuse_class_iteration()
             # A body with several magic loops is several *passes* over the work items. Each
             # one is translated on its own into a kernel of its own, because a second loop
             # inside one kernel would be run by every work item instead of once. They are

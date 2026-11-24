@@ -144,6 +144,15 @@ class _AssignMixin(_StoreWrapMixin, _PrivateArrayMixin, _OuterStoreMixin, _WorkG
                 self.member_writes.add(self.self_param)
                 self._emit(f"({self.self_param})->{member} = {value_code};")
                 return
+            value_code, value_t = self._visit_expression(node.value)
+            # A class-body descriptor on the kernel's own class (`self.total = v` runs
+            # `__set__`): python resolves it before it looks for an attribute, so the store
+            # keeps that meaning on the device.
+            descriptor_base:Translated = self._visit_expression(target.value)
+            if self._emit_descriptor_write(
+                    self._descriptor_classes_of(target.value, descriptor_base[1]),
+                    target.attr, descriptor_base, target.value, value_code, value_t, node):
+                return
             self._error(
                 f"cannot assign to self.{target.attr}: host attributes cannot be written by device code; "
                 f"write into an array element (self.{target.attr}[i] = ...) or use a local variable", node)
@@ -330,6 +339,12 @@ class _AssignMixin(_StoreWrapMixin, _PrivateArrayMixin, _OuterStoreMixin, _WorkG
                         pass
                 self._emit(f"{member[0]} = {code};")
                 return
+            # `box[i] = v` on a class value is that class's own `__setitem__`, the write twin
+            # of the `__getitem__` the read path dispatches. Recognized before the array
+            # paths for the same reason the member store is: a class value is not a buffer,
+            # and emitting the subscript as a C store failed to compile.
+            if self._emit_magic_setitem(target, code, t, node):
+                return
             # A store into a work-group buffer flattens like the read side, and has to be
             # recognized before the array path (a slice is not a pointer parameter).
             slice_code, slice_t = self._visit_expression(target.value)
@@ -371,6 +386,16 @@ class _AssignMixin(_StoreWrapMixin, _PrivateArrayMixin, _OuterStoreMixin, _WorkG
             # _visit_target below.
             if self._emit_vec_member_store(target, code, t, node):
                 return
+            # `obj.attr = v` where `attr` is a class-body descriptor is that descriptor's
+            # `__set__`, the write twin of the `__get__` the read path dispatches. Only a
+            # name or a member read is resolved: a call would be evaluated twice, and its
+            # result is not a class this can ask.
+            if isinstance(target.value, (ast.Name, ast.Attribute)):
+                descriptor_base:Translated = self._visit_expression(target.value)
+                if self._emit_descriptor_write(
+                        self._descriptor_classes_of(target.value, descriptor_base[1]),
+                        target.attr, descriptor_base, target.value, code, t, node):
+                    return
             # `p.x = ...`: a C member store on a structure value, the write twin of the
             # attribute read. The read/write analysis cannot attribute the field store to
             # the caller's argument (it sees a member expression, not a subscript), so this

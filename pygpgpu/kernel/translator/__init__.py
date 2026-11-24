@@ -100,7 +100,7 @@ from .notation import (
     _CUDA_TYPE_NAMES,
     device_name,
 )
-from .receivers import (
+from .magic_tables import (
     BUILTIN_METHODS,
     CALL_METHOD,
     CONVERSION_METHODS,
@@ -108,13 +108,15 @@ from .receivers import (
     MAGIC_INPLACE,
     MAGIC_METHODS,
     MAGIC_REFLECTED,
+    _operator_name,
+)
+from .receivers import (
     _MISSING,
     _class_attr,
     _collect_self_attrs,
     _enum_member_value,
     _helper_globals,
     _magic_method_of,
-    _operator_name,
     _property_accessor,
     _property_carrier,
     _property_of,
@@ -219,6 +221,7 @@ from .attributes import _AttributesMixin
 from .complex_values import _ComplexValuesMixin
 from .quaternions import _QuaternionsMixin
 from .magic_methods import _MagicMethodsMixin
+from .descriptors import _DescriptorMixin
 from .vector_ops import _VectorOpsMixin
 from .vector_floor import _VectorFloorMixin
 from .structures import _StructuresMixin
@@ -241,7 +244,7 @@ from .shared_shapes import baked_shared_shapes
 from . import tail_recursion
 
 
-class FunctionTranslator(_InitMixin, _EmitMixin, _NamingMixin, _PhasesMixin, _MagicLoopMixin, _HostRegionsMixin, _OuterVarsMixin, _StatementsMixin, _ReturnsMixin, _AssignMixin, _AugassignMixin, _TargetsMixin, _TuplesMixin, _PrintEmitMixin, _ExpressionsMixin, _OperatorsMixin, _SubscriptsMixin, _ImagesMixin, _AttributesMixin, _ComplexValuesMixin, _QuaternionsMixin, _MagicMethodsMixin, _VectorOpsMixin, _VectorFloorMixin, _StructuresMixin, _CallsMixin, _MethodOnValueMixin, _BuiltinEmitMixin, _NumpyEmitMixin, _DeviceCallMixin, _NativeRecursionMixin, _RenderMixin, _BuiltinPythonMixin, _NdIndexMixin, _PrivateArrayMixin, _NestedLaunchMixin):
+class FunctionTranslator(_InitMixin, _EmitMixin, _NamingMixin, _PhasesMixin, _MagicLoopMixin, _HostRegionsMixin, _OuterVarsMixin, _StatementsMixin, _ReturnsMixin, _AssignMixin, _AugassignMixin, _TargetsMixin, _TuplesMixin, _PrintEmitMixin, _ExpressionsMixin, _OperatorsMixin, _SubscriptsMixin, _ImagesMixin, _AttributesMixin, _DescriptorMixin, _ComplexValuesMixin, _QuaternionsMixin, _MagicMethodsMixin, _VectorOpsMixin, _VectorFloorMixin, _StructuresMixin, _CallsMixin, _MethodOnValueMixin, _BuiltinEmitMixin, _NumpyEmitMixin, _DeviceCallMixin, _NativeRecursionMixin, _RenderMixin, _BuiltinPythonMixin, _NdIndexMixin, _PrivateArrayMixin, _NestedLaunchMixin):
         PRIVATE_ARRAY_MAX_UNROLL = 64
 
 

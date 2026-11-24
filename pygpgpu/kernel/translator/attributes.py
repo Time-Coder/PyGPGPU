@@ -104,6 +104,16 @@ class _AttributesMixin:
                         if node.attr in members:
                             return (f"({self.self_param})->{node.attr}" ,
                                     members[node.attr])
+                # A class-body descriptor on the kernel's own class: `self.total` runs
+                # `type(self).total.__get__(self, ...)`, exactly as it does for a structure
+                # argument. Tried before the "not discovered" refusal, which stays the answer
+                # for every name that is neither a member nor a descriptor.
+                descriptor_base:Translated = self._visit_expression(node.value)
+                descriptor_read:Optional[Translated] = self._emit_descriptor_read(
+                    self._descriptor_classes_of(node.value, descriptor_base[1]), node.attr,
+                    descriptor_base, node)
+                if descriptor_read is not None:
+                    return descriptor_read
                 kind:str
                 _target:object
                 kind, _target = _self_member_call_kind(self.self_owner, node.attr)
@@ -211,6 +221,13 @@ class _AttributesMixin:
                     structs.declared_classes(dtype), node.attr, (base_code, base_t), node)
                 if property_read is not None:
                     return property_read
+                # Any other descriptor on the class (`__get__`) answers the same way the
+                # property does: python runs it before it looks for a field.
+                descriptor_read:Optional[Translated] = self._emit_descriptor_read(
+                    self._descriptor_classes_of(node.value, base_t), node.attr,
+                    (base_code, base_t), node)
+                if descriptor_read is not None:
+                    return descriptor_read
                 members:Dict[str, object] = structs.member_types(dtype, self.backend)
                 if node.attr not in members:
                     self._error(
@@ -228,6 +245,18 @@ class _AttributesMixin:
         if isinstance(base_t, str):
             dtype:Optional[np.dtype] = structs.dtype_for(base_t)
             if dtype is not None:
+                # A structure *value* (`self.box`, a local built from one) carries the same
+                # computed members a structure pointer does: the property first, then any
+                # other descriptor, and the field lookup only when neither answers.
+                property_read = self._emit_property_read(
+                    structs.declared_classes(dtype), node.attr, (base_code, base_t), node)
+                if property_read is not None:
+                    return property_read
+                descriptor_read = self._emit_descriptor_read(
+                    self._descriptor_classes_of(node.value, base_t), node.attr,
+                    (base_code, base_t), node)
+                if descriptor_read is not None:
+                    return descriptor_read
                 members:Dict[str, object] = structs.member_types(dtype, self.backend)
                 if node.attr not in members:
                     self._error(

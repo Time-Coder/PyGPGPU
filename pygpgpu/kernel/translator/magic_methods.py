@@ -1,22 +1,28 @@
 from __future__ import annotations
 import ast
 import typing
-from typing import (Any, Callable, Dict, List, Optional, Tuple)
+from typing import (Callable, Dict, List, Optional, Tuple)
 import numpy as np
 from ..structs import dtype_for as structs_dtype_for
 from .notation import (
     DeviceType,
     Translated,
 )
-from .receivers import (
+from .magic_tables import (
     MAGIC_COMPARE_REFLECTED,
     MAGIC_REFLECTED,
-    _magic_method_of,
+    MagicOwner,
     _operator_name,
+)
+from .receivers import (
+    _magic_method_of,
     _property_accessor,
     _property_carrier,
     _property_of,
     _receiver_param_of,
+)
+from .magic_index import (
+    _MagicIndexMixin,
 )
 from .vectors import (
     is_vec,
@@ -29,7 +35,7 @@ from .predicates import (
 )
 
 
-class _MagicMethodsMixin:
+class _MagicMethodsMixin(_MagicIndexMixin):
 
     def _magic_receiver_type(self, t:DeviceType)->DeviceType:
         """The type a magic method's receiver parameter takes.
@@ -118,13 +124,45 @@ class _MagicMethodsMixin:
         casting an aggregate is not what the caller wrote. None when the operand carries
         no such method, which leaves the ordinary scalar path to answer.
         """
-        owner:Optional[Tuple[type, Any]] = self._magic_owner(t, magic)
+        owner:Optional[MagicOwner] = self._magic_owner(t, magic, code)
         if owner is None:
             return None
         _cls, method = owner
         return self._emit_device_call(
             magic, method, [(code, t)], node,
             self_param=_receiver_param_of(method), receiver_as_argument=True)
+
+
+    def _magic_truth_code(self, code:str, t:object,
+                          node:ast.AST)->Optional[str]:
+        """A class value's truth as a device bool expression, or None for other values.
+
+        Python tests `bool(x)` as `x.__bool__()` and -- when the class defines no
+        `__bool__` -- as `len(x) != 0`. A structure value has neither unless its class
+        wrote one, and testing the value itself is not an option: `if (box)` on a
+        structure pointer is a null test, which the device always answers "true". That
+        is how `if box:` silently took the wrong branch, so a class value goes through
+        its own method, and one that defines neither method is refused with the name of
+        the method to add rather than tested as a pointer.
+        """
+        if not self._is_structure_operand(t):
+            return None
+        converted:Optional[Translated] = self._emit_magic_conversion(
+            "__bool__", code, t, node)
+        if converted is not None:
+            expression, result_t = converted
+            # A conditional *expression* needs a bool on OpenCL C, and `__bool__` may be
+            # declared to answer an int: a comparison against zero is a bool everywhere.
+            return expression if result_t == "bool" else f"(({expression}) != 0)"
+        length:Optional[Translated] = self._emit_magic_conversion(
+            "__len__", code, t, node)
+        if length is not None:
+            return f"(({length[0]}) != 0)"
+        self._error(
+            "a class value has no truth value on the device: give the class a "
+            "'__bool__' method (or a '__len__', which python falls back to), or test "
+            "one of its members (`if s.count:`)", node)
+        return None
 
 
     def _emit_magic_binop(self, magic:str, left:str, lt:object, right:str, rt:object,
@@ -136,7 +174,7 @@ class _MagicMethodsMixin:
         scalar on the left reaches a class that only knows how to multiply itself by one
         (`2.0 * v` calls `v.__rmul__(2.0)`), which is a shape a kernel body does write.
         """
-        owner:Optional[Tuple[type, Any]] = self._magic_owner(lt, magic)
+        owner:Optional[MagicOwner] = self._magic_owner(lt, magic)
         if owner is not None:
             _cls, method = owner
             return self._emit_device_call(
@@ -163,7 +201,7 @@ class _MagicMethodsMixin:
         # Its result is a truth value, so `not in` negates the same call. A chained form
         # (`x in a in b`) is refused above, where the operator is read.
         if magic == "__contains__":
-            owner:Optional[Tuple[type, Any]] = self._magic_owner(rt, magic)
+            owner:Optional[MagicOwner] = self._magic_owner(rt, magic)
             if owner is not None:
                 _cls, method = owner
                 call:Translated = self._emit_device_call(
@@ -174,7 +212,7 @@ class _MagicMethodsMixin:
                 return call
             return None
 
-        owner:Optional[Tuple[type, Any]] = self._magic_owner(lt, magic)
+        owner:Optional[MagicOwner] = self._magic_owner(lt, magic)
         if owner is not None:
             _cls, method = owner
             return self._emit_device_call(
@@ -208,7 +246,7 @@ class _MagicMethodsMixin:
 
 
     def _magic_owner(self, t:object, magic:str,
-                     code:str = "")->Optional[Tuple[type, Any]]:
+                     code:str = "")->Optional[MagicOwner]:
         """The class whose magic method an operand's operator should call, and that method.
 
         A python class that defines `__add__` gives `a + b` a meaning of its own, and a

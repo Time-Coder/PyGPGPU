@@ -1,6 +1,6 @@
 from __future__ import annotations
 import ast
-from typing import (Any, Dict, List, Optional, Tuple, cast)
+from typing import (Dict, List, Optional, Tuple, cast)
 from ..structs import dtype_for as structs_dtype_for
 from ..device_builtins import emit_index
 from .notation import (
@@ -12,9 +12,6 @@ from .notation import (
     WORK_GROUP_SLICES,
     DeviceType,
     Translated,
-)
-from .receivers import (
-    _receiver_param_of,
 )
 from .vectors import (
     _C_FIELD_TYPES,
@@ -74,32 +71,32 @@ class _SubscriptsMixin:
         # `box[i]` on a class that defines `__getitem__` is that method, exactly as
         # `box.attr` is `box.__getattribute__`. The member read above already covered the
         # string spelling (`s["field"]`), so only a computed index reaches here.
-        if (not (isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str))
-                and isinstance(node.value, ast.Name)):
-            # Only a plain name is a class instance this class's `__getitem__` can answer
-            # for. A shared buffer (`bins[blockIdx]`) and an array are indexed by the paths
-            # below, and visiting their base here would raise the shared-buffer refusal
-            # before that path could handle the outer subscript.
-            binding:DeviceType = self._lookup(node.value.id)
-            # A structure travels as a pointer too, so `is_ptr` alone would call it an
-            # array and skip the `__getitem__` its class may define.
-            is_struct_ptr:bool = (isinstance(binding, tuple) and is_ptr(binding)
-                                  and structs_dtype_for(binding[1]) is not None)
-            is_array:bool = (is_ptr(binding) and not is_struct_ptr) or (
-                isinstance(binding, tuple) and len(binding) == 4 and binding[0] == "bodyarr")
-            is_shared:bool = (isinstance(binding, tuple) and len(binding) == 5
-                              and binding[0] in ("shared", BLOCK_ARRAY))
-            if not is_array and not is_shared:
-                base_code, base_t = self._visit_expression(node.value)
-                owner:Optional[Tuple[type, Any]] = self._magic_owner(base_t, "__getitem__")
-                if owner is not None:
-                    _cls, method = owner
-                    index_code, index_t = self._visit_expression(node.slice)
-                    return self._emit_device_call(
-                        "__getitem__", method,
-                        [(base_code, base_t), (index_code, index_t)],
-                        node, self_param=_receiver_param_of(method),
-                        receiver_as_argument=True)
+        if not (isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
+            if isinstance(node.value, ast.Name):
+                # A shared buffer (`bins[blockIdx]`) and an array are indexed by the paths
+                # below, and visiting their base here would raise the shared-buffer refusal
+                # before that path could handle the outer subscript.
+                binding:DeviceType = self._lookup(node.value.id)
+                # A structure travels as a pointer too, so `is_ptr` alone would call it an
+                # array and skip the `__getitem__` its class may define.
+                is_struct_ptr:bool = (isinstance(binding, tuple) and is_ptr(binding)
+                                      and isinstance(binding[1], str)
+                                      and structs_dtype_for(binding[1]) is not None)
+                is_array:bool = (is_ptr(binding) and not is_struct_ptr) or (
+                    isinstance(binding, tuple) and len(binding) == 4
+                    and binding[0] == "bodyarr")
+                is_shared:bool = (isinstance(binding, tuple) and len(binding) == 5
+                                  and binding[0] in ("shared", BLOCK_ARRAY))
+                if not is_array and not is_shared:
+                    magic_item:Optional[Translated] = self._emit_magic_getitem(node)
+                    if magic_item is not None:
+                        return magic_item
+            elif isinstance(node.value, ast.Attribute):
+                # A member that holds a class instance (`self.tri[i]`, `a.inner[i]`) answers
+                # through the same method: the base is a member read, not a buffer.
+                magic_item = self._emit_magic_getitem(node)
+                if magic_item is not None:
+                    return magic_item
 
         # `buf[k]` on a `local_array_per_group(...)` value: the index selects a work group,
         # and only the caller's own group is reachable from inside a work item, so `k` must

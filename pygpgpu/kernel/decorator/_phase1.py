@@ -155,6 +155,15 @@ class _PrepareLaunchMixin:
             # computed above are what decides which methods are host-only (see `_host_region_values`).
             plan.self_attrs = scan_self_attrs(self.raw_func, self._self_param, plan.owner,
                                          set(plan.host_executed))
+            # A class-body descriptor on the kernel's own class (`self.total`) is *computed*
+            # by its `__get__`, which the device calls -- so it is not a stored member and
+            # must not be packed as one. Its value may not even exist on the host instance
+            # (`hasattr` runs the descriptor and may fail), and packing it would freeze a
+            # value the body is supposed to recompute.
+            from ..translator.descriptors import descriptor_of  # noqa: PLC0415 (import cycle)
+
+            plan.self_attrs = [name for name in plan.self_attrs
+                               if descriptor_of(plan.owner, name) is None]
             for name in plan.self_attrs:
                 if not hasattr(instance, name):
                     raise SyntaxError(

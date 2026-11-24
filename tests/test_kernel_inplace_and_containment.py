@@ -3,7 +3,9 @@
 C has no in-place operator for a structure, so `v += w` used to emit `v += w` and fail to
 compile; python answers it by asking `v.__iadd__(w)` and falling back to `v.__add__(w)`. The
 translation now follows that and stores the returned value back. `x in box` / `x not in box`
-reach `box.__contains__(x)`, whose receiver is the *right* operand.
+reach `box.__contains__(x)`, whose receiver is the *right* operand. The same operators on a
+receiver member (`self.count += 1`) must leave the receiver writable, and `box[i] += v` on a
+class value is `box[i] = box[i] + v`, which is the `__getitem__`/`__setitem__` pair.
 
 Every class here has its own layout on purpose: two classes with one layout share a dtype,
 hence one C type, so their names and methods would come from whichever registered first.
@@ -262,3 +264,81 @@ def test_a_vector_in_place_operator_is_written_out(runner):
     assert float(out[0]) == pytest.approx(2.0)   # 1.0 accumulated twice
     runner(accumulates_a_call, float3(1.0, 2.0, 3.0), out)
     assert float(out[0]) == pytest.approx(4.0)   # 2.0 doubled
+
+
+# ---------------------------------------------------------------------------
+# In-place operators on a receiver member, and on a class subscript
+# ---------------------------------------------------------------------------
+
+
+class Cell(ctypes.Structure):
+    """Nine floats: a structure layout, and an in-place form of its own."""
+
+    _fields_ = [(name, ctypes.c_float)
+                for name in ("a", "b", "c", "d", "e", "f", "g", "h", "i")]
+
+    def __iadd__(self, other):
+        return Cell(self.a + other.a, self.b, self.c, self.d, self.e,
+                    self.f, self.g, self.h, self.i)
+
+
+class MemberHolder:
+    """A receiver carrying a scalar member and a class-typed one."""
+
+    def __init__(self) -> None:
+        self.count = 3
+        self.cell = Cell(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    @kernel
+    def accumulates_members(self, other, out: np.ndarray):
+        for i in range(out.shape[0]):
+            self.count += 1
+            self.cell += other
+            out[i] = float(self.count) + self.cell.a
+
+
+def test_an_in_place_operator_on_a_receiver_member_stores_through_it(runner):
+    """`self.count += 1` and `self.cell += other` must not land in a `const` receiver.
+
+    The read/write analysis cannot attribute an augmented member expression to the
+    parameter, so the receiver stayed `const` and the generated `+=` was a compile error
+    ("expression must be a modifiable lvalue"). Recording the member write is what the
+    plain `self.x = ...` store already does.
+    """
+    out = np.zeros(1, dtype=np.float32)
+    holder = MemberHolder()
+    runner(holder.accumulates_members,
+           Cell(4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), out)
+    assert float(out[0]) == pytest.approx(9.0)       # 4 + 5
+    assert holder.count == 4
+    assert float(holder.cell.a) == pytest.approx(5.0)
+
+
+class Slot(ctypes.Structure):
+    """Ten floats; a class that answers its own subscripts both ways."""
+
+    _fields_ = [(name, ctypes.c_float)
+                for name in ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j")]
+
+    def __getitem__(self, index):
+        return self.a + index * 10.0
+
+    def __setitem__(self, index, value):
+        self.a = value + index
+
+
+@kernel
+def accumulates_a_slot(box, answer: np.ndarray):
+    """`box[i] += v` on a class value is `box[i] = box[i] + v`."""
+    for i in range(answer.shape[0]):
+        box[1] += 4.0
+        answer[i] = box[1]
+
+
+def test_an_in_place_operator_on_a_class_subscript_reads_and_writes_it(runner):
+    """`box[i] += v` reads through `__getitem__`, applies the operator, writes back."""
+    box = Slot(2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    out = np.zeros(1, dtype=np.float32)
+    runner(accumulates_a_slot, box, out)
+    assert float(out[0]) == pytest.approx(27.0)      # ((2 + 10) + 4) + 10 + 1
+    assert float(box.a) == pytest.approx(17.0)

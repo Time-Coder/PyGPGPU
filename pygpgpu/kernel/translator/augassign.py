@@ -11,9 +11,11 @@ from .notation import (
     WORK_GROUP_VALUES,
     Translated,
 )
-from .receivers import (
+from .magic_tables import (
     MAGIC_INPLACE,
     MAGIC_METHODS,
+)
+from .receivers import (
     _receiver_param_of,
 )
 from .predicates import (
@@ -151,6 +153,33 @@ class _AugassignMixin:
         # an atomic operation whenever the translator cannot prove the elements are
         # distinct. `out[i] += x[i]` over the loop's own index stays a plain store.
         op_name:str = node.op.__class__.__name__
+        # `self.total op= v` where `total` is a class-body descriptor is python's
+        # `self.total = self.total op v`: the rewrite sends it through the `__get__` the read
+        # path dispatches and the `__set__` the store path dispatches.
+        if isinstance(node.target, ast.Attribute) \
+                and isinstance(node.target.value, (ast.Name, ast.Attribute)):
+            descriptor_base:Translated = self._visit_expression(node.target.value)
+            if self._descriptor_carrier(
+                    self._descriptor_classes_of(node.target.value, descriptor_base[1]),
+                    node.target.attr) is not None:
+                self._visit_assign(ast.Assign(
+                    targets=[node.target],
+                    value=ast.BinOp(left=node.target, op=node.op, right=node.value,
+                                    lineno=node.lineno, col_offset=node.col_offset),
+                    lineno=node.lineno, col_offset=node.col_offset))
+                return
+        # `box[i] op= v` on a class value is python's `box[i] = box[i] op v`: the class's
+        # `__getitem__` reads the element, the operator applies, and `__setitem__` writes it
+        # back. The rewrite keeps one spelling for both halves, and it is python's own rule
+        # whenever the element defines no `__iadd__`.
+        if isinstance(node.target, ast.Subscript) \
+                and self._class_index_base(node.target.value) is not None:
+            self._visit_assign(ast.Assign(
+                targets=[node.target],
+                value=ast.BinOp(left=node.target, op=node.op, right=node.value,
+                                lineno=node.lineno, col_offset=node.col_offset),
+                lineno=node.lineno, col_offset=node.col_offset))
+            return
         # An outer scalar named `nonlocal`/`global` is one device location shared by every
         # work item, so an in-place update there is racy in exactly the same way a
         # data-driven array index is -- python accumulates every contribution.
@@ -216,6 +245,15 @@ class _AugassignMixin:
             return
 
         target_code, target_t = self._visit_target(node.target)
+        # An `op=` on a receiver member stores through the receiver structure, exactly as a
+        # plain `self.x = ...` does. The read/write analysis cannot see that store, so a
+        # member no plain assignment writes would leave the receiver `const` -- and
+        # `(self[0]).n += 1` on a const element does not compile. The name is the one the
+        # plain member store records (`self.self_param`), so both spellings agree.
+        if (self.self_param and isinstance(node.target, ast.Attribute)
+                and isinstance(node.target.value, ast.Name)
+                and node.target.value.id == self.self_param):
+            self.member_writes.add(self.self_param)
         value_code, value_t = self._visit_expression(node.value)
 
         # A complex target has no C in-place operator either, but its arithmetic *does* have

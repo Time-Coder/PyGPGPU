@@ -305,6 +305,41 @@ class _StatementsMixin(_RaiseMixin):
         self._emit_blank()
 
 
+    def _refuse_class_iteration(self)->None:
+        """Refuse `for x in <class value>` anywhere in the body.
+
+        A class instance is not an array: python walks it through `__iter__` (or, without
+        one, through `__getitem__` until an IndexError), and a device has neither -- the
+        loop would read the structure pointer as a buffer of records and iterate whatever
+        follows it in memory. The refusal is a scan over the whole body rather than a check
+        inside `_visit_for`, because a loop written above the work-item dispatch is not
+        translated as work-item code at all (`_outside_loops` leaves it to the translator,
+        which never reaches it), and there it used to disappear: the kernel then answered a
+        stale value with nothing reported.
+
+        A *record array* is a different thing and stays iterable -- its elements are
+        records, which is exactly what the element loop reads. Only a one-instance class
+        argument is refused, and the launch is what knows which parameters those are
+        (`struct_arg_classes`).
+        """
+        for node in ast.walk(self.tree):
+            if not (isinstance(node, ast.For) and isinstance(node.iter, ast.Name)):
+                continue
+            if node.iter.id not in self.struct_arg_classes:
+                continue
+            self._error(self._class_iteration_message(node.iter.id), node.iter)
+
+
+    def _class_iteration_message(self, spelling:str)->str:
+        """Why a class value cannot be iterated, and what to write instead."""
+        return (
+            f"cannot iterate '{spelling}': it is a class instance, and device code has no "
+            f"'__iter__' (python walks it through that method, or through '__getitem__' "
+            f"until an IndexError). Iterate an array instead -- the one the class holds "
+            f"(for x in {spelling}.values) -- or read the members one at a time "
+            f"({spelling}.a, {spelling}.b)")
+
+
     def _emit_element_loop(self, node:ast.For)->None:
         """`for x in arr:` as an indexed loop with `x` a copy of the current element.
 
@@ -315,6 +350,16 @@ class _StatementsMixin(_RaiseMixin):
         if not isinstance(node.target, ast.Name):
             self._error("iterating an array needs a plain variable: `for x in arr`", node.target)
         code, t = self._visit_expression(node.iter)
+        # A class instance is not iterable on the device (see _refuse_class_iteration). The
+        # distinction that matters is a one-instance argument against a *record array*: both
+        # travel as a pointer to records, and only the launch knows which parameter is a
+        # single instance (`struct_arg_classes`). A structure *value* -- a receiver member, a
+        # local built from one -- is always a single instance.
+        if isinstance(node.iter, ast.Name) and node.iter.id in self.struct_arg_classes:
+            self._error(self._class_iteration_message(node.iter.id), node.iter)
+        if not is_ptr(t) and self._is_structure_operand(t):
+            self._error(self._class_iteration_message(
+                ast.unparse(node.iter)), node.iter)
         if not is_ptr(t):
             self._error(
                 "iterating a value directly needs an array; this is a scalar. Use an array "

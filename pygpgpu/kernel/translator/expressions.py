@@ -55,7 +55,8 @@ class _ExpressionsMixin:
             # allowed"), while CUDA accepts it -- so a bare float test compiled on CUDA and
             # failed on OpenCL for the same source. A comparison is a bool on both.
             codes:List[Translated] = [self._visit_expression(v) for v in node.values]
-            parts:List[str] = [self._truth_of(code, t) for code, t in codes]
+            parts:List[str] = [self._truth_of(code, t, value)
+                               for (code, t), value in zip(codes, node.values)]
             is_and:bool = isinstance(node.op, ast.And)
             # Fold from the right: `a and b and c` is `a ? (b ? c : b) : a`.
             folded_code, folded_t = codes[-1]
@@ -308,17 +309,36 @@ class _ExpressionsMixin:
         refused with "expression must have bool type". A zero complex value means
         `z.re == 0 && z.im == 0`, which is the negation of the header's own inequality
         against the zero the constructor builds.
+
+        A class value goes through its own `__bool__` (see `_magic_truth_code`): the value
+        itself is a structure, and `if (box)` on the pointer is a null test that is always
+        true -- that is how `if box:` used to take the wrong branch silently.
         """
+        if isinstance(node, ast.BoolOp):
+            # A condition reads the *truth* of an `and`/`or` chain: python's short-circuit
+            # and each operand's truthiness, with no operand value escaping. Spelling it as
+            # `&&`/`||` over the operands' truth is what lets a class value's `__bool__`
+            # answer here -- the value form (`a ? b : a`) answers a structure, and a
+            # structure has no truth of its own.
+            join:str = " && " if isinstance(node.op, ast.And) else " || "
+            parts:List[str] = []
+            for operand in node.values:
+                operand_code, operand_t = self._visit_expression(operand)
+                parts.append(self._truth_of(operand_code, operand_t, operand))
+            return f"({join.join(parts)})"
         code, t = self._visit_expression(node)
         dtype:Optional[np.dtype] = self._complex_dtype_of(t)
         if dtype is None:
+            truth:Optional[str] = self._magic_truth_code(code, t, node)
+            if truth is not None:
+                return f"({truth})"
             return f"({code})"
         self._require_complex(dtype)
         kind:str = self._complex_side(t, dtype)
         return (f"({kind}_equal({code}, {kind}_from_real(0)) == 0)")
 
 
-    def _truth_of(self, code:str, t:object)->str:
+    def _truth_of(self, code:str, t:object, node:Optional[ast.AST]=None)->str:
         """A translated scalar as a **bool** expression, for a conditional's condition.
 
         `_condition_code` is right for an `if`/`while` on every backend, but a conditional
@@ -338,4 +358,8 @@ class _ExpressionsMixin:
             return f"({kind}_equal({code}, {kind}_from_real(0)) == 0)"
         if t == "bool":
             return f"({code})"
+        if node is not None:
+            truth:Optional[str] = self._magic_truth_code(code, t, node)
+            if truth is not None:
+                return f"({truth})"
         return f"(({code}) != 0)"

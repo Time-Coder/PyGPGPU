@@ -35,7 +35,8 @@ class _DeviceCallMixin:
                           receiver_as_argument:bool=False,
                           tuple_targets:Optional[List[str]]=None,
                           class_constants:Optional[Dict[str, object]]=None,
-                          class_owner:Optional[type]=None)->Translated:
+                          class_owner:Optional[type]=None,
+                          leading_skips:int=0)->Translated:
         is_kernel_ref:bool = getattr(target, "is_pykernel", False)
         raw_func:Callable = (target.raw_func if is_kernel_ref else target)
         if is_kernel_ref:
@@ -113,8 +114,8 @@ class _DeviceCallMixin:
         # functions. Only a raising helper has a base at all, and a non-raising one keys
         # exactly as it always did.
         exception_base:int = len(self.raise_sites)
-        sig_key:Tuple[Callable, Tuple[object, ...], int] = (
-            raw_func, tuple(param_types), exception_base)
+        sig_key:Tuple[Callable, Tuple[object, ...], int, int] = (
+            raw_func, tuple(param_types), exception_base, leading_skips)
         entry:Optional[Dict[str, object]] = self.device_cache.get(sig_key)
         if entry is not None:
             if entry["status"] == "in_progress":
@@ -212,7 +213,8 @@ class _DeviceCallMixin:
                 # literal in a helper body follows the same `float=` mapping (see
                 # `_python_complex_kind`). Without this the helper silently answered the
                 # default while its caller was mapped to a double.
-                type_map=self.type_map)
+                type_map=self.type_map,
+                leading_skips=leading_skips)
             # A helper that raises writes `base + local id` into the slot, so it has to know
             # where its sites land in *this* caller's table **before** it translates -- the
             # number is baked into the emitted code, which is also why the base is part of

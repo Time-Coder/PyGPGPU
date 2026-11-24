@@ -38,7 +38,8 @@ class _InitMixin:
                      type_map:Optional[Dict[str, str]]=None,
                      argument_values:Optional[List[object]]=None,
                      object_array_members:Optional[Dict[str, List[Tuple[str, str]]]]=None,
-                     class_constants:Optional[Dict[str, object]]=None):
+                     class_constants:Optional[Dict[str, object]]=None,
+                     leading_skips:int=0):
             self.func:Callable = func
             self.filename:str = getattr(getattr(func, "__code__", None), "co_filename", "<kernel>")
             self.backend:str = backend
@@ -424,6 +425,13 @@ class _InitMixin:
             self.scopes:List[Dict[str, DeviceType]] = []
 
             args:List[ast.arg] = self.tree.args.args
+            if leading_skips:
+                # Parameters the caller does not and cannot supply: a descriptor's `__get__`
+                # is declared `(self, instance, owner=None)`, and only the instance has a
+                # device value -- the descriptor object and its owner class are host objects.
+                # The skipped names are simply absent from the scope, so a body that reads one
+                # is refused by name (see `_emit_descriptor_read`).
+                args = args[leading_skips:]
             if self.tree.args.vararg or self.tree.args.kwarg or self.tree.args.kwonlyargs:
                 raise SyntaxError("*args/**kwargs/keyword-only args are not supported", self.tree.args) from None
             # Default values are accepted: a kernel argument is always supplied by the

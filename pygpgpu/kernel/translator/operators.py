@@ -8,7 +8,7 @@ from .type_map import (
 from .notation import (
     Translated,
 )
-from .receivers import (
+from .magic_tables import (
     MAGIC_METHODS,
 )
 from .vectors import (
@@ -246,7 +246,12 @@ class _OperatorsMixin:
             # comparison against the negated left operand, which is not what python means
             # (`not (a == b)`), and the OpenCL compiler says so with "logical not is only
             # applied to the left hand side of this comparison".
-            return f"(!({code}))", "bool"
+            #
+            # The truth is read through `_truth_of`, which is where python's own rules live
+            # (a float, a bool, a complex value and a class value each answer differently),
+            # so `not box` calls the class's `__bool__` instead of testing the pointer --
+            # `!box` on a structure pointer is false for every argument.
+            return f"(!{self._truth_of(code, t, node)})", "bool"
         self._error(f"unsupported unary operator: {name}", node)
 
 
