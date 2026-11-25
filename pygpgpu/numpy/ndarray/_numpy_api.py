@@ -29,6 +29,26 @@ def _inplace(func):
     return wrapper
 
 
+@functools.lru_cache(maxsize=None)
+def _element_class(dtype: np.dtype) -> Optional[type]:
+    """The ctypes class a structured dtype was built from, or None for a plain record.
+
+    numpy builds `np.dtype(pygf.float3)` from the vector class, and its own subscript answers
+    an element as a live instance of that class (`arr[0]` is a `pygf.float3`, with the vector's
+    arithmetic and components). gnp reads elements through the raw `ndarray.__getitem__` slot,
+    which answers a plain `np.void` instead, so the class is recovered once per dtype and the
+    element rebuilt from its bytes. numpy's own subscript returns a *snapshot* for a ctypes
+    dtype -- a write through the element does not reach the array -- and this matches it.
+    """
+    if dtype.names is None:
+        return None
+    try:
+        element = np.zeros(1, dtype=dtype)[0]
+    except (TypeError, ValueError):
+        return None
+    return None if isinstance(element, np.void) else type(element)
+
+
 
 class _NumpyApiMixin:
 
@@ -123,7 +143,18 @@ class _NumpyApiMixin:
 
     def __getitem__(self, key: object) -> object:
         self._ensure_host_bytes()
-        return self._change_result(np.ndarray.__getitem__(self.view(np.ndarray), key))
+        element = np.ndarray.__getitem__(self.view(np.ndarray), key)
+        # A ctypes-backed dtype answers its element as an instance of the class itself on
+        # numpy's own subscript path; the raw slot above answers a plain void, so rebuild the
+        # snapshot numpy would have returned (a copy -- writes through it do not reach the
+        # array, exactly as numpy's element read behaves).
+        scalar_type: Optional[type] = _element_class(self.dtype)
+        if scalar_type is not None and isinstance(element, np.void):
+            try:
+                element = scalar_type.from_buffer_copy(element.tobytes())
+            except (TypeError, ValueError):
+                pass
+        return self._change_result(element)
 
 
     def __setitem__(self, key: object, value: object) -> None:
@@ -134,6 +165,11 @@ class _NumpyApiMixin:
         if isinstance(value, ndarray):
             value._ensure_host_bytes()
             value = value.view(np.ndarray)
+        scalar_type: Optional[type] = _element_class(self.dtype)
+        if scalar_type is not None and isinstance(value, scalar_type):
+            # numpy's own store path accepts a ctypes instance; the raw slot reads it as a
+            # sequence and refuses, so hand over the dtype's own void scalar instead.
+            value = np.frombuffer(bytes(value), dtype=self.dtype)[0]
         np.ndarray.__setitem__(self.view(np.ndarray), key, value)
         self._after_host_write()
 
