@@ -200,8 +200,10 @@ class _BuildLaunchMixin:
         # Their actual values, recomputed on *this* call: the compile that recorded the
         # signature happens once, but a host-region value can depend on the arguments
         # (`shift = len(label)`), so the launch reads the snapshot the call just made.
+        # It is read from `plan`, which is this call's own state -- reading it off `self`
+        # made two concurrent launches of one kernel swap their values.
         plan.host_region_values:Dict[str, object] = dict(
-            getattr(self, "host_region_snapshot", None)
+            plan.host_region_snapshot
             or plan.launch_meta.get("host_region_values") or {})
         plan.runtime_values:List[object] = list(plan.outer_state["full"]) + _created_arguments(plan.created)
         plan.return_state:Dict[str, object] = (self._alloc_return_slots(plan.returns)

@@ -125,6 +125,13 @@ class _PrepareLaunchMixin:
             plan.host_values_now = _host_values_now
             plan.host_executed = _host_executed
             plan.host_values_now = {**plan.built, **plan.host_values_now}
+        # The snapshot travels on `plan`, not on `self`: it is data about *this call*, and the
+        # kernel object is shared by every call -- two threads launching one kernel used to
+        # overwrite each other's host-region values between phase 1 and phase 2, so a launch
+        # carried another call's numbers. `self.host_region_snapshot` is kept as the
+        # build-time mirror the compile path reads (see _compile_translate), which is only
+        # read while the plan that wrote it is still the one being compiled.
+        plan.host_region_snapshot = plan.host_values_now
         self.host_region_snapshot = plan.host_values_now
         self.host_region_statements = plan.host_executed
         if self._is_method:
