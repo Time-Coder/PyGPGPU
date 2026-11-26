@@ -2,7 +2,7 @@ from __future__ import annotations
 import ast
 import inspect
 import math
-from typing import (Any, Dict, List, Optional, Tuple)
+from typing import (Dict, List, Optional)
 import numpy as np
 from .nested_launch import _NestedLaunchMixin
 from ..device_builtins import (
@@ -19,6 +19,7 @@ from .magic_tables import (
     BUILTIN_METHODS,
     CALL_METHOD,
     CONVERSION_METHODS,
+    MagicOwner,
 )
 from .receivers import (
     _receiver_param_of,
@@ -114,7 +115,7 @@ class _CallsMixin(_NestedLaunchMixin):
             # not a function, and a class that defines `__call__` gives it a meaning.
             holder:DeviceType = self._lookup(name)
             if holder is not None and self._is_structure_operand(holder):
-                owner:Optional[Tuple[type, Any]] = self._magic_owner(holder, CALL_METHOD)
+                owner:Optional[MagicOwner] = self._magic_owner(holder, CALL_METHOD)
                 if owner is not None:
                     _cls, method = owner
                     return self._emit_device_call(
@@ -158,6 +159,14 @@ class _CallsMixin(_NestedLaunchMixin):
                 self._error(reason, node)
 
             target:object = self.resolve_global(name)
+            if getattr(target, "is_pykernel", False):
+                # A bare call of a kernel is a *device-side launch* when the child's body
+                # declares its own domain (a magic loop), exactly as a bracket-less host call
+                # is: the loop supplies the work size. A gid-style child has no in-body
+                # domain for a device launch to read, so it stays the helper mistake
+                # `_emit_device_call` names.
+                if self._emit_nested_launch(node):
+                    return "", "void"
             if isinstance(target, type):
                 # A `ctypes.Structure` subclass is not an object in the python sense: it is a
                 # layout, and a device type is generated from it, so `Ray(origin, direction)`
@@ -362,7 +371,6 @@ class _CallsMixin(_NestedLaunchMixin):
             return "", "void"
 
         self._error("unsupported call expression", node)
-
 
     def _reorder_keywords(self, node:ast.Call)->ast.Call:
         """Rewrite a call with keyword arguments into positional order.

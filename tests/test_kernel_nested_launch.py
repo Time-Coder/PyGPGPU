@@ -7,6 +7,8 @@ mark CUDA specifically rather than going through `gpu_backend`.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -45,6 +47,51 @@ def test_a_kernel_can_launch_a_kernel():
     np.testing.assert_array_equal(out, np.arange(8, dtype=np.int32) * 2)
 
 
+@kernel
+def magic_child(a: np.ndarray, out: np.ndarray):
+    """A *magic-loop* child: its extent is a derived parameter, not the body's own bound."""
+    for i in range(out.shape[0]):
+        out[i] = a[i] * 2.0
+
+
+@kernel
+def magic_parent(a: np.ndarray, out: np.ndarray):
+    """A magic-loop child launched from device code must forward its extent."""
+    magic_child[(out.shape[0],)](a, out)
+
+
+def test_a_magic_loop_child_gets_its_extent_forwarded():
+    """The child's signature ends with `int _out_shape0`, and the launch has to supply it.
+
+    A gid-style child states its work size in the bracket and derives nothing, which is why
+    this case was not covered: the extent parameters are the magic loop's, and a device-side
+    launch that omits them is a C compile error ("too few arguments in function call") far
+    from the line that caused it.
+    """
+    a = np.arange(8, dtype=np.float32)
+    out = np.zeros(8, dtype=np.float32)
+    magic_parent["cuda"](a, out)
+    np.testing.assert_allclose(out, a * 2.0)
+
+
+def test_a_magic_loop_child_forwards_the_extent_of_a_renamed_argument():
+    """The argument names need not match: the child's extent follows the parent's array."""
+    a = np.arange(6, dtype=np.float32)
+    out = np.zeros(6, dtype=np.float32)
+
+    @kernel
+    def renamed_child(source, target):
+        for i in range(target.shape[0]):
+            target[i] = source[i] + 1.0
+
+    @kernel
+    def renamed_parent(left, right):
+        renamed_child[(right.shape[0],)](left, right)
+
+    renamed_parent["cuda"](a, out)
+    np.testing.assert_allclose(out, a + 1.0)
+
+
 def test_a_nested_launch_takes_a_work_size_and_a_group():
     """`child[(n, local)]` splits the same span, exactly as a host launch would."""
     out = np.zeros(8, dtype=np.int32)
@@ -78,7 +125,13 @@ def test_a_backend_without_nested_launch_says_so(backend):
 
 
 def test_a_kernel_called_without_a_work_size_is_refused():
-    """From device code a @kernel is a launch, so a plain call is a mistake worth naming."""
+    """A child with no in-body domain has nothing for a device launch to derive a size from.
+
+    That is the gid-style child (`out[get_global_id(0)]`): its domain is named outside the
+    body -- by `@kernel(domain=...)`, which a device-side launch cannot consult -- so a bare
+    call stays the "called a kernel as a helper" mistake. A *magic-loop* child does derive a
+    size, and a bare call of it is a launch (see the tests below).
+    """
 
     @kernel
     def calls_a_kernel_as_a_helper(out: np.ndarray):
@@ -89,6 +142,92 @@ def test_a_kernel_called_without_a_work_size_is_refused():
     message: str = str(caught.value)
     assert "launch" in message
     assert "work size" in message
+
+
+@kernel
+def sized_child(a: np.ndarray, out: np.ndarray):
+    """A child that declares its own domain with a magic loop."""
+    for i in range(out.shape[0]):
+        out[i] = a[i] * 3.0
+
+
+def test_a_bare_child_launch_derives_its_work_size():
+    """A bracket-less device launch is sized from the child's own magic loop.
+
+    The same body called from the host needs no bracket either, because its loop states the
+    extent. Requiring one in device code only made the two spellings of one kernel disagree.
+    """
+    a = np.arange(8, dtype=np.float32)
+    out = np.zeros(8, dtype=np.float32)
+
+    @kernel
+    def bare_parent(a: np.ndarray, out: np.ndarray):
+        sized_child(a, out)
+
+    bare_parent["cuda"](a, out)
+    np.testing.assert_allclose(out, a * 3.0)
+
+
+def test_a_bare_child_launch_and_a_bracketed_one_agree():
+    """The two spellings are one launch: the derived size equals the written one."""
+    a = np.arange(6, dtype=np.float32)
+    derived = np.zeros(6, dtype=np.float32)
+    written = np.zeros(6, dtype=np.float32)
+
+    @kernel
+    def bare_parent(a: np.ndarray, out: np.ndarray):
+        sized_child(a, out)
+
+    @kernel
+    def bracketed_parent(a: np.ndarray, out: np.ndarray):
+        sized_child[(out.shape[0],)](a, out)
+
+    bare_parent["cuda"](a, derived)
+    bracketed_parent["cuda"](a, written)
+    np.testing.assert_allclose(derived, written)
+    np.testing.assert_allclose(derived, a * 3.0)
+
+
+def test_a_device_selector_in_a_child_launch_is_ignored_with_a_warning():
+    """The device is already running, so a selector there cannot choose anything.
+
+    It is *ignored*, not refused: `child["cuda"][(n,)](...)` is the spelling a reader may
+    carry over from a host launch site, and the child runs wherever the parent is running
+    anyway. The warning names the selector so the dead argument is not silent.
+    """
+    from pygpgpu.kernel.translator.nested_launch import NestedLaunchWarning
+
+    @kernel
+    def parent_with_selector(out: np.ndarray):
+        child["cuda"][(out.shape[0],)](out)
+
+    out = np.zeros(8, dtype=np.int32)
+    with pytest.warns(NestedLaunchWarning, match="no effect on the child"):
+        parent_with_selector["cuda"](out)
+    np.testing.assert_array_equal(out, np.arange(8, dtype=np.int32) * 2)
+
+
+def test_a_plain_child_launch_warns_nothing():
+    """The supported spelling stays silent: the warning is only about a dead selector."""
+    from pygpgpu.kernel.translator.nested_launch import NestedLaunchWarning
+
+    out = np.zeros(8, dtype=np.int32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", NestedLaunchWarning)
+        parent["cuda"](out)
+    np.testing.assert_array_equal(out, np.arange(8, dtype=np.int32) * 2)
+
+
+def test_a_selector_without_a_work_size_is_refused():
+    """Ignoring the selector leaves no geometry at all, so that case still has to be named."""
+
+    @kernel
+    def selector_only(out: np.ndarray):
+        child["cuda"](out)
+
+    with pytest.raises(SyntaxError) as caught:
+        selector_only["cuda"](np.zeros(4, dtype=np.int32))
+    assert "work size" in str(caught.value)
 
 
 def test_two_magic_loops_are_two_passes():
@@ -263,16 +402,23 @@ def test_an_ordinary_loop_inside_the_work_item_stays_allowed():
     assert result.tolist() == [10, 10]
 
 
-def test_a_nested_launch_cannot_pick_a_backend():
-    """The device is already running, so only the work size may be given."""
+def test_a_nested_launch_ignores_a_backend_selector_with_a_warning():
+    """The device is already running, so a selector there is ignored rather than honoured.
+
+    It used to be refused. Ignoring it (and warning) is the friendlier reading: the child
+    runs wherever the parent runs, so the dead argument costs nothing, and a reader who
+    carried the spelling over from a host launch site gets a warning that names it.
+    """
+    from pygpgpu.kernel.translator.nested_launch import NestedLaunchWarning
 
     @kernel
     def picks_a_backend(out: np.ndarray):
         child["opencl"][(out.shape[0],)](out)
 
-    with pytest.raises(SyntaxError) as caught:
-        picks_a_backend["cuda"](np.zeros(4, dtype=np.int32))
-    assert "cannot be chosen" in str(caught.value)
+    out = np.zeros(8, dtype=np.int32)
+    with pytest.warns(NestedLaunchWarning, match="cannot|no effect"):
+        picks_a_backend["cuda"](out)
+    np.testing.assert_array_equal(out, np.arange(8, dtype=np.int32) * 2)
 
 
 @kernel
