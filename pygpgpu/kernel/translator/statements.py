@@ -122,6 +122,18 @@ class _StatementsMixin(_RaiseMixin):
             self._push_scope_block(node.body, is_loop=True)
             self._emit("}")
             self._emit_blank()
+        elif isinstance(node, ast.With):
+            # A `with` has no device meaning: it is a host statement, and the one that writes
+            # a kernel body (`with inline, kernel(...):`) cannot appear here either, because a
+            # kernel body is device code and this *is* one. Saying so by name matters -- the
+            # generic "unsupported statement: With" left the reader with no idea that the
+            # spelling they reached for belongs at the launch site instead.
+            self._error(
+                "a `with` statement has no device meaning, so it cannot appear in a kernel "
+                "body. The one worth knowing about is `with inline, kernel(...):`, which "
+                "writes a kernel body and therefore belongs at the launch site -- in ordinary "
+                "python, outside every @kernel. Inside a @kernel body, call a plain device "
+                "helper instead", node)
         elif isinstance(node, ast.For):
             # A second *top-level* magic loop would silently become an ordinary serial loop
             # inside every work item -- each item running the whole phase, all of them racing

@@ -50,6 +50,7 @@ from .kernel import (
     available_devices,
     list_devices,
     get_device,
+    inline,
     kernel,
 )
 # The dual-sided device builtins are plain functions, so they are exported here directly:
@@ -194,6 +195,8 @@ __all__ = [
     # kernel
     "kernel", "PyKernel", "DEFAULT_BACKEND_ORDER",
     "list_devices", "get_device", "available_devices",
+    # the `with inline, kernel(...)` block head; `kernel` is that same callable
+    "inline",
     # the process-wide settings (print_info, type_map, default_device, kernel_import)
     "config", "Config",
     # device builtins (dual-sided functions; see pygpgpu/kernel/builtins.py)
@@ -231,4 +234,5 @@ __all__ = [
 
 def __dir__()->List[str]:
     return sorted(set(globals()) | set(__all__))
+
 

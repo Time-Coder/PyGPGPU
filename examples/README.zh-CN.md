@@ -39,6 +39,8 @@
 | [16_scientific_math.py](16_scientific_math.py) | 科学计算函数库(`erf`、`tgamma`、`normal_cdf`、快速近似与正确舍入的 CUDA 内建), 以及 `device_function`: 给已有的设备端函数起个名字 -- 这里用的是 [mylib.h](mylib.h) 里的 `__device__` 函数 |
 | [17_metal_backend.py](17_metal_backend.py) | Metal 后端：用 `k["metal"]`/`k["mtl"]` 选择它、拓展一次启动编译出的 MSL，以及在没有 Apple GPU 的机器上脚本会输出什么（Metal 需要 macOS 和真实设备，因此 Mac 虚拟机也没有） |
 | [18_metal_device_check.py](18_metal_device_check.py) | 在真实 Apple GPU 上端到端验证 Metal 后端：两项只有装有 Metal.framework 的机器才能回答的检查 (MSL 编译、标量绑定、dispatch、线程组内存、原子、向量、两阶段、返回值)。成功退出 0，检查失败退出 1，本机没有 Metal 设备退出 2 |
+| [19_device_resident_arrays.py](19_device_resident_arrays.py) | `pygpgpu.numpy`(gnp)端到端: 构造、多次启动之间数据留在设备上、公开的异步 `to_host`/`to_device` 传输、一个缓冲区被多个视图共用、跨设备经宿主机转存, 以及与 torch 的零拷贝互通。API 简要总览; 更深入的零拷贝与原子见 [05_gnp_zero_copy_and_atomics.py](05_gnp_zero_copy_and_atomics.py) |
+| [20_inline_kernel.py](20_inline_kernel.py) | 内联 kernel 块: `with inline, kernel(...):` 把 `@kernel` 函数体直接写在调用处, 不需要 `def`。数据来自外层作用域; 迭代域由函数体自己的 magic loop 声明(gid 风格函数体被拒绝); 头部只带选项(`default_device=`、`blocks_per_grid=`/`threads_per_block=`); `return` 通过 `with inline as result` 传回; 同一处无论执行多少次都只翻译一次 |
 
 `@kernel` 函数体支持 docstring(第一行的字符串字面量会被翻译器自动忽略,
 不会进入生成的 GPU 源码), 所以可以放心在装饰函数里写说明文字。

@@ -225,7 +225,77 @@ pygpgpu.config.type_map = {float: np.float64}        # python float 使用的宽
 pygpgpu.config.default_device = ["cuda:0", "hip:0"]  # 不带中括号的 k(...) 依次尝试
 ```
 
-常用名字都能从顶层直接导入——`kernel`、`funcs`、向量类型(`float4` 等)、设备内建(`get_global_id`、`atomic_add`、`barrier` 等)、`list_devices`/`get_device`、`config`、`kernel_import`——编辑器补全 `pygpgpu.` 就能看到。
+常用名字都能从顶层直接导入——`kernel`、`funcs`、向量类型(`float4` 等)、设备内建(`get_global_id`、`atomic_add`、`barrier` 等)、`list_devices`/`get_device`、`config`、`kernel_import`、`inline`——编辑器补全 `pygpgpu.` 就能看到。
+
+## 在调用处直接写 kernel
+
+**kernel 块**就是写在调用处、没有 `def` 的 `@kernel` 函数体。它还是同一个函数体——同一条 magic loop、同样的三段 host region、同样的拷贝策略、同样的生成文件和缓存——所以"函数体是什么意思"没有任何新东西要学。变的只是它**写在哪里**、数据**从哪里来**:
+
+```python
+from pygpgpu import inline, kernel
+
+a = np.arange(1024, dtype=np.float32)
+b = np.arange(1024, dtype=np.float32) * 2.0
+out = np.zeros(1024, dtype=np.float32)
+
+with inline, kernel(default_device="cuda"):
+    for i in range(out.shape[0]):
+        out[i] = a[i] * 2.0 + b[i]
+
+# `out` 里已是结果; 这个栈帧里一行块代码都没执行过
+```
+
+**数据来自作用域, 不是来自调用。** `@kernel` 函数体从参数、闭包单元或模块全局取值。块没有参数表, 所以它从外层函数读到的名字就是送到设备的值——按函数体首次读取的顺序——而模块全局根本不需要捕获, 因为重建后的函数体共享模块自己的全局字典。调用者不写参数表, 这正是重点: 块是一次性的, 在它所在的位置发射。
+
+```python
+factor = 2.5
+with inline, kernel():
+    for i in range(out.shape[0]):
+        out[i] = a[i] * factor          # `factor` 和 `a` 被捕获; 不用写参数
+
+class Layer:
+    def __init__(self, bias):
+        self.bias = bias
+
+    def apply(self, x, out):
+        with inline, kernel():
+            for i in range(out.shape[0]):
+                out[i] = x[i] + self.bias   # `self` 作为接收者结构体传输
+```
+
+**头部只带选项, 拼写与装饰器一致。** `default_device=`(别名 `device=`)、`int=`、`float=` 的含义与 `@kernel` 上完全相同; `blocks_per_grid=` / `threads_per_block=` 从头部直接给出 work size, 用的就是中括号那套 `(blocks, threads)` 拼写:
+
+```python
+with inline, kernel(blocks_per_grid=8, threads_per_block=128):
+    for i in range(out.shape[0]):
+        out[i] = a[i]
+```
+
+**函数体自己声明迭代域, 用 magic loop。** 这是块刻意比 `@kernel` 窄的唯一一处: 它不接受 `domain=`, 而 gid 风格的函数体(`get_global_id`)会被按名字拒绝。原因是块就写在发射处, 提供 work size 的那个数组本来就在作用域里——`for i in range(out.shape[0])` 已经在函数体里说明了迭代域, `domain=` 没有东西可补充。`@kernel(domain="x")` 之所以存在, 是因为装饰过的函数体写在它要跑的数组之外。
+
+```python
+# 块的迭代域: 循环上界就是 work size
+with inline, kernel():
+    for i in range(out.shape[0]):
+        out[i] = a[i] * 2.0
+```
+
+**`return` 通过 `inline` 绑定的对象传回结果,** 因为 `with` 语句本身没有值:
+
+```python
+with inline as result, kernel():
+    for i in range(out.shape[0]):
+        out[i] = a[i]
+    return 42                 # 与 @kernel 函数体里写的 return 相同
+
+print(result.value)           # 42
+```
+
+**`inline` 必须写在前面。** 压制函数体的方式是从头部抛出内部信号、由 `inline.__exit__` 捕获; 所以 `with kernel(...), inline:` 会在捕获者存在之前就进入头部——这种顺序会被拒绝并说明原因。只有 `with inline:` 也会被拒绝, 因为没有东西可发射。
+
+**一个块在一个位置只编译一个 kernel。** 在循环里执行同一个块, 只翻译一次, 之后每次发射同一个 `PyKernel`, 与装饰过的 kernel 完全一样。
+
+**这套拼写表达不了的东西在翻译之前就被拒绝。** gid 风格的函数体(`get_global_id`)或完全没有 magic loop 的函数体、`domain=` 选项、`nonlocal`(块作为 kernel 函数体翻译, 没有外层作用域可写——改用单元素数组捕获)、顶层的 `break`/`continue`(它们会指向调用者的循环, 而块根本不在那里运行)、单行函数体、`await`/`yield`, 都会抛出 `SyntaxError` 并指出改法。函数体内部报出的错误则指向块自己所在的文件和行号, 并显示真实的源码文本与插入符位置。
 
 ## 导入手写 kernel
 

@@ -225,7 +225,77 @@ pygpgpu.config.type_map = {float: np.float64}        # the width a python float 
 pygpgpu.config.default_device = ["cuda:0", "hip:0"]  # what a plain k(...) tries, in order
 ```
 
-Every commonly used name is importable from the top level — `kernel`, `funcs`, vector types (`float4`, ...), device builtins (`get_global_id`, `atomic_add`, `barrier`, ...), `list_devices`/`get_device`, `config`, `kernel_import` — so an editor completes `pygpgpu.` and finds them.
+Every commonly used name is importable from the top level — `kernel`, `funcs`, vector types (`float4`, ...), device builtins (`get_global_id`, `atomic_add`, `barrier`, ...), `list_devices`/`get_device`, `config`, `kernel_import`, `inline` — so an editor completes `pygpgpu.` and finds them.
+
+## Writing a kernel where it is launched
+
+A **kernel block** is a `@kernel` body written at its call site, with no `def`. It is the same body — the same magic loop, the same host regions, the same copy policy, the same generated file and cache — so there is nothing new to learn about what a body means. What changes is where it is written and where its data comes from:
+
+```python
+from pygpgpu import inline, kernel
+
+a = np.arange(1024, dtype=np.float32)
+b = np.arange(1024, dtype=np.float32) * 2.0
+out = np.zeros(1024, dtype=np.float32)
+
+with inline, kernel(default_device="cuda"):
+    for i in range(out.shape[0]):
+        out[i] = a[i] * 2.0 + b[i]
+
+# `out` holds the result; not one line of the block ran in this frame
+```
+
+**The data comes from the scope, not from a call.** A `@kernel` body reads its values from its parameters, a closure cell or a module global. A block has no parameter list, so the names it reads from the enclosing function are what travel to the device — in the order the body first reads them — and a module global needs no capture at all, because the rebuilt body shares the module's own globals. The caller writes no argument list, which is the point: the block is one-shot, launched where it stands.
+
+```python
+factor = 2.5
+with inline, kernel():
+    for i in range(out.shape[0]):
+        out[i] = a[i] * factor          # `factor` and `a` are captured; no parameters written
+
+class Layer:
+    def __init__(self, bias):
+        self.bias = bias
+
+    def apply(self, x, out):
+        with inline, kernel():
+            for i in range(out.shape[0]):
+                out[i] = x[i] + self.bias   # `self` travels as the receiver structure
+```
+
+**The head carries options, in the decorator's own spelling.** `default_device=` (or its alias `device=`), `int=` and `float=` mean exactly what they mean on `@kernel`, and `blocks_per_grid=` / `threads_per_block=` state the work size from the head, in the same `(blocks, threads)` spelling a bracket uses:
+
+```python
+with inline, kernel(blocks_per_grid=8, threads_per_block=128):
+    for i in range(out.shape[0]):
+        out[i] = a[i]
+```
+
+**The body states its own domain, with a magic loop.** This is the one place a block is deliberately narrower than `@kernel`: it does not take `domain=`, and a gid-style body (`get_global_id`) is refused by name. The reason is that a block is written where it is launched, so the array whose shape gives the work size is already in scope — `for i in range(out.shape[0])` says the domain in the body itself, and there is nothing left for `domain=` to add. `@kernel(domain="x")` exists because a decorated body is written away from the arrays it runs over.
+
+```python
+# the block's domain: the loop bound IS the work size
+with inline, kernel():
+    for i in range(out.shape[0]):
+        out[i] = a[i] * 2.0
+```
+
+**A `return` answers through the object `inline` binds,** because a `with` statement has no value of its own:
+
+```python
+with inline as result, kernel():
+    for i in range(out.shape[0]):
+        out[i] = a[i]
+    return 42                 # the same return a @kernel body writes
+
+print(result.value)           # 42
+```
+
+**`inline` must come first.** The block is suppressed by raising from the head and catching that signal in `inline.__exit__`, so `with kernel(...), inline:` enters the head before the catcher exists — that order is refused with a message saying so. `with inline:` on its own is refused too, since there would be nothing to launch.
+
+**A block is one kernel per site.** Executing one block inside a loop builds its translation once and launches the same `PyKernel` each time, exactly as a decorated kernel does.
+
+**What the spelling cannot mean is refused before translation.** A gid-style body (`get_global_id`) or a body with no magic loop at all, a `domain=` option, a `nonlocal` (the block is translated as a kernel body, so there is no enclosing scope to write — capture a one-element array instead), a top-level `break`/`continue` (they would target the caller's loop, which the block never enters), a one-line body, and an `await`/`yield` all raise a `SyntaxError` naming the fix. A reported error inside the body points at the block's own file and line, with the real source text under the caret.
 
 ## Importing handwritten kernels
 

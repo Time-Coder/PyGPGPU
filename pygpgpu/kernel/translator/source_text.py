@@ -5,8 +5,32 @@ import functools
 import inspect
 import sys
 import textwrap
-from typing import (Callable, Dict, List)
+import weakref
+from typing import (Callable, Dict, List, Optional)
 
+
+
+def register_block_source(func:Callable, text:str)->None:
+    """Teach the source readers the generated text of an inline block.
+
+    An inline block is a function whose source `inspect` cannot recover: its code object
+    points at the line of the `with` statement that holds the body, so `getsource` would
+    return statements rather than a `def`. The text this feature generated is the truth, and
+    it is handed over here so every reader -- `get_dedented_source`, `_source_first_line`,
+    `_source_signature` -- answers from one place.
+
+    The registry is keyed weakly: the rebuilt function is kept alive by the `PyKernel` that
+    owns it, so a site that is dropped does not leak its text.
+    """
+    _BLOCK_SOURCES[func] = text
+
+
+def block_source(func:Callable)->Optional[str]:
+    """The generated text of an inline block, or None for an ordinary function."""
+    return _BLOCK_SOURCES.get(func)
+
+
+_BLOCK_SOURCES:"weakref.WeakKeyDictionary[Callable, str]" = weakref.WeakKeyDictionary()
 
 
 @functools.lru_cache(maxsize=512)
@@ -23,7 +47,13 @@ def get_dedented_source(func:Callable)->str:
     module's source as remembered by the cache (`source_store`), which the build that first
     translated this module wrote beside the generated device code. Only when neither exists
     is the launch refused.
+
+    An inline block answers from the text this feature generated (see `register_block_source`),
+    which is already a dedented `def` holding the block.
     """
+    known:Optional[str] = block_source(func)
+    if known is not None:
+        return known
     try:
         source:str = inspect.getsource(func)
     except OSError as e:
@@ -78,7 +108,12 @@ def _source_first_line(func:Callable)->int:
     at the first decorator, which can be several lines earlier, so the skipped decorator
     lines have to be added back; using its number directly would report every error a few
     lines too high.
+
+    An inline block's generated text is line-aligned with the user's file (see
+    `register_block_source`), so its parsed copy's line 1 IS file line 1.
     """
+    if block_source(func) is not None:
+        return 1
     try:
         lines, first_decorator = inspect.getsourcelines(func)
     except (OSError, TypeError):

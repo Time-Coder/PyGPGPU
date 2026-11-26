@@ -9,9 +9,11 @@ from .decorator import (
     list_devices,
     PyKernel,
 )
+from .inline_kernels import inline
 
 __all__ = [
     "kernel", "PyKernel", "DEFAULT_BACKEND_ORDER",
+    "inline",
     "list_devices", "get_device", "available_devices",
     # The builtin tables: the translator resolves a call through them, and tests use them
     # to check that the namespace and the device side agree.

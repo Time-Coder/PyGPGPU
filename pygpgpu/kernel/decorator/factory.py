@@ -8,32 +8,39 @@ from .devices import DefaultDeviceEntries, _parse_default_device_value, _snapsho
 
 if TYPE_CHECKING:
     from . import PyKernel
+    from ..inline_kernels.spec import _KernelSpec
+
+
+# The device setting every public spelling accepts: `default_device=` and its alias `device=`.
+_DeviceValue = Union[str, Sequence[str]]
 
 
 @overload
 def kernel(func:Callable[_P, Any], *,
-           default_device:Optional[Union[str, Sequence[str]]]=None,
+           default_device:Optional[_DeviceValue]=None,
+           device:Optional[_DeviceValue]=None,
            domain:Optional[str]=None,
            int:object=None, float:object=None)->PyKernel[_P]: ...
 @overload
 def kernel(func:None=None, *,
-           default_device:Optional[Union[str, Sequence[str]]]=None,
+           default_device:Optional[_DeviceValue]=None,
+           device:Optional[_DeviceValue]=None,
            domain:Optional[str]=None,
-           int:object=None, float:object=None)->Callable[[Callable[_P, Any]], PyKernel[_P]]: ...
+           int:object=None, float:object=None,
+           blocks_per_grid:object=None,
+           threads_per_block:object=None)->_KernelSpec: ...
 def kernel(func:Optional[Callable[..., Any]]=None, *,
-           default_device:Optional[Union[str, Sequence[str]]]=None,
-           domain:Optional[str]=None, int:object=None, float:object=None):
-    """The `@kernel` decorator.
+           default_device:Optional[_DeviceValue]=None,
+           device:Optional[_DeviceValue]=None,
+           domain:Optional[str]=None, int:object=None, float:object=None,
+           blocks_per_grid:object=None, threads_per_block:object=None):
+    """The `@kernel` decorator, and the head of an inline kernel block.
 
-    A call without a bracket runs on the first usable entry of the kernel's own
-    `default_device` list, then of `config.default_device`, then of the built-in probe
-    order: platform-dependent, ``metal -> cuda -> hip -> opencl`` on macOS,
-    ``cuda -> hip -> metal -> opencl`` elsewhere). The choice is made per call, not here.
+    Two roles, one name, because the `with` spelling is written `kernel(...)` either way.
+    Called with a function it decorates; called with options only it returns a decorator
+    factory -- and that same object is what ``with inline, kernel(...):`` enters.
 
     Usage::
-
-        from pygpgpu.kernel import kernel
-        import numpy as np
 
         @kernel
         def add(a, b, out):
@@ -42,7 +49,12 @@ def kernel(func:Optional[Callable[..., Any]]=None, *,
 
         add(np.arange(8, dtype=np.float32), np.arange(8, dtype=np.float32) * 2, out)
 
-    - The outermost `for i in range(<array parameter>.shape[0])` loop is the work-item loop;
+        # the body, written where it is launched, with no `def`
+        with inline, kernel(device="cuda"):
+            for i in range(out.shape[0]):
+                out[i] = a[i] * 2.0 + b[i]
+
+    - The outermost `for i in range(<array>.shape[0])` loop is the work-item loop;
       the work size is taken automatically from that array's first dimension;
     - plain python functions called by the kernel are translated into device functions (monomorphized per argument types);
     - helpers may be reached by name: a bare module-level name, `module.func(...)`, `SomeClass.static_method(...)`,
@@ -50,10 +62,10 @@ def kernel(func:Optional[Callable[..., Any]]=None, *,
     - math.* and abs/min/max/round map to device builtins;
     - unsupported syntax raises SyntaxError.
 
-    Both spellings are declared as overloads so the decorated name keeps the function's own
-    parameters: ``@kernel`` and ``@kernel(default_device=...)`` return one and the same
-    ``PyKernel[...]``, and a checker reports a call's missing or extra argument against the
-    author's ``def`` rather than against a ``*args``-only decorator.
+    Both decorator spellings are declared as overloads so the decorated name keeps the
+    function's own parameters: ``@kernel`` and ``@kernel(default_device=...)`` return one
+    and the same ``PyKernel[...]``, and a checker reports a call's missing or extra argument
+    against the author's ``def`` rather than against a ``*args``-only decorator.
 
     `default_device=` names what this kernel's bracket-less calls run on, accepting the
     same shapes and the same selector strings `config.default_device` takes -- one
@@ -65,6 +77,11 @@ def kernel(func:Optional[Callable[..., Any]]=None, *,
 
         @kernel(default_device=["opencl:cpu", "cuda"])   # ... and fall back to cuda
         def add(a, b, out): ...
+
+    **`device=` is the same option under a shorter name**, for the call sites where it reads
+    better (`with inline, kernel(device="cuda"):`). The two are one option: either spelling
+    accepts the same values and means the same thing, and passing both is refused rather than
+    silently letting one win.
 
     A kernel that names one walks its own list and ignores the process-wide setting;
     a bracket on the call (``k["opencl:1"](...)``) still overrides both. The entries are
@@ -90,7 +107,26 @@ def kernel(func:Optional[Callable[..., Any]]=None, *,
     follows ``float=``. The choice is fixed when the decorator runs and is part of the
     kernel's identity, so ``config.type_map`` does not change a kernel that is already
     declared.
+
+    `domain=` declares the work size of a gid-style body: it names an array **parameter** of a
+    decorated kernel (``@kernel(domain="out")``). An inline block does not take a `domain=`:
+    it states its domain with a magic loop in the body instead, and a gid-style body is
+    refused there by name (`with inline, kernel(...)` is written where it is launched, so the
+    extent it iterates is already in scope).
+
+    `blocks_per_grid=` / `threads_per_block=` state the work size from an inline block's head,
+    in the same ``(blocks, threads)`` spelling a bracket uses
+    (`k[(blocks, threads)](...)`), which is CUDA's pair on every backend.
     """
+    # `device=` is `default_device=` under a shorter name. Both spellings name one option, so
+    # giving both is ambiguous rather than layered -- refuse it instead of letting the later
+    # keyword silently win.
+    if device is not None:
+        if default_device is not None:
+            raise TypeError(
+                "@kernel() takes one device setting: use `default_device=` or its alias "
+                "`device=`, not both (they mean the same thing)")
+        default_device = device
     type_map:Optional[Dict[str, object]] = None
     if int is not None or float is not None:
         type_map = {}
@@ -105,15 +141,19 @@ def kernel(func:Optional[Callable[..., Any]]=None, *,
     default_entries:Optional[DefaultDeviceEntries] = (
         _parse_default_device_value(default_device, "@kernel(default_device=...)") or None)
 
-    def decorator(f:Callable[..., Any])->"PyKernel[object]":
-        # The facade defines the class; a top-level import here would be a cycle.
+    if func is not None:
+        # The bare `@kernel` spelling: decorate now.
         from . import PyKernel  # noqa: PLC0415
         # The backend argument is a reporting snapshot only: the walk runs per call, and
         # every launch records the backend it actually used.
-        return PyKernel(f, _snapshot_backend(default_entries),
+        return PyKernel(func, _snapshot_backend(default_entries),
                         default_devices=default_entries, domain=domain,
                         type_map=type_map)
 
-    if func is not None:
-        return decorator(func)
-    return decorator
+    # Called with options only. The result is a decorator factory -- and the `with`-item head
+    # of an inline kernel block, which is why it is not a plain function.
+    from ..inline_kernels.spec import _KernelSpec  # noqa: PLC0415
+
+    return _KernelSpec(default_entries, domain, type_map,
+                       blocks_per_grid=blocks_per_grid,
+                       threads_per_block=threads_per_block)

@@ -326,3 +326,59 @@ def test_a_kernel_with_a_default_still_accepts_a_python_bracket():
     out = np.zeros(8, dtype=np.float32)
     add["python"](a, b, out)
     np.testing.assert_allclose(out, a + b)
+
+
+# ---------------------------------------------------------------------------
+# `device=` is the same option under a shorter name
+# ---------------------------------------------------------------------------
+
+
+def test_device_is_an_alias_for_default_device():
+    """`@kernel(device=...)` picks the same backend `@kernel(default_device=...)` does."""
+    @kernel(device="python")
+    def via_alias(a, b, out):
+        for i in range(out.shape[0]):
+            out[i] = a[i] + b[i]
+
+    @kernel(default_device="python")
+    def via_full_name(a, b, out):
+        for i in range(out.shape[0]):
+            out[i] = a[i] + b[i]
+
+    values = np.arange(8, dtype=np.float32)
+    first = np.zeros(8, dtype=np.float32)
+    second = np.zeros(8, dtype=np.float32)
+    via_alias(values, values, first)
+    via_full_name(values, values, second)
+    np.testing.assert_allclose(first, values + values)
+    np.testing.assert_allclose(second, first)
+    assert via_alias.backend == via_full_name.backend == "python"
+
+
+def test_device_and_default_device_together_are_refused():
+    """One option, two names: giving both is ambiguous rather than layered."""
+    with pytest.raises(TypeError, match="alias"):
+        kernel(default_device="python", device="python")
+
+
+def test_the_alias_takes_the_same_shapes():
+    """A list of entries, a selector string, and a bare backend name all work."""
+    @kernel(device=["python", "cuda"])
+    def listed(a, b, out):
+        for i in range(out.shape[0]):
+            out[i] = a[i] + b[i]
+
+    assert listed._default_devices is not None
+    assert listed._default_devices[0] == ("python", None)
+
+
+def test_the_alias_reaches_the_inline_block_head():
+    """A block head is the same callable, so it takes the same option."""
+    from pygpgpu import inline
+
+    values = np.arange(4, dtype=np.float32)
+    out = np.zeros(4, dtype=np.float32)
+    with inline, kernel(device="python"):
+        for i in range(out.shape[0]):
+            out[i] = values[i] + 1.0
+    np.testing.assert_allclose(out, values + 1.0)
