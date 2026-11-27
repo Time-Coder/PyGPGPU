@@ -1,13 +1,13 @@
 """21_random_numbers.py -- random numbers inside a kernel body.
 
-A kernel body draws the way it would on the host: `random.random()`,
-`random.uniform(0.0, 1.0)`, `np.random.normal(0.0, 1.0)`. The launch owns the
-seed and the work item, so the body never passes either -- which is what lets a
-helper draw with no `tid` and no `seed`, the same contract `taichi.random`
-offers.
+A kernel body draws the way it would on the host: ``random.random()``,
+``random.expovariate(1.0)``, ``np.random.gamma(2.0)``. The launch owns the seed and
+the work item, so the body never passes either -- which is what lets a helper draw
+with no ``tid`` and no ``seed``, the same contract ``taichi.random`` offers.
 
-Each work item gets its own stream, so two work items never share a sequence,
-and pinning the seed replays the whole sequence.
+The seed is the host generator's own: the first kernel that draws digests
+``random.getstate()`` or ``np.random.get_state()`` once per process. Seeding the
+host generator before that first draw replays the device sequence.
 
 Run:
     python examples/21_random_numbers.py
@@ -15,7 +15,6 @@ Run:
 import random
 
 import numpy as np
-import pygpgpu
 from pygpgpu import kernel
 
 
@@ -38,6 +37,7 @@ def draw_mixed(out: np.ndarray):
         out[i] = (random.random()
                   + random.uniform(0.0, 1.0)
                   + np.random.normal(0.0, 1.0)
+                  + np.random.poisson(4.0)
                   + jitter())
 
 
@@ -51,10 +51,8 @@ def draw_integer(out: np.ndarray):
 def main():
     n = 100_000
 
-    # A pinned seed makes the whole sequence reproducible. Left alone, every
-    # process draws its own seed and consecutive runs differ.
-    pygpgpu.config.random.seed = 20240101
-
+    # Seed the host generator, not a PyGPGPU setting: the first kernel draw reads it.
+    random.seed(20240101)
     out = np.zeros(n, dtype=np.float32)
     draw_uniform(out)
     assert np.all(out >= 0.0) and np.all(out < 1.0)
@@ -68,12 +66,9 @@ def main():
     assert unique > 0.99 * n, f"only {unique} distinct values out of {n}"
     print(f"one stream per work item - {unique} distinct values out of {n}")
 
-    # The same seed replays the same numbers.
-    again = np.zeros(n, dtype=np.float32)
-    pygpgpu.config.random.seed = 20240101
-    draw_uniform(again)
-    assert np.array_equal(out, again)
-    print("a pinned seed replays the sequence - OK")
+    # The launch's base seed is digested from the host generator on its first use
+    # in this process; from then on successive launches walk their own streams.
+    print("seed digested from the host generator on first use")
 
     mixed = np.zeros(n, dtype=np.float32)
     draw_mixed(mixed)

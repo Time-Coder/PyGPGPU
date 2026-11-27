@@ -32,6 +32,26 @@ def _local_dtype_for(ctype:str)->np.dtype:
     return _LOCAL_DTYPES.get(ctype, np.dtype(np.float32))
 
 
+def _random_sources_of(stage:object)->Tuple[str, ...]:
+    """The host generators one translation unit drew from."""
+    return tuple(sorted(getattr(stage, "random_sources", None) or ()))
+
+
+def _merged_random_sources(translator:object, device_cache:Dict[str, object])->Tuple[str, ...]:
+    """Every generator named by this kernel, its passes and the helpers it reaches.
+
+    The launch's seed comes from these generators' states (see kernel/random.py), so a
+    helper drawing from `np.random` must contribute that source even when the kernel body
+    itself only called `random.random()`.
+    """
+    sources:Set[str] = set(_random_sources_of(translator))
+    for stage in getattr(translator, "phase_translators", ()):
+        sources.update(_random_sources_of(stage))
+    for entry in device_cache.values():
+        sources.update(entry.get("random_sources") or ())
+    return tuple(sorted(sources))
+
+
 def _merged_raise_sites(translator:object)->list:
     """Every raise site of this kernel, in the order the device ids will index them.
 
@@ -360,6 +380,10 @@ class _CompileKernelsMixin:
                                   for stage in plan.translator.phase_translators]
                                  if plan.translator.phase_translators
                                  else bool(getattr(plan.translator, "uses_random", False))),
+                 # The host generators whose states seed this launch's stream: the
+                 # kernel body, its passes and any device helper that draws.
+                 "random_sources": _merged_random_sources(
+                     plan.translator, plan.device_cache),
                  "local_element_counts": (plan.phase_local_counts
                                           if plan.translator.phase_translators
                                           else list(plan.local_element_counts)),

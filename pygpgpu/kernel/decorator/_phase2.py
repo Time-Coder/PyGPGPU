@@ -7,7 +7,7 @@ from typing import (
     Tuple,
 )
 import numpy as np
-from .. import rng as random_support
+from .. import random as random_support
 from .slots import (
     _kernel_scalar_argument,
 )
@@ -130,7 +130,9 @@ class _BuildLaunchMixin:
         plan.random_drawn:bool = (any(plan.uses_random)
                                   if isinstance(plan.uses_random, list)
                                   else bool(plan.uses_random))
-        plan.random_seed:int = random_support.launch_seed() if plan.random_drawn else 0
+        plan.random_sources:tuple = tuple(plan.launch_meta.get("random_sources") or ())
+        plan.random_seed:int = (random_support.launch_seed(plan.random_sources)
+                                if plan.random_drawn else 0)
         plan.local_element_counts:object = plan.launch_meta.get("local_element_counts") or []
         plan.local_dtypes:object = plan.launch_meta.get("local_dtypes") or []
         plan.own_count:int = len(plan.full)

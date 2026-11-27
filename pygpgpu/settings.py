@@ -120,44 +120,6 @@ class KernelImportConfig:
                 % (self.type_checked, self.generate_pyi, self.options))
 
 
-class RandomConfig:
-    """The device random stream's settings, at ``config.random``.
-
-    One attribute, read at launch time so it applies to kernels that were already
-    decorated:
-
-    ``seed``
-        The base seed a launch's stream starts from. ``None`` (the default) means the
-        process draws its own, so consecutive runs differ -- the unseeded behaviour
-        ``np.random.random()`` has. An integer makes the sequence reproducible: the seed
-        is walked by a per-process launch count, and assigning a value restarts that count,
-        so assigning the same integer again replays exactly the same numbers.
-
-    Only the device backends read it. The ``python`` backend runs the kernel body
-    unmodified, so a draw there is python's own ``random``/``numpy.random`` call -- seed
-    those the way python expects (``random.seed``, ``np.random.seed``) when a serial run
-    has to be reproducible.
-    """
-
-    __slots__ = ()
-
-    @property
-    def seed(self) -> Optional[int]:
-        """The base seed a launch's stream starts from, or None for a fresh process seed."""
-        from .kernel import rng as _rng
-
-        return _rng.seed()
-
-    @seed.setter
-    def seed(self, value: Optional[int]) -> None:
-        from .kernel import rng as _rng
-
-        _rng.set_seed(value)
-
-    def __repr__(self) -> str:
-        return "RandomConfig(seed=%r)" % (self.seed,)
-
-
 class Config:
     """The process-wide settings, one attribute each.
 
@@ -171,7 +133,6 @@ class Config:
         pygpgpu.config.default_device = "cuda:0"           # what a plain k(...) runs on
         pygpgpu.config.default_device = ["cuda:0", "hip:0"]  # ... tried in this order
         pygpgpu.config.kernel_import.type_checked = True   # check imported kernels' calls
-        pygpgpu.config.random.seed = 1234                  # reproducible device random draws
 
     ``print_info``
         Whether the backends log translation, compilation, copy and launch lines. The
@@ -212,21 +173,15 @@ class Config:
     and the logging flag is read by the backend that owns it.
     """
 
-    __slots__ = ("_kernel_import", "_random")
+    __slots__ = ("_kernel_import",)
 
     def __init__(self) -> None:
         self._kernel_import = KernelImportConfig()
-        self._random = RandomConfig()
 
     @property
     def kernel_import(self) -> KernelImportConfig:
         """The import hook's settings."""
         return self._kernel_import
-
-    @property
-    def random(self) -> RandomConfig:
-        """The device random stream's settings."""
-        return self._random
 
     @property
     def print_info(self) -> bool:
@@ -286,10 +241,9 @@ class Config:
             _parse_default_device_value(value, "config.default_device"))
 
     def __repr__(self) -> str:
-        return ("Config(print_info=%r, type_map=%r, default_device=%r, kernel_import=%r, "
-                "random=%r)"
+        return ("Config(print_info=%r, type_map=%r, default_device=%r, kernel_import=%r)"
                 % (self.print_info, self.type_map, self.default_device,
-                   self._kernel_import, self._random))
+                   self._kernel_import))
 
 
 # The one settings object. ``pygpgpu.config`` is this instance, and it is the only

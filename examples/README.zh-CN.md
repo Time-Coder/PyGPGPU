@@ -41,7 +41,7 @@
 | [18_metal_device_check.py](18_metal_device_check.py) | 在真实 Apple GPU 上端到端验证 Metal 后端：两项只有装有 Metal.framework 的机器才能回答的检查 (MSL 编译、标量绑定、dispatch、线程组内存、原子、向量、两阶段、返回值)。成功退出 0，检查失败退出 1，本机没有 Metal 设备退出 2 |
 | [19_device_resident_arrays.py](19_device_resident_arrays.py) | `pygpgpu.numpy`(gnp)端到端: 构造、多次启动之间数据留在设备上、公开的异步 `to_host`/`to_device` 传输、一个缓冲区被多个视图共用、跨设备经宿主机转存, 以及与 torch 的零拷贝互通。API 简要总览; 更深入的零拷贝与原子见 [05_gnp_zero_copy_and_atomics.py](05_gnp_zero_copy_and_atomics.py) |
 | [20_inline_kernel.py](20_inline_kernel.py) | 内联 kernel 块: `with inline, kernel(...):` 把 `@kernel` 函数体直接写在调用处, 不需要 `def`。数据来自外层作用域; 迭代域由函数体自己的 magic loop 声明(gid 风格函数体被拒绝); 头部只带选项(`default_device=`、`blocks_per_grid=`/`threads_per_block=`); `return` 通过 `with inline as result` 传回; 同一处无论执行多少次都只翻译一次 |
-| [21_random_numbers.py](21_random_numbers.py) | kernel 函数体里的随机数: `random.random()`、`random.uniform()`、`np.random.normal()` 以及整数取值; 种子与 work item 由发射方掌握, 所以辅助函数取随机数既不传 `tid` 也不传 `seed`。每个 work item 一条自己的序列, `pygpgpu.config.random.seed` 让整条序列可复现 |
+| [21_random_numbers.py](21_random_numbers.py) | kernel 函数体里的随机数: `random.random()`、`random.uniform()`、`np.random.normal()` 以及整数取值; 种子与 work item 由发射方掌握, 所以辅助函数取随机数既不传 `tid` 也不传 `seed`。每个 work item 一条自己的序列, `the host generator's state` 让整条序列可复现 |
 
 `@kernel` 函数体支持 docstring(第一行的字符串字面量会被翻译器自动忽略,
 不会进入生成的 GPU 源码), 所以可以放心在装饰函数里写说明文字。

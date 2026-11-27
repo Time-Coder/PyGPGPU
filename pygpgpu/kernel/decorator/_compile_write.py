@@ -255,9 +255,9 @@ class _CompileWriteMixin:
             plan.random_used = plan.random_used or bool(phase.uses_random)
         for entry in plan.device_cache.values():
             plan.random_double = plan.random_double or bool(entry.get("random_needs_double"))
-            plan.random_used = plan.random_used or bool(entry.get("needs_rng"))
+            plan.random_used = plan.random_used or bool(entry.get("needs_random"))
         if plan.random_used:
-            from .. import rng as random_header
+            from .. import random as random_header
 
             plan.random_widths:Tuple[str, ...] = (("double", ) if plan.random_double
                                                  else ("float", ))

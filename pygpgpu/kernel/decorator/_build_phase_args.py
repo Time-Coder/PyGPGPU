@@ -8,7 +8,7 @@ from typing import (
 
 import numpy as np
 
-from .. import rng as random_support
+from .. import random as random_support
 from ..translator import (
     infer_ctype,
 )

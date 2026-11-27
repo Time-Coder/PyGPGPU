@@ -23,9 +23,8 @@ import random
 import numpy as np
 import pytest
 
-import pygpgpu
 from pygpgpu import get_global_id, kernel
-from pygpgpu.kernel import rng as random_support
+from pygpgpu.kernel import random as random_support
 
 
 @kernel
@@ -122,7 +121,7 @@ def test_a_users_own_function_is_not_a_draw():
 
 
 def test_an_import_under_another_name_is_still_a_draw(gpu_backend):
-    """`from random import random as rnd` and `import random as rng` both resolve to the
+    """`from random import random as rnd` and `import random as random_support` both resolve to the
     same callable, and identity is what decides."""
     from random import random as rnd
     import random as rng_module
@@ -229,20 +228,50 @@ def test_two_work_items_are_two_streams(gpu_backend):
     assert len(set(values.tolist())) == 32
 
 
-def test_a_pinned_seed_replays_the_sequence(gpu_backend):
-    pygpgpu.config.random.seed = 20240101
-    first = draw_one(uniform_draw, gpu_backend, 16)
-    pygpgpu.config.random.seed = 20240101
-    second = draw_one(uniform_draw, gpu_backend, 16)
-    assert np.array_equal(first, second)
+def test_the_host_seed_replays_the_sequence(gpu_backend):
+    """The seed is the host generator's, read on the first kernel draw of the process."""
+    state = random.getstate()
+    try:
+        random.seed(20240101)
+        random_support._reset_generator_seeds()
+        first = draw_one(uniform_draw, gpu_backend, 16)
+        random.seed(20240101)
+        random_support._reset_generator_seeds()
+        second = draw_one(uniform_draw, gpu_backend, 16)
+        assert np.array_equal(first, second)
+    finally:
+        random.setstate(state)
+        random_support._reset_generator_seeds()
 
 
-def test_a_different_seed_gives_a_different_sequence(gpu_backend):
-    pygpgpu.config.random.seed = 1
-    first = draw_one(uniform_draw, gpu_backend, 16)
-    pygpgpu.config.random.seed = 2
-    second = draw_one(uniform_draw, gpu_backend, 16)
-    assert not np.array_equal(first, second)
+def test_a_different_host_seed_gives_a_different_sequence(gpu_backend):
+    state = random.getstate()
+    try:
+        random.seed(1)
+        random_support._reset_generator_seeds()
+        first = draw_one(uniform_draw, gpu_backend, 16)
+        random.seed(2)
+        random_support._reset_generator_seeds()
+        second = draw_one(uniform_draw, gpu_backend, 16)
+        assert not np.array_equal(first, second)
+    finally:
+        random.setstate(state)
+        random_support._reset_generator_seeds()
+
+
+def test_the_numpy_generator_seeds_numpy_draws(gpu_backend):
+    state = np.random.get_state()
+    try:
+        np.random.seed(1234)
+        random_support._reset_generator_seeds()
+        first = draw_one(numpy_draw, gpu_backend, 16)
+        np.random.seed(1234)
+        random_support._reset_generator_seeds()
+        second = draw_one(numpy_draw, gpu_backend, 16)
+        assert np.array_equal(first, second)
+    finally:
+        np.random.set_state(state)
+        random_support._reset_generator_seeds()
 
 
 def test_the_second_draw_follows_the_first(gpu_backend):
@@ -291,26 +320,6 @@ def helper_draw() -> float:
 
 
 # ---------------------------------------------------------------------------
-# The seed setting
-# ---------------------------------------------------------------------------
-
-
-def test_the_seed_setting_round_trips():
-    pygpgpu.config.random.seed = 7
-    assert pygpgpu.config.random.seed == 7
-    pygpgpu.config.random.seed = None
-    assert pygpgpu.config.random.seed is None
-
-
-def test_the_seed_must_be_a_32_bit_integer():
-    with pytest.raises(TypeError):
-        pygpgpu.config.random.seed = "seven"
-    with pytest.raises(ValueError):
-        pygpgpu.config.random.seed = -1
-    with pytest.raises(ValueError):
-        pygpgpu.config.random.seed = 2 ** 32
-
-
 # ---------------------------------------------------------------------------
 # The refusals
 # ---------------------------------------------------------------------------
@@ -404,10 +413,10 @@ def test_the_generated_source_includes_the_random_header(gpu_backend):
     draw_one(uniform_draw, gpu_backend, 4)
     source = _generated_source(gpu_backend)
     assert "include/random.h" in source
-    assert "pyg_rng_init" in source
+    assert "random_init" in source
 
 
 def test_the_generated_source_declares_the_launch_seed(gpu_backend):
     draw_one(uniform_draw, gpu_backend, 4)
     source = _generated_source(gpu_backend)
-    assert "_pyg_random_seed" in source
+    assert "_random_seed" in source

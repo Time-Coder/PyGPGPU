@@ -316,10 +316,13 @@ def sample(out: np.ndarray):
 
 **Each work item gets its own stream.** The stream is seeded from the launch seed and the work item's own position, so two work items never share a sequence, and a work item's k-th draw is the same number whatever order the work items ran in. The draws are PCG32, the generator `taichi.random` uses.
 
-**The seed is a process-wide setting** — `pygpgpu.config.random.seed`. Left alone, each process draws its own; pinned, the sequence replays exactly:
+**Every scalar distribution in both libraries is available.** `random.expovariate`, `random.betavariate`, `random.gammavariate`, `random.lognormvariate`, `random.triangular`, `random.vonmisesvariate`, `random.paretovariate` and `random.weibullvariate`, along with numpy's `exponential`, `beta`, `gamma`, `chisquare`, `f`, `standard_t`, `laplace`, `logistic`, `gumbel`, `rayleigh`, `poisson`, `binomial`, `negative_binomial`, `hypergeometric`, `geometric`, `logseries` and `zipf`, take their arguments in the same order as the host call. Array-valued APIs (`choice`, `permutation`, `multinomial`, `dirichlet`, ...) are refused: a draw answers one number, not an array.
+
+**The seed comes from the host generator.** There is no `config.random` setting: on the first kernel draw in a process, PyGPGPU digests `random.getstate()` when the body uses `random.*`, or `np.random.get_state()` when it uses `np.random.*`, and keeps that base for the process. Seeding the host generator before that first draw makes the device sequence reproducible:
 
 ```python
-pygpgpu.config.random.seed = 1234       # reproducible from here on
+import random
+random.seed(1234)               # before the first kernel that draws
 ```
 
 **The interpreter backend runs the body as written**, so a draw there is python's own `random`/`numpy.random` call — the same distribution, but python's sequence rather than the device's. That follows from the interpreter having no work items (a magic-loop body runs once, standing for the whole launch).
@@ -364,7 +367,7 @@ A struct `typedef` in the source becomes a ctypes type (a `Pt` above would pass 
 - **Recursive device functions** — a helper or method that calls itself is compiled into a loop automatically, on every backend: the tail call, a result the caller consumes (`r = f(...)` with statements after it, or `return g(f(...))` with the recursive call at any argument position), and structure arguments the walk replaces per level (the bounce ray of a ray tracer). A shape the loop cannot order — a wrapper reading a value that differs per level, or two self-calls in one expression — is refused with its reason; CUDA and HIP answer those shapes through native recursion. ([ray tracing](examples/ray_tarcing_in_one_weekend/render.py))
 - **Outer-scope variables** — variables the body reads from outside become kernel parameters, so a changed value is visible on the next call; a scalar declared `nonlocal`/`global` is written back to its scope after the call. ([11_returns_and_scope.py](examples/11_returns_and_scope.py))
 - **Non-blocking launches** — `submit()` (a `concurrent.futures.Future`) and `await k.async_call(...)` (an `asyncio.Future`) on the same decorated function; the brackets apply here too. ([10](examples/10_async_launch.py))
-- **Random numbers** — a kernel body draws with the spellings it already knows (`random.random()`, `np.random.normal(...)`); the launch owns the seed and the work item, so a helper draws with no `tid` and no `seed`. One stream per work item, and `pygpgpu.config.random.seed` replays the sequence. ([21](examples/21_random_numbers.py))
+- **Random numbers** — a kernel body draws with the spellings it already knows (`random.random()`, `random.expovariate(...)`, `np.random.gamma(...)`, and the rest); the launch owns the seed and the work item, so a helper draws with no `tid` and no `seed`. One stream per work item, seeded from the host generator's state. ([21](examples/21_random_numbers.py))
 
 ## How it compares
 
