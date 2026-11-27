@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .rebuild import block_body_lines, block_name, block_text
 
-from ..translator.walk import _is_magic_loop_stmt
+from ..translator.dispatch_domain import _is_magic_loop_stmt
 
 
 # The device builtins that mean "this body reads a work item of its own": a body that calls
@@ -176,9 +176,18 @@ def _refuse_await_and_yield(node:ast.With)->None:
 
 
 def _magic_loops(node:ast.With)->List[ast.For]:
-    """The block's magic loops: its top-level `for i in range(<array>.shape[0])` dispatch."""
+    """The block's magic loops: its top-level `for i in range(<array>.shape[0])` dispatch.
+
+    No parameter set is passed, and that is the correct answer here rather than an omission:
+    an inline block has no parameter list of its own. Its body reads the *enclosing* scope,
+    so a `range(n)` bound there names a local or a closure cell -- a value the source decides,
+    not a count the call hands over -- and promoting it would turn an ordinary serial loop
+    into a grid. The shape spelling (`range(out.shape[0])`) is what a block states its domain
+    with, which is also what its own error message asks for.
+    """
     return [statement for statement in node.body
-            if isinstance(statement, ast.For) and _is_magic_loop_stmt(statement)]
+            if isinstance(statement, ast.For)
+            and _is_magic_loop_stmt(statement, frozenset())]
 
 
 def _launches_a_child_kernel(node:ast.With)->bool:

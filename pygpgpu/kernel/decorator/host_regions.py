@@ -38,7 +38,8 @@ def _isolated(value:object)->object:
 
 def _host_regions(func:object)->List[object]:
     """The statements a kernel body runs on the host, before and between its magic loops."""
-    from ..translator import _parse_kernel_source, _outside_loops, get_dedented_source
+    from ..translator import (_outside_loops, _parameter_names_of, _parse_kernel_source,
+                             get_dedented_source)
 
     try:
         tree:object = _parse_kernel_source(get_dedented_source(func))
@@ -47,7 +48,7 @@ def _host_regions(func:object)->List[object]:
     if not (tree.body and isinstance(tree.body[0], ast.ImportFrom)):
         pass
     body:List[object] = tree.body[0].body if tree.body else []
-    return list(_outside_loops(body))
+    return list(_outside_loops(body, set(_parameter_names_of(func))))
 
 
 def _host_scalar_values(func:object, names:List[str], args:Optional[Tuple[object, ...]]=None,
@@ -155,8 +156,8 @@ def _host_region_values(func:object,
     as a device object, and building a second one here would shadow the launch's copy.
     """
     from ..translator import (_is_magic_loop_stmt,
-                             _outside_loops, get_dedented_source, _parse_kernel_source,
-                             _outer_scope_names)
+                             _outside_loops, _parameter_names_of, get_dedented_source,
+                             _parse_kernel_source, _outer_scope_names)
 
     values:Dict[str, object] = {}
     executed:List[int] = []
@@ -167,12 +168,15 @@ def _host_region_values(func:object,
     if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
         return values, executed
     body:List[object] = list(tree.body[0].body)
+    # The kernel's own parameter names: a counted dispatch (`for i in range(n)`) is a magic
+    # loop, and this split has to agree with the translator's about which statement it is.
+    params:Set[str] = set(_parameter_names_of(func))
     # A body with no magic loop is a *gid-style* body (`@kernel(domain="x")` or a bracket):
     # every one of its top-level statements is per-work-item code, so none of them is host
     # work. Running `atomic_add(...)` there would execute it once on the host (it is a
     # device builtin and refuses) and then once per work item on the device -- the atomic
     # landed twice.
-    if not any(_is_magic_loop_stmt(statement)
+    if not any(_is_magic_loop_stmt(statement, params)
                for statement in body if isinstance(statement, ast.For)):
         return values, executed
     # `local = <array>` is a pointer assignment, not host work: the device binds a second
@@ -183,7 +187,7 @@ def _host_region_values(func:object,
             if not _is_array_pointer_assignment(statement)]
     outer_names:Set[str] = _outer_scope_names(func)
     built:Set[str] = set(created_names or ())
-    statements:List[object] = list(_outside_loops(body))
+    statements:List[object] = list(_outside_loops(body, params))
     statements = [statement for statement in statements
                   if _assigned_name_of(statement) not in outer_names
                   and _assigned_name_of(statement) not in built]
@@ -197,7 +201,7 @@ def _host_region_values(func:object,
     # seconds. The tail starts after the last one.
     last_loop:int = max((index for index, statement in enumerate(body)
                          if isinstance(statement, ast.For)
-                         and _is_magic_loop_stmt(statement)), default=-1)
+                         and _is_magic_loop_stmt(statement, params)), default=-1)
     tail:List[object] = [statement for statement
                          in body[last_loop + 1 if last_loop >= 0 else len(body):]
                          if not isinstance(statement, ast.Return)

@@ -199,7 +199,7 @@ def shade(x: np.ndarray, scene: Scene) -> np.ndarray:
     return out
 ```
 
-**kernel 需要一个迭代域**来推导 work size。要么用魔法循环(`for i in range(x.shape[0])`, 循环上界就是迭代域; 二维/三维用 `np.ndindex`/`np.ndenumerate`); 要么在基于 `get_global_id` 的写法里用装饰器指明数组: `@kernel(domain="x")`。三者都没有时调用会直接报错, 而不是猜测。
+**kernel 需要一个迭代域**来推导 work size。迭代域就是函数体自己声明的那个: 基于**形状**的魔法循环(`for i in range(x.shape[0])`; 二维/三维用 `np.ndindex`/`np.ndenumerate`)、基于**运行期计数**的魔法循环(`for i in range(n)`, `n` 是 kernel 参数——每个样本一个工作项), 或者基于 `get_global_id` 时用装饰器指明数组: `@kernel(domain="x")`。**字面量**计数(`for i in range(8)`)不是迭代域: 它表示一个工作项内部走的固定步数, 光线步进的内层循环和点积循环就是这种。一个都没有时调用会直接报错, 而不是猜测。
 
 **统一的中括号语法**指定后端、设备与 work size——所有后端一致, 顺序不限:
 

@@ -6,7 +6,7 @@ import inspect
 import sys
 import textwrap
 import weakref
-from typing import (Callable, Dict, List, Optional)
+from typing import (Callable, Collection, Dict, List, Optional)
 
 
 
@@ -211,7 +211,7 @@ def _returns_a_value(body:List[ast.stmt])->bool:
     return False
 
 
-def _has_device_return(body:List[ast.stmt])->bool:
+def _has_device_return(body:List[ast.stmt], params:Collection[str])->bool:
     """True when some `return` of this body is emitted into the generated kernel.
 
     A body's statements fall into three regions (see PyKernel._run_host_region): the ones
@@ -222,11 +222,17 @@ def _has_device_return(body:List[ast.stmt])->bool:
     A bare `return` counts: it claims with None, which is how python's "the first work item
     to leave decides" rule survives a value-returning site elsewhere in the body. A
     gid-style body has no host regions at all, so every statement of it is device code.
+
+    `params` is the kernel's own parameter names, because a counted dispatch
+    (`for i in range(n)`) is a magic loop -- see `_is_magic_loop_stmt`. It is required rather
+    than defaulted: a caller that could omit it would get the shape-only answer, and then
+    whether a `return` claims the result would disagree with where the dispatch really is.
     """
-    # Upward call: `walk` owns the magic-loop question and imports this module.
-    from .walk import _is_magic_loop_stmt
+    # Upward call: `dispatch_domain` owns the magic-loop question and imports this module.
+    from .dispatch_domain import _is_magic_loop_stmt
     loops:List[ast.For] = [stmt for stmt in body
-                           if isinstance(stmt, ast.For) and _is_magic_loop_stmt(stmt)]
+                           if isinstance(stmt, ast.For)
+                           and _is_magic_loop_stmt(stmt, params)]
     if not loops:
         regions:List[ast.AST] = list(body)
     else:

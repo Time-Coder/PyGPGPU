@@ -178,6 +178,15 @@ from .predicates import (
     is_ptr,
     promote,
 )
+from .dispatch_domain import (
+    _counted_range_param,
+    _is_magic_loop_stmt,
+    _is_shape_access,
+    _magic_loop_end,
+    _magic_loop_index,
+    _outside_loops,
+    _parameter_names_of,
+)
 from .walk import (
     _BUILTIN_NAMES,
     _HOST_CREATION_FUNCTIONS,
@@ -191,12 +200,7 @@ from .walk import (
     _is_creation_expression as _module_is_creation_expression,
     _is_creation_shape,
     _is_host_evaluable,
-    _is_magic_loop_stmt,
-    _is_shape_access,
-    _magic_loop_end,
-    _magic_loop_index,
     _outer_scope_names,
-    _outside_loops,
     short_hash,
     type_sig,
 )

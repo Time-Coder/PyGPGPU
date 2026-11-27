@@ -60,9 +60,50 @@ def test_the_predicate_separates_a_serial_range_from_the_dispatch():
 
     from pygpgpu.kernel.translator import _is_magic_loop_stmt
 
+    params = {"x", "lane"}
     serial = ast.parse("for j in range(lane * 4, lane * 4 + 4):\n    pass\n").body[0]
     literal = ast.parse("for k in range(256):\n    pass\n").body[0]
     dispatch = ast.parse("for i in range(x.shape[0]):\n    pass\n").body[0]
-    assert not _is_magic_loop_stmt(serial)
-    assert not _is_magic_loop_stmt(literal)
-    assert _is_magic_loop_stmt(dispatch)
+    assert not _is_magic_loop_stmt(serial, params)
+    assert not _is_magic_loop_stmt(literal, params)
+    assert _is_magic_loop_stmt(dispatch, params)
+
+
+def test_a_runtime_count_is_a_dispatch_and_a_constant_is_not():
+    """`range(n)` over a parameter is a domain; `range(8)` is a walk one work item does.
+
+    The line is "the call decides the count" versus "the source decides it": a parameter is a
+    value only the caller knows, so its loop is one iteration per work item; a literal or a
+    module constant is a property of the source, so its loop is a fixed number of steps inside
+    one work item. Promoting the second would turn every inner walk (a raymarcher's march, a
+    matmul's row dot) into a grid.
+    """
+    import ast
+
+    from pygpgpu.kernel.translator import _is_magic_loop_stmt
+
+    params = {"n", "x"}
+    counted = ast.parse("for i in range(n):\n    pass\n").body[0]
+    literal = ast.parse("for i in range(8):\n    pass\n").body[0]
+    local = ast.parse("for i in range(k):\n    pass\n").body[0]   # `k` is not a parameter
+    stepped = ast.parse("for i in range(0, n, 2):\n    pass\n").body[0]
+    assert _is_magic_loop_stmt(counted, params)
+    assert not _is_magic_loop_stmt(literal, params)
+    assert not _is_magic_loop_stmt(local, params)
+    # A start/step form is a strided walk, not a one-iteration-per-item domain.
+    assert not _is_magic_loop_stmt(stepped, params)
+
+
+def test_a_counted_domain_without_the_parameter_set_stays_serial():
+    """The parameter set is what makes a counted domain recognisable, and it is required.
+
+    A caller that could omit it would silently get the shape-only answer, and then the
+    host-region boundary and the translator would disagree about which loop is the
+    dispatch -- the disagreement this signature is written to make impossible.
+    """
+    import ast
+
+    from pygpgpu.kernel.translator import _is_magic_loop_stmt
+
+    counted = ast.parse("for i in range(n):\n    pass\n").body[0]
+    assert not _is_magic_loop_stmt(counted, frozenset())

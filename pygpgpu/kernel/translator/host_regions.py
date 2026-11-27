@@ -9,17 +9,28 @@ from .predicates import (
     infer_ctype,
     is_ptr,
 )
+from .dispatch_domain import (
+    _magic_loop_index,
+    _parameter_names_of,
+)
 from .walk import (
     _HOST_CREATION_FUNCTIONS,
     _NUMPY_DEVICE_TYPES,
     _UNRESOLVED,
     _assigned_name_of,
     _creation_target_of,
-    _magic_loop_index,
 )
 
 
 class _HostRegionsMixin:
+
+    def _loop_parameter_names(self)->Set[str]:
+        """The kernel's own parameter names, as the loop scans need them (see walk)."""
+        cached:Optional[Set[str]] = getattr(self, "_loop_params_cache", None)
+        if cached is None:
+            cached = _parameter_names_of(self.func)
+            self._loop_params_cache = cached
+        return cached
 
     def _bind_host_values(self, body:List[ast.stmt])->None:
         """Record every host-created object above the magic loop before the body is visited.
@@ -29,7 +40,7 @@ class _HostRegionsMixin:
         every later use needs the object's type, so the declarations are collected once,
         up front, instead of being discovered while walking the body.
         """
-        for stmt in body[:_magic_loop_index(body)]:
+        for stmt in body[:_magic_loop_index(body, self._loop_parameter_names())]:
             value:Optional[ast.expr] = _creation_target_of(stmt)
             name:Optional[str] = _assigned_name_of(stmt)
             if value is None or name is None:
@@ -92,7 +103,7 @@ class _HostRegionsMixin:
         loop assigns" -- a `self.<attr> += ...` or an element store is not a local at all.
         """
         body:List[ast.stmt] = list(self.tree.body)
-        start:int = _magic_loop_index(body)
+        start:int = _magic_loop_index(body, self._loop_parameter_names())
         names:Set[str] = set()
         for statement in body[start:]:
             if not isinstance(statement, ast.For):

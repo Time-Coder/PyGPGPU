@@ -273,15 +273,16 @@ def test_the_host_scan_stops_at_the_last_magic_loop():
     import ast
 
     from pygpgpu.kernel.decorator import host_regions as regions
-    from pygpgpu.kernel.translator import (_is_magic_loop_stmt, _parse_kernel_source,
-                                          get_dedented_source)
+    from pygpgpu.kernel.translator import (_is_magic_loop_stmt, _parameter_names_of,
+                                          _parse_kernel_source, get_dedented_source)
 
     # `_host_region_values` parses the dedented source, so the line numbers it reports are
     # the ones this parse gives, which is what makes the two comparable.
     tree = _parse_kernel_source(get_dedented_source(two_passes_after_each_other.raw_func))
     body = tree.body[0].body
+    params = _parameter_names_of(two_passes_after_each_other.raw_func)
     loops = [statement for statement in body
-             if isinstance(statement, ast.For) and _is_magic_loop_stmt(statement)]
+             if isinstance(statement, ast.For) and _is_magic_loop_stmt(statement, params)]
     assert len(loops) == 2, "the fixture kernel must have two magic loops"
 
     _, executed = regions._host_region_values(

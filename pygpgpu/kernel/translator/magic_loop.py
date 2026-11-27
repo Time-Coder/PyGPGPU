@@ -1,6 +1,6 @@
 from __future__ import annotations
 import ast
-from typing import (List, Optional, Tuple)
+from typing import (List, Optional, Set, Tuple)
 from .nd_index import _NdIndexMixin
 from .errors import (
     _unpack_count_message,
@@ -11,23 +11,44 @@ from .notation import (
     HostValueEntry,
     OuterVarEntry,
     Translated,
+    device_name,
 )
 from .predicates import (
     is_image,
+    is_int,
     is_ptr,
+)
+from .dispatch_domain import (
+    _counted_range_param,
+    _magic_loop_end,
+    _magic_loop_index,
+    _outside_loops,
+    _parameter_names_of,
 )
 from .walk import (
     _assigned_name_of,
     _creation_target_of,
-    _magic_loop_end,
-    _magic_loop_index,
-    _outside_loops,
 )
 
 
 class _MagicLoopMixin(_NdIndexMixin):
 
+    def _loop_parameter_names(self)->Set[str]:
+        """The python parameter names a counted dispatch may be sized from.
+
+        Cached on the translator because every scan that splits the body asks for it: the
+        loop detection here, `_outside_loops`, `_magic_loop_index`/`_magic_loop_end` and the
+        phase splitter. They all have to answer "which loop is the dispatch" the same way,
+        or a statement lands in a host region on one path and in device code on another.
+        """
+        cached:Optional[Set[str]] = getattr(self, "_loop_params_cache", None)
+        if cached is None:
+            cached = _parameter_names_of(self.func)
+            self._loop_params_cache = cached
+        return cached
+
     def _translate_magic_loop(self, body:List[ast.stmt])->None:
+        params:Set[str] = self._loop_parameter_names()
         # The statements after the loop are python: they run once on the host, after the
         # launch, reading whatever the work items wrote (see PyKernel._run_host_region).
         # Recorded here so every dispatch shape treats the tail the same way.
@@ -37,13 +58,13 @@ class _MagicLoopMixin(_NdIndexMixin):
         # last `ast.For` of any kind as the boundary pushed everything between them -- a
         # `local_array_per_group` declaration included -- into the host tail, where a device-only
         # builtin has no work item and fails.
-        self.body_tail = list(body[_magic_loop_end(body):])
+        self.body_tail = list(body[_magic_loop_end(body, params):])
         # `rows: int = out.shape[0]` above the loop: the local stands for the extent, and
         # an `np.ndindex(rows, ...)` bound resolves through it. Scanned up front, because
         # the loop *detection* below needs the table -- a bound held in a local is still
         # the work-item domain, and missing it made the loop read as a "second magic
         # loop" instead.
-        for stmt in body[:_magic_loop_index(body)]:
+        for stmt in body[:_magic_loop_index(body, params)]:
             value:Optional[ast.expr] = _creation_target_of(stmt)
             name:Optional[str] = _assigned_name_of(stmt)
             if value is None or name is None:
@@ -60,11 +81,20 @@ class _MagicLoopMixin(_NdIndexMixin):
         enumerate_form:Optional[Translated] = None
         nd_form:Optional[Tuple[str, str, str]] = None
         alias_form:bool = False
+        counted_form:bool = False
         for idx, stmt in enumerate(body):
             if not isinstance(stmt, ast.For):
                 continue
             if self._is_shape0_range(stmt.iter):
                 magic_index = idx
+                break
+            # `for i in range(n)` with `n` a kernel parameter: the count is the iteration
+            # domain, exactly as `range(arr.shape[0])` is. A body whose only bound is a
+            # runtime count used to stay a serial loop in one work item -- a hundred
+            # thousand samples on one thread, with nothing in the source looking wrong.
+            if _counted_range_param(stmt, params) is not None:
+                magic_index = idx
+                counted_form = True
                 break
             # `n = img.shape[0]` above the loop, then `for p in range(n)`: the local is
             # the extent, recorded by the scan above, so this is the same dispatch the
@@ -99,7 +129,7 @@ class _MagicLoopMixin(_NdIndexMixin):
         # redundant: PyKernel rejects a kernel that carries both before it reaches here.
         self.magic_loop_present = True
         self.magic_loop_line = int(getattr(body[magic_index], "lineno", 0) or 0)
-        for stmt in _outside_loops(body):
+        for stmt in _outside_loops(body, params):
             # A creation the device cannot perform is executed by the interpreter instead
             # and becomes a parameter; that is only possible here, above the loop, because
             # below it the statement would run once per work item.
@@ -229,6 +259,45 @@ class _MagicLoopMixin(_NdIndexMixin):
         loop:ast.For = body[magic_index]
         range_call:ast.Call = loop.iter
         bound:ast.expr = range_call.args[0]
+        if counted_form:
+            # `for i in range(n)` with `n` a kernel parameter: the parameter's *value* sizes
+            # the launch, so this is a one-dimensional domain whose extent is that scalar.
+            # The head is the same one the shape spelling emits -- gid, then the guard that
+            # stops the round-up -- and `work_size_dims` carries the `-2` marker, which is
+            # how the launch knows to read the count off the argument instead of an array's
+            # `shape[d]` (see PyKernel._invoke's extent sources).
+            count_name:str = _counted_range_param(loop, params) or ""
+            # Python's `range()` refuses a non-integer, so the domain has to be an integer
+            # count here too. Without this check a `float` parameter compiled and launched a
+            # grid of 4 while python raised `TypeError`, and the launch then *silently*
+            # produced a wrong answer: every work item ran the whole body (the count reached
+            # the guard as a float comparison) and they raced on the same output. A count is
+            # a number of items, so say what python says instead of guessing at a truncation.
+            count_type:DeviceType = self._lookup(count_name)
+            if not is_int(count_type):
+                self._error(
+                    f"'{count_name}' sizes this loop's iteration domain with `range(...)`, so "
+                    f"it has to be an integer: python raises \"'float' object cannot be "
+                    f"interpreted as an integer\" for `range({count_name})`. Pass an integer "
+                    f"(np.int32(n)) or compute the count into an integer local", bound)
+            target:str = loop.target.id
+            bound_code:str = device_name(count_name)
+            self.work_item_indices = [target]
+            self._define(target, "int", loop.target)
+            if self._opencl_syntax:
+                self._emit(f"const int {target} = get_global_id(0);")
+            else:
+                self._emit(
+                    f"const int {target} = (int)(blockIdx.x * blockDim.x + threadIdx.x);")
+            self._emit(f"if ({target} >= {bound_code})")
+            self._emit("{")
+            self._emit("    return;")
+            self._emit("}")
+            self._emit_blank()
+            self._visit_work_item_body(loop.body)
+            self.work_size_dims = [(count_name, -2)]
+            return
+
         if alias_form:
             # The bound is a local the scan registered as an extent alias: resolve it to
             # the extent expression it was assigned from (`<array>.shape[0]`), so the

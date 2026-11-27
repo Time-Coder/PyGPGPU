@@ -199,7 +199,7 @@ def shade(x: np.ndarray, scene: Scene) -> np.ndarray:
     return out
 ```
 
-**A kernel needs an iteration domain** for the work size to be derived from. Either use a magic loop (`for i in range(x.shape[0])`, whose bound is the domain; `np.ndindex`/`np.ndenumerate` for 2-D/3-D) or, when dispatching on `get_global_id`, name the array: `@kernel(domain="x")`. Without either the call raises instead of guessing.
+**A kernel needs an iteration domain** for the work size to be derived from. The domain is whichever of these the body states: a magic loop over a **shape** (`for i in range(x.shape[0])`, `for i, j in np.ndindex(arr.shape)`, or `np.ndenumerate` for 2-D/3-D), a magic loop over a **runtime count** (`for i in range(n)` with `n` a kernel parameter — one work item per sample), or, when dispatching on `get_global_id`, the array named in the decorator: `@kernel(domain="x")`. A **literal** count (`for i in range(8)`) is not a domain: it is a fixed number of steps one work item walks, which is what an inner raymarcher or dot-product loop is. Without any domain the call raises instead of guessing.
 
 **One bracket syntax** names the backend, the device and the work size — the same on every backend, in any order:
 

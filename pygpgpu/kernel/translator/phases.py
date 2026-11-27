@@ -9,11 +9,15 @@ from .notation import (
     DeviceType,
     PTR,
 )
+from .dispatch_domain import (
+    _counted_range_param,
+    _magic_loop_end,
+    _magic_loop_index,
+    _parameter_names_of,
+)
 from .walk import (
     _assigned_name_of,
     _creation_target_of,
-    _magic_loop_end,
-    _magic_loop_index,
 )
 
 
@@ -41,7 +45,7 @@ class _PhasesMixin:
             self.has_returns = _returns_a_value(body)
             # Whether any of those returns is device code, which is a different question:
             # a tail return runs on the host and claims nothing (see render_return_params).
-            self._claims_on_device = _has_device_return(body)
+            self._claims_on_device = _has_device_return(body, _parameter_names_of(self.func))
             # A local initialized above the loop and written inside it is one location for
             # the whole launch, not one per work item -- see _carried_scalars.
             self._bind_carried_scalars(body)
@@ -93,12 +97,14 @@ class _PhasesMixin:
           it as a parameter would add an argument nothing needs, and it is what keeps a
           body's `k = 2 * factor` readable across the split.
         """
+        params:Set[str] = self._loop_parameter_names()
         # The statements every phase shares: those above the first loop, plus the gaps
         # between the loops (a creation there has to exist before the pass that reads it).
-        header:List[ast.stmt] = self.phases[0][:_magic_loop_index(self.phases[0])]
+        header:List[ast.stmt] = self.phases[0][:_magic_loop_index(self.phases[0], params)]
         carried:List[ast.stmt] = []
         for index in range(len(self.phases) - 1):
-            gap:List[ast.stmt] = self.phases[index][_magic_loop_end(self.phases[index]):]
+            gap:List[ast.stmt] = self.phases[index][
+                _magic_loop_end(self.phases[index], params):]
             for stmt in gap:
                 # Every gap statement runs on the host: python executes it once, between the
                 # two passes. A creation is bound by _bind_host_values, which already runs on
@@ -126,7 +132,7 @@ class _PhasesMixin:
         # The statements after each phase's loop, in phase order: the host runs region i
         # between launch i and launch i + 1 (see PyKernel._run_host_region).
         self.phase_gaps:List[List[ast.stmt]] = [
-            list(self.phases[index][_magic_loop_end(self.phases[index]):])
+            list(self.phases[index][_magic_loop_end(self.phases[index], params):])
             for index in range(len(self.phases) - 1)]
 
         for index, phase_body in enumerate(self.phases):
@@ -134,8 +140,9 @@ class _PhasesMixin:
             # creation the host builds or a value the next pass recomputes), so it is cut
             # from this phase's body: emitted here it would be device code, and a creation
             # has no device form.
-            body:List[ast.stmt] = (list(phase_body[:_magic_loop_index(phase_body) + 1]
-                                        if index < len(self.phases) - 1 else phase_body))
+            body:List[ast.stmt] = (list(
+                phase_body[:_magic_loop_index(phase_body, params) + 1]
+                if index < len(self.phases) - 1 else phase_body))
 
             # Through the facade, lazily: this mixin is imported by the module that
             # defines the class, and a top-level import would be a cycle.
@@ -157,7 +164,8 @@ class _PhasesMixin:
             # The gap this phase precedes is host code, but the phase still has to see the
             # names it feeds: a scalar the loop accumulates and the gap reads keeps its
             # shared slot in the writing phase (see _carried_scalars).
-            phase.phase_gap = list(self.phases[index][_magic_loop_end(self.phases[index]):])
+            phase.phase_gap = list(
+                self.phases[index][_magic_loop_end(self.phases[index], params):])
             phase._bind_outer_variables()
             # The host supplies the whole outer-scope block to every pass, so a phase's
             # declaration order and writable flags have to be the main translator's -- a
@@ -198,7 +206,7 @@ class _PhasesMixin:
             # Every phase is its own kernel, so whether one of them claims is a fact about
             # its own slice: a pass whose only return sits in its tail hands it back on the
             # host and needs no claim word (see render_return_params).
-            phase._claims_on_device = _has_device_return(body)
+            phase._claims_on_device = _has_device_return(body, params)
             phase._translate_magic_loop(body)
             # The statements after this phase's own loop. For the last phase that is the
             # body's tail, which the host runs after the final launch; for an earlier one it
@@ -207,7 +215,7 @@ class _PhasesMixin:
             # multi-loop body: only the main translator used to keep one, so a body split
             # into passes lost its tail entirely and a `return out` after the last loop
             # answered None.
-            phase.body_tail = list(body[_magic_loop_end(body):])
+            phase.body_tail = list(body[_magic_loop_end(body, params):])
             for name in gap_values:
                 if name in phase.host_scalars:
                     continue
@@ -268,11 +276,12 @@ class _PhasesMixin:
     def _is_secondary_magic_loop(self, node:ast.For)->bool:
         """True for a `for` shaped like the work-item dispatch, at the top level.
 
-        The shape is the one the first loop has -- `range(arr.shape[0])`, `enumerate(arr)`,
-        `np.ndindex(...)` -- but its position is what matters: only the first one is the
-        launch. A `range` over something that is not an array's shape (`range(8)`) does not
-        name a work-item domain, so it is an ordinary serial loop and stays allowed, exactly
-        as it was before the several-pass split existed.
+        The shape is the one the first loop has -- `range(arr.shape[0])`, `range(n)` over a
+        kernel parameter (a *counted* domain), `enumerate(arr)`, `np.ndindex(...)` -- but its
+        position is what matters: only the first one is the launch. A `range` over something
+        that is neither an array's shape nor a runtime count (`range(8)`, `range(MAX_ITER)`)
+        does not name a work-item domain, so it is an ordinary serial loop and stays allowed,
+        exactly as it was before the several-pass split existed.
 
         An argument that is a local alias of an array (`src = a`, then `enumerate(src)`) is
         the same domain: resolving the alias here is what keeps a body with one dispatch
@@ -284,8 +293,10 @@ class _PhasesMixin:
             if isinstance(func, ast.Name) and func.id == "enumerate":
                 return True
             if isinstance(func, ast.Name) and func.id == "range":
-                # Only a data-shaped range is a dispatch; a literal count is a plain loop.
-                return self._shape0_range_param(iterator) is not None
+                # A data-shaped range or a counted one is a dispatch; a literal count is a
+                # plain loop, and so is a step or a start/stop pair.
+                return (self._shape0_range_param(iterator) is not None
+                        or _counted_range_param(node, self._loop_parameter_names()) is not None)
             if (isinstance(func, ast.Attribute) and func.attr in ("ndindex", "ndenumerate")
                     and isinstance(func.value, ast.Name)):
                 return True
@@ -321,7 +332,8 @@ class _PhasesMixin:
         # Names the whole body carried that this phase initializes or writes: the read that
         # made them shared lives in a later pass, which this phase's slice no longer shows.
         hint:Set[str] = set(getattr(self, "phase_carried_hint", []) or [])
-        magic_index:int = _magic_loop_index(body)
+        params:Set[str] = self._loop_parameter_names()
+        magic_index:int = _magic_loop_index(body, params)
         written:Set[str] = set()
         for stmt in body[magic_index if magic_index < len(body) else len(body):]:
             for node in ast.walk(stmt):
@@ -346,7 +358,7 @@ class _PhasesMixin:
             # interpreter, which runs python's own arithmetic, answered 0.75.
             element_t:object = "int"
             init_stmt:Optional[ast.stmt] = next(
-                (stmt for stmt in body[:_magic_loop_index(body)]
+                (stmt for stmt in body[:_magic_loop_index(body, params)]
                  if _assigned_name_of(stmt) == name), None)
             if init_stmt is not None:
                 init_value:Optional[ast.expr] = _creation_target_of(init_stmt)
@@ -375,7 +387,7 @@ class _PhasesMixin:
         The statements above the loop still run on the host -- that is where the initial
         `total = 0` comes from -- and the kernel receives the slot, not the value.
         """
-        magic_index:int = _magic_loop_index(body)
+        magic_index:int = _magic_loop_index(body, self._loop_parameter_names())
         initialized:Dict[str, ast.stmt] = {}
         for stmt in body[:magic_index]:
             name:Optional[str] = _assigned_name_of(stmt)
@@ -420,7 +432,7 @@ class _PhasesMixin:
         """
         if not names:
             return []
-        magic_index:int = _magic_loop_index(body)
+        magic_index:int = _magic_loop_index(body, self._loop_parameter_names())
         if magic_index >= len(body) or not isinstance(body[magic_index], ast.For):
             # A gid-style body has no magic loop, so there is no per-item region to check.
             return []
