@@ -182,6 +182,12 @@ class _DeviceCallMixin:
                 self._adopt_raise_sites(entry)
                 argument_codes.append(self.EXCEPTION_SLOT)
                 argument_codes.append(self.EXCEPTION_STOP)
+            if entry.get("needs_rng"):
+                # The callee draws, so it declared the random state pointer and the caller
+                # forwards its own -- which this caller must therefore carry, even if it
+                # never draws directly.
+                self.uses_random = True
+                argument_codes.append(self._random_state())
             return (f"{entry['c_name']}({', '.join(argument_codes)})",
                     entry["return_type"])
 
@@ -300,6 +306,13 @@ class _DeviceCallMixin:
                 "quaternion_needs": set(callee.quaternion_needs),
                 # The same for complex values: a helper's body may use them too.
                 "complex_needs": set(callee.complex_needs),
+                # Whether this helper draws random numbers: its signature then carries the
+                # caller's state pointer, and every call site forwards its own (see the
+                # call-site branches).
+                "needs_rng": bool(callee.uses_random),
+                # Whether a draw in this helper's body asks for the header's double block,
+                # so the compilation emits that block even when the kernel never does.
+                "random_needs_double": bool(getattr(callee, "random_needs_double", False)),
             }
             # Recorded after `render_device`, so a definition the render itself
             # contributed (see _render_body's declaration fixup) is carried too: the
@@ -337,6 +350,11 @@ class _DeviceCallMixin:
             self._adopt_raise_sites(entry)
             argument_codes.append(self.EXCEPTION_SLOT)
             argument_codes.append(self.EXCEPTION_STOP)
+        if entry.get("needs_rng"):
+            # The callee draws, so it declared the state pointer; the caller forwards its
+            # own, which it must therefore carry even when it never draws directly.
+            self.uses_random = True
+            argument_codes.append(self._random_state())
         return (f"{entry['c_name']}({', '.join(argument_codes)})", entry["return_type"])
 
 

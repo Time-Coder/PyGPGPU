@@ -7,6 +7,7 @@ from typing import (
     Tuple,
 )
 import numpy as np
+from .. import rng as random_support
 from .slots import (
     _kernel_scalar_argument,
 )
@@ -118,6 +119,18 @@ class _BuildLaunchMixin:
         # launch resolves per position (see `_phase_metal_flags`).
         plan.has_barrier:object = plan.launch_meta.get("has_barrier")
         plan.has_atomic64:object = plan.launch_meta.get("has_atomic64")
+        # Whether the kernel at each position draws random numbers, and the seed each
+        # pass of this launch gets. The seeds are read once per launch -- one base seed
+        # for the launch, walked by the pass index -- so the passes of one body are
+        # separate streams (two passes drawing from one stream would repeat each other's
+        # numbers), and the process's launch count advances only when a kernel actually
+        # draws, so a program's sequence of draws does not depend on the kernels that
+        # never do.
+        plan.uses_random:object = plan.launch_meta.get("uses_random")
+        plan.random_drawn:bool = (any(plan.uses_random)
+                                  if isinstance(plan.uses_random, list)
+                                  else bool(plan.uses_random))
+        plan.random_seed:int = random_support.launch_seed() if plan.random_drawn else 0
         plan.local_element_counts:object = plan.launch_meta.get("local_element_counts") or []
         plan.local_dtypes:object = plan.launch_meta.get("local_dtypes") or []
         plan.own_count:int = len(plan.full)

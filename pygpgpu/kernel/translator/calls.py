@@ -42,6 +42,13 @@ class _CallsMixin(_NestedLaunchMixin):
 
     def _visit_call(self, node:ast.Call)->Translated:
         func:ast.expr = node.func
+        # A random draw is decided before anything else, because its spellings belong to
+        # the standard library and numpy rather than to this package: `random.random()`
+        # and `np.random.random()` are ordinary module attributes whose meaning inside a
+        # kernel body is the launch's stream, not the host's generator.
+        random_result:Optional[Translated] = self._emit_random_call(node)
+        if random_result is not None:
+            return random_result
         if node.keywords:
             # A structure constructor takes member names as keywords -- Ray(origin=p) is
             # how python's ctypes spelling addresses members -- so it is translated before

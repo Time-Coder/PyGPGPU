@@ -229,6 +229,7 @@ from .calls import _CallsMixin
 from .method_on_value import _MethodOnValueMixin
 from .foreign_cls import class_constant_values, receiver_passed_as_value
 from .builtin_emit import _BuiltinEmitMixin
+from .random_emit import _RandomEmitMixin
 from .numpy_emit import _NumpyEmitMixin
 from .device_call import _DeviceCallMixin
 from .native_recursion import _NativeRecursionMixin
@@ -244,7 +245,7 @@ from .shared_shapes import baked_shared_shapes
 from . import tail_recursion
 
 
-class FunctionTranslator(_InitMixin, _EmitMixin, _NamingMixin, _PhasesMixin, _MagicLoopMixin, _HostRegionsMixin, _OuterVarsMixin, _StatementsMixin, _ReturnsMixin, _AssignMixin, _AugassignMixin, _TargetsMixin, _TuplesMixin, _PrintEmitMixin, _ExpressionsMixin, _OperatorsMixin, _SubscriptsMixin, _ImagesMixin, _AttributesMixin, _DescriptorMixin, _ComplexValuesMixin, _QuaternionsMixin, _MagicMethodsMixin, _VectorOpsMixin, _VectorFloorMixin, _StructuresMixin, _CallsMixin, _MethodOnValueMixin, _BuiltinEmitMixin, _NumpyEmitMixin, _DeviceCallMixin, _NativeRecursionMixin, _RenderMixin, _BuiltinPythonMixin, _NdIndexMixin, _PrivateArrayMixin, _NestedLaunchMixin):
+class FunctionTranslator(_InitMixin, _EmitMixin, _NamingMixin, _PhasesMixin, _MagicLoopMixin, _HostRegionsMixin, _OuterVarsMixin, _StatementsMixin, _ReturnsMixin, _AssignMixin, _AugassignMixin, _TargetsMixin, _TuplesMixin, _PrintEmitMixin, _ExpressionsMixin, _OperatorsMixin, _SubscriptsMixin, _ImagesMixin, _AttributesMixin, _DescriptorMixin, _ComplexValuesMixin, _QuaternionsMixin, _MagicMethodsMixin, _VectorOpsMixin, _VectorFloorMixin, _StructuresMixin, _CallsMixin, _MethodOnValueMixin, _BuiltinEmitMixin, _RandomEmitMixin, _NumpyEmitMixin, _DeviceCallMixin, _NativeRecursionMixin, _RenderMixin, _BuiltinPythonMixin, _NdIndexMixin, _PrivateArrayMixin, _NestedLaunchMixin):
         PRIVATE_ARRAY_MAX_UNROLL = 64
 
 

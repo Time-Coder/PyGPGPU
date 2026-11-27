@@ -95,6 +95,18 @@ namespace metal {
     inline float copysign(float a, float b) { return a; }
     inline float ldexp(float a, int b) { return a; }
 
+    // The plain transcendental names MSL's `metal_stdlib` declares in the global
+    // namespace -- `log`, `cos` and `sqrt` are what a header such as the random one
+    // calls. The `fast::` forms above are the accelerated ones, and they are a
+    // different spelling on purpose: a generated source that names the plain form
+    // must resolve to the precise one.
+    inline float log(float v) { return v; }
+    inline float cos(float v) { return v; }
+    inline float sqrt(float v) { return v; }
+    inline double log(double v) { return v; }
+    inline double cos(double v) { return v; }
+    inline double sqrt(double v) { return v; }
+
     // The work-group barrier and its memory flags. `mem_flags` is a bit-set in MSL
     // (`mem_threadgroup | mem_device`), so it is a class with an `operator|` rather
     // than a plain enum -- an enum's `|` yields an int, which a plain C++ build

@@ -8,6 +8,7 @@ from typing import (
 
 import numpy as np
 
+from .. import rng as random_support
 from ..translator import (
     infer_ctype,
 )
@@ -235,4 +236,30 @@ class _BuildPhaseArgsMixin:
                 locks:np.ndarray = np.zeros(int(groups), dtype=np.uint32)
                 plan._metal_shared_buffers.append(locks)
                 phase_args.append(locks)
+            # The launch seed, for a kernel that draws random numbers: `render` declares it
+            # as the last host-bound parameter (after the barrier counter and the atomic
+            # lock, before Metal's prologue parameters, which the dispatch fills in), so the
+            # launch appends its value here, last.
+            #
+            # The seed is the *pass's* seed: a body split into passes launches one kernel
+            # per pass, and two passes drawing from one stream would answer the same
+            # numbers. The pass index is mixed into the launch's base seed, so the passes
+            # are separate streams and the whole launch still replays from one seed.
+            if self._phase_random(plan, phase_index):
+                seed: int = random_support.phase_seed(plan.random_seed, phase_index)
+                phase_args.append(np.uint32(seed))
             return phase_args
+
+
+    @staticmethod
+    def _phase_random(plan:object, phase_index:int)->bool:
+        """Whether the kernel at `phase_index` draws random numbers.
+
+        A body split into passes gives each pass its own signature, and only the passes
+        that draw declare the launch seed; a single-phase body records a plain flag. The
+        shape is read the same way `_phase_metal_flags` reads its two.
+        """
+        value:object = getattr(plan, "uses_random", None)
+        if isinstance(value, list):
+            return bool(value[phase_index]) if phase_index < len(value) else False
+        return bool(value)

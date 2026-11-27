@@ -297,6 +297,35 @@ print(result.value)           # 42
 
 **这套拼写表达不了的东西在翻译之前就被拒绝。** gid 风格的函数体(`get_global_id`)或完全没有 magic loop 的函数体、`domain=` 选项、`nonlocal`(块作为 kernel 函数体翻译, 没有外层作用域可写——改用单元素数组捕获)、顶层的 `break`/`continue`(它们会指向调用者的循环, 而块根本不在那里运行)、单行函数体、`await`/`yield`, 都会抛出 `SyntaxError` 并指出改法。函数体内部报出的错误则指向块自己所在的文件和行号, 并显示真实的源码文本与插入符位置。
 
+## 随机数
+
+kernel 函数体像在主机上一样取随机数——`random.random()`、`random.uniform(0.0, 1.0)`、`np.random.normal(0.0, 1.0)`——而**种子与 work item 由发射方掌握**, 所以函数体两者都不用传。这与 `taichi.random` 的约定一致, 也正是模型函数需要的: 取随机数的辅助函数既不传 `tid` 也不传 `seed`。
+
+```python
+import random
+from pygpgpu import kernel
+
+def jitter() -> float:                  # 辅助函数取随机数, 不需要种子, 也不需要 work item
+    return random.uniform(-0.1, 0.1)
+
+@kernel
+def sample(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = random.random() + jitter()
+```
+
+**每个 work item 有自己的序列。** 序列由发射种子和该 work item 自己的位置共同播种, 所以两个 work item 不会共用一条序列; 某个 work item 的第 k 次取值, 与各 work item 的实际执行顺序无关。取随机数用的是 PCG32, 也就是 `taichi.random` 所用的生成器。
+
+**种子是一个进程级设置**——`pygpgpu.config.random.seed`。不设置时每个进程自行取一个; 设置之后序列完全可复现:
+
+```python
+pygpgpu.config.random.seed = 1234       # 从这里开始可复现
+```
+
+**解释器后端按原样运行函数体**, 所以那里的取随机数就是 python 自己的 `random`/`numpy.random` 调用——分布相同, 但序列是 python 的而非设备的。这是解释器没有 work item 的必然结果(magic loop 的函数体只运行一次, 代表整个发射)。
+
+**kernel 做不到的事情会按名字被拒绝。** 一次取值只给一个数, 所以 `np.random.random(3)` 和 `size=` 参数在函数体里无法表达; `np.random.seed(0)` 是发射方的职责, 不是某个 work item 的; 关键字参数(`np.random.uniform(0.0, high=1.0)`)也会被拒绝, 因为设备调用只接受位置参数。
+
 ## 导入手写 kernel
 
 `kernel_import` 是把已有 kernel 文件变成 Python 模块的导入钩子: kernel 与 struct 类型成为模块属性, 源码旁自动生成 `.pyi` 供 IDE 补全。写一个 `vecadd.cl`:
@@ -335,6 +364,7 @@ vecadd.vecadd["opencl"][(3907, 256)](a, a, out, np.int32(len(a)))   # 后端 + w
 - **设备函数的递归** —— 一个子函数或方法自调用本身, 在每个后端都被自动编译成循环: 尾调用、调用者消费的结果(`r = f(...)` 之后接语句, 或 `return g(f(...))` 且递归调用位于任意参数位置), 以及每层被替换的结构体参数(光线追踪的弹射光线)。循环无法排序的形状——包裹表达式读取逐层不同的值、或一个表达式里两次自调用——会被拒绝并给出原因; CUDA 与 HIP 通过原生递归承接这些形状。([光线追踪](examples/ray_tarcing_in_one_weekend/render.py))
 - **访问外层作用域变量** —— 函数体读取的外层变量成为 kernel 参数, 改变后下一次调用立即生效; 用 `nonlocal`/`global` 声明的标量在调用后写回原作用域。([11_returns_and_scope.py](examples/11_returns_and_scope.py))
 - **异步启动** —— 同一个装饰函数上有 `submit()`(`concurrent.futures.Future`)与 `await k.async_call(...)`(`asyncio.Future`), 中括号同样适用。([10](examples/10_async_launch.py))
+- **随机数** —— kernel 函数体用已经熟悉的拼写取随机数(`random.random()`、`np.random.normal(...)`); 种子与 work item 由发射方掌握, 所以辅助函数取随机数既不传 `tid` 也不传 `seed`。每个 work item 一条自己的序列, `pygpgpu.config.random.seed` 让整条序列可复现。([21](examples/21_random_numbers.py))
 
 ## 与其他库的用法对比
 

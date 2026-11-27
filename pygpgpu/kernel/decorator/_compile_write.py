@@ -244,6 +244,28 @@ class _CompileWriteMixin:
             plan.include_lines = (f"{plan.include_lines}\n{plan.complex_lines}" if plan.include_lines
                              else plan.complex_lines)
 
+        # The random header works the same way: one include, plus the macro that opens the
+        # double block only when a double draw was emitted. A helper's draws travel with its
+        # cache entry, and a multi-loop body's passes carry their own.
+        plan.random_double:bool = bool(plan.translator.random_needs_double)
+        for phase in getattr(plan.translator, "phase_translators", ()):
+            plan.random_double = plan.random_double or bool(phase.random_needs_double)
+        plan.random_used:bool = bool(plan.translator.uses_random)
+        for phase in getattr(plan.translator, "phase_translators", ()):
+            plan.random_used = plan.random_used or bool(phase.uses_random)
+        for entry in plan.device_cache.values():
+            plan.random_double = plan.random_double or bool(entry.get("random_needs_double"))
+            plan.random_used = plan.random_used or bool(entry.get("needs_rng"))
+        if plan.random_used:
+            from .. import rng as random_header
+
+            plan.random_widths:Tuple[str, ...] = (("double", ) if plan.random_double
+                                                 else ("float", ))
+            plan.random_lines:str = random_header.include_line(
+                plan.random_widths, backend, self._cache_dir(backend))
+            plan.include_lines = (f"{plan.include_lines}\n{plan.random_lines}" if plan.include_lines
+                             else plan.random_lines)
+
         # A registered device-side library function may need headers the compilation does
         # not have yet. A header the user ships as a *path* is copied into the cache's
         # include folder and included by name; a header given as a full `#include` line

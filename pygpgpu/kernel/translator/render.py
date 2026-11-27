@@ -145,6 +145,10 @@ class _RenderMixin:
             qualifier = self._buffer_qualifier()
             params.append(f"{qualifier}int* {self.EXCEPTION_SLOT}")
             params.append(f"{qualifier}int* {self.EXCEPTION_STOP}")
+        # The random state a helper draws from: its caller's own stream, so a helper and
+        # the body that calls it advance one sequence in source order. The call site passes
+        # it last (see _emit_device_call), after the exception pointers.
+        params.extend(self.random_state_parameter())
         ret:str = (self.return_type or "void")
         header:str = f"{self._device_qualifier()}{self._device_type(ret)} {c_name}({', '.join(params)})"
         body:str = self._render_body()
@@ -344,6 +348,11 @@ class _RenderMixin:
         if self._metal_syntax and getattr(self, "has_atomic64", False):
             params.append("device atomic_uint* _atomic_lock")
 
+        # The launch seed a drawing kernel receives. Declared after every parameter the
+        # work size derives from, and before Metal's prologue parameters, because the host
+        # appends it last (see _build_phase_args) and never binds the prologue ones.
+        params.extend(self.random_seed_parameter())
+
         # Metal's work-item numbers arrive as attribute-decorated parameters, not as
         # `get_global_id()` calls (see kernel/metal_codegen.py). They are declared after
         # every parameter the host binds, because the host never binds them: the dispatch
@@ -386,6 +395,10 @@ class _RenderMixin:
                 # first declarations, not part of the signature.
                 body_lines.append(
                     f"    __shared__ {self._device_type(lc_type)} {lc_name}[{lc_count}];")
+        # The per-work-item random state, when the body (or a helper it reaches) draws: a
+        # declaration and its seeding, ahead of the body so a helper later in it can take
+        # the state's address.
+        body_lines.extend(self.random_entry_lines())
         body_lines.extend(self.lines)
         # A blank line between the shared-memory declarations and the body reads as a
         # separate preamble; the renderer collapses and trims whatever follows.

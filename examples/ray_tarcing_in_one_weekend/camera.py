@@ -11,10 +11,10 @@ from pygf import (
 )
 import math
 import numpy as np
+import random
 from ray import Ray
 from scene import Scene
 from pygpgpu import kernel
-from utils import rand
 
 
 class Camera:
@@ -130,7 +130,7 @@ class Camera:
         return self.orientation * dir
 
     def get_ray(self, i: int, j: int, sample: int)->Ray:
-        offset: vector3f = self.sample_square(i, j, sample)
+        offset: vector3f = self.sample_square(i, j)
         pixel_sample = (
               self.left_top_pixel_pos_in_world
             + ((j + offset.x) * self.du_in_world)
@@ -141,17 +141,16 @@ class Camera:
 
         return Ray(ray_origin, ray_direction)
 
-    def sample_square(self, i, j, seed):
-        return vector3f(rand(i*self.image_width+j, seed)-0.5, rand(i*self.image_width+j, seed+1)-0.5, 0)
+    def sample_square(self, i, j):
+        return vector3f(random.random()-0.5, random.random()-0.5, 0)
 
     @kernel
     def render(self, scene: Scene)->np.ndarray:
         for i, j in np.ndindex(self.image_height, self.image_width):
-            tid: int = i*self.image_width + j
             pixel_color = color3f(0, 0, 0)
             for sample in range(0, self.samples_per_pixel):
                 ray: Ray = self.get_ray(i, j, sample)
-                pixel_color += scene.ray_color(ray, self.max_depth, tid, sample)
+                pixel_color += scene.ray_color(ray, self.max_depth)
 
             self.write_color(i, j, pixel_color/self.samples_per_pixel)
 

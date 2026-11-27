@@ -353,6 +353,13 @@ class _CompileKernelsMixin:
                                    for stage in plan.translator.phase_translators]
                                   if plan.translator.phase_translators
                                   else bool(getattr(plan.translator, "has_atomic64", False))),
+                 # Whether each kernel draws random numbers: such a kernel declares the
+                 # launch seed as its last parameter, and the launch appends the seed value
+                 # in that position (see render.random_seed_parameter and _build_phase_args).
+                 "uses_random": ([bool(getattr(stage, "uses_random", False))
+                                  for stage in plan.translator.phase_translators]
+                                 if plan.translator.phase_translators
+                                 else bool(getattr(plan.translator, "uses_random", False))),
                  "local_element_counts": (plan.phase_local_counts
                                           if plan.translator.phase_translators
                                           else list(plan.local_element_counts)),

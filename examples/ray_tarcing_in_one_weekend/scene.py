@@ -34,7 +34,7 @@ class Scene(Hittable):
 
         return record
 
-    def ray_color(self, ray: Ray, depth: int, tid: int, seed: int)->color3f:
+    def ray_color(self, ray: Ray, depth: int)->color3f:
         # The recursive spelling. Each bounce is one self-call: the wrapper reads
         # only the slot and the names that keep one value for the walk, so the
         # translator takes it on every backend (opencl/metal included) -- the
@@ -52,9 +52,9 @@ class Scene(Hittable):
         if record.is_hitted:
             if depth <= 0:
                 return color3f(0)
-            direction: vector3f = rand_vector3f_hemisphere(record.normal, tid, seed)
+            direction: vector3f = rand_vector3f_hemisphere(record.normal)
             return 0.5 * self.ray_color(
-                Ray(record.position, direction), depth - 1, tid, seed + 1)
+                Ray(record.position, direction), depth - 1)
         unit_dir = normalize(ray.direction)
         weight = 0.5 * (unit_dir.y + 1.0)
         return mix(color3f(1), color3f(0.5, 0.7, 1.0), weight)

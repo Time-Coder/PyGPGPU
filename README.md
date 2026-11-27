@@ -297,6 +297,35 @@ print(result.value)           # 42
 
 **What the spelling cannot mean is refused before translation.** A gid-style body (`get_global_id`) or a body with no magic loop at all, a `domain=` option, a `nonlocal` (the block is translated as a kernel body, so there is no enclosing scope to write — capture a one-element array instead), a top-level `break`/`continue` (they would target the caller's loop, which the block never enters), a one-line body, and an `await`/`yield` all raise a `SyntaxError` naming the fix. A reported error inside the body points at the block's own file and line, with the real source text under the caret.
 
+## Random numbers
+
+A kernel body draws the way it would on the host — `random.random()`, `random.uniform(0.0, 1.0)`, `np.random.normal(0.0, 1.0)` — and the **launch owns the seed and the work item**, so the body never passes either. That is the same contract `taichi.random` offers, and it is what a model function needs: a helper that draws takes no `tid` and no `seed`.
+
+```python
+import random
+from pygpgpu import kernel
+
+def jitter() -> float:                  # a helper draws with no seed and no work item
+    return random.uniform(-0.1, 0.1)
+
+@kernel
+def sample(out: np.ndarray):
+    for i in range(out.shape[0]):
+        out[i] = random.random() + jitter()
+```
+
+**Each work item gets its own stream.** The stream is seeded from the launch seed and the work item's own position, so two work items never share a sequence, and a work item's k-th draw is the same number whatever order the work items ran in. The draws are PCG32, the generator `taichi.random` uses.
+
+**The seed is a process-wide setting** — `pygpgpu.config.random.seed`. Left alone, each process draws its own; pinned, the sequence replays exactly:
+
+```python
+pygpgpu.config.random.seed = 1234       # reproducible from here on
+```
+
+**The interpreter backend runs the body as written**, so a draw there is python's own `random`/`numpy.random` call — the same distribution, but python's sequence rather than the device's. That follows from the interpreter having no work items (a magic-loop body runs once, standing for the whole launch).
+
+**What a kernel cannot do is refused by name.** A draw answers one number, so `np.random.random(3)` and a `size=` argument cannot be represented in a body; `np.random.seed(0)` is the launch's business, not a work item's; and a keyword argument (`np.random.uniform(0.0, high=1.0)`) is refused because a device call takes positional arguments only.
+
 ## Importing handwritten kernels
 
 `kernel_import` is the import hook that turns existing kernel files into Python modules: kernels and struct types become module attributes, and a `.pyi` stub is generated beside the source so IDE completion works. Write `vecadd.cl`:
@@ -335,6 +364,7 @@ A struct `typedef` in the source becomes a ctypes type (a `Pt` above would pass 
 - **Recursive device functions** — a helper or method that calls itself is compiled into a loop automatically, on every backend: the tail call, a result the caller consumes (`r = f(...)` with statements after it, or `return g(f(...))` with the recursive call at any argument position), and structure arguments the walk replaces per level (the bounce ray of a ray tracer). A shape the loop cannot order — a wrapper reading a value that differs per level, or two self-calls in one expression — is refused with its reason; CUDA and HIP answer those shapes through native recursion. ([ray tracing](examples/ray_tarcing_in_one_weekend/render.py))
 - **Outer-scope variables** — variables the body reads from outside become kernel parameters, so a changed value is visible on the next call; a scalar declared `nonlocal`/`global` is written back to its scope after the call. ([11_returns_and_scope.py](examples/11_returns_and_scope.py))
 - **Non-blocking launches** — `submit()` (a `concurrent.futures.Future`) and `await k.async_call(...)` (an `asyncio.Future`) on the same decorated function; the brackets apply here too. ([10](examples/10_async_launch.py))
+- **Random numbers** — a kernel body draws with the spellings it already knows (`random.random()`, `np.random.normal(...)`); the launch owns the seed and the work item, so a helper draws with no `tid` and no `seed`. One stream per work item, and `pygpgpu.config.random.seed` replays the sequence. ([21](examples/21_random_numbers.py))
 
 ## How it compares
 
