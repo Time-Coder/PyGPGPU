@@ -1,4 +1,5 @@
-# Vector `%` and `//`: python's floored rule, applied per component.
+# `%` and `//`: python's floored rule -- the scalar spellings and the vector
+# per-component form.
 from __future__ import annotations
 import ast
 from typing import List, Tuple
@@ -24,7 +25,36 @@ from .predicates import (
 )
 
 
-class _VectorFloorMixin:
+class _FloorsMixin:
+
+    def _emit_floored(self, operations:Tuple[str, str], operation:str,
+                      left:str, ctype:str, right:str, right_t:object,
+                      node:ast.AST)->Translated:
+        """`left // right` or `left % right` with python's floor semantics, for integers.
+
+        C's `/` truncates toward zero and its `%` takes the dividend's sign; python floors
+        and takes the divisor's sign. They agree only when the remainder is zero or the
+        operands have the same sign, so the generated code calls a small device function
+        that applies the one-step correction (see `python_floor_source`).
+
+        An **unsigned** width needs no correction -- its remainder is never negative -- and
+        `(r < 0)` on it is always false anyway, which some compilers warn about, so the
+        plain C operator is emitted there and the helper is not declared.
+
+        The helper is declared once per (operation, width): a file that uses both `//` and
+        `%` on `int` carries two functions, and a second kernel using `//` on `int` finds
+        the definition already recorded.
+        """
+        device_ctype:str = self._device_type(ctype)
+        helper:str = python_floor_name(operation, device_ctype)
+        source:str = python_floor_source(operation, device_ctype, self.backend)
+        if not source:
+            # An unsigned width: the C operator already matches python.
+            symbol:str = "/" if operation == "floor_div" else "%"
+            return f"({left} {symbol} {right})", ctype
+        if source not in self.device_helpers:
+            self.device_helpers.append(source)
+        return f"{helper}({left}, {right})", ctype
 
     def _emit_vec_floored(self, name:str, left:str, lt:object,
                           right:str, rt:object, node:ast.AST)->Translated:
