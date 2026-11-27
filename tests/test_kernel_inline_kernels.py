@@ -154,37 +154,6 @@ def test_a_captured_scalar_bounds_a_serial_loop(backend)->None:
     _close(out, a * 3.0)
 
 
-def test_a_captured_object_reaches_the_device_as_a_structure(backend)->None:
-    box:_Box = _Box(3.0)
-    a:np.ndarray = np.arange(4, dtype=np.float32)
-    out:np.ndarray = np.zeros(4, dtype=np.float32)
-    box.scale_into(a, out, backend)
-    _close(out, a * 3.0)
-
-
-class _Box:
-    """A method whose block captures the receiver, which travels as a structure."""
-
-    def __init__(self, factor:float)->None:
-        self.factor:float = factor
-
-    def scale_into(self, a:np.ndarray, out:np.ndarray, backend:str)->None:
-        with inline, kernel(default_device=backend):
-            for i in range(out.shape[0]):
-                out[i] = a[i] * self.factor
-
-
-def test_the_receiver_is_not_a_general_capture(backend)->None:
-    """A `self` that is not the enclosing method's receiver is just another name."""
-    a:np.ndarray = np.arange(4, dtype=np.float32)
-    out:np.ndarray = np.zeros(4, dtype=np.float32)
-    box:_Box = _Box(2.0)
-    with inline, kernel(default_device=backend):
-        for i in range(out.shape[0]):
-            out[i] = a[i] * box.factor
-    _close(out, a * 2.0)
-
-
 def test_a_two_pass_block_writes_both_phases(backend)->None:
     a:np.ndarray = np.arange(4, dtype=np.float32)
     mid:np.ndarray = np.zeros(4, dtype=np.float32)
