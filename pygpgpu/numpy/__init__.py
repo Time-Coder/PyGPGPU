@@ -45,7 +45,12 @@ PyTorch tensors convert both ways, with the host-side forms able to share one bu
     gnp.ndarray.from_torch(tensor, zero_copy=True)
     array.to_torch(zero_copy=True)
 """
-from numpy import *  # noqa: F403  (numpy's whole namespace, numpy's own spellings)
+# numpy's namespace is forwarded lazily (see __getattr__ below) instead of being bound
+# eagerly by a star import: on numpy 2.x, `from numpy import *` itself pulled the f2py
+# chain -- ~2.9 s measured on a warm cache, paid by every `import pygpgpu`.
+import numpy as _numpy
+
+from typing import Any, List
 
 from . import _backends
 from ._devices import Target, backend_devices, probe, resolve, target_of
@@ -97,6 +102,25 @@ def zero_copy_support(target: object = None) -> "tuple[bool, str]":
 # names from the package and read the module's surface in one place.
 to_host = ndarray.to_host
 to_device = ndarray.to_device
+
+
+def __getattr__(name: str) -> Any:
+    """numpy's whole namespace, resolved on demand.
+
+    ``from numpy import *`` used to bind every name here eagerly, and on numpy 2.x the
+    star import itself pulled the ``f2py`` chain -- numpy's module ``__getattr__``
+    lazy-loads ``f2py``, which drags in ``crackfortran``, ``charset_normalizer``,
+    ``numpy.testing`` and ``asyncio``. Forwarding answers the same names from numpy's
+    own module (including the submodules, ``gnp.linalg`` and friends), and the
+    constructors imported above shadow numpy's same-named functions exactly as they
+    did. The ``Any`` return is the one shape a module forwarder cannot name: the
+    forwarded set is all of numpy.
+    """
+    return getattr(_numpy, name)
+
+
+def __dir__() -> List[str]:
+    return sorted(set(globals()) | set(dir(_numpy)))
 
 
 __all__ = [

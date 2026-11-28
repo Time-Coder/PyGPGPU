@@ -6,7 +6,10 @@ from .binding import _bind_arguments, _native_argument_errors
 from .devices import _parse_selector, _parse_work_item
 if TYPE_CHECKING:
     from . import PyKernel
-import asyncio
+    # `asyncio` names annotations only (`async_call`'s return type), which are lazy
+    # under `from __future__ import annotations` -- so the plain-launch import path
+    # never loads it.
+    import asyncio
 import ast
 import concurrent.futures
 from typing import (

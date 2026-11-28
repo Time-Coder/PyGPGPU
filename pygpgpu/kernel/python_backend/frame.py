@@ -1,6 +1,5 @@
 # The per-launch frame, the thread pool the async forms use, and their futures.
 from __future__ import annotations
-import asyncio
 import concurrent.futures
 import threading
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
@@ -10,6 +9,9 @@ if TYPE_CHECKING:
     # still annotating the storage a block-local buffer keeps.
     import numpy as np
     from numpy.typing import DTypeLike
+    # `asyncio` names annotations and the two async-form functions' bodies; the module
+    # import lives inside those functions, so the plain-launch path never loads it.
+    import asyncio
 
 
 
@@ -104,6 +106,10 @@ def _current_loop() -> asyncio.AbstractEventLoop:
     bound to an installed loop still lets a caller drive it with
     ``loop.run_until_complete(future)`` instead of failing at creation time.
     """
+    # Imported here so the plain-launch import path never loads asyncio: the module
+    # is imported eagerly (the decorator builds on the python backend), and asyncio
+    # is only ever touched by the async forms.
+    import asyncio
     try:
         return asyncio.get_running_loop()
     except RuntimeError:

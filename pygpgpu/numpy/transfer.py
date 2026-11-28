@@ -19,10 +19,14 @@ A Transfer is therefore both a *barrier* (``wait()``) and a *future* (``result()
 """
 from __future__ import annotations
 
-import asyncio
 import concurrent.futures
 import threading
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # `asyncio` names one return annotation (`future(kind="asyncio")`); the module
+    # import lives inside that method, so the plain-launch path never loads it.
+    import asyncio
 
 
 class Transfer:
@@ -104,6 +108,10 @@ class Transfer:
         ``kind="asyncio"`` returns an ``asyncio.Future`` bound to the running loop.
         The transfer itself still owns the copy; the future only mirrors it.
         """
+        # Imported here: this module sits on the plain-launch import path (the
+        # decorator binds gnp for its isinstance checks), and asyncio is only needed
+        # when a caller asks for an asyncio-shaped future.
+        import asyncio
         if kind == "asyncio":
             loop = asyncio.get_running_loop()
             future: "asyncio.Future[None]" = loop.create_future()

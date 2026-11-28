@@ -7,7 +7,6 @@ for the GPU. A completion callback only hands the continuation to a shared worke
 stream callback may not call the driver API, and the next pass is a driver call.
 """
 from __future__ import annotations
-import asyncio
 import concurrent.futures
 import ast
 from typing import Dict, List, Optional, Tuple
@@ -36,6 +35,9 @@ class _PhaseAsyncMixin:
         is_asyncio: bool = launch == "async"
         total: int = len(plan.active_kernels)
         if is_asyncio:
+            # Imported here so the plain-launch import path never loads asyncio (this
+            # module itself is imported eagerly, as a mixin of the decorator).
+            import asyncio
             try:
                 caller_loop: Optional[object] = asyncio.get_running_loop()
             except RuntimeError:

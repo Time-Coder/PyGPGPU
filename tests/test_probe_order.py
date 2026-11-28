@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from pygpgpu.kernel.decorator import devices
 from pygpgpu.kernel_import.tables import _BACKEND_EXTENSIONS
 
@@ -69,3 +71,39 @@ def test_kernel_import_walks_the_same_order() -> None:
         list(devices.DEFAULT_BACKEND_ORDER)
     assert dict(_BACKEND_EXTENSIONS) == {
         "cuda": ".cu", "hip": ".hip", "metal": ".metal", "opencl": ".cl"}
+
+
+def test_a_machine_with_no_runtime_names_every_backend(monkeypatch):
+    """The all-backends-failed launch names each runtime's reason and the escape hatch.
+
+    Regression: every probe failure was swallowed, so the launch died deep in the
+    device resolution naming only the last backend ("no opencl devices found") --
+    never saying that no runtime was found at all, and never pointing at the
+    interpreter backend that needs none of them.
+    """
+    from pygpgpu.kernel.decorator import devices
+
+    monkeypatch.setattr(devices, "_backend_devices", lambda backend: [])
+    monkeypatch.setattr(devices, "_probe_all_failed", True)
+    monkeypatch.setattr(devices, "_probe_failure_of", {
+        "cuda": "OSError: nvcuda.dll not found",
+        "hip": "OSError: amdhip64.dll not found",
+        "metal": "OSError: no Metal runtime on this platform",
+        "opencl": "OSError: OpenCL.dll not found",
+    })
+
+    with pytest.raises(RuntimeError, match="no GPU runtime was found") as caught:
+        devices._resolve_device("opencl", None)
+    assert "cuda: OSError: nvcuda.dll not found" in str(caught.value)
+    assert 'kernel["python"]' in str(caught.value)
+
+
+def test_a_backend_failure_without_a_full_probe_keeps_its_own_message(monkeypatch):
+    """A machine the probe never walked still answers the per-backend message."""
+    from pygpgpu.kernel.decorator import devices
+
+    monkeypatch.setattr(devices, "_backend_devices", lambda backend: [])
+    monkeypatch.setattr(devices, "_probe_all_failed", False)
+
+    with pytest.raises(RuntimeError, match="no opencl devices found"):
+        devices._resolve_device("opencl", None)

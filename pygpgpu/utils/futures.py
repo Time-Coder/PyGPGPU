@@ -1,6 +1,9 @@
 # The future plumbing the async launch forms share.
+#
+# `asyncio` is imported inside the functions that need it: this module sits on the
+# plain-launch import path (pygpgpu.utils), and asyncio is only ever touched by the
+# async forms -- a synchronous launch would otherwise pay its import for nothing.
 from __future__ import annotations
-import asyncio
 from typing import Optional
 
 
@@ -15,6 +18,7 @@ def settle_future(future:object, error:Optional[BaseException]=None) -> None:
     future in a Task whose completion re-schedules the loop. Scheduling the
     completion through the loop keeps a bare await responsive.
     """
+    import asyncio
     if isinstance(future, asyncio.Future):
         loop = future.get_loop()
         if loop.is_running():
@@ -51,6 +55,7 @@ def _current_loop() -> object:
     loop still lets a caller drive it with ``loop.run_until_complete(future)``
     instead of failing at creation time.
     """
+    import asyncio
     try:
         return asyncio.get_running_loop()
     except RuntimeError:

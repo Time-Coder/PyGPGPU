@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..translator import ReturnSiteLayout
-import asyncio
 import ast
 import concurrent.futures
 from typing import (
@@ -158,6 +157,9 @@ class _PykernelReturnsMixin:
         through a fresh future on the caller's running loop when there is one, and is
         otherwise completed in place on whatever loop the backend future uses.
         """
+        # Imported here so the plain-launch import path never loads asyncio (this
+        # module is imported eagerly, as a mixin of the decorator).
+        import asyncio
         is_asyncio:bool = isinstance(future, asyncio.Future)
         deliver:object = concurrent.futures.Future()
         try:
@@ -236,6 +238,7 @@ class _PykernelReturnsMixin:
         """
         tail_writable:Dict[str, np.ndarray] = {
             entry["name"]: entry["buffer"] for entry in outer_writable}
+        import asyncio
         is_asyncio:bool = isinstance(future, asyncio.Future)
         try:
             caller_loop:object = asyncio.get_running_loop()

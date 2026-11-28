@@ -1,6 +1,6 @@
 from __future__ import annotations
 import ast
-from typing import (List, Optional)
+from typing import (List, Optional, Set)
 import numpy as np
 from ..structs import dtype_for as structs_dtype_for
 from .notation import (
@@ -15,6 +15,25 @@ from .predicates import (
     is_ptr,
 )
 from .raise_emit import _RaiseMixin
+
+
+def _function_read_names(body:List[ast.stmt])->Set[str]:
+    """Every name the function reads, anywhere in its body, in Load context.
+
+    The range loop consults this before emitting the hidden counter's assignment into
+    the target: python binds the target on every pass, but when nothing ever reads it --
+    in the body, after the loop, or in a later loop over the same name -- both the
+    per-pass assignment and the hoisted declaration are dead stores the device compiler
+    warns about (nvcc's `#550-D`, one line per such loop, per compile). An augmented
+    assignment reads its own target implicitly, so `i += 1` keeps the target alive.
+    """
+    reads:Set[str] = set()
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            reads.add(node.id)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            reads.add(node.target.id)
+    return reads
 
 
 
@@ -268,7 +287,12 @@ class _StatementsMixin(_RaiseMixin):
             if not is_int(t):
                 self._error("range() arguments must be integers", a)
         target:str = node.target.id
-        if self._lookup(target) is None:
+        # A target nothing ever reads gains neither the assignment nor the hoisted
+        # declaration: both would be dead stores the device compiler warns about
+        # (see _function_read_names). A missing scan means "assume it is read".
+        reads:Optional[Set[str]] = getattr(self, "_function_reads", None)
+        target_is_read:bool = (reads is None or target in reads)
+        if self._lookup(target) is None and target_is_read:
             # Python scopes the loop target to the whole function, and a C `for (int k ...)`
             # scopes it to the loop: a read after the loop named an undefined identifier. The
             # declaration is hoisted, and the loop drives a *hidden* counter that assigns the
@@ -308,7 +332,8 @@ class _StatementsMixin(_RaiseMixin):
         self._emit("{")
         self._indent += 1
         try:
-            self._emit(f"{target} = {counter};")
+            if target_is_read:
+                self._emit(f"{target} = {counter};")
             self._emit_exception_checkpoint()
         finally:
             self._indent -= 1

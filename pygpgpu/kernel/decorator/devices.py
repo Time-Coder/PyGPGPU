@@ -39,6 +39,11 @@ DEFAULT_BACKEND_ORDER:Tuple[str, ...] = (
     _MACOS_DEVICE_ORDER if sys.platform == "darwin" else _DEFAULT_DEVICE_ORDER)
 
 _probed_backend:Optional[str] = None
+# Why each probed backend failed, for the one error a machine with no GPU runtime at
+# all deserves: without it, every backend's reason was swallowed and the launch died
+# deep in _resolve_device naming only the last backend ("no opencl devices found").
+_probe_failure_of:Dict[str, str] = {}
+_probe_all_failed:bool = False
 
 # The parsed shape of one default-device configuration: each entry is one selector with
 # the backend and the device parts it named, None where the selector left a part open (a
@@ -212,14 +217,31 @@ def _backend_devices(backend:str)->List[object]:
 def _probe_backend(backend:str)->Optional[str]:
     """Probe whether a backend is usable: enumerating at least one device counts as usable.
 
-    Backend packages load their runtime (nvcuda/amdhip64/OpenCL) only at import time; failures are treated as unavailable.
+    Backend packages load their runtime (nvcuda/amdhip64/OpenCL) only at import time; failures are treated as unavailable, and the reason is kept so a machine with no runtime at all can say what it tried (see `_no_runtime_message`).
     """
     try:
         if _backend_devices(backend):
             return backend
-    except Exception:
-        pass
+        _probe_failure_of[backend] = "no devices"
+    except Exception as failure:
+        _probe_failure_of[backend] = f"{type(failure).__name__}: {failure}"
     return None
+
+
+def _no_runtime_message()->str:
+    """The error for a launch on a machine where every backend's probe failed.
+
+    One line per backend, in the probe order, each with the reason its runtime did not
+    load -- and the escape hatch, which always works and needs none of them.
+    """
+    reasons:str = "; ".join(
+        f"{backend}: {_probe_failure_of.get(backend, 'not probed')}"
+        for backend in DEFAULT_BACKEND_ORDER if backend in _probe_failure_of)
+    return (
+        "no GPU runtime was found on this machine ("
+        + (reasons if reasons else "every backend's probe failed")
+        + "). The interpreter backend always works: kernel[\"python\"](...); "
+        "list_devices() reports what this machine has")
 
 
 def _builtin_probe_backend()->str:
@@ -229,13 +251,16 @@ def _builtin_probe_backend()->str:
     itself does not change at runtime. The order is platform-dependent -- on macOS Metal
     leads -- but it is fixed at import either way.
     """
-    global _probed_backend
+    global _probed_backend, _probe_all_failed
     if _probed_backend is None:
         for backend in DEFAULT_BACKEND_ORDER:
             if _probe_backend(backend) is not None:
                 _probed_backend = backend
                 break
         else:
+            # The never-raise contract (see _snapshot_backend): an all-unusable machine
+            # still decorates, and the launch that needs a device carries the reason.
+            _probe_all_failed = True
             _probed_backend = "opencl"
     return _probed_backend
 
@@ -389,6 +414,11 @@ def _resolve_device(backend:str, device_sel:Optional[str])->Tuple[object, str]:
     devices:List[object] = _backend_devices(backend)
 
     if not devices:
+        if _probe_all_failed:
+            # The probe already walked every backend and each one failed: this launch
+            # fell back to the probe's never-raise answer, so the useful error is the
+            # whole machine's, not this one backend's.
+            raise RuntimeError(_no_runtime_message())
         raise RuntimeError(f"no {backend} devices found")
 
     if device_sel is None or device_sel.strip() == "":

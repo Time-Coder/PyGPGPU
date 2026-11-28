@@ -19,12 +19,17 @@ from .walk import (
     _assigned_name_of,
     _creation_target_of,
 )
+from .statements import _function_read_names
 
 
 class _PhasesMixin:
 
     def translate(self)->None:
         body:List[ast.stmt] = self.tree.body
+        # Whether a range loop's target is ever read decides the loop's emission (an
+        # unread target's assignment is a dead store the device compiler warns about;
+        # see _function_read_names) -- one scan over the whole body, up front.
+        self._function_reads = _function_read_names(body)
         # A local pointer (`src = a`) is known before the body is walked: the magic-loop
         # scan asks about `enumerate(src)` before that statement is reached (see
         # _collect_array_pointers).

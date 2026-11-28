@@ -1,5 +1,4 @@
 from __future__ import annotations
-import asyncio
 import ast
 import concurrent.futures
 import copy
@@ -29,7 +28,6 @@ from ...vec_types.layout import pack
 from ...utils import local_size_for_global, detect_work_size, device_limits, blocks_to_global, _current_loop
 from ..python_backend import PythonKernel, analyse
 from .. import structs
-from ...numpy import ndarray as gnp
 from ..translator import (
     PTR,
     DeviceType,
@@ -157,6 +155,10 @@ if TYPE_CHECKING:
     # `Image` is imported inside the functions that use it (it is a heavy module and this
     # package keeps backend imports lazy), so an annotation needs the name here instead.
     from ...image import Image
+    # `asyncio` names only an annotation (`async_call`'s return type): the annotation is
+    # lazy under `from __future__ import annotations`, so the import lives here and the
+    # plain-launch import path never loads asyncio.
+    import asyncio
 
 
 if TYPE_CHECKING:

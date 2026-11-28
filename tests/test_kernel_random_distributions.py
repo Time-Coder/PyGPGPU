@@ -238,7 +238,11 @@ CASES = [
     ("f", d_f, 5.0 / 3.0, 0.20, 0.0, None),
     ("noncentral_f", d_noncentral_f, 2.0, 0.40, 0.0, None),
     ("standard_cauchy", d_standard_cauchy, None, 0.60, None, None),
-    ("standard_t", d_standard_t, 0.0, 0.20, -20.0, 20.0),
+    # Student-t is heavy-tailed: per draw P(|T5| > 20) is ~3e-6, so an 8192-draw
+    # launch exceeds +-20 about 2% of the time (measured: 66/3000 launches, max 38).
+    # A bound of +-80 sits at ~5e-5 per launch, far enough out to still catch a
+    # broken generator while never tripping on the distribution's own tail.
+    ("standard_t", d_standard_t, 0.0, 0.20, -80.0, 80.0),
     ("gumbel", d_gumbel, 0.5772, 0.20, None, None),
     ("laplace", d_laplace, 0.0, 0.15, None, None),
     ("logistic", d_logistic, 0.0, 0.15, None, None),
