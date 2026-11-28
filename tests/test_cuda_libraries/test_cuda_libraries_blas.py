@@ -170,3 +170,52 @@ def test_cublaslt_gemm_matches_numpy(device):
 
     result = lt_gemm(a, b)
     np.testing.assert_allclose(result, a @ b, rtol=1e-5, atol=1e-6)
+
+def test_cublas_gemm_refuses_mixed_dtypes(device):
+    """float32 x float64 would have cuBLAS read float32 bytes as doubles: refused.
+
+    Regression: `result_type` widened the dtype while the operands kept their own
+    bytes, so the mixed case returned wrong numbers with no error. HIP already
+    refused it; CUDA now names the same reason the same way.
+    """
+    _require_library("cublas")
+    from pygpgpu.cuda.libraries.wrappers import gemm
+
+    a = np.ones((2, 2), np.float32)
+    b = np.ones((2, 2), np.float64)
+    with pytest.raises(TypeError, match="one dtype"):
+        gemm(a, b)
+
+
+def test_cublas_gemm_out_casts_the_dtype(device):
+    """An `out=` of another dtype receives the product, the way numpy's does.
+
+    Regression: the product was written into an `astype` copy, so the caller's array
+    came back untouched -- silently.
+    """
+    _require_library("cublas")
+    from pygpgpu.cuda.libraries.wrappers import gemm
+
+    a = np.ones((2, 3), np.float32)
+    b = np.ones((3, 2), np.float32)
+    out = np.zeros((2, 2), np.float64)
+
+    result = gemm(a, b, out=out)
+    assert result is out
+    np.testing.assert_allclose(out, a @ b, rtol=1e-5, atol=1e-6)
+
+
+def test_cublas_gemm_out_follows_a_strided_view(device):
+    """A non-contiguous `out=` is written at its strided positions, not scattered."""
+    _require_library("cublas")
+    from pygpgpu.cuda.libraries.wrappers import gemm
+
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    b = np.arange(6, dtype=np.float32).reshape(3, 2)
+    holder = np.zeros((2, 4), np.float32)
+    out = holder[:, :2]          # shape (2, 2), strides make it non-contiguous
+
+    result = gemm(a, b, out=out)
+    assert result is out
+    np.testing.assert_allclose(holder[:, :2], a @ b, rtol=1e-5, atol=1e-6)
+    assert np.all(holder[:, 2:] == 0.0), "the store spilled past the view"

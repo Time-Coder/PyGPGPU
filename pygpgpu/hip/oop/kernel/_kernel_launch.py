@@ -18,6 +18,25 @@ from ..mem_object import MemObject
 from ....utils import detect_work_size, join_with_and, local_size_for_global, device_limits, product
 
 
+def _release_failed_launch(bound:Dict[str, object])->None:
+    """Return the pool claims a failed launch still holds.
+
+    The success path hands each claimed buffer back through the stream's callbacks
+    (`_after_call`); a launch that raises while binding, or before those callbacks are
+    scheduled, would otherwise leak every buffer it had claimed -- and repeated failed
+    launches would bleed the pool dry. The blanket walk is safe: a gnp array owns its
+    buffer and carries no pool claim, a buffer shared between two argument names is
+    claimed once (the second release is a no-op), and the serial is captured at release
+    time, so a callback that already returned the claim -- or a newer claim by another
+    launch -- makes this one a no-op, which is the guarantee `MemObject.unuse` exists
+    to give. See the CUDA backend's twin for the same reasoning.
+    """
+    for entry in bound.values():
+        mem_obj:object = entry[0] if entry is not None else None
+        if isinstance(mem_obj, MemObject):
+            mem_obj.unuse(mem_obj.claim_serial)
+
+
 class _KernelLaunchMixin:
 
     def _prepare_call(self, args, kwargs, stream:Stream):
@@ -30,31 +49,37 @@ class _KernelLaunchMixin:
         # must not live on the shared ArgInfo objects.
         bound:Dict[str, object] = {}
         value_ptrs = (c_void_p * len(self._args))()
-        i = 0
-        for key, arg_info in self._args.items():
-            value = used_kwargs[key]
-            value_ptrs[i] = cast(self._process_arg(stream, arg_info, value, bound), c_void_p)
-            i += 1
+        try:
+            i = 0
+            for key, arg_info in self._args.items():
+                value = used_kwargs[key]
+                value_ptrs[i] = cast(self._process_arg(stream, arg_info, value, bound), c_void_p)
+                i += 1
 
-        if global_work_size is None or local_work_size is None:
-            if global_work_size is None:
-                # The shape comes from this call's binding (see the OpenCL backend): the
-                # per-ArgInfo mem_obj the detection used to read stopped being filled
-                # when bindings became per-call, so a bare call launched (1, 1, 1) and
-                # silently wrote one element.
-                global_work_size, local_work_size = self._detect_work_size(bound)
-            else:
-                # When only grid is given, derive block from that grid (must divide evenly)
-                max_group, max_items = device_limits(self._program.context.device)
-                local_work_size = local_size_for_global(
-                    global_work_size, max_work_group_size=max_group, max_work_item_sizes=max_items)
+            if global_work_size is None or local_work_size is None:
+                if global_work_size is None:
+                    # The shape comes from this call's binding (see the OpenCL backend): the
+                    # per-ArgInfo mem_obj the detection used to read stopped being filled
+                    # when bindings became per-call, so a bare call launched (1, 1, 1) and
+                    # silently wrote one element.
+                    global_work_size, local_work_size = self._detect_work_size(bound)
+                else:
+                    # When only grid is given, derive block from that grid (must divide evenly)
+                    max_group, max_items = device_limits(self._program.context.device)
+                    local_work_size = local_size_for_global(
+                        global_work_size, max_work_group_size=max_group, max_work_item_sizes=max_items)
 
-        # hipModuleLaunchKernel always takes 3 dimensions
-        global_work_size = tuple(global_work_size) + (1,) * (3 - len(global_work_size))
-        local_work_size = tuple(local_work_size) + (1,) * (3 - len(local_work_size))
-        global_work_size = (c_size_t * 3)(*global_work_size)
-        local_work_size = (c_size_t * 3)(*local_work_size)
-        return global_work_size, local_work_size, value_ptrs, bound
+            # hipModuleLaunchKernel always takes 3 dimensions
+            global_work_size = tuple(global_work_size) + (1,) * (3 - len(global_work_size))
+            local_work_size = tuple(local_work_size) + (1,) * (3 - len(local_work_size))
+            global_work_size = (c_size_t * 3)(*global_work_size)
+            local_work_size = (c_size_t * 3)(*local_work_size)
+            return global_work_size, local_work_size, value_ptrs, bound
+        except BaseException:
+            # The claims made so far belong to a launch that will never run: without
+            # this release they are held forever (see _release_failed_launch).
+            _release_failed_launch(bound)
+            raise
 
 
     def _before_call(self, args, kwargs, async_launch:bool=False):

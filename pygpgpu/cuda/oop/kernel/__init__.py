@@ -29,7 +29,7 @@ from ..program_parser import ProgramParser
 from ....utils import detect_work_size, join_with_and, local_size_for_global, device_limits, product
 from ._kernel_args import _KernelArgsMixin
 from ._kernel_pack import _KernelPackMixin
-from ._kernel_launch import _KernelLaunchMixin
+from ._kernel_launch import _KernelLaunchMixin, _release_failed_launch
 from ._kernel_async import _KernelAsyncMixin
 
 
@@ -138,16 +138,22 @@ class Kernel(_KernelArgsMixin, _KernelPackMixin, _KernelLaunchMixin, _KernelAsyn
 
     def _call(self, args, kwargs, async_launch:bool=False)->Stream:
         stream, grid_dims, block_dims, value_ptrs, bound = self._before_call(args, kwargs, async_launch)
-        CUDA.cuLaunchKernel(
-            self.id,
-            grid_dims[0], grid_dims[1], grid_dims[2],
-            block_dims[0], block_dims[1], block_dims[2],
-            0, stream.id, value_ptrs, None
-        )
-        if CUDA.print_info:
-            print(f"launch CUDA {self} on {stream.device} with grid_dim={tuple(grid_dims)}, block_dim={tuple(block_dims)}", flush=True)
+        try:
+            CUDA.cuLaunchKernel(
+                self.id,
+                grid_dims[0], grid_dims[1], grid_dims[2],
+                block_dims[0], block_dims[1], block_dims[2],
+                0, stream.id, value_ptrs, None
+            )
+            if CUDA.print_info:
+                print(f"launch CUDA {self} on {stream.device} with grid_dim={tuple(grid_dims)}, block_dim={tuple(block_dims)}", flush=True)
 
-        self._after_call(stream, bound)
+            self._after_call(stream, bound)
+        except BaseException:
+            # The callbacks that return the pool buffers were not (all) scheduled:
+            # release this launch's claims here, or every failed launch leaks them.
+            _release_failed_launch(bound)
+            raise
 
         return stream
 

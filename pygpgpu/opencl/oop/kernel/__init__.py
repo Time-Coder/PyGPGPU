@@ -36,7 +36,7 @@ from ....utils import (detect_work_size, join_with_and, local_size_for_global, d
                       product, blocks_to_global)
 from .... import numpy as gnp
 from ._kernel_args import _KernelArgsMixin
-from ._kernel_launch import _KernelLaunchMixin
+from ._kernel_launch import _KernelLaunchMixin, _release_failed_launch
 from ._kernel_async import _KernelAsyncMixin
 
 
@@ -209,12 +209,23 @@ class Kernel(_KernelArgsMixin, _KernelLaunchMixin, _KernelAsyncMixin, CLObject):
             work_dim = len(global_work_size)
 
             event_id = cl_event(0)
-            CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, pointer(event_id))
-            launch_event = Event(self.context, event_id, CL.clEnqueueNDRangeKernel)
-            if CL.print_info:
-                print(f"launch OpenCL {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
+            try:
+                CL.clEnqueueNDRangeKernel(cmd_queue.id, self.id, work_dim, None, global_work_size, local_work_size, 0, None, pointer(event_id))
+                launch_event = Event(self.context, event_id, CL.clEnqueueNDRangeKernel)
+                if CL.print_info:
+                    print(f"launch OpenCL {self} on {cmd_queue.device} with global_work_size={tuple(global_work_size)}, local_work_size={tuple(local_work_size)}", flush=True)
+            except BaseException:
+                _release_failed_launch(bound)
+                raise
 
-        return self._after_call(cmd_queue, launch_event, bound)
+        try:
+            return self._after_call(cmd_queue, launch_event, bound)
+        except BaseException:
+            # An argument whose callbacks were not scheduled still holds its claim;
+            # a claim whose callback already ran makes this release a no-op
+            # (see _release_failed_launch).
+            _release_failed_launch(bound)
+            raise
 
 
     @property

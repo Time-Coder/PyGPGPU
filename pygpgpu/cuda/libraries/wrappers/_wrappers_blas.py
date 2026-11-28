@@ -73,7 +73,13 @@ def gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0
         raise ValueError(
             f"cannot multiply a {a_matrix_shape} matrix by a {b_matrix_shape} matrix")
 
-    dtype = np.result_type(a_array.dtype, b_array.dtype)
+    # One dtype for both operands, as HIP refuses the mixed case: `result_type`
+    # would widen float32 x float64 to float64 and have cuBLAS read the float32
+    # bytes as doubles -- wrong numbers with no error.
+    if a_array.dtype != b_array.dtype:
+        raise TypeError(
+            f"the two operands must have one dtype, got {a_array.dtype} and {b_array.dtype}")
+    dtype = a_array.dtype
     if dtype not in (_FLOAT32, _FLOAT64):
         raise TypeError(f"gemm supports float32 and float64, got {dtype}")
 
@@ -86,15 +92,21 @@ def gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0
         b_array.T if (transpose_b and not b_is_vector) else b_array
     ).reshape(b_matrix_shape)
 
-    if out is None:
-        result = np.zeros((m, n), dtype=dtype)
-    else:
-        result = np.asarray(out)
-        if result.shape != (m, n):
+    # numpy's own `out=` contract: the caller's array receives the product, at any
+    # dtype numpy can safely cast and at any layout. `beta` also *reads* C, so the
+    # buffer BLAS writes must start from the caller's values -- the temp below is
+    # `out.astype(dtype)`, not zeros. The temp keeps the dtype and layout BLAS
+    # writes: a differently-typed or non-contiguous `out` cannot be written through
+    # directly, so the copy into it happens after the call.
+    out_array:Optional[np.ndarray] = None
+    if out is not None:
+        out_array = np.asarray(out)
+        if out_array.shape != (m, n):
             raise ValueError(
-                f"the output is {result.shape}, but the product is {(m, n)}")
-        if result.dtype != dtype:
-            result = result.astype(dtype)
+                f"the output is {out_array.shape}, but the product is {(m, n)}")
+        result = out_array.astype(dtype, copy=True)
+    else:
+        result = np.zeros((m, n), dtype=dtype)
 
     # BLAS reads column-major and numpy holds row-major, so the row-major product
     # C = A @ B is the column-major product C' = B' @ A'. The bytes of a
@@ -138,20 +150,24 @@ def gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0
 
         synchronize()
         to_host(c_device, result)
+        if out_array is not None:
+            np.copyto(out_array, result)
     finally:
         destroy_handle(handle)
         free(a_device)
         free(b_device)
         free(c_device)
 
-    # The result takes numpy's shape for the product, not BLAS's.
+    # The result takes numpy's shape for the product, not BLAS's. An `out=` call
+    # answers the caller's own array, the way `np.matmul(..., out=...)` does.
+    answer:np.ndarray = out_array if out_array is not None else result
     if a_is_vector and b_is_vector:
-        return result.reshape(())
+        return answer.reshape(())
     if a_is_vector:
-        return result.reshape(n)
+        return answer.reshape(n)
     if b_is_vector:
-        return result.reshape(m)
-    return result
+        return answer.reshape(m)
+    return answer
 
 
 def axpy(alpha:float, x:ArrayLike, y:ArrayLike)->np.ndarray:

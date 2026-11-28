@@ -97,3 +97,40 @@ def test_a_double_claim_is_still_an_error(cls):
     obj.use()
     with pytest.raises(RuntimeError):
         obj.use()
+
+
+@pytest.mark.parametrize("cls", [CudaMemObject, HipMemObject], ids=["cuda", "hip"])
+def test_a_failed_launch_releases_the_claims_it_made(cls):
+    """`_release_failed_launch` returns every claim a failed launch still holds.
+
+    Regression: the binding loop had no error bracket, so a launch that raised on
+    argument 3 left the buffers claimed for arguments 1-2 held forever -- repeated
+    failed launches bled the pool dry (every later `get_buffer` of that size allocated
+    a fresh buffer because none was ever handed back).
+    """
+    import numpy as np
+
+    # The helper is per backend (each carries its own MemObject class, which its
+    # isinstance test reads), so the parametrized class picks its own.
+    if cls is CudaMemObject:
+        from pygpgpu.cuda.oop.kernel._kernel_launch import _release_failed_launch
+    else:
+        from pygpgpu.hip.oop.kernel._kernel_launch import _release_failed_launch
+
+    held = _bare(cls)
+    shared = _bare(cls)
+    serial = held.use()
+    shared.use()
+    bound = {
+        # An array argument: (mem_obj, original value, converted value).
+        "a": (held, np.zeros(1), np.zeros(1)),
+        # A scalar or handle argument carries no buffer.
+        "k": (None, 1, 1),
+        # The same buffer travelling under a second name: claimed once, so the
+        # blanket walk releases it twice and the second release is a no-op.
+        "b": (shared, np.zeros(1), np.zeros(1)),
+    }
+    _release_failed_launch(bound)
+    assert not held.using, "the failed launch kept its claim"
+    assert not shared.using, "the shared buffer's claim was not returned"
+    assert held.claim_serial == serial, "a release must not bump the serial"

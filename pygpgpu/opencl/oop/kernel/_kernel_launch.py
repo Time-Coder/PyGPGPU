@@ -24,6 +24,25 @@ from ....utils import (detect_work_size, join_with_and, local_size_for_global, d
 from .... import numpy as gnp
 
 
+def _release_failed_launch(bound:Dict[str, object])->None:
+    """Return the pool claims a failed launch still holds.
+
+    The success path hands each claimed buffer back through the event callbacks
+    (`_after_call`); a launch that raises while binding, or before those callbacks are
+    scheduled, would otherwise leak every buffer it had claimed -- and repeated failed
+    launches would bleed the pool dry. The blanket walk is safe: a gnp array owns its
+    buffer and carries no pool claim, a buffer shared between two argument names is
+    claimed once (the second release is a no-op), and the serial is captured at release
+    time, so a callback that already returned the claim -- or a newer claim by another
+    launch -- makes this one a no-op, which is the guarantee `MemObject.unuse` exists
+    to give. See the CUDA backend's twin for the same reasoning.
+    """
+    for entry in bound.values():
+        mem_obj:object = entry[0] if entry is not None else None
+        if isinstance(mem_obj, MemObject):
+            mem_obj.unuse(mem_obj.claim_serial)
+
+
 class _KernelLaunchMixin:
 
     def _before_call(self, args, kwargs, cmd_queue:Optional[CommandQueue]=None):
@@ -40,22 +59,28 @@ class _KernelLaunchMixin:
         if cmd_queue is None:
             cmd_queue = self.context.create_command_queue(used_device)
         bound:Dict[str, object] = {}
-        for key, value in used_kwargs.items():
-            self._set_arg(cmd_queue, key, value, bound)
+        try:
+            for key, value in used_kwargs.items():
+                self._set_arg(cmd_queue, key, value, bound)
 
-        if global_work_size is None or local_work_size is None:
-            if global_work_size is None:
-                global_work_size, local_work_size = self._detect_work_size(used_device, bound)
-            else:
-                # when only global is specified, derive local from the given global (must divide evenly)
-                max_group, max_items = device_limits(used_device)
-                local_work_size = local_size_for_global(
-                    global_work_size, max_work_group_size=max_group, max_work_item_sizes=max_items)
+            if global_work_size is None or local_work_size is None:
+                if global_work_size is None:
+                    global_work_size, local_work_size = self._detect_work_size(used_device, bound)
+                else:
+                    # when only global is specified, derive local from the given global (must divide evenly)
+                    max_group, max_items = device_limits(used_device)
+                    local_work_size = local_size_for_global(
+                        global_work_size, max_work_group_size=max_group, max_work_item_sizes=max_items)
 
-        work_dim = len(global_work_size)
-        global_work_size = (c_size_t * work_dim)(*global_work_size)
-        local_work_size = (c_size_t * work_dim)(*local_work_size)
-        return cmd_queue, global_work_size, local_work_size, bound
+            work_dim = len(global_work_size)
+            global_work_size = (c_size_t * work_dim)(*global_work_size)
+            local_work_size = (c_size_t * work_dim)(*local_work_size)
+            return cmd_queue, global_work_size, local_work_size, bound
+        except BaseException:
+            # The claims made so far belong to a launch that will never run: without
+            # this release they are held forever (see _release_failed_launch).
+            _release_failed_launch(bound)
+            raise
 
 
     @staticmethod

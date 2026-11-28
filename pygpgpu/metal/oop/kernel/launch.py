@@ -60,7 +60,7 @@ class BoundKernel:
         """The synchronous launch: encode, commit, wait, copy back, release."""
         _wait_ready()
         kernel = self._kernel
-        bound = kernel._bind_args(args, kwargs)
+        bound, entries = kernel._bind_args(args, kwargs)
 
         command_buffer:int = kernel.program.context.command_queue.new_command_buffer()
         try:
@@ -75,8 +75,7 @@ class BoundKernel:
             if error_obj:
                 encode_error = RuntimeError(
                     f"the metal launch failed: {ObjC.describe(error_obj)}")
-            entries = self._claim_entries()
-            for buffer, host_value, need, claim in entries:
+            for buffer, host_value, need, claim in self._claim_entries(entries):
                 _finish_buffer(buffer, host_value, need, encode_error,
                                claim_serial=claim)
             if MetaMetal.print_info:
@@ -87,6 +86,13 @@ class BoundKernel:
                     if is_buffer and kernel._args[arg_names[index]].need_read_back:
                         print(f"copy data to host for argument "
                               f"'{arg_names[index]}'", flush=True)
+        except BaseException:
+            # The launch failed before (or while) the copy-backs returned the claims:
+            # hand them back here, or every failed launch leaks its buffers. A claim
+            # a copy-back already returned makes this release a no-op.
+            for buffer, _host_value, _need in entries:
+                buffer.unuse(buffer.claim_serial)
+            raise
         finally:
             ObjC.release(int(command_buffer))
 
@@ -124,20 +130,27 @@ class BoundKernel:
             return future
 
         def watch() -> None:
-            while ObjC.send_int(command_buffer, "status") \
-                    < _MTCOMMAND_BUFFER_STATUS_COMPLETED:
-                time.sleep(_POLL_INTERVAL)
-            error_obj:int = ObjC.send_ptr(command_buffer, "error")
-            if error_obj:
-                message:str = ObjC.describe(error_obj)
-                settle_future(future, RuntimeError(
-                    f"the metal launch failed: {message}"))
-                return
-            for buffer, host_value, need, claim in entries:
-                _finish_buffer(buffer, host_value, need, claim_serial=claim)
-            settle_future(future)
-            # The buffer's work is done and the launch holds nothing else against it.
-            ObjC.release(int(command_buffer))
+            try:
+                while ObjC.send_int(command_buffer, "status") \
+                        < _MTCOMMAND_BUFFER_STATUS_COMPLETED:
+                    time.sleep(_POLL_INTERVAL)
+                error_obj:int = ObjC.send_ptr(command_buffer, "error")
+                if error_obj:
+                    raise RuntimeError(
+                        f"the metal launch failed: {ObjC.describe(error_obj)}")
+                for buffer, host_value, need, claim in entries:
+                    _finish_buffer(buffer, host_value, need, claim_serial=claim)
+                settle_future(future)
+            except BaseException as error:
+                # A poller failure still settles the future -- an `await` that never
+                # wakes is a hang -- and returns the claims the copy-backs did not.
+                for buffer, _host_value, _need in entries:
+                    buffer.unuse(buffer.claim_serial)
+                settle_future(future, error)
+            finally:
+                # The buffer's work is done whatever the outcome, so every exit path
+                # releases it.
+                ObjC.release(int(command_buffer))
 
         threading.Thread(target=watch, name="pygpgpu-metal", daemon=True).start()
         return future
@@ -155,16 +168,21 @@ class BoundKernel:
         """
         _wait_ready()
         kernel = self._kernel
-        bound = kernel._bind_args(args, kwargs)
+        bound, entries = kernel._bind_args(args, kwargs)
         command_buffer:int = kernel.program.context.command_queue.new_command_buffer()
         try:
             self._encode(command_buffer, bound)
             self._log_launch(kernel)
             ObjC.send(command_buffer, "commit", (), ctypes.c_void_p)
         except BaseException:
+            # An encode-time failure releases the buffer claims here and re-raises,
+            # so a caller's `finally` never sees a half-encoded buffer -- which is
+            # what this method's contract has always promised.
+            for buffer, _host_value, _need in entries:
+                buffer.unuse(buffer.claim_serial)
             ObjC.release(int(command_buffer))
             raise
-        return command_buffer, self._claim_entries()
+        return command_buffer, self._claim_entries(entries)
 
     def _encode(self, command_buffer:int, bound:List[BoundEntry])->None:
         """The encode half of a launch, shared by the synchronous and async paths."""
@@ -213,7 +231,9 @@ class BoundKernel:
                   _mtl_size(threadgroups), _mtl_size(threads))
         ObjC.send(encoder, "endEncoding", (), ctypes.c_void_p)
 
-    def _claim_entries(self)->List[Tuple["Buffer", object, object, int]]:
+    def _claim_entries(self,
+                       entries:List[Tuple["Buffer", object, object]]
+                       )->List[Tuple["Buffer", object, object, int]]:
         """One `(buffer, host_value, need_read_back, claim_serial)` per pointer argument.
 
         The read-back flag and the claim serial travel together but answer different
@@ -224,7 +244,7 @@ class BoundKernel:
         like from the outside.
         """
         return [(buffer, host_value, need, buffer.claim_serial)
-                for buffer, host_value, need in self._kernel.take_bound_entries()]
+                for buffer, host_value, need in entries]
 
     def _dispatch_shape(self)->Tuple[Tuple[int, ...], Tuple[int, ...]]:
         """The `(threadgroups, threads_per_threadgroup)` pair for this launch."""

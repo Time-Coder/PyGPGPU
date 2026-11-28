@@ -87,13 +87,21 @@ def gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0
     b_operand_buffer = to_device(b_operand)
 
     result_shape = (m, n)
-    if out is None:
-        result = np.zeros(result_shape, dtype=dtype)
-    else:
-        result = np.ascontiguousarray(out)
-        if result.shape != result_shape:
+    # numpy's own `out=` contract, as the CUDA wrapper spells it: the caller's array
+    # receives the product at any dtype numpy can safely cast and at any layout.
+    # `beta` also *reads* C, so the buffer BLAS writes must start from the caller's
+    # values -- the temp below is `out.astype(dtype)`, not zeros. The temp keeps the
+    # dtype and layout BLAS writes: a differently-typed or non-contiguous `out`
+    # cannot be written through directly, so the copy into it happens after the call.
+    out_array:Optional[np.ndarray] = None
+    if out is not None:
+        out_array = np.asarray(out)
+        if out_array.shape != result_shape:
             raise ValueError(
-                f"out has shape {result.shape}, but the product is {result_shape}")
+                f"out has shape {out_array.shape}, but the product is {result_shape}")
+        result = out_array.astype(dtype, copy=True)
+    else:
+        result = np.zeros(result_shape, dtype=dtype)
     result_buffer = to_device(result)
 
     # BLAS's own dimensions: A is m x k, B is k x n, C is m x n. With b's memory as A,
@@ -120,19 +128,23 @@ def gemm(a:ArrayLike, b:ArrayLike, out:Optional[ArrayLike]=None, alpha:float=1.0
             dtype)
         synchronize()
         to_host(result_buffer, result)
+        if out_array is not None:
+            np.copyto(out_array, result)
     finally:
         destroy_handle(handle)
         free(a_operand_buffer)
         free(b_operand_buffer)
         free(result_buffer)
 
+    # An `out=` call answers the caller's own array, the way `np.matmul(..., out=)` does.
+    answer:np.ndarray = out_array if out_array is not None else result
     if a_is_vector and b_is_vector:
-        return result.reshape(-1)[:1][0]
+        return answer.reshape(-1)[:1][0]
     if a_is_vector:
-        return result.reshape(n)
+        return answer.reshape(n)
     if b_is_vector:
-        return result.reshape(m)
-    return result
+        return answer.reshape(m)
+    return answer
 
 
 def _double_pointer()->type:

@@ -172,24 +172,37 @@ class NVRTCProgram(CUObject):
         return True
     
     def ptx(self, device:Device)->bytes:
-        if device not in self._ptx:
-            if not self._load_cubin(device):
-                if not self.id:
-                    self._create_with_source()
-                    self._build(device, True)
+        """The compiled PTX for one device, from the cache or a fresh compile.
 
+        A cached cubin does not answer this: a cubin holds no PTX, so the source path
+        below runs even when the binary itself is cached. The old form tested
+        `_load_cubin` here instead, which satisfied the "anything cached?" check while
+        answering nothing -- and then raised a raw KeyError off a healthy, cubin-only
+        cache.
+        """
+        if device not in self._ptx:
+            if not self._load_ptx(device) and not self.id:
+                self._create_with_source()
+                self._build(device, True)
+        if device not in self._ptx:
+            raise RuntimeError(
+                "no PTX is cached for this device and no compilation is in progress: "
+                "the program was built without keeping the PTX")
         return self._ptx[device]
 
     def cubin(self, device:Device)->bytes:
-        if device not in self._ptx:
+        if device not in self._cubin:
             if not self._load_cubin(device):
-                if not self.id:
+                # A cached PTX without its cubin is still loadable: cuModuleLoadData
+                # JIT-compiles PTX, so the missing binary is not worth a recompile.
+                if not self._load_ptx(device) and not self.id:
                     self._create_with_source()
                     self._build(device, True)
-
-        if not self._cubin[device]:
-            self._cubin[device] = self._ptx[device]
-
+            if not self._cubin.get(device) and device in self._ptx:
+                self._cubin[device] = self._ptx[device]
+        if device not in self._cubin:
+            raise RuntimeError(
+                "no cubin is cached for this device and no compilation is in progress")
         return self._cubin[device]
     
     @property

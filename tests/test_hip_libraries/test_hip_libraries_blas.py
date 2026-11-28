@@ -106,3 +106,39 @@ def test_lt_gemm_matches_gemm_or_says_why_it_cannot(hipblas):
         pytest.skip("rocBLASLt has no kernel library for this device")
         return
     np.testing.assert_allclose(result, a @ b, rtol=1e-5)
+
+def test_gemm_refuses_mixed_dtypes(hipblas):
+    """One dtype for both operands, with the reason named."""
+    a = np.ones((2, 2), np.float32)
+    b = np.ones((2, 2), np.float64)
+    with pytest.raises(TypeError, match="one dtype"):
+        hipblas.gemm(a, b)
+
+
+def test_gemm_out_casts_the_dtype(hipblas):
+    """An `out=` of another dtype receives the product, the way numpy's does.
+
+    Regression: `ascontiguousarray(out)` kept the caller's dtype, so BLAS wrote
+    float32 bytes into a float64-sized buffer and the caller's array came back
+    wrong -- silently.
+    """
+    a = np.ones((2, 3), np.float32)
+    b = np.ones((3, 2), np.float32)
+    out = np.zeros((2, 2), np.float64)
+
+    result = hipblas.gemm(a, b, out=out)
+    assert result is out
+    np.testing.assert_allclose(out, a @ b, rtol=1e-5, atol=1e-6)
+
+
+def test_gemm_out_follows_a_strided_view(hipblas):
+    """A non-contiguous `out=` is written at its strided positions, not scattered."""
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    b = np.arange(6, dtype=np.float32).reshape(3, 2)
+    holder = np.zeros((2, 4), np.float32)
+    out = holder[:, :2]          # shape (2, 2), strides make it non-contiguous
+
+    result = hipblas.gemm(a, b, out=out)
+    assert result is out
+    np.testing.assert_allclose(holder[:, :2], a @ b, rtol=1e-5, atol=1e-6)
+    assert np.all(holder[:, 2:] == 0.0), "the store spilled past the view"

@@ -98,13 +98,20 @@ class Program(CLObject):
         binary_status = (cl_int * self.n_devices)()
         error_code = cl_int(0)
 
+        # The `as error` name is deleted when its block ends, so the failure is kept in
+        # a variable that survives it. clCreateProgramWithBinary reports its own
+        # failures through error_code, which the status check below turns into an
+        # exception; this bracket is for what arrives as an exception instead (a
+        # ctypes-level fault), which a bare `pass` here used to surface as a NameError
+        # at the `CLObject.__init__` below -- the real cause lost.
+        program_failure:Optional[BaseException] = None
         try:
             program_id = CL.clCreateProgramWithBinary(self.context.id, cl_uint(self.n_devices), self.device_ids, binary_sizes, binaries, binary_status, pointer(error_code))
-        except BaseException:
-            # The name bound by `except ... as e` is deleted when the block ends, so it cannot
-            # be re-raised here; clCreateProgramWithBinary reports failures through error_code
-            # instead. The status check below turns them into an exception.
-            pass
+        except BaseException as error:
+            program_failure = error
+
+        if program_failure is not None:
+            raise program_failure
 
         if CL.check_error:
             error_messages = []
@@ -114,7 +121,7 @@ class Program(CLObject):
                 if status == ErrorCode.CL_INVALID_VALUE:
                     error_messages.append(f"binary for {device} error: {ErrorCode.CL_INVALID_VALUE}: lengths[{i}] is zero or if binaries[{i}] is a NULL value")
                 elif status == ErrorCode.CL_INVALID_BINARY:
-                    error_messages.append(f"binary for {device} error: {ErrorCode.CL_INVALID_VALUE}: program binary is not a valid binary for this device")
+                    error_messages.append(f"binary for {device} error: {ErrorCode.CL_INVALID_BINARY}: program binary is not a valid binary for this device")
 
             if error_messages:
                 details:str = "\n".join(error_messages)

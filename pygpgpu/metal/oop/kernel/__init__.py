@@ -95,20 +95,6 @@ class MetalKernel:
         self.dispatch_parameters:List[str] = []
         self.type_checked:bool = False
         self._pipeline:Optional[int] = None
-        self._bound_entries:List[Tuple["Buffer", object, object]] = []
-
-    def take_bound_entries(self)->List[Tuple["Buffer", object, object]]:
-        """The argument buffers the last `_bind_args` claimed, and consume the list.
-
-        A launch needs, after the device has finished, one copy-back and one claim
-        release per pointer argument. The entries travel with the launch rather than
-        living on the kernel: two launches of one kernel (two threads, or a caller
-        still reading a future while the next `submit()` starts) must not overwrite
-        each other's list.
-        """
-        entries = self._bound_entries
-        self._bound_entries = []
-        return entries
 
     @property
     def args(self)->Dict[str, "ArgInfo"]:
@@ -202,17 +188,26 @@ class MetalKernel:
                 and getattr(self.args[name], "address", None) != "local"]
 
     def _bind_args(self, args:Tuple[object, ...],
-                   kwargs:Dict[str, object])->List[BoundEntry]:
+                   kwargs:Dict[str, object])->Tuple[List[BoundEntry],
+                                                    List[Tuple["Buffer", object, object]]]:
         """Upload every host-bound argument, paired with its index and its kind.
 
-        Each entry is `(index, value, is_buffer)`. A pointer argument becomes a
-        `MTLBuffer`; a scalar becomes its **bytes**, which MSL binds with
-        `setBytes:length:atIndex:` rather than `setBuffer:offset:atIndex:`.
+        Answers `(bound, entries)`. Each `bound` entry is `(index, value, is_buffer)`:
+        a pointer argument becomes a `MTLBuffer`; a scalar becomes its **bytes**, which
+        MSL binds with `setBytes:length:atIndex:` rather than
+        `setBuffer:offset:atIndex:`. Each `entries` item is one
+        `(buffer, host_value, need_read_back)` per pointer argument, for the
+        completion's copy-backs and claim releases.
 
-        That distinction is load-bearing, not stylistic: a scalar kernel parameter
-        lives in the thread address space, and a buffer bound there would present
-        the device a pointer where it declared a value -- the pipeline rejects the
-        launch with a type mismatch. Only a `device`/`constant` pointer takes a
+        The entries travel with the launch -- they are this method's answer, never
+        state on the kernel -- because two launches of one kernel (two threads, or a
+        caller still reading a future while the next `submit()` starts) must not
+        overwrite each other's list.
+
+        The buffer/bytes distinction is load-bearing, not stylistic: a scalar kernel
+        parameter lives in the thread address space, and a buffer bound there would
+        present the device a pointer where it declared a value -- the pipeline rejects
+        the launch with a type mismatch. Only a `device`/`constant` pointer takes a
         buffer.
         """
 
@@ -237,35 +232,43 @@ class MetalKernel:
                 f"{self._name}: the attribute parameter(s) {', '.join(overlap)} appear "
                 f"among the bindable arguments; they are filled in by the dispatch and "
                 f"must not be bound, so every buffer index after them would be wrong")
-        self._bound_entries:List[Tuple["Buffer", object, object]] = []
         bound:List[BoundEntry] = []
-        for position, name in enumerate(names):
-            index:int = list(self.args).index(name)
-            argument:object = args[position]
-            arg_info:"ArgInfo" = self.args[name]
-            if arg_info.is_ptr:
-                is_struct_param:bool = (self._program.structs.get(arg_info.base_type_str)
-                                        is not None)
-                if not is_struct_param and not isinstance(argument, np.ndarray):
-                    raise TypeError(
-                        f"argument '{name}' must be np.ndarray, got "
-                        f"{type(argument).__name__}")
-                if self.type_checked:
-                    arg_info.check_type(argument)
-                buffer, _event = arg_info.use_buffer(
-                    self._program.context.command_queue, argument)
-                # The flag travels with the buffer rather than being re-derived from
-                # `buffer.kernel_flags` after the launch: `need_read_back` is the
-                # shared `ArgInfo` contract every backend reads, and a second
-                # derivation here could drift from it.
-                self._bound_entries.append((buffer, argument, arg_info.need_read_back))
-                bound.append((index, buffer, True))
-            else:
-                if self.type_checked:
-                    arg_info.check_type(argument)
-                bound.append((index, _scalar_bytes(arg_info.base_type_str, argument),
-                              False))
-        return bound
+        entries:List[Tuple["Buffer", object, object]] = []
+        try:
+            for position, name in enumerate(names):
+                index:int = list(self.args).index(name)
+                argument:object = args[position]
+                arg_info:"ArgInfo" = self.args[name]
+                if arg_info.is_ptr:
+                    is_struct_param:bool = (self._program.structs.get(arg_info.base_type_str)
+                                            is not None)
+                    if not is_struct_param and not isinstance(argument, np.ndarray):
+                        raise TypeError(
+                            f"argument '{name}' must be np.ndarray, got "
+                            f"{type(argument).__name__}")
+                    if self.type_checked:
+                        arg_info.check_type(argument)
+                    buffer, _event = arg_info.use_buffer(
+                        self._program.context.command_queue, argument)
+                    # The flag travels with the buffer rather than being re-derived from
+                    # `buffer.kernel_flags` after the launch: `need_read_back` is the
+                    # shared `ArgInfo` contract every backend reads, and a second
+                    # derivation here could drift from it.
+                    entries.append((buffer, argument, arg_info.need_read_back))
+                    bound.append((index, buffer, True))
+                else:
+                    if self.type_checked:
+                        arg_info.check_type(argument)
+                    bound.append((index, _scalar_bytes(arg_info.base_type_str, argument),
+                                  False))
+            return bound, entries
+        except BaseException:
+            # A later argument refused the value: the claims made so far belong to a
+            # launch that will never run, so they are released here -- and the
+            # per-launch entries never reach a later launch's copy-backs.
+            for buffer, _host_value, _need in entries:
+                buffer.unuse(buffer.claim_serial)
+            raise
 
     def __getitem__(self, work_sizes:Optional[Extents])->"BoundKernel":
         """Bind a CUDA-style `(blocks, threads_per_block)` work size."""
