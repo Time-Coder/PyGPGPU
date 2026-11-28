@@ -20,7 +20,7 @@ from typing import (Callable, Dict, List, Optional, Tuple)
 
 from ..builtin_registry import builtin_name_of
 from .notation import BLOCK_LOCAL_BUILTINS, PER_GROUP_BUILTINS
-from .source_text import get_dedented_source, _parse_kernel_source
+from .source_text import parse_kernel_body
 
 _SHARED_BUILTINS = PER_GROUP_BUILTINS + BLOCK_LOCAL_BUILTINS
 _UNRESOLVED:object = object()
@@ -46,7 +46,7 @@ def baked_shared_shapes(func:Callable, values:List[object],
     answer feeds the cache key and the C name's hash, so two calls whose shapes differ
     compile different kernels and both definitions coexist in the generated file.
     """
-    tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+    tree:ast.Module = parse_kernel_body(func)
     if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
         return ()
     code:object = getattr(func, "__code__", None)

@@ -54,7 +54,17 @@ class _PykernelIdentityMixin:
         try:
             source:str = inspect.getsource(self.raw_func)
         except OSError:
-            source = ""
+            # An AD-adjoint function has no file to read: its identity is the TRANSFORMED
+            # TREE itself, so any change in the adjoint's body -- a rule fix, a transform
+            # fix -- moves the signature, and with it the generated file and the binary
+            # cache, even though the user's own source has not moved. The rules' version
+            # travels with the dump, because the rules are part of what produced the tree.
+            import ast as _ast  # noqa: PLC0415
+            from ...ad.rules import RULES_VERSION  # noqa: PLC0415
+            from ..translator.source_text import adjoint_tree_of  # noqa: PLC0415
+            entry:object = adjoint_tree_of(self.raw_func)
+            tree_dump:str = (_ast.dump(entry[0]) if entry is not None else "")
+            source = f"ad={RULES_VERSION}\n{tree_dump}"
         return short_hash(f"{source}\nbackend={self.backend}\ntypes={self._type_map_key()}")
 
 

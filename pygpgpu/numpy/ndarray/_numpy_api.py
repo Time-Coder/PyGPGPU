@@ -95,6 +95,10 @@ class _NumpyApiMixin:
                              _to_plain_mapping(kwargs))
         out = kwargs.get("out")
         if out is not None:
+            # The class lives in the package facade, which imports this module, so the
+            # runtime reference is made here (a TYPE_CHECKING import alone cannot answer
+            # an isinstance, and a top-level one would close the import cycle).
+            from . import ndarray
             for value in (out if isinstance(out, tuple) else (out,)):
                 if isinstance(value, ndarray):
                     value._after_host_write()

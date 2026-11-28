@@ -37,8 +37,8 @@ import types
 from typing import Callable, List, Optional, Set
 
 from ..translator import (
-    _parse_kernel_source,
     get_dedented_source,
+    parse_kernel_body,
     short_hash,
 )
 
@@ -87,7 +87,7 @@ def _helper_closure(func:Callable, resolve_global:Callable[[str], object],
         return
     visited.add(id(func))
     try:
-        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+        tree:ast.Module = parse_kernel_body(func)
     except (SyntaxError, OSError):
         return
     if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):

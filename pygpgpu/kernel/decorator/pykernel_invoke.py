@@ -10,6 +10,7 @@ from ._phase2 import _BuildLaunchMixin
 from ._phase3 import _RunLaunchMixin
 from ._phase_async import _PhaseAsyncMixin
 from ._build_phase_args import _BuildPhaseArgsMixin
+from .. import tape_hook
 
 
 class _PykernelInvokeMixin(
@@ -35,5 +36,9 @@ class _PykernelInvokeMixin(
             return plan.result
         self._build_launch(plan, instance, args, backend_sel, device_sel,
                           global_size, local_size, launch)
-        return self._run_launch(plan, instance, args, backend_sel, device_sel,
+        result:object = self._run_launch(plan, instance, args, backend_sel, device_sel,
                             global_size, local_size, launch)
+        # A tape records kernel launches only -- never device operations -- and the hook
+        # is a two-line module so a plain launch pays one None check, not an import.
+        tape_hook.record(self, args, {})
+        return result

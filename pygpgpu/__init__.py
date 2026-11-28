@@ -236,3 +236,16 @@ def __dir__()->List[str]:
     return sorted(set(globals()) | set(__all__))
 
 
+
+
+def __getattr__(name: str):
+    """The lazy exports: names a process only pays for when it differentiates.
+
+    `Tape` lives in `pygpgpu.ad`, whose import pulls the AST transform -- so it is
+    resolved on first attribute access instead of at import time, keeping a plain
+    `import pygpgpu` on the fast path the benchmarks measure.
+    """
+    if name == "Tape":
+        from .ad.tape import Tape
+        return Tape
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

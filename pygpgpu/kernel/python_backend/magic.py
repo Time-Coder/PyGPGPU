@@ -4,7 +4,7 @@ import ast
 from typing import Callable, Dict, Optional, Tuple
 import numpy as np
 from ..builtin_registry import builtin_name_of
-from ..translator import _parse_kernel_source, get_dedented_source
+from ..translator import parse_kernel_body
 
 
 
@@ -41,7 +41,7 @@ def _dedented_ast(func: Callable) -> Optional[ast.FunctionDef]:
     analysis is skipped and the frame reports that when a builtin needs it.
     """
     try:
-        tree = _parse_kernel_source(get_dedented_source(func))
+        tree = parse_kernel_body(func)
     except Exception:
         return None
     if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):

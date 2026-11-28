@@ -6,7 +6,7 @@
 from __future__ import annotations
 from .dispatch_domain import _is_magic_loop_stmt, _outside_loops, _parameter_names_of
 from .predicates import is_ptr
-from .source_text import _parse_kernel_source, get_dedented_source
+from .source_text import parse_kernel_body
 import ast
 import builtins
 import functools
@@ -80,8 +80,7 @@ def _creation_assignments(func:Callable)->Tuple[ast.stmt, ...]:
     The answer is a fact about the source and the launch asks for it on every call, so it is
     remembered per function; a tuple because the callers only iterate it.
     """
-    source:str = get_dedented_source(func)
-    tree:ast.Module = _parse_kernel_source(source)
+    tree:ast.Module = parse_kernel_body(func)
     if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
         return ()
     body:List[ast.stmt] = tree.body[0].body
@@ -312,7 +311,7 @@ def _outer_scope_names_cached(func:object)->frozenset:
     answer as their own working set.
     """
     try:
-        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+        tree:ast.Module = parse_kernel_body(func)
     except SyntaxError:
         return frozenset()
     if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):

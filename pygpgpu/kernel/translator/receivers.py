@@ -1,7 +1,7 @@
 # What a receiver object is, from the classes it belongs to.
 from __future__ import annotations
 from .notation import Translated
-from .source_text import _parse_kernel_source, get_dedented_source
+from .source_text import parse_kernel_body
 import ast
 import enum
 import inspect
@@ -253,7 +253,7 @@ def writes_receiver(func:Callable, self_param:str)->bool:
     if not self_param:
         return False
     try:
-        tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+        tree:ast.Module = parse_kernel_body(func)
     except Exception:
         return False
     for node in ast.walk(tree):
@@ -339,7 +339,7 @@ def _collect_self_attrs(func:Callable, self_param:str, owner:Optional[type],
     if func in visited:
         return
     visited.add(func)
-    tree:ast.Module = _parse_kernel_source(get_dedented_source(func))
+    tree:ast.Module = parse_kernel_body(func)
     called:Set[str] = {node.func.attr for node in ast.walk(tree)
                        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                        and isinstance(node.func.value, ast.Name)

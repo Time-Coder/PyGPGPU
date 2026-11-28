@@ -38,11 +38,11 @@ def _isolated(value:object)->object:
 
 def _host_regions(func:object)->List[object]:
     """The statements a kernel body runs on the host, before and between its magic loops."""
-    from ..translator import (_outside_loops, _parameter_names_of, _parse_kernel_source,
-                             get_dedented_source)
+    from ..translator import (_outside_loops, _parameter_names_of,
+                             parse_kernel_body)
 
     try:
-        tree:object = _parse_kernel_source(get_dedented_source(func))
+        tree:object = parse_kernel_body(func)
     except SyntaxError:
         return []
     if not (tree.body and isinstance(tree.body[0], ast.ImportFrom)):
@@ -156,13 +156,13 @@ def _host_region_values(func:object,
     as a device object, and building a second one here would shadow the launch's copy.
     """
     from ..translator import (_is_magic_loop_stmt,
-                             _outside_loops, _parameter_names_of, get_dedented_source,
-                             _parse_kernel_source, _outer_scope_names)
+                             _outside_loops, _parameter_names_of,
+                             parse_kernel_body, _outer_scope_names)
 
     values:Dict[str, object] = {}
     executed:List[int] = []
     try:
-        tree:object = _parse_kernel_source(get_dedented_source(func))
+        tree:object = parse_kernel_body(func)
     except SyntaxError:
         return values, executed
     if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):

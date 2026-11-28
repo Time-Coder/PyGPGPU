@@ -16,7 +16,7 @@ from .notation import (
     ReturnPosition,
     Translated,
 )
-from .source_text import _parse_kernel_source, _source_first_line, _trimmed_source
+from .source_text import parse_kernel_body, _source_first_line, _trimmed_source
 
 if TYPE_CHECKING:
     from . import FunctionTranslator
@@ -191,7 +191,7 @@ class _InitMixin:
                 # copy is what keeps one phase's transplant from rewriting the main
                 # translator's body (and every later phase's). It is paid once per compile,
                 # not once per launch.
-                tree:ast.Module = copy.deepcopy(_parse_kernel_source(self.source_text))
+                tree:ast.Module = copy.deepcopy(parse_kernel_body(func))
                 if not (tree.body and isinstance(tree.body[0], ast.FunctionDef)):
                     raise SyntaxError("decorated object must be a plain function") from None
                 self.tree:ast.FunctionDef = tree.body[0]

@@ -199,6 +199,33 @@ class ndarray(_HostStateMixin, _TransferMixin, _LaunchBindingMixin, _NumpyApiMix
         if parent is not None:
             parent._children.append(self)
 
+    # ---------- the AD hooks: requires_grad is a plain attribute; .grad is lazy ----------
+
+    @property
+    def grad(self) -> Optional["ndarray"]:
+        """The gradient buffer this array accumulated into, or None before a backward.
+
+        Allocated lazily on first backward, same shape/dtype/device as this array, and
+        accumulating across backward calls (PyTorch semantics) -- `zero_grad()` clears
+        it. Not inherited by views: a view tracks because the view itself says so, and
+        propagating the flag through `x[1:]` would make "which object did the caller
+        actually pass" ambiguous in a binding layer that reasons about object identity.
+        """
+        return self.__dict__.get("_grad")
+
+    @grad.setter
+    def grad(self, buffer: "ndarray") -> None:
+        self.__dict__["_grad"] = buffer
+
+    def zero_grad(self) -> None:
+        """Drop the accumulated gradient, so the next backward allocates fresh."""
+        self.__dict__.pop("_grad", None)
+
+    def requires_grad_(self, flag: bool = True) -> "ndarray":
+        """Set `requires_grad` and return the array, so a setup line can chain."""
+        self.requires_grad = bool(flag)
+        return self
+
     __iadd__ = _inplace(np.ndarray.__iadd__)
 
     __isub__ = _inplace(np.ndarray.__isub__)
@@ -277,6 +304,7 @@ __all__ = [
     "dumps",
     "flat",
     "from_torch",
+    "grad",
     "imag",
     "is_zero_copy",
     "item",
@@ -287,6 +315,7 @@ __all__ = [
     "to_device",
     "to_device_zero_copy",
     "to_host",
+    "zero_grad",
     "to_torch",
     "tobytes",
     "tofile",

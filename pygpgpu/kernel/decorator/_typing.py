@@ -7,7 +7,7 @@ plain class whose __class_getitem__ returns itself, so subscripting
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Generic, List, TypeVar
+from typing import TYPE_CHECKING, Any, Dict, Generic, List, Optional, Tuple, TypeVar
 import numpy as np
 from typing_extensions import ParamSpec, TypedDict
 
@@ -20,9 +20,53 @@ if TYPE_CHECKING:
         """``Generic`` over the decorated function's parameters, for the type checkers."""
 else:
     class _KernelBase:
-        """Runtime stand-in: subscripting returns this class, so ``PyKernel[_P]`` imports."""
+        """Runtime stand-in: subscripting returns this class, so ``PyKernel[_P]`` imports.
+
+        It also carries the four AD properties, because this is the base the kernel object
+        and both wrappers share: `obj.trace.grad(...)` has to work or a differentiable
+        method cannot be differentiated from an instance, and a method body is a common
+        shape. Each property imports `pygpgpu.ad` on first access -- `import pygpgpu` must
+        not pull the AST transform in -- and a `k.grad(...)` form is a different object
+        from an array's `.grad` buffer: different objects, different call shapes, and the
+        docstrings settle which is which.
+        """
         def __class_getitem__(cls, item:object)->type:
             return cls
+
+        def _ad_subject(self)->Tuple[object, object, Optional[str]]:
+            """The kernel object a form is built over, and the instance it binds."""
+            kernel:object = getattr(self, "_kernel", self)
+            instance:object = getattr(self, "_instance", None)
+            backend:Optional[str] = getattr(self, "_backend", None)
+            return kernel, instance, backend
+
+        @property
+        def grad(self)->object:
+            """The gradient form: `k.grad(loss=...)(args)` answers gradients only."""
+            from ...ad import GradForm
+            kernel, instance, backend = self._ad_subject()
+            return GradForm(kernel, instance=instance, backend=backend)
+
+        @property
+        def value_and_grad(self)->object:
+            """The gradient form that also answers the loss the forward computed."""
+            from ...ad import ValueAndGradForm
+            kernel, instance, backend = self._ad_subject()
+            return ValueAndGradForm(kernel, instance=instance, backend=backend)
+
+        @property
+        def vjp(self)->object:
+            """The pullback form: `result, pullback = k.vjp()(args)`, then `pullback(g)`."""
+            from ...ad import VJPForm
+            kernel, instance, backend = self._ad_subject()
+            return VJPForm(kernel, instance=instance, backend=backend)
+
+        @property
+        def jvp(self)->object:
+            """The forward-mode form: `dout = k.jvp(tangent=dx)(args)`."""
+            from ...ad import JVPForm
+            kernel, instance, backend = self._ad_subject()
+            return JVPForm(kernel, instance=instance, backend=backend)
 
 
 if TYPE_CHECKING:

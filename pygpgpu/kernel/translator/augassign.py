@@ -30,32 +30,38 @@ from .vectors import (
 )
 
 
+def race_free_gather(index:ast.expr, work_item_indices:List[str])->bool:
+    """True when each work item provably touches a different element of one array.
+
+    The only case provable without knowing the launch geometry is the one where the
+    subscript is built from the magic loop's own index variables: every index is one of
+    them, each appears once, and all of them appear. Distinct work items then have
+    distinct index tuples, so `out[i, j] += v` cannot overlap with another work item and a
+    plain read-modify-write is exact.
+
+    Anything else -- a subscript driven by a data value (`bins[image[i]] += 1`), a partial
+    tuple (`out[i] += v` in a 2-D loop), or an arithmetic index -- may collide and is
+    treated as racy. One proof, two consumers: the translator's atomic-conversion decision
+    and the AD stage's gather-or-refuse question for gradient accumulation both read this,
+    because a second copy of the analysis would drift and the drift would show up as a
+    silently missing contribution.
+    """
+    elements:List[ast.expr] = list(index.elts) if isinstance(index, ast.Tuple) else [index]
+    if not all(isinstance(element, ast.Name) for element in elements):
+        return False
+    names:List[str] = [element.id for element in elements]  # type: ignore[union-attr]
+    if not work_item_indices:
+        # A gid-style kernel states its work item through gpu.get_global_id, which this
+        # check cannot relate to a subscript, so nothing is provable there.
+        return False
+    return sorted(names) == sorted(work_item_indices)
+
+
 class _AugassignMixin:
 
     def _augassign_is_race_free(self, target:ast.Subscript)->bool:
-        """True when each work item provably touches a different element.
-
-        The only case the translator can prove without knowing the launch geometry is the
-        one where the subscript is built from the magic loop's own index variables: every
-        index is one of them, each appears once, and all of them appear. Distinct work
-        items then have distinct index tuples, so `out[i, j] += v` cannot overlap with
-        another work item and a plain read-modify-write is exact.
-
-        Anything else -- a subscript driven by a data value (`bins[image[i]] += 1`), a
-        partial tuple (`out[i] += v` in a 2-D loop), or an arithmetic index -- may collide
-        and is treated as racy.
-        """
-        indices:ast.expr = target.slice
-        elements:List[ast.expr] = list(indices.elts) if isinstance(indices, ast.Tuple) else [indices]
-        if not all(isinstance(element, ast.Name) for element in elements):
-            return False
-        names:List[str] = [element.id for element in elements]  # type: ignore[union-attr]
-        work_items:List[str] = self.work_item_indices
-        if not work_items:
-            # A gid-style kernel states its work item through gpu.get_global_id, which this
-            # check cannot relate to a subscript, so nothing is provable there.
-            return False
-        return sorted(names) == sorted(work_items)
+        """True when each work item provably touches a different element."""
+        return race_free_gather(target.slice, self.work_item_indices)
 
 
     def _visit_atomic_augassign(self, node:ast.AugAssign, op_name:str,

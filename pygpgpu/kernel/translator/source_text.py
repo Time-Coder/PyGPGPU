@@ -6,7 +6,7 @@ import inspect
 import sys
 import textwrap
 import weakref
-from typing import (Callable, Collection, Dict, List, Optional)
+from typing import (Callable, Collection, Dict, List, Optional, Tuple)
 
 
 
@@ -31,6 +31,60 @@ def block_source(func:Callable)->Optional[str]:
 
 
 _BLOCK_SOURCES:"weakref.WeakKeyDictionary[Callable, str]" = weakref.WeakKeyDictionary()
+
+
+def register_adjoint_tree(func:Callable, tree:ast.Module, origin:Callable)->None:
+    """Teach the source readers the transformed tree of an AD-adjoint kernel.
+
+    An adjoint is built by the `pygpgpu.ad` stage: it takes the user's kernel body, emits
+    another body, and the result has to travel through the same pipeline a source-written
+    kernel travels. There is no text to re-parse -- the Python 3.7 floor has no
+    `ast.unparse`, and re-parsing generated text would renumber the lines the host-region
+    machinery keys on -- so the transformed tree is handed over here instead, and every
+    tree-level reader answers from it (`parse_kernel_body` below).
+
+    ``origin`` is the user's own kernel function. Error positions are reported against the
+    user's file, which works because the transform preserves the original nodes' line
+    numbers; `_source_first_line` resolves the adjoint's line 1 through it.
+
+    The registry is keyed weakly: the adjoint function is kept alive by the form that
+    launched it, so a dropped form does not leak its tree.
+    """
+    _ADJOINT_TREES[func] = (tree, origin)
+
+
+def adjoint_tree_of(func:Callable)->Optional[Tuple[ast.Module, Callable]]:
+    """The registered (tree, origin) of an adjoint function, or None for an ordinary one."""
+    return _ADJOINT_TREES.get(func)
+
+
+_ADJOINT_TREES:"weakref.WeakKeyDictionary[Callable, Tuple[ast.Module, Callable]]" = \
+    weakref.WeakKeyDictionary()
+
+
+def parse_kernel_body(func:Callable)->ast.Module:
+    """The parsed body of a kernel function: a registered AD tree, else its source text.
+
+    One reader for every scan that walks a kernel's tree. The adjoint's registered tree is
+    the shared, read-only one -- the same contract `_parse_kernel_source`'s cache gives --
+    so a caller that rewrites a body deep-copies first (the translator always does).
+    """
+    entry:Optional[Tuple[ast.Module, Callable]] = adjoint_tree_of(func)
+    if entry is not None:
+        return entry[0]
+    return _parse_kernel_source(get_dedented_source(func))
+
+
+def kernel_source_text(func:Callable)->str:
+    """The source text a kernel's errors are shown against.
+
+    An adjoint carries no text of its own: its tree reuses the original nodes' line
+    numbers, so the original body's text is what a caret should underline.
+    """
+    entry:Optional[Tuple[ast.Module, Callable]] = adjoint_tree_of(func)
+    if entry is not None:
+        return get_dedented_source(entry[1])
+    return get_dedented_source(func)
 
 
 @functools.lru_cache(maxsize=512)
@@ -96,8 +150,12 @@ def _remembered_function_source(func:Callable)->str:
 
 
 def _trimmed_source(func:Callable)->str:
-    """The text the translator parses: decorators dropped, dedented."""
-    return get_dedented_source(func)
+    """The text the translator shows and hashes: decorators dropped, dedented.
+
+    An adjoint reports against its origin (see `kernel_source_text`), so its text is the
+    user's own body even though the tree the translator walks is the transformed one.
+    """
+    return kernel_source_text(func)
 
 
 def _source_first_line(func:Callable)->int:
@@ -110,8 +168,13 @@ def _source_first_line(func:Callable)->int:
     lines too high.
 
     An inline block's generated text is line-aligned with the user's file (see
-    `register_block_source`), so its parsed copy's line 1 IS file line 1.
+    `register_block_source`), so its parsed copy's line 1 IS file line 1. An AD adjoint
+    reports against the user's own kernel: its tree reuses the original nodes' line
+    numbers, so the origin's line 1 is the answer.
     """
+    entry:Optional[Tuple[ast.Module, Callable]] = adjoint_tree_of(func)
+    if entry is not None:
+        return _source_first_line(entry[1])
     if block_source(func) is not None:
         return 1
     try:

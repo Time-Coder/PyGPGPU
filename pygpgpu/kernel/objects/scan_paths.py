@@ -118,7 +118,7 @@ class Scan:
 
 def _parse(func:Callable[..., object])->Optional[ast.Module]:
     import copy as _copy  # noqa: PLC0415
-    from ..translator import _parse_kernel_source, get_dedented_source  # noqa: PLC0415
+    from ..translator import parse_kernel_body  # noqa: PLC0415
 
     cached:Optional[ast.Module] = _LIFTED_TREES.get(_tree_key(func))
     if cached is not None:
@@ -131,7 +131,7 @@ def _parse(func:Callable[..., object])->Optional[ast.Module]:
         # is -- so it takes a copy of the parsed one. `_parse_kernel_source` answers a
         # cached tree shared by every reader, and inserting a statement into that would
         # hand the next launch a body with a lifted name no scan put there.
-        return _copy.deepcopy(_parse_kernel_source(get_dedented_source(func)))
+        return _copy.deepcopy(parse_kernel_body(func))
     except Exception:
         return None
 
@@ -145,13 +145,13 @@ def _readonly_parse(func:Callable[..., object])->Optional[ast.Module]:
     launch, which showed up as the largest single cost of a call once the compile was out of
     the way. **The answer is shared: never mutate it.**
     """
-    from ..translator import _parse_kernel_source, get_dedented_source  # noqa: PLC0415
+    from ..translator import parse_kernel_body  # noqa: PLC0415
 
     cached:Optional[ast.Module] = _LIFTED_TREES.get(_tree_key(func))
     if cached is not None:
         return cached
     try:
-        return _parse_kernel_source(get_dedented_source(func))
+        return parse_kernel_body(func)
     except Exception:
         return None
 

@@ -49,6 +49,8 @@ from .source_text import (
     _source_first_line,
     _trimmed_source,
     get_dedented_source,
+    kernel_source_text,
+    parse_kernel_body,
 )
 from .errors import (
     _position_error,
