@@ -20,8 +20,8 @@ The DLL is loaded on first use, never at import time, and a machine without the 
 toolkit still imports this package: the failure surfaces at the call.
 
 Nothing here is a device-side builtin. A ``@kernel`` body cannot call any of it --
-these are array-level operations the host performs, not per-thread arithmetic. See the
-README section "Host-side CUDA libraries" for the difference.
+these are array-level operations the host performs, not per-thread arithmetic (a
+``@kernel`` body's math goes through the translator's device builtins instead).
 """
 from __future__ import annotations
 

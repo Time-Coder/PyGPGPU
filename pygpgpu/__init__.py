@@ -229,6 +229,8 @@ __all__ = [
     "cuda_libraries",
     # the host-side HIP libraries (hipBLAS, hipBLASLt), reached the same way
     "hip_libraries",
+    # the automatic-differentiation tape (resolved lazily; see __getattr__ below)
+    "Tape",
 ]
 
 

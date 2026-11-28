@@ -146,7 +146,7 @@ pythonpath = ["tests"]
 # The device headers are real files the translator copies into a kernel's cache folder
 # (`kernel/headers/pygpgpu_quat.h`), so they have to travel with the package or an installed
 # copy would fail to find them.
-pygpgpu = ["py.typed", "**/*.pyi", "**/*.pyi.in", "kernel/include/*.h"]
+pygpgpu = ["py.typed", "**/*.pyi", "kernel/include/*.h"]
 
 # What the sdist carries beyond the package itself is declared in MANIFEST.in: the
 # sdist ships the installable package only -- examples/ stays in the repository,

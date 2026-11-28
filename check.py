@@ -11,7 +11,10 @@ from __future__ import annotations
 import subprocess
 import sys
 
-subprocess.check_call([sys.executable, "-m", "ruff", "check", "--fix"])
+# Checked, never fixed: a "verification" that rewrites the tree would make the lint
+# fixes unreviewable -- and, without CI, they would happen silently on one machine.
+# Run `python -m ruff check --fix` by hand when a fix is wanted, then look at the diff.
+subprocess.check_call([sys.executable, "-m", "ruff", "check"])
 # Warnings are the ctypes-layer inference noise documented in pyproject.toml; only error-level
 # diagnostics should fail the run.
 subprocess.check_call([sys.executable, "-m", "ty", "check", "--exit-zero-on-warning"])

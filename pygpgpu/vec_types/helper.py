@@ -1,5 +1,7 @@
 """The vector-type stub writer: ``python -m pygpgpu.vec_types.helper`` regenerates
-the ``.pyi`` files from the ``genVecN.pyi.in`` templates.
+the ``.pyi`` files. (The ``genVecN.pyi.in`` templates are gone -- since the base
+classes moved to pygf, this module builds each stub's text itself, from the swizzle
+generators below.)
 
 The swizzle combinations themselves are pygf's generator -- the one implementation
 serves both libraries -- and this module keeps only the presentation the stubs add:

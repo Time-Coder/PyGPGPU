@@ -1,11 +1,13 @@
 # Automatic differentiation: design and plan
 
-**Status:** M0–M4 landed and pinned by tests; M5 landed (the deferred launch spellings and the static per-phase multi-pass adjoint) (`tests/test_ad_forward.py`,
+**Status:** M0–M5 landed and pinned by tests (`tests/test_ad_forward.py`,
 `tests/test_ad_reverse.py`, `tests/test_ad_refusals.py`, `tests/test_ad_rules_complete.py`,
-`tests/test_ad_tape.py`). The code lives in `pygpgpu/ad/`; the machinework this plan decided
-is described in `AGENTS.md` (the "Automatic differentiation" section) and in the modules'
-own docstrings. This file keeps the design rationale and the open questions; M5 (multi-pass
-and async) and M6 (deferred) are still open.
+`tests/test_ad_tape.py`, `tests/test_ad_members_and_deferred.py`) -- the multi-pass
+adjoint, the deferred launch spellings and the members/deferred machinery included. The
+code lives in `pygpgpu/ad/`; the machinery this plan decided is described in `AGENTS.md`
+(the "Automatic differentiation" section) and in the modules' own docstrings. This file
+keeps the design rationale; what is still open is exactly what the sections below label
+**Argument**.
 
 Sections are labelled so a reader can tell what is fixed from what is still an argument:
 
