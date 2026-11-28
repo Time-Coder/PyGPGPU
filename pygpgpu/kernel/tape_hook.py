@@ -17,8 +17,14 @@ from typing import Any, Dict, Optional, Tuple
 active:Optional[Any] = None
 
 
-def record(kernel:object, args:Tuple[object, ...], kwargs:Dict[str, object]) -> None:
-    """Record one launch on the active tape, if there is one."""
+def record(kernel:object, args:Tuple[object, ...], kwargs:Dict[str, object],
+           instance:object = None) -> None:
+    """Record one launch on the active tape, if there is one.
+
+    ``instance`` is a method (or classmethod) launch's receiver, or None: the adjoint
+    keeps the origin's signature, so a method kernel's backward launch needs the
+    receiver prepended -- the same prepend the AD forms make for a bound instance.
+    """
     tape:Optional[Any] = active
     if tape is not None:
-        tape.record(kernel, args, kwargs)
+        tape.record(kernel, args, kwargs, instance)

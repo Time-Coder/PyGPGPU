@@ -40,5 +40,7 @@ class _PykernelInvokeMixin(
                             global_size, local_size, launch)
         # A tape records kernel launches only -- never device operations -- and the hook
         # is a two-line module so a plain launch pays one None check, not an import.
-        tape_hook.record(self, args, {})
+        # The instance rides with the record: a method kernel's adjoint keeps the
+        # origin's signature, so its backward launch needs the receiver.
+        tape_hook.record(self, args, {}, instance)
         return result

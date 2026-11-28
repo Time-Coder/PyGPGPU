@@ -168,3 +168,35 @@ def test_tapes_do_not_nest():
         with pytest.raises(RuntimeError, match="already active"):
             with Tape():
                 pass
+
+def test_method_kernel_launch_records_the_receiver(gpu_backend):
+    """A tape over a method kernel: the receiver rides with the record, and the
+    backward launch -- whose adjoint keeps the origin's signature, receiver included
+    -- gets it prepended.
+
+    Regression: the receiver was never recorded, so the adjoint launch was short one
+    argument and crashed with a raw TypeError (or, with another signature shape,
+    misbound silently).
+    """
+
+    class Accumulator:
+        def __init__(self, scale: float) -> None:
+            self.scale = scale
+
+        @kernel
+        def accumulate(self, x, out):
+            for i in range(out.shape[0]):
+                out[i] = self.scale * x[i]
+
+    n = 8
+    x = gnp.arange(n, dtype=np.float32)
+    x.requires_grad = True
+    out = gnp.zeros(n, np.float32)
+    acc = Accumulator(3.0)
+
+    with Tape() as tape:
+        acc.accumulate[gpu_backend](x, out)
+
+    tape.backward(out)
+    # loss = sum(3 * x): d/dx = 3, per element
+    np.testing.assert_allclose(_host(x.grad), 3.0, rtol=1e-5)

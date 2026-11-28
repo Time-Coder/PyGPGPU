@@ -204,3 +204,51 @@ def test_host_region_read_of_tracked_array_refused(tracked):
     _result, pullback = body.vjp()(tracked, scale, out)
     with pytest.raises(SyntaxError, match="host has no AD"):
         pullback(_weights())
+
+def test_dispatch_loop_else_refused_in_reverse(tracked):
+    """The dispatch loop's own `else` block never passes through the walk (the walk
+    starts at the dispatch body), so `build` refuses it before walking."""
+    loss = gnp.zeros(1, np.float32)
+
+    @kernel
+    def body(x, loss):
+        for i in range(x.shape[0]):
+            loss[0] += x[i]
+        else:
+            loss[0] += 0.0
+
+    with pytest.raises(SyntaxError, match="`else` block"):
+        body.grad(loss="loss")(tracked, loss)
+
+
+def test_nested_while_else_refused_in_reverse(tracked):
+    """A nested loop's `else` block is refused by the walk itself, at the loop."""
+    loss = gnp.zeros(1, np.float32)
+
+    @kernel
+    def body(x, loss):
+        for i in range(x.shape[0]):
+            v = x[i]
+            while v > 1.0:
+                v = v * 0.5
+            else:
+                loss[0] += v
+
+    with pytest.raises(SyntaxError, match="`else` block"):
+        body.grad(loss="loss")(tracked, loss)
+
+
+def test_loop_else_refused_in_forward_mode(tracked):
+    """The forward transform refuses the same shape: the else block gains no tangent."""
+    out = gnp.zeros(8, np.float32)
+
+    @kernel
+    def body(x, out):
+        for i in range(out.shape[0]):
+            out[i] = x[i] * 2.0
+        else:
+            out[0] = 0.0
+
+    form = body.jvp(tangent=gnp.ones(8, np.float32), out="out")["python"]
+    with pytest.raises(SyntaxError, match="`else` block"):
+        form(tracked, out)

@@ -35,6 +35,16 @@ from .reverse_distribute import (Contribution, OutCotangent, SEED_COT, SEED_ONE,
 from .reverse_guards import _ScanGuardsMixin
 from .reverse_while import _WhileReplayMixin
 
+#: A `for`/`while` loop's `else` block has no adjoint in v1: the walk cannot attribute
+#: the else block's stores to the loop's iterations, so a value assigned only there
+#: would silently lose its cotangent. One message for the dispatch loop (checked in
+#: `build`, whose walk starts at the dispatch body) and every nested loop (checked in
+#: `walk_stmt`).
+LOOP_ELSE_REFUSAL:str = ("the `else` block of a `for`/`while` loop is not differentiable "
+                         "in v1: the reverse walk cannot attribute the else block's "
+                         "stores to the loop's iterations -- move the else work after "
+                         "the loop")
+
 class GradBuilder(_DistributeMixin, _ScanGuardsMixin, _WhileReplayMixin):
     """The reverse walk over one kernel body.
 
@@ -98,6 +108,10 @@ class GradBuilder(_DistributeMixin, _ScanGuardsMixin, _WhileReplayMixin):
                 "`get_global_id` body cannot show -- iterate "
                 "`for i in range(<array>.shape[0])`", funcdef)
         self._check_scanned()
+        # The dispatch loop itself never passes through walk_stmt (the walk starts at
+        # its body), so its own `else` block is checked here.
+        if self.scan.dispatch.orelse:
+            raise self._error(LOOP_ELSE_REFUSAL, self.scan.dispatch)
         prefix:List[ast.stmt] = []
         tail:List[ast.stmt] = []
         seen_dispatch:bool = False
@@ -191,6 +205,8 @@ class GradBuilder(_DistributeMixin, _ScanGuardsMixin, _WhileReplayMixin):
             return self.walk_augassign(stmt, saved)
         if isinstance(stmt, ast.If):
             return self.walk_if(stmt, destroyed)
+        if isinstance(stmt, (ast.For, ast.While)) and stmt.orelse:
+            raise self._error(LOOP_ELSE_REFUSAL, stmt)
         if isinstance(stmt, ast.For):
             return self.walk_for(stmt, destroyed)
         if isinstance(stmt, ast.While):

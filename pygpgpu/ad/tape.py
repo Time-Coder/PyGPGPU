@@ -49,7 +49,8 @@ class Tape:
         if tape_hook.active is not None:
             raise RuntimeError("a Tape is already active: tapes do not nest -- exit the "
                                "outer one first")
-        self.launches:List[Tuple[object, Tuple[object, ...], List[Tuple[object, int]]]] = []
+        self.launches:List[Tuple[object, object, Tuple[object, ...],
+                                 List[Tuple[object, int]]]] = []
         tape_hook.active = self
         return self
 
@@ -61,13 +62,15 @@ class Tape:
         self._cotangents:Dict[int, object] = {}
 
     def record(self, kernel:object, args:Tuple[object, ...],
-               kwargs:Dict[str, object])->None:
+               kwargs:Dict[str, object], instance:object = None)->None:
         """One launch, as the launch pipeline hands it over.
 
-        The tape's own adjoint launches are skipped: a backward inside its own recording
-        would chase itself. The python backend never reaches this hook (it answers from
-        the first launch phase), so a tape records device launches, which is what its
-        adjoints are.
+        ``instance`` is a method launch's receiver, or None: the adjoint keeps the
+        origin's signature, so a method kernel's backward launch prepends it -- the
+        same prepend the AD forms make for a bound instance. The tape's own adjoint
+        launches are skipped: a backward inside its own recording would chase itself.
+        The python backend never reaches this hook (it answers from the first launch
+        phase), so a tape records device launches, which is what its adjoints are.
         """
         if getattr(kernel, "_pygpgpu_adjoint", False):
             return
@@ -75,7 +78,7 @@ class Tape:
         for value in args:
             if isinstance(value, gnp) and bool(getattr(value, "requires_grad", False)):
                 epochs.append((value, int(value._state.epoch)))
-        self.launches.append((kernel, args, epochs))
+        self.launches.append((kernel, instance, args, epochs))
 
     def backward(self, loss:object)->None:
         """Seed the loss array with ones and run every recorded adjoint, last first.
@@ -96,12 +99,13 @@ class Tape:
         from ..numpy import ones_like
         self._cotangents[id(loss)] = ones_like(loss)
         loss_param_of:Dict[object, Optional[str]] = {}
-        for kernel, args, _epochs in self.launches:
+        for kernel, _instance, args, _epochs in self.launches:
             loss_param_of[id(kernel)] = self._param_of(kernel, args, loss)
-        for kernel, args, _epochs in reversed(self.launches):
-            self._backward_launch(kernel, args, loss, loss_param_of[id(kernel)])
+        for kernel, instance, args, _epochs in reversed(self.launches):
+            self._backward_launch(kernel, instance, args, loss,
+                                  loss_param_of[id(kernel)])
         # The tracked inputs' cotangents land in `.grad`, on the device.
-        for kernel, args, _epochs in self.launches:
+        for kernel, _instance, args, _epochs in self.launches:
             for value in args:
                 if isinstance(value, gnp) and bool(getattr(value, "requires_grad", False)):
                     buffer:object = self._cotangents.get(id(value))
@@ -110,7 +114,7 @@ class Tape:
 
     def _validate_epochs(self)->None:
         """Refuse a backward whose arrays moved since the forward ran, naming the array."""
-        for _kernel, _args, epochs in self.launches:
+        for _kernel, _instance, _args, epochs in self.launches:
             for array, epoch in epochs:
                 if int(array._state.epoch) != epoch:
                     raise RuntimeError(
@@ -129,7 +133,8 @@ class Tape:
                 return name_
         return None
 
-    def _backward_launch(self, kernel:object, args:Tuple[object, ...],
+    def _backward_launch(self, kernel:object, instance:object,
+                         args:Tuple[object, ...],
                          loss:object, loss_name:Optional[str])->None:
         """One recorded launch's adjoint: cotangent buffers in, gradient buffers out."""
         scan:BodyScan = self._scan_of(kernel)
@@ -158,8 +163,11 @@ class Tape:
             key=(f"tape:{kernel.__name__}", tuple(wrt), out_name, loss_name,
                  rule_table.RULES_VERSION))
         call_args:List[object] = list(args)
-        if kernel._is_method:
-            pass            # the recorded args already exclude the receiver
+        if instance is not None:
+            # A method (or classmethod) launch's adjoint keeps the origin's signature,
+            # so its receiver is the adjoint's first parameter -- the recorded args
+            # exclude it, exactly as the launch pipeline handed them over.
+            call_args.insert(0, instance)
         call_args.extend(buffers[name_] for name_ in wrt)
         if out_name is not None:
             call_args.append(self._cotangents[id(_value_of(array_params, out_name))])

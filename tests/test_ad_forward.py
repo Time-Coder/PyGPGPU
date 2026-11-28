@@ -127,3 +127,27 @@ def test_jvp_positional_configuring_call_refused():
     out = gnp.zeros(4, np.float32)
     with pytest.raises(SyntaxError):
         twice.jvp(x, out)
+
+def test_branch_jvp_matches_the_taken_branch(backend):
+    """A branch in the dispatch: the tangent follows the branch the forward takes.
+
+    Regression: `transform_if` passed two arguments to a one-argument
+    `transform_block`, so any `if` in the dispatch crashed with a raw TypeError
+    instead of translating.
+    """
+    @kernel
+    def branchy(x, out):
+        for i in range(out.shape[0]):
+            u = x[i]
+            if u > 0.0:
+                out[i] = u * u
+            else:
+                out[i] = -u
+
+    values = np.array([2.0, -3.0, 0.5, -1.0], dtype=np.float32)
+    x = gnp.array(values, dtype=np.float32)
+    out = gnp.zeros(4, dtype=np.float32)
+    tangent = _jvp(branchy, x, np.ones(4, dtype=np.float32), out, backend)
+    # d/dx (x^2) = 2x where x > 0; d/dx (-x) = -1 where x <= 0
+    expected = np.where(values > 0.0, 2.0 * values, -1.0).astype(np.float32)
+    np.testing.assert_allclose(_host(tangent), expected, rtol=1e-5)

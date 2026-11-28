@@ -91,6 +91,11 @@ class JVPBuilder:
             return self.transform_augassign(stmt)
         if isinstance(stmt, ast.If):
             return self.transform_if(stmt)
+        if isinstance(stmt, (ast.For, ast.While)) and stmt.orelse:
+            raise self._error(
+                "the `else` block of a `for`/`while` loop is not differentiable in "
+                "v1: the else block's statements gain no tangent statements -- move "
+                "the else work after the loop", stmt)
         if isinstance(stmt, ast.For):
             return self.transform_for(stmt)
         if isinstance(stmt, ast.While):
@@ -235,8 +240,10 @@ class JVPBuilder:
 
     def transform_if(self, stmt:ast.If)->List[ast.stmt]:
         branch:ast.If = copied(stmt)
-        branch.body = self.transform_block(list(stmt.body), stmt.lineno)
-        branch.orelse = self.transform_block(list(stmt.orelse), stmt.lineno)
+        # The copied nodes carry their own line numbers; transform_block takes the
+        # statements only.
+        branch.body = self.transform_block(list(stmt.body))
+        branch.orelse = self.transform_block(list(stmt.orelse))
         return [branch]
 
     def transform_for(self, stmt:ast.For)->List[ast.stmt]:
